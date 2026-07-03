@@ -133,7 +133,11 @@ impl ToolRegistry {
     /// Register all tools exposed by a freshly-loaded plugin. Re-registering an
     /// existing plugin id replaces its tool set in place (upsert).
     pub fn register_plugin_tools(&mut self, plugin_id: PluginId, tools: Vec<Arc<dyn Tool>>) {
-        if let Some(entry) = self.plugin_tools.iter_mut().find(|(id, _)| *id == plugin_id) {
+        if let Some(entry) = self
+            .plugin_tools
+            .iter_mut()
+            .find(|(id, _)| *id == plugin_id)
+        {
             entry.1 = tools;
         } else {
             self.plugin_tools.push((plugin_id, tools));

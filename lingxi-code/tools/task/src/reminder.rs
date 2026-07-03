@@ -204,7 +204,9 @@ mod tests {
         ];
         let out = render_v2(&items);
         assert!(
-            out.ends_with("\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"),
+            out.ends_with(
+                "\n\nHere are the existing tasks:\n\n#1. [completed] alpha\n#2. [pending] beta"
+            ),
             "got: {out:?}"
         );
         assert!(out.starts_with("The task tools haven't been used recently."));

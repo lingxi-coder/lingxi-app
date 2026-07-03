@@ -627,10 +627,17 @@ async fn run_validate(args: &ValidateArgs) -> i32 {
         return RUNTIME_ERROR;
     }
     if args.strict && !warnings.is_empty() {
-        eprintln!("Validation failed (--strict) for {}", manifest_path.display());
+        eprintln!(
+            "Validation failed (--strict) for {}",
+            manifest_path.display()
+        );
         return RUNTIME_ERROR;
     }
-    println!("OK: {} is a valid {} manifest", manifest_path.display(), kind.label());
+    println!(
+        "OK: {} is a valid {} manifest",
+        manifest_path.display(),
+        kind.label()
+    );
     SUCCESS
 }
 

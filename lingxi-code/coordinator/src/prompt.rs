@@ -38,22 +38,22 @@ const TASK_STOP_TOOL_NAME: &str = "TaskStop";
 /// here matches the TS `Set` insertion order; the consumer sorts before joining,
 /// so only membership matters for the rendered string.
 const ASYNC_AGENT_ALLOWED_TOOLS: &[&str] = &[
-    "Read",          // FILE_READ_TOOL_NAME
-    "WebSearch",     // WEB_SEARCH_TOOL_NAME
-    "TodoWrite",     // TODO_WRITE_TOOL_NAME
-    "Grep",          // GREP_TOOL_NAME
-    "WebFetch",      // WEB_FETCH_TOOL_NAME
-    "Glob",          // GLOB_TOOL_NAME
-    "Bash",          // SHELL_TOOL_NAMES[0]
-    "PowerShell",    // SHELL_TOOL_NAMES[1]
-    "Edit",          // FILE_EDIT_TOOL_NAME
-    "Write",         // FILE_WRITE_TOOL_NAME
-    "NotebookEdit",  // NOTEBOOK_EDIT_TOOL_NAME
-    "Skill",         // SKILL_TOOL_NAME
+    "Read",                     // FILE_READ_TOOL_NAME
+    "WebSearch",                // WEB_SEARCH_TOOL_NAME
+    "TodoWrite",                // TODO_WRITE_TOOL_NAME
+    "Grep",                     // GREP_TOOL_NAME
+    "WebFetch",                 // WEB_FETCH_TOOL_NAME
+    "Glob",                     // GLOB_TOOL_NAME
+    "Bash",                     // SHELL_TOOL_NAMES[0]
+    "PowerShell",               // SHELL_TOOL_NAMES[1]
+    "Edit",                     // FILE_EDIT_TOOL_NAME
+    "Write",                    // FILE_WRITE_TOOL_NAME
+    "NotebookEdit",             // NOTEBOOK_EDIT_TOOL_NAME
+    "Skill",                    // SKILL_TOOL_NAME
     SYNTHETIC_OUTPUT_TOOL_NAME, // "StructuredOutput"
-    "ToolSearch",    // TOOL_SEARCH_TOOL_NAME
-    "EnterWorktree", // ENTER_WORKTREE_TOOL_NAME
-    "ExitWorktree",  // EXIT_WORKTREE_TOOL_NAME
+    "ToolSearch",               // TOOL_SEARCH_TOOL_NAME
+    "EnterWorktree",            // ENTER_WORKTREE_TOOL_NAME
+    "ExitWorktree",             // EXIT_WORKTREE_TOOL_NAME
 ];
 
 /// Mirror of `INTERNAL_WORKER_TOOLS` (`coordinatorMode.ts:29-34`): coordinator-
@@ -98,7 +98,10 @@ fn worker_tools_list(simple: bool) -> String {
 pub fn is_env_truthy(value: Option<&str>) -> bool {
     match value {
         None => false,
-        Some(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Some(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
     }
 }
 
@@ -499,8 +502,20 @@ mod tests {
         assert!(ctx.starts_with("Workers spawned via the Agent tool have access to these tools: "));
         // Full set (sorted) must include these and EXCLUDE the internal tools.
         for expected in [
-            "Bash", "Edit", "EnterWorktree", "ExitWorktree", "Glob", "Grep", "NotebookEdit",
-            "PowerShell", "Read", "Skill", "TodoWrite", "ToolSearch", "WebFetch", "WebSearch",
+            "Bash",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "Glob",
+            "Grep",
+            "NotebookEdit",
+            "PowerShell",
+            "Read",
+            "Skill",
+            "TodoWrite",
+            "ToolSearch",
+            "WebFetch",
+            "WebSearch",
             "Write",
         ] {
             assert!(ctx.contains(expected), "worker tools must list {expected}");
@@ -511,8 +526,13 @@ mod tests {
         assert!(!ctx.contains("TeamDelete"));
         assert!(!ctx.contains("SendMessage"));
         // Tools list is alphabetically sorted (Bash before Edit before Glob).
-        let list = ctx.strip_prefix("Workers spawned via the Agent tool have access to these tools: ").unwrap();
-        assert!(list.starts_with("Bash, Edit, EnterWorktree"), "sorted list got: {list}");
+        let list = ctx
+            .strip_prefix("Workers spawned via the Agent tool have access to these tools: ")
+            .unwrap();
+        assert!(
+            list.starts_with("Bash, Edit, EnterWorktree"),
+            "sorted list got: {list}"
+        );
     }
 
     #[test]

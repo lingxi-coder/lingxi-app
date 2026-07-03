@@ -4,8 +4,8 @@
 //! `✻ Thinking…` (U+273B + space + "Thinking" + U+2026), `dimColor` italic.
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// `✻ ` marker. U+273B (0xE2 0x9C 0xBB) + ASCII space.
 pub const REDACTED_MARKER: &str = "\u{273B} ";

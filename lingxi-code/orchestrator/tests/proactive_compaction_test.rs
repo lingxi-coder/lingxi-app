@@ -27,7 +27,11 @@ use traits::OutputEvent;
 /// the test can inspect `captured_msgs()`.
 fn make_orch(
     threshold: Option<u64>,
-) -> (Arc<ConversationOrchestrator>, Arc<MockApiClient>, Arc<MockOutputStream>) {
+) -> (
+    Arc<ConversationOrchestrator>,
+    Arc<MockApiClient>,
+    Arc<MockOutputStream>,
+) {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".to_string(),

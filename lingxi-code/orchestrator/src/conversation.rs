@@ -7,11 +7,10 @@ use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
-    call_api_with_ptl_recovery, execute_one_turn_with_recovery_tracked,
-    surface_prompt_too_long, surface_rapid_refill_thrashing, PtlCallOutcome,
-    RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
-    MALFORMED_TOOL_USE_RETRY_NUDGE, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
-    MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
+    call_api_with_ptl_recovery, execute_one_turn_with_recovery_tracked, surface_prompt_too_long,
+    surface_rapid_refill_thrashing, PtlCallOutcome, RecoveryState, TurnStepOutcome,
+    MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_NUDGE,
+    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
 };
 use async_trait::async_trait;
 use engine::SessionState;
@@ -1129,12 +1128,15 @@ fn find_unresolved_tool_use_in_history(
     if resolved {
         return None;
     }
-    history.iter().find(|m| match m {
-        ConversationMessage::Assistant { content, .. } => content.iter().any(
-            |b| matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id),
-        ),
-        _ => false,
-    }).cloned()
+    history
+        .iter()
+        .find(|m| match m {
+            ConversationMessage::Assistant { content, .. } => content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id)),
+            _ => false,
+        })
+        .cloned()
 }
 
 impl ConversationOrchestrator {
@@ -1266,10 +1268,7 @@ impl ConversationOrchestrator {
     /// desktop composition root. Without it the default private cell (over the
     /// static `cwd`) never moves, so hooks read the init cwd exactly as before.
     #[must_use]
-    pub fn with_current_cwd(
-        mut self,
-        cell: Arc<std::sync::Mutex<std::path::PathBuf>>,
-    ) -> Self {
+    pub fn with_current_cwd(mut self, cell: Arc<std::sync::Mutex<std::path::PathBuf>>) -> Self {
         self.current_cwd = cell;
         self
     }
@@ -1579,10 +1578,7 @@ impl ConversationOrchestrator {
     /// Without it every abort is labeled a user interrupt (today's behavior).
     /// Builder form. See [`Self::set_cancel_reason`] for the `&self` form.
     #[must_use]
-    pub fn with_cancel_reason(
-        self,
-        flag: crate::prompt::mid_turn_input::CancelReasonFlag,
-    ) -> Self {
+    pub fn with_cancel_reason(self, flag: crate::prompt::mid_turn_input::CancelReasonFlag) -> Self {
         self.set_cancel_reason(flag);
         self
     }
@@ -1597,9 +1593,10 @@ impl ConversationOrchestrator {
     /// the wired flag, defaulting to `UserInterrupt` when no flag is wired (so an
     /// un-wired turn always takes the user-interrupt branch — today's behavior).
     fn cancel_reason_now(&self) -> crate::prompt::mid_turn_input::CancelReason {
-        self.cancel_reason
-            .get()
-            .map_or(crate::prompt::mid_turn_input::CancelReason::UserInterrupt, |f| f.get())
+        self.cancel_reason.get().map_or(
+            crate::prompt::mid_turn_input::CancelReason::UserInterrupt,
+            |f| f.get(),
+        )
     }
 
     /// Mid-turn drain step: pull any queued main-thread, non-slash input from the
@@ -2391,8 +2388,11 @@ impl ConversationOrchestrator {
             telemetry::AnalyticsValue::String(self.query_chain_id.clone()),
         );
         metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
-        bus.log_event(telemetry::tengu::orchestrator::POST_AUTOCOMPACT_TURN, metadata)
-            .await;
+        bus.log_event(
+            telemetry::tengu::orchestrator::POST_AUTOCOMPACT_TURN,
+            metadata,
+        )
+        .await;
     }
 
     pub(crate) async fn maybe_compact_before_call(&self) {
@@ -2419,7 +2419,8 @@ impl ConversationOrchestrator {
             }
         };
         if let Some((turn_id, turn_counter)) = post_autocompact {
-            self.fire_post_autocompact_turn(&turn_id, turn_counter).await;
+            self.fire_post_autocompact_turn(&turn_id, turn_counter)
+                .await;
         }
 
         // Snapshot history + estimate tokens WITHOUT holding the lock across
@@ -2606,12 +2607,14 @@ impl ConversationOrchestrator {
         // Sum per-model usage into aggregate token counters. api_calls comes
         // from our own counter because cost::Usage does not carry a
         // per-call count (its `add()` merges token totals only).
-        let (mut input_tokens, mut output_tokens, mut cache_read_tokens, mut cache_creation_tokens) = (0u64, 0u64, 0u64, 0u64);
+        let (mut input_tokens, mut output_tokens, mut cache_read_tokens, mut cache_creation_tokens) =
+            (0u64, 0u64, 0u64, 0u64);
         for entry in state.per_model_usage.values() {
             input_tokens = input_tokens.saturating_add(entry.usage.tokens.input);
             output_tokens = output_tokens.saturating_add(entry.usage.tokens.output);
             cache_read_tokens = cache_read_tokens.saturating_add(entry.cache_read_input_tokens);
-            cache_creation_tokens = cache_creation_tokens.saturating_add(entry.cache_creation_input_tokens);
+            cache_creation_tokens =
+                cache_creation_tokens.saturating_add(entry.cache_creation_input_tokens);
         }
         let api_calls = self
             .api_calls_recorded
@@ -2865,7 +2868,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         prompt_id: Option<String>,
     ) -> session::JsonlMessage {
         self.to_jsonl_message_with_inner_id(
-            msg, session_id, parent_uuid, git_branch, entrypoint, prompt_id, None, None, None, None,
+            msg,
+            session_id,
+            parent_uuid,
+            git_branch,
+            entrypoint,
+            prompt_id,
+            None,
+            None,
+            None,
+            None,
             None,
         )
     }
@@ -3218,15 +3230,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // Extract the matching `tool_use` block (queryHelpers.ts:238-251). The
         // lookup guarantees one exists; bail defensively otherwise.
         let Some((name, input, provider_id)) = (match &assistant_msg {
-            ConversationMessage::Assistant { content, .. } => content.iter().find_map(|b| match b {
-                ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                    provider_id,
-                } if id == tool_use_id => Some((name.clone(), input.clone(), provider_id.clone())),
-                _ => None,
-            }),
+            ConversationMessage::Assistant { content, .. } => {
+                content.iter().find_map(|b| match b {
+                    ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        provider_id,
+                    } if id == tool_use_id => {
+                        Some((name.clone(), input.clone(), provider_id.clone()))
+                    }
+                    _ => None,
+                })
+            }
             _ => None,
         }) else {
             return Ok(false);
@@ -3249,9 +3265,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         {
             let model = self.session.lock().await.model.clone();
             let (msg_id, stop_reason) = match &assistant_msg {
-                ConversationMessage::Assistant { id, stop_reason, .. } => {
-                    (id.to_string(), stop_reason.clone())
-                }
+                ConversationMessage::Assistant {
+                    id, stop_reason, ..
+                } => (id.to_string(), stop_reason.clone()),
                 _ => (assistant_msg.id().to_string(), None),
             };
             self.output.emit_message_start(&msg_id, &model).await;
@@ -3262,8 +3278,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         ContentBlock::ToolUse {
                             id, name, input, ..
                         } => self.output.emit_tool_call(id, name, input).await,
-                        ContentBlock::Thinking { thinking, signature } => {
-                            self.output.emit_thinking(thinking, signature.as_deref()).await;
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        } => {
+                            self.output
+                                .emit_thinking(thinking, signature.as_deref())
+                                .await;
                         }
                         _ => {}
                     }
@@ -3304,7 +3325,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let tool_uses = vec![(tool_use_id.clone(), name, final_input, provider_id)];
         let dispatch_result =
             crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, None).await;
-        self.orphan_forced_decisions.lock().await.remove(tool_use_id);
+        self.orphan_forced_decisions
+            .lock()
+            .await
+            .remove(tool_use_id);
         let (tool_results, _prevent, injected_messages, context_modifiers) = dispatch_result?;
 
         // 6. Append + persist the `tool_result` user message and any
@@ -3979,7 +4003,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // (like the binary, which returns before appending) we end WITHOUT
                 // adding the stop-hook feedback message the `LoopAgain` path would.
                 if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
-                    self.fire_stop_hook_block_count(next_count, true, false).await;
+                    self.fire_stop_hook_block_count(next_count, true, false)
+                        .await;
                     return StopHookFlow::TerminateMaxTurns;
                 }
                 // `parseInt(process.env.LINGXI_STOP_HOOK_BLOCK_CAP??"",10)`
@@ -3998,7 +4023,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // normal end-of-turn tail). NOTE: `is_subagent` is hard-coded
                     // `false` — the orchestrator does not thread subagent identity
                     // (`Boolean(N.agentId)`); the main-loop value is `false`.
-                    self.fire_stop_hook_block_count(next_count, false, true).await;
+                    self.fire_stop_hook_block_count(next_count, false, true)
+                        .await;
                     let warning = format!(
                         "A hook blocked the turn from ending {next_count} consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set LINGXI_STOP_HOOK_BLOCK_CAP to raise this limit."
                     );
@@ -4041,10 +4067,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             "count".into(),
             telemetry::AnalyticsValue::Int(i64::from(count)),
         );
-        metadata.insert(
-            "is_subagent".into(),
-            telemetry::AnalyticsValue::Bool(false),
-        );
+        metadata.insert("is_subagent".into(), telemetry::AnalyticsValue::Bool(false));
         metadata.insert(
             "hit_max_turns".into(),
             telemetry::AnalyticsValue::Bool(hit_max_turns),
@@ -4512,7 +4535,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // (order: recovery → stop-hooks → token-budget, TS
                     // `query.ts:1262-1308`).
                     match self
-                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, &mut stop_hook_blocking_count, turn_count, id)
+                        .handle_stop_at_end(
+                            &stop_reason,
+                            &mut stop_hook_active,
+                            &mut stop_hook_blocking_count,
+                            turn_count,
+                            id,
+                        )
                         .await
                     {
                         StopHookFlow::Terminate(outcome) => return Ok(outcome),
@@ -4976,7 +5005,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // `FallThrough`), so the directive is discarded and the normal
                 // end-of-turn tail runs — exactly mirroring the batched path.
                 let _ = self
-                    .handle_stop_at_end("blocking_limit", &mut stop_hook_active, &mut stop_hook_blocking_count, turn_count, id)
+                    .handle_stop_at_end(
+                        "blocking_limit",
+                        &mut stop_hook_active,
+                        &mut stop_hook_blocking_count,
+                        turn_count,
+                        id,
+                    )
                     .await;
                 if self
                     .maybe_continue_for_budget(budget.as_mut(), &mut recovery, global_turn_tokens)
@@ -5031,8 +5066,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
             // tengu_api_success `messageCount:n` / `messageTokens:r`: capture from
             // the OUTGOING snapshot BEFORE it is moved into `.stream(...)`.
-            let api_success_message_count =
-                u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
+            let api_success_message_count = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
             let api_success_message_tokens =
                 compaction::grouping::estimate_tokens_for_range(&snapshot);
 
@@ -5221,11 +5255,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // consuming it for the verbatim message text. Wrap into the
                     // `Streaming` variant — this is the connect-phase streaming
                     // surface — so the classifier sees the inner `LlmError`.
-                    let env =
-                        classify_api_error(&OrchestratorError::Streaming(other.clone()));
+                    let env = classify_api_error(&OrchestratorError::Streaming(other.clone()));
                     let id =
-                        crate::turn_loop::surface_model_error(self, &other.to_string(), env)
-                            .await;
+                        crate::turn_loop::surface_model_error(self, &other.to_string(), env).await;
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("model_error", &cost).await;
                     final_message_id = id;
@@ -5262,85 +5294,85 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let pumped = match opened {
                 OpenOutcome::Recovered(pumped_from_recovery) => pumped_from_recovery,
                 OpenOutcome::Stream(stream) => match pump_stream_with_executor(
-                stream,
-                &self.output,
-                ExecutorPump {
-                    executor: &mut exec,
-                    assistant_id,
-                    user_cancel: user_cancel.as_ref(),
-                },
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(OrchestratorError::Streaming(
-                    ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
-                )) if !is_env_truthy(
-                    std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
-                        .as_deref()
-                        .ok(),
-                ) =>
+                    stream,
+                    &self.output,
+                    ExecutorPump {
+                        executor: &mut exec,
+                        assistant_id,
+                        user_cancel: user_cancel.as_ref(),
+                    },
+                )
+                .await
                 {
-                    // Seed: a streaming overload counts as 1 toward the consecutive
-                    // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
-                    // (e.g. ProviderInternal) seed 0 — matching TS
-                    // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
-                    let seed: u8 = u8::from(matches!(e, LlmError::Overloaded { .. }));
+                    Ok(p) => p,
+                    Err(OrchestratorError::Streaming(
+                        ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
+                    )) if !is_env_truthy(
+                        std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
+                            .as_deref()
+                            .ok(),
+                    ) =>
+                    {
+                        // Seed: a streaming overload counts as 1 toward the consecutive
+                        // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
+                        // (e.g. ProviderInternal) seed 0 — matching TS
+                        // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
+                        let seed: u8 = u8::from(matches!(e, LlmError::Overloaded { .. }));
 
-                    // Re-snapshot history for the non-streaming call (the partial
-                    // stream never touched session.history, so it is still the same
-                    // snapshot we used for the stream — no reset needed).
-                    let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
-                        let s = self.session.lock().await;
-                        (s.history.clone(), s.model.clone(), s.model_profile.clone())
-                    };
-                    // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
-                    // context meta message on EVERY `callModel`, including this
-                    // non-streaming fallback. Prepend it to the re-snapshot too.
-                    if let Some(ctx_msg) = self.additional_context_message().await {
-                        non_stream_snapshot.insert(0, ctx_msg);
-                    }
-                    let tools_for_fallback = wire_tools.clone();
-
-                    let resp = self
-                        .api
-                        .messages_create_seeded(
-                            &non_stream_model,
-                            non_stream_profile.as_deref(),
-                            system_prompt.as_deref(),
-                            non_stream_snapshot,
-                            tools_for_fallback,
-                            seed,
-                        )
-                        .await
-                        .map_err(OrchestratorError::ApiCall)?;
-
-                    // Convert LlmResponse → PumpedTurn so the rest of the streaming
-                    // turn loop can proceed identically.
-                    let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
-
-                    // Emit text blocks from the non-streaming response to the output
-                    // stream, mirroring the batched path (turn_loop.rs step 4:
-                    // `orch.output.emit_text(text).await`).  In the normal streaming
-                    // path `pump_stream` calls `dispatch_event` → `emit_text` for each
-                    // `TextDelta`; the non-streaming path has no SSE events, so we
-                    // replicate the whole-body emit here.
-                    for blk in &pumped_from_fallback.assistant_blocks {
-                        if let ContentBlock::Text { text } = blk {
-                            self.output.emit_text(text).await;
+                        // Re-snapshot history for the non-streaming call (the partial
+                        // stream never touched session.history, so it is still the same
+                        // snapshot we used for the stream — no reset needed).
+                        let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
+                            let s = self.session.lock().await;
+                            (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                        };
+                        // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
+                        // context meta message on EVERY `callModel`, including this
+                        // non-streaming fallback. Prepend it to the re-snapshot too.
+                        if let Some(ctx_msg) = self.additional_context_message().await {
+                            non_stream_snapshot.insert(0, ctx_msg);
                         }
-                    }
+                        let tools_for_fallback = wire_tools.clone();
 
-                    // claude-code `query.ts:733-740`: discard the partial
-                    // streaming attempt's executor (its tool_uses have stale ids
-                    // and would orphan against the fallback response) and replace
-                    // it with a fresh one. Dropping the old executor cancels any
-                    // in-flight tool futures it had started mid-stream. The fresh
-                    // executor's tools are registered from the FALLBACK response's
-                    // tool_uses by the post-stream drive loop below (this is the
-                    // ONLY path that still `add_tool`s after the stream — the
-                    // normal path registers mid-stream).
-                    exec = match &user_cancel {
+                        let resp = self
+                            .api
+                            .messages_create_seeded(
+                                &non_stream_model,
+                                non_stream_profile.as_deref(),
+                                system_prompt.as_deref(),
+                                non_stream_snapshot,
+                                tools_for_fallback,
+                                seed,
+                            )
+                            .await
+                            .map_err(OrchestratorError::ApiCall)?;
+
+                        // Convert LlmResponse → PumpedTurn so the rest of the streaming
+                        // turn loop can proceed identically.
+                        let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+
+                        // Emit text blocks from the non-streaming response to the output
+                        // stream, mirroring the batched path (turn_loop.rs step 4:
+                        // `orch.output.emit_text(text).await`).  In the normal streaming
+                        // path `pump_stream` calls `dispatch_event` → `emit_text` for each
+                        // `TextDelta`; the non-streaming path has no SSE events, so we
+                        // replicate the whole-body emit here.
+                        for blk in &pumped_from_fallback.assistant_blocks {
+                            if let ContentBlock::Text { text } = blk {
+                                self.output.emit_text(text).await;
+                            }
+                        }
+
+                        // claude-code `query.ts:733-740`: discard the partial
+                        // streaming attempt's executor (its tool_uses have stale ids
+                        // and would orphan against the fallback response) and replace
+                        // it with a fresh one. Dropping the old executor cancels any
+                        // in-flight tool futures it had started mid-stream. The fresh
+                        // executor's tools are registered from the FALLBACK response's
+                        // tool_uses by the post-stream drive loop below (this is the
+                        // ONLY path that still `add_tool`s after the stream — the
+                        // normal path registers mid-stream).
+                        exec = match &user_cancel {
                         Some(token) => {
                             crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
                                 self,
@@ -5349,39 +5381,39 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         }
                         None => crate::streaming_executor::StreamingToolExecutor::new(self),
                     };
-                    for tu in &pumped_from_fallback.tool_uses {
-                        exec.add_tool(
-                            tu.id.clone(),
-                            tu.name.clone(),
-                            tu.input.clone(),
-                            tu.provider_id.clone(),
-                            assistant_id,
-                        );
-                    }
+                        for tu in &pumped_from_fallback.tool_uses {
+                            exec.add_tool(
+                                tu.id.clone(),
+                                tu.name.clone(),
+                                tu.input.clone(),
+                                tu.provider_id.clone(),
+                                assistant_id,
+                            );
+                        }
 
-                    pumped_from_fallback
-                }
-                // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
-                // downstream handling — propagate.
-                Err(e) if crate::turn_loop::is_carveout_propagated(&e) => return Err(e),
-                // #10: any other mid-stream model/runtime error (e.g. Transport)
-                // ends the turn GRACEFULLY as `model_error` (faithful port of the
-                // `query.ts` catch) rather than bubbling a hard error / phantom
-                // interrupt. The assistant message for this turn is persisted only
-                // AFTER a successful pump, so the errored pump left no orphaned
-                // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
-                Err(other) => {
-                    // Classify the typed mid-stream error (`Flp`/`KNn`) into the
-                    // api-error envelope; the message text stays verbatim.
-                    let env = classify_api_error(&other);
-                    let id =
-                        crate::turn_loop::surface_model_error(self, &other.to_string(), env)
-                            .await;
-                    let cost = self.snapshot_cost_real().await;
-                    self.output.emit_end_turn("model_error", &cost).await;
-                    final_message_id = id;
-                    break;
-                }
+                        pumped_from_fallback
+                    }
+                    // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
+                    // downstream handling — propagate.
+                    Err(e) if crate::turn_loop::is_carveout_propagated(&e) => return Err(e),
+                    // #10: any other mid-stream model/runtime error (e.g. Transport)
+                    // ends the turn GRACEFULLY as `model_error` (faithful port of the
+                    // `query.ts` catch) rather than bubbling a hard error / phantom
+                    // interrupt. The assistant message for this turn is persisted only
+                    // AFTER a successful pump, so the errored pump left no orphaned
+                    // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
+                    Err(other) => {
+                        // Classify the typed mid-stream error (`Flp`/`KNn`) into the
+                        // api-error envelope; the message text stays verbatim.
+                        let env = classify_api_error(&other);
+                        let id =
+                            crate::turn_loop::surface_model_error(self, &other.to_string(), env)
+                                .await;
+                        let cost = self.snapshot_cost_real().await;
+                        self.output.emit_end_turn("model_error", &cost).await;
+                        final_message_id = id;
+                        break;
+                    }
                 },
             };
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
@@ -5545,10 +5577,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // stream-json P1: signal the message boundary to the output sink so
             // `StreamJsonStream` can flush its accumulated assistant frame.
             self.output
-                .emit_message_boundary(
-                    pumped.stop_reason.as_deref(),
-                    request_id.as_deref(),
-                )
+                .emit_message_boundary(pumped.stop_reason.as_deref(), request_id.as_deref())
                 .await;
             let tool_use_parent_uuids = self
                 .persist_assistant_per_block(
@@ -6170,7 +6199,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // working) loops. `handle_stop_at_end` already emits the
                     // end-turn on Terminate, so we don't re-emit there.
                     match self
-                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, &mut stop_hook_blocking_count, turn_count, id)
+                        .handle_stop_at_end(
+                            &stop_reason,
+                            &mut stop_hook_active,
+                            &mut stop_hook_blocking_count,
+                            turn_count,
+                            id,
+                        )
                         .await
                     {
                         StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
@@ -6602,10 +6637,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // heading, so key the entry as `Environment` and strip that leading
             // heading — the userContext renderer prepends `# {key}\n`, and a raw
             // `# env\n{env}` would DOUBLE the heading (`# env\n# Environment\n…`).
-            let body = env
-                .strip_prefix("# Environment\n")
-                .unwrap_or(&env)
-                .trim();
+            let body = env.strip_prefix("# Environment\n").unwrap_or(&env).trim();
             if !body.is_empty() {
                 entries.push(format!("# Environment\n{body}"));
             }
@@ -7841,9 +7873,7 @@ mod turn_recovery_tests {
         }
         async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
             let first = matches!(event, HookEvent::Stop { .. })
-                && !self
-                    .blocked
-                    .swap(true, std::sync::atomic::Ordering::SeqCst);
+                && !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst);
             let response = first.then(|| HookResponse {
                 decision: Some(HookDecision::Block),
                 reason: Some("keep going".into()),
@@ -10227,7 +10257,10 @@ mod agent_listing_reminder_tests {
         let orch = orch_with(reg_with_agent_tool(), Some(catalog));
         let got = orch.agent_listing_reminder_message().await;
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
-        assert!(got.is_none(), "explicit gate OFF ⇒ no reminder (inline path)");
+        assert!(
+            got.is_none(),
+            "explicit gate OFF ⇒ no reminder (inline path)"
+        );
     }
 
     #[tokio::test]
@@ -10423,7 +10456,9 @@ mod new_diagnostics_reminder_tests {
         }
     }
 
-    fn orch_with_diag(source: Option<Arc<dyn traits::NewDiagnosticsSource>>) -> ConversationOrchestrator {
+    fn orch_with_diag(
+        source: Option<Arc<dyn traits::NewDiagnosticsSource>>,
+    ) -> ConversationOrchestrator {
         let o = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
@@ -11614,7 +11649,11 @@ mod persist_with_parent_tests {
                 Some("server_error"),
                 Some(529),
             ),
-            (LlmError::Authentication, Some("authentication_failed"), Some(401)),
+            (
+                LlmError::Authentication,
+                Some("authentication_failed"),
+                Some(401),
+            ),
             (
                 LlmError::PermissionDenied,
                 Some("authentication_failed"),
@@ -11635,7 +11674,11 @@ mod persist_with_parent_tests {
                 Some("invalid_request"),
                 Some(400),
             ),
-            (LlmError::ModelUnavailable, Some("model_not_found"), Some(404)),
+            (
+                LlmError::ModelUnavailable,
+                Some("model_not_found"),
+                Some(404),
+            ),
             (LlmError::ProviderInternal, Some("server_error"), Some(500)),
             // Timeout/transport tail → `server_error`, no status.
             (
@@ -11678,7 +11721,10 @@ mod persist_with_parent_tests {
                 assert_eq!(env.error, cat, "category for {inner:?}");
                 assert_eq!(env.api_error_status, status, "status for {inner:?}");
                 // The `ql` path never overrides the inner stop_reason.
-                assert_eq!(env.inner_stop_reason, None, "inner stop_reason for {inner:?}");
+                assert_eq!(
+                    env.inner_stop_reason, None,
+                    "inner stop_reason for {inner:?}"
+                );
             }
         }
     }
@@ -11724,7 +11770,16 @@ mod persist_with_parent_tests {
             message: "bad".into(),
         }));
         let line = orch.to_jsonl_message_with_inner_id(
-            &msg, "sess", None, None, None, None, None, None, None, None,
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             Some(&env),
         );
         assert_eq!(
@@ -11745,7 +11800,16 @@ mod persist_with_parent_tests {
             message: "t".into(),
         }));
         let line2 = orch.to_jsonl_message_with_inner_id(
-            &msg, "sess", None, None, None, None, None, None, None, None,
+            &msg,
+            "sess",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             Some(&env2),
         );
         assert_eq!(
@@ -11768,8 +11832,8 @@ mod persist_with_parent_tests {
         // a Bash `cd` mutates. Start it at the init cwd.
         let init_cwd = dir.path().to_path_buf();
         let cell = Arc::new(std::sync::Mutex::new(init_cwd.clone()));
-        let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"))
-            .with_current_cwd(cell.clone());
+        let orch =
+            orch_with_writer(dir.path(), dir.path().join("s.jsonl")).with_current_cwd(cell.clone());
 
         // First persisted line is stamped with the init cwd.
         let m1 = ConversationMessage::user(protocol::MessageId::new(), "before cd".into());
@@ -11845,7 +11909,9 @@ mod persist_with_parent_tests {
             stop_reason: Some("tool_use".into()),
         };
 
-        let map = orch.persist_assistant_per_block(&assistant_msg, None, None).await;
+        let map = orch
+            .persist_assistant_per_block(&assistant_msg, None, None)
+            .await;
 
         let lines = read_jsonl(&session_path);
         // (c) THREE single-block assistant lines.

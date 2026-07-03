@@ -193,8 +193,7 @@ fn normalize_url(url: &str) -> String {
     let authority_lc = authority.to_ascii_lowercase();
     let authority_norm = match authority_lc.rsplit_once(':') {
         Some((host, port))
-            if (scheme_lc == "https" && port == "443")
-                || (scheme_lc == "http" && port == "80") =>
+            if (scheme_lc == "https" && port == "443") || (scheme_lc == "http" && port == "80") =>
         {
             host.to_string()
         }
@@ -293,8 +292,7 @@ pub async fn discover_protected_resource(
     server_url: &str,
 ) -> Result<ProtectedResourceMetadata, XaaError> {
     let url = well_known(server_url, "oauth-protected-resource");
-    let prm: ProtectedResourceMetadata =
-        get_json(http, &url).await.map_err(XaaError::Prm)?;
+    let prm: ProtectedResourceMetadata = get_json(http, &url).await.map_err(XaaError::Prm)?;
     if prm.resource.is_empty() || prm.authorization_servers.first().is_none() {
         return Err(XaaError::Prm(
             "PRM missing resource or authorization_servers".into(),
@@ -429,11 +427,14 @@ pub async fn request_jwt_authorization_grant(
         body_bytes: None,
         timeout: Some(XAA_REQUEST_TIMEOUT),
     };
-    let resp = http.request(http_req).await.map_err(|e| XaaError::TokenExchange {
-        message: format!("transport: {e}"),
-        // Network/transport failure (captive portal etc.) — keep id_token.
-        should_clear_id_token: false,
-    })?;
+    let resp = http
+        .request(http_req)
+        .await
+        .map_err(|e| XaaError::TokenExchange {
+            message: format!("transport: {e}"),
+            // Network/transport failure (captive portal etc.) — keep id_token.
+            should_clear_id_token: false,
+        })?;
 
     if !(200..300).contains(&resp.status) {
         let body = redact_tokens(&resp.body);
@@ -548,8 +549,10 @@ pub async fn exchange_jwt_auth_grant(
     http: &Arc<dyn HttpTransport>,
     req: &JwtBearerRequest<'_>,
 ) -> Result<XaaTokenResult, XaaError> {
-    let mut form: Vec<(&str, &str)> =
-        vec![("grant_type", JWT_BEARER_GRANT), ("assertion", req.assertion)];
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", JWT_BEARER_GRANT),
+        ("assertion", req.assertion),
+    ];
     if let Some(scope) = req.scope {
         form.push(("scope", scope));
     }
@@ -609,9 +612,7 @@ pub async fn exchange_jwt_auth_grant(
         ))
     })?;
     if parsed.access_token.is_empty() {
-        return Err(XaaError::JwtBearer(
-            "response missing access_token".into(),
-        ));
+        return Err(XaaError::JwtBearer("response missing access_token".into()));
     }
     Ok(XaaTokenResult {
         access_token: parsed.access_token,
@@ -754,7 +755,8 @@ mod tests {
 
     #[test]
     fn redact_tokens_masks_known_keys_only() {
-        let raw = r#"{"error":"bad","subject_token":"secret-jwt","scope":"a b","client_secret":"shh"}"#;
+        let raw =
+            r#"{"error":"bad","subject_token":"secret-jwt","scope":"a b","client_secret":"shh"}"#;
         let red = redact_tokens(raw);
         assert!(red.contains(r#""subject_token":"[REDACTED]""#), "{red}");
         assert!(red.contains(r#""client_secret":"[REDACTED]""#), "{red}");

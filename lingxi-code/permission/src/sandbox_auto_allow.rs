@@ -106,7 +106,11 @@ mod tests {
     use super::*;
 
     fn cfg(excluded: &[&str]) -> SandboxAutoAllowConfig {
-        SandboxAutoAllowConfig::new(true, true, excluded.iter().map(|s| (*s).to_string()).collect())
+        SandboxAutoAllowConfig::new(
+            true,
+            true,
+            excluded.iter().map(|s| (*s).to_string()).collect(),
+        )
     }
 
     #[test]

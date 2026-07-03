@@ -452,6 +452,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         assert_eq!(long, GLOB_DESCRIPTION);
@@ -460,6 +461,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
+                model_profile: None,
             })
             .await;
         assert_eq!(short, GLOB_PROMPT_SHORT);
@@ -609,7 +611,9 @@ mod tests {
         // All three .rs (root + nested + deeper-nested), no .txt.
         assert_eq!(matches.len(), 3, "bare *.rs must recurse: {matches:?}");
         assert!(matches.iter().any(|m| m.ends_with("root.rs")));
-        assert!(matches.iter().any(|m| m.replace('\\', "/").ends_with("sub/x.rs")));
+        assert!(matches
+            .iter()
+            .any(|m| m.replace('\\', "/").ends_with("sub/x.rs")));
         assert!(matches
             .iter()
             .any(|m| m.replace('\\', "/").ends_with("sub/deeper/y.rs")));
@@ -950,7 +954,11 @@ mod tests {
             .await
             .unwrap();
         let matches = result.data["filenames"].as_array().unwrap();
-        assert_eq!(matches.len(), 2, "absolute pattern should match: {matches:?}");
+        assert_eq!(
+            matches.len(),
+            2,
+            "absolute pattern should match: {matches:?}"
+        );
         assert_eq!(result.data["truncated"], false);
     }
 
@@ -969,7 +977,9 @@ mod tests {
             )
             .await;
         // Verbatim GlobTool/prompt.ts DESCRIPTION (5 bullets).
-        assert!(d.starts_with("- Fast file pattern matching tool that works with any codebase size\n"));
+        assert!(
+            d.starts_with("- Fast file pattern matching tool that works with any codebase size\n")
+        );
         assert!(d.contains("- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\""));
         assert!(d.ends_with("use the Agent tool instead"));
         // prompt() equals DESCRIPTION for Glob.
@@ -977,6 +987,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         assert_eq!(p, d);

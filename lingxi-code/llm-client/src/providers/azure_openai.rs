@@ -29,10 +29,10 @@
 //! Identical SSE shape to `OpenAI` Chat Completions; the `OpenAiChatCodec`
 //! stream decoder is reused directly.
 
-use crate::{
-    LlmError, LlmRequest, ProviderRequest, ProviderResponse, LlmResponse, StreamDecoder, WireCodec,
-};
 use super::OpenAiChatCodec;
+use crate::{
+    LlmError, LlmRequest, LlmResponse, ProviderRequest, ProviderResponse, StreamDecoder, WireCodec,
+};
 
 /// Azure `OpenAI` Chat Completions codec.
 ///
@@ -62,7 +62,11 @@ impl AzureOpenAiCodec {
         // encode_request is called for body encoding, but the resulting URL is
         // overridden by the Azure deployment URL before returning.
         let inner = OpenAiChatCodec::new(base_url.clone());
-        Self { base_url, api_version, inner }
+        Self {
+            base_url,
+            api_version,
+            inner,
+        }
     }
 
     /// Build the Azure deployment URL for a given model (deployment name).

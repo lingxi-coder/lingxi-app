@@ -144,10 +144,7 @@ impl LspRegistry {
     /// [`LspError::Unavailable`] when no configured server handles the file;
     /// [`LspError::Transport`] / [`LspError::ServerError`] on spawn/handshake
     /// failure.
-    pub async fn ensure_server_for_file(
-        &self,
-        path: &Path,
-    ) -> Result<McpConnectionId, LspError> {
+    pub async fn ensure_server_for_file(&self, path: &Path) -> Result<McpConnectionId, LspError> {
         let ext = file_extension(path);
 
         // Resolve the responsible server (already-initialized wins; else the
@@ -317,7 +314,9 @@ mod routing_tests {
             &self,
             _config: &LspServerConfig,
         ) -> Result<LspRawConnection, LspError> {
-            Ok(LspRawConnection { connection_id: self.id })
+            Ok(LspRawConnection {
+                connection_id: self.id,
+            })
         }
         async fn initialize(
             &self,
@@ -326,10 +325,7 @@ mod routing_tests {
         ) -> Result<LspServerCapabilities, LspError> {
             Ok(caps())
         }
-        async fn connection(
-            &self,
-            _conn_id: McpConnectionId,
-        ) -> Result<Arc<Connection>, LspError> {
+        async fn connection(&self, _conn_id: McpConnectionId) -> Result<Arc<Connection>, LspError> {
             Ok(self.conn.clone())
         }
         async fn request(
@@ -340,12 +336,7 @@ mod routing_tests {
         ) -> Result<Value, LspError> {
             Ok(Value::Null)
         }
-        async fn notify(
-            &self,
-            _c: &LspRawConnection,
-            _m: &str,
-            _p: Value,
-        ) -> Result<(), LspError> {
+        async fn notify(&self, _c: &LspRawConnection, _m: &str, _p: Value) -> Result<(), LspError> {
             Ok(())
         }
         async fn shutdown(&self, _id: McpConnectionId) -> Result<(), LspError> {

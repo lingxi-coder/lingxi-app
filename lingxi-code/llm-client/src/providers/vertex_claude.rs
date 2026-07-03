@@ -40,11 +40,10 @@
 
 use serde_json::Value;
 
-use crate::{
-    LlmError, LlmRequest, LlmResponse, ProviderRequest, ProviderResponse,
-    StreamDecoder, WireCodec,
-};
 use super::AnthropicMessagesCodec;
+use crate::{
+    LlmError, LlmRequest, LlmResponse, ProviderRequest, ProviderResponse, StreamDecoder, WireCodec,
+};
 
 /// The Anthropic API version inserted into Vertex AI request bodies.
 const VERTEX_ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
@@ -80,7 +79,11 @@ impl VertexClaudeCodec {
     /// Build the Vertex AI rawPredict URL for a given model id.
     fn predict_url(&self, model_id: &str, stream: bool) -> String {
         let base = self.base_url.trim_end_matches('/');
-        let action = if stream { "streamRawPredict" } else { "rawPredict" };
+        let action = if stream {
+            "streamRawPredict"
+        } else {
+            "rawPredict"
+        };
         format!("{base}/publishers/anthropic/models/{model_id}:{action}")
     }
 }
@@ -136,7 +139,8 @@ impl WireCodec for VertexClaudeCodec {
 mod tests {
     use super::*;
 
-    const BASE: &str = "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1";
+    const BASE: &str =
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1";
 
     // ── Codec encode shape ─────────────────────────────────────────────────────
 
@@ -165,7 +169,10 @@ mod tests {
 
         // anthropic_version must be present (body-level, snake_case, Vertex value).
         assert_eq!(
-            provider_req.body_json.get("anthropic_version").and_then(Value::as_str),
+            provider_req
+                .body_json
+                .get("anthropic_version")
+                .and_then(Value::as_str),
             Some("vertex-2023-10-16"),
             "anthropic_version must be \"vertex-2023-10-16\" in body"
         );
@@ -194,7 +201,10 @@ mod tests {
 
         // anthropic_version still in body.
         assert_eq!(
-            provider_req.body_json.get("anthropic_version").and_then(Value::as_str),
+            provider_req
+                .body_json
+                .get("anthropic_version")
+                .and_then(Value::as_str),
             Some("vertex-2023-10-16")
         );
 

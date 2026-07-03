@@ -159,7 +159,10 @@ pub fn default_bindings() -> Vec<KeybindingBlock> {
             ],
         ),
         block("Task", &[("ctrl+b", "task:background")]),
-        block("ThemePicker", &[("ctrl+t", "theme:toggleSyntaxHighlighting")]),
+        block(
+            "ThemePicker",
+            &[("ctrl+t", "theme:toggleSyntaxHighlighting")],
+        ),
         block(
             "Scroll",
             &[

@@ -145,9 +145,9 @@ pub fn input_path_for_tool<'a>(
     match input.get(field).and_then(serde_json::Value::as_str) {
         Some(p) => Some(std::borrow::Cow::Borrowed(p)),
         // Glob/Grep default their search root to cwd when `path` is omitted.
-        None if matches!(tool_name, "Glob" | "Grep") => {
-            Some(std::borrow::Cow::Owned(roots.cwd.to_string_lossy().into_owned()))
-        }
+        None if matches!(tool_name, "Glob" | "Grep") => Some(std::borrow::Cow::Owned(
+            roots.cwd.to_string_lossy().into_owned(),
+        )),
         None => None,
     }
 }
@@ -197,7 +197,10 @@ pub(crate) fn pattern_with_root(
         }
     } else if pattern.starts_with('/') {
         // Single leading slash → settings-dir-relative.
-        (pattern.to_string(), Some(root_path_for_source(source, roots)))
+        (
+            pattern.to_string(),
+            Some(root_path_for_source(source, roots)),
+        )
     } else {
         // No root: strip a leading `./` so `./.env` matches `.env`.
         let normalized = pattern.strip_prefix("./").unwrap_or(pattern);
@@ -455,7 +458,11 @@ fn contains_path_traversal(path: &str) -> bool {
 /// collapses, with a single lexical path, to "the path is within some working
 /// dir". Returns `false` for an empty `working_dirs` list (no allowance).
 #[must_use]
-pub fn path_in_allowed_working_path(path: &Path, working_dirs: &[PathBuf], roots: &FsRoots) -> bool {
+pub fn path_in_allowed_working_path(
+    path: &Path,
+    working_dirs: &[PathBuf],
+    roots: &FsRoots,
+) -> bool {
     working_dirs
         .iter()
         .any(|wd| path_in_working_path(path, wd, roots))
@@ -725,9 +732,15 @@ mod tests {
     fn private_var_rewrite_makes_paths_match() {
         // `/private/var/...` target vs `/var/...` working dir → both rewrite to
         // `/var/...` and compare equal-prefix → contained.
-        assert!(in_working("/private/var/folders/x/file.rs", "/var/folders/x"));
+        assert!(in_working(
+            "/private/var/folders/x/file.rs",
+            "/var/folders/x"
+        ));
         // And the reverse: `/var/...` target vs `/private/var/...` working dir.
-        assert!(in_working("/var/folders/x/file.rs", "/private/var/folders/x"));
+        assert!(in_working(
+            "/var/folders/x/file.rs",
+            "/private/var/folders/x"
+        ));
     }
 
     #[test]

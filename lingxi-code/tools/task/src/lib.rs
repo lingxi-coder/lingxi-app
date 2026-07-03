@@ -25,10 +25,10 @@ pub mod task;
 pub mod todo_store;
 pub mod todo_write;
 
+pub use monitor::MonitorTool;
 pub use task::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
 };
-pub use monitor::MonitorTool;
 pub use todo_write::TodoWriteTool;
 
 /// Register the 6 task tools + TodoWrite against `reg`.

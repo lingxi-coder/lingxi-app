@@ -123,7 +123,11 @@ impl CoordinatorMode {
             _ => {
                 // No bus attached, or called outside a tokio runtime: fall back
                 // to a tracing event so the switch is always observable.
-                tracing::info!(event = MODE_SWITCHED, to, "coordinator mode switched on resume");
+                tracing::info!(
+                    event = MODE_SWITCHED,
+                    to,
+                    "coordinator mode switched on resume"
+                );
             }
         }
 

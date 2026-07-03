@@ -147,9 +147,9 @@ impl std::fmt::Display for ManagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidConfig(m) => write!(f, "invalid sandbox config: {m}"),
-            Self::TlsTerminateAndMitmProxy => f.write_str(
-                "network.tlsTerminate and network.mitmProxy are mutually exclusive",
-            ),
+            Self::TlsTerminateAndMitmProxy => {
+                f.write_str("network.tlsTerminate and network.mitmProxy are mutually exclusive")
+            }
             Self::MitmCa(m) => write!(f, "mitm CA: {m}"),
             Self::DependenciesMissing(m) => write!(f, "Sandbox dependencies not available: {m}"),
             Self::Io(m) => write!(f, "sandbox io error: {m}"),
@@ -349,7 +349,8 @@ impl SandboxManager {
             .expect("config set before start_infrastructure");
 
         let net = &config.network;
-        let parent_proxy = resolve_parent_proxy(net.parent_proxy.as_ref(), &env_map()).map(Arc::new);
+        let parent_proxy =
+            resolve_parent_proxy(net.parent_proxy.as_ref(), &env_map()).map(Arc::new);
         // The LIVE, swappable network config both proxies read per request.
         let shared_network = shared_network_config(net.clone());
 
@@ -542,8 +543,9 @@ impl SandboxManager {
         let ripgrep_cmd = active
             .and_then(|c| c.ripgrep.as_ref().map(|r| r.command.clone()))
             .unwrap_or_else(|| "rg".to_string());
-        let mandatory_deny_search_depth =
-            active.and_then(|c| c.mandatory_deny_search_depth).unwrap_or(3) as usize;
+        let mandatory_deny_search_depth = active
+            .and_then(|c| c.mandatory_deny_search_depth)
+            .unwrap_or(3) as usize;
         let allow_git_config = active
             .and_then(|c| c.filesystem.allow_git_config)
             .unwrap_or(false);
@@ -655,8 +657,8 @@ impl SandboxManager {
             bin_shell,
             tmpdir: &tmpdir,
         };
-        let wrapped =
-            wrap_command_with_sandbox_macos(&params).map_err(|e| ManagerError::Io(e.to_string()))?;
+        let wrapped = wrap_command_with_sandbox_macos(&params)
+            .map_err(|e| ManagerError::Io(e.to_string()))?;
         Ok((wrapped, Vec::new()))
     }
 
@@ -834,7 +836,10 @@ fn build_fs_configs_macos(
 
     // macOS: map removeTrailingGlobSuffix only (no filter, no expand).
     let strip = |paths: &[String]| -> Vec<String> {
-        paths.iter().map(|p| remove_trailing_glob_suffix(p)).collect()
+        paths
+            .iter()
+            .map(|p| remove_trailing_glob_suffix(p))
+            .collect()
     };
     let mut allow_only = get_default_write_paths();
     allow_only.extend(strip(&allow_write));
@@ -905,7 +910,10 @@ mod tests {
             wrapped.contains("/usr/bin/sandbox-exec"),
             "wrapped: {wrapped}"
         );
-        assert!(wrapped.contains("-c") && wrapped.contains("echo hi"), "wrapped: {wrapped}");
+        assert!(
+            wrapped.contains("-c") && wrapped.contains("echo hi"),
+            "wrapped: {wrapped}"
+        );
         assert!(mounts.is_empty(), "macOS has no mount-point artifacts");
         mgr.reset();
     }
@@ -931,7 +939,11 @@ mod tests {
                 .unwrap();
             let mut buf = vec![0u8; 128];
             let n = c.read(&mut buf).await.unwrap();
-            String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string()
+            String::from_utf8_lossy(&buf[..n])
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
         }
 
         let mut mgr = SandboxManager::new();
@@ -943,7 +955,10 @@ mod tests {
 
         // Deny-all → 403.
         let line = connect_status(http_port, "github.com:443").await;
-        assert!(line.contains("403"), "expected 403 before update, got {line}");
+        assert!(
+            line.contains("403"),
+            "expected 403 before update, got {line}"
+        );
 
         // LIVE update: allow github.com — same running proxy, no reset.
         mgr.update_config(SandboxRuntimeConfig {
@@ -956,7 +971,10 @@ mod tests {
 
         // A NEW CONNECT is now allowed (200 Connection Established line).
         let line = connect_status(http_port, "github.com:443").await;
-        assert!(line.contains("200"), "expected 200 after live update, got {line}");
+        assert!(
+            line.contains("200"),
+            "expected 200 after live update, got {line}"
+        );
 
         mgr.reset();
     }
@@ -1038,7 +1056,10 @@ mod tests {
             wrapped.contains("--setenv") && wrapped.contains("HTTP_PROXY"),
             "proxy env: {wrapped}"
         );
-        assert!(wrapped.contains("socat"), "sandbox socat command: {wrapped}");
+        assert!(
+            wrapped.contains("socat"),
+            "sandbox socat command: {wrapped}"
+        );
         // tlsTerminate → the CA cert path is wired into the read allow set,
         // which surfaces as a bwrap arg referencing the cert path.
         assert!(
@@ -1049,9 +1070,11 @@ mod tests {
         // ── denied host through the running HTTP proxy → 403 ──
         {
             let mut c = TcpStream::connect(("127.0.0.1", http_port)).await.unwrap();
-            c.write_all(b"CONNECT denied.example.com:443 HTTP/1.1\r\nHost: denied.example.com:443\r\n\r\n")
-                .await
-                .unwrap();
+            c.write_all(
+                b"CONNECT denied.example.com:443 HTTP/1.1\r\nHost: denied.example.com:443\r\n\r\n",
+            )
+            .await
+            .unwrap();
             let mut buf = vec![0u8; 256];
             let n = c.read(&mut buf).await.unwrap();
             let head = String::from_utf8_lossy(&buf[..n]);

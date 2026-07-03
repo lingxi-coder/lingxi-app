@@ -123,7 +123,11 @@ pub struct JsonlMessage {
     /// e.g. `"cli"`. Stamped on EVERY line by claude-code's writer. Optional on
     /// read (legacy rows omit it); `skip_serializing_if = "Option::is_none"`
     /// so an unset value is omitted, matching TS `undefined`.
-    #[serde(rename = "entrypoint", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "entrypoint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub entrypoint: Option<String>,
 
     /// Per-session plan slug — `getPlanSlugCache().get(sessionId)`

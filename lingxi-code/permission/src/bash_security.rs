@@ -243,7 +243,10 @@ fn validate_incomplete_commands(ctx: &Ctx) -> Option<String> {
     // `/^\s*\t/` — starts with whitespace then a tab.
     {
         static RE: OnceLock<Regex> = OnceLock::new();
-        if RE.get_or_init(|| Regex::new(r"^\s*\t").unwrap()).is_match(original) {
+        if RE
+            .get_or_init(|| Regex::new(r"^\s*\t").unwrap())
+            .is_match(original)
+        {
             return Some(
                 "Command appears to be an incomplete fragment (starts with tab)".to_string(),
             );
@@ -307,7 +310,12 @@ fn parse_git_commit_message(s: &str) -> Option<(char, String, String)> {
     // Lazily scan `[^;&|`$<>()\n\r]*?` then `-m[ \t]+`. Try the SHORTEST run
     // first (lazy): at each position, attempt to match `-m<hws>`; if it fails,
     // consume one allowed char and retry. Disallowed chars abort the scan.
-    let is_allowed = |c: char| !matches!(c, ';' | '&' | '|' | '`' | '$' | '<' | '>' | '(' | ')' | '\n' | '\r');
+    let is_allowed = |c: char| {
+        !matches!(
+            c,
+            ';' | '&' | '|' | '`' | '$' | '<' | '>' | '(' | ')' | '\n' | '\r'
+        )
+    };
     let mut j = i;
     loop {
         // Try `-m[ \t]+` at position j.
@@ -372,8 +380,7 @@ fn validate_git_commit(ctx: &Ctx) -> Option<String> {
     // matches `git<hws>commit<hws>`, lazily consumes a metachar-free run up to
     // `-m<hws>`, reads the opening quote, lazily reads content up to the SAME
     // quote, and captures the remainder. `(quote, message_content, remainder)`.
-    let (quote, message_content_owned, remainder_owned) =
-        parse_git_commit_message(original)?;
+    let (quote, message_content_owned, remainder_owned) = parse_git_commit_message(original)?;
     let message_content = message_content_owned.as_str();
     let remainder = remainder_owned.as_str();
 
@@ -384,9 +391,7 @@ fn validate_git_commit(ctx: &Ctx) -> Option<String> {
             .get_or_init(|| Regex::new(r"\$\(|`|\$\{").unwrap())
             .is_match(message_content)
         {
-            return Some(
-                "Git commit message contains command substitution patterns".to_string(),
-            );
+            return Some("Git commit message contains command substitution patterns".to_string());
         }
     }
     // Remainder shell metacharacters (`:679`) → TS returns passthrough (full
@@ -457,8 +462,10 @@ fn validate_jq_command(ctx: &Ctx) -> Option<String> {
         static RE: OnceLock<Regex> = OnceLock::new();
         if RE
             .get_or_init(|| {
-                Regex::new(r"(?:^|\s)(?:-f\b|--from-file|--rawfile|--slurpfile|-L\b|--library-path)")
-                    .unwrap()
+                Regex::new(
+                    r"(?:^|\s)(?:-f\b|--from-file|--rawfile|--slurpfile|-L\b|--library-path)",
+                )
+                .unwrap()
             })
             .is_match(after_jq)
         {
@@ -502,9 +509,7 @@ fn validate_obfuscated_flags(ctx: &Ctx) -> Option<String> {
             .get_or_init(|| Regex::new(r#"\$"[^"]*""#).unwrap())
             .is_match(original)
         {
-            return Some(
-                "Command contains locale quoting which can hide characters".to_string(),
-            );
+            return Some("Command contains locale quoting which can hide characters".to_string());
         }
     }
     // 3. Empty ANSI-C/locale quotes before dash — `/\$['"]{2}\s*-/` (`:1181`).
@@ -620,9 +625,7 @@ fn validate_obfuscated_flags(ctx: &Ctx) -> Option<String> {
                         || has_flag_chars_continuing
                         || has_flag_chars_in_next_quote)
                 {
-                    return Some(
-                        "Command contains quoted characters in flag names".to_string(),
-                    );
+                    return Some("Command contains quoted characters in flag names".to_string());
                 }
             }
 
@@ -651,9 +654,7 @@ fn validate_obfuscated_flags(ctx: &Ctx) -> Option<String> {
                     j += 1;
                 }
                 if flag_content.contains('"') || flag_content.contains('\'') {
-                    return Some(
-                        "Command contains quoted characters in flag names".to_string(),
-                    );
+                    return Some("Command contains quoted characters in flag names".to_string());
                 }
             }
         }
@@ -788,9 +789,7 @@ fn validate_shell_metacharacters(ctx: &Ctx) -> Option<String> {
     {
         static RE: OnceLock<Regex> = OnceLock::new();
         if RE
-            .get_or_init(|| {
-                Regex::new(r#"(?:^|\s)["'][^"']*[;&][^"']*["'](?:\s|$)"#).unwrap()
-            })
+            .get_or_init(|| Regex::new(r#"(?:^|\s)["'][^"']*[;&][^"']*["'](?:\s|$)"#).unwrap())
             .is_match(content)
         {
             return Some(message);
@@ -983,7 +982,8 @@ fn validate_ifs_injection(ctx: &Ctx) -> Option<String> {
         .is_match(&ctx.original)
     {
         return Some(
-            "Command contains IFS variable usage which could bypass security validation".to_string(),
+            "Command contains IFS variable usage which could bypass security validation"
+                .to_string(),
         );
     }
     None
@@ -1106,10 +1106,17 @@ fn validate_backslash_escaped_operators(ctx: &Ctx) -> Option<String> {
 /// Matches Unicode whitespace (TS `UNICODE_WS_RE`, `bashSecurity.ts:1899-1900`).
 fn validate_unicode_whitespace(ctx: &Ctx) -> Option<String> {
     let hit = ctx.original.chars().any(|c| {
-        matches!(c,
-            '\u{00A0}' | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}')
+        matches!(
+            c,
+            '\u{00A0}' | '\u{1680}' | '\u{2000}'
+                ..='\u{200A}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202F}'
+                    | '\u{205F}'
+                    | '\u{3000}'
+                    | '\u{FEFF}'
+        )
     });
     if hit {
         return Some(
@@ -1445,8 +1452,7 @@ fn validate_brace_expansion(ctx: &Ctx) -> Option<String> {
             } else if c == '}' && !is_escaped_at_position(&content, k) {
                 inner_depth -= 1;
             } else if inner_depth == 0
-                && (c == ','
-                    || (c == '.' && k + 1 < mc && content[k + 1] == '.'))
+                && (c == ',' || (c == '.' && k + 1 < mc && content[k + 1] == '.'))
             {
                 return Some(
                     "Command contains brace expansion that could alter command parsing".to_string(),
@@ -1631,7 +1637,9 @@ pub fn bash_command_is_safe(command: &str) -> BashSafetyVerdict {
     // 2. shell-quote single-quote bug (`:2277-2284`).
     if has_shell_quote_single_quote_bug(command) {
         return BashSafetyVerdict::Ask {
-            message: "Command contains single-quoted backslash pattern that could bypass security checks".to_string(),
+            message:
+                "Command contains single-quoted backslash pattern that could bypass security checks"
+                    .to_string(),
         };
     }
 
@@ -1771,11 +1779,15 @@ mod tests {
     // ── validateIncompleteCommands ──────────────────────────────────────
     #[test]
     fn incomplete_starts_with_flag() {
-        assert!(message("--flag value").unwrap().contains("starts with flags"));
+        assert!(message("--flag value")
+            .unwrap()
+            .contains("starts with flags"));
     }
     #[test]
     fn incomplete_starts_with_operator() {
-        assert!(message("&& rm -rf /").unwrap().contains("continuation line"));
+        assert!(message("&& rm -rf /")
+            .unwrap()
+            .contains("continuation line"));
     }
     #[test]
     fn incomplete_starts_with_tab() {
@@ -1935,9 +1947,7 @@ mod tests {
     // ── validateIFSInjection ────────────────────────────────────────────
     #[test]
     fn ifs_injection_asks() {
-        assert!(message("cat${IFS}/etc/passwd")
-            .unwrap()
-            .contains("IFS"));
+        assert!(message("cat${IFS}/etc/passwd").unwrap().contains("IFS"));
     }
     #[test]
     fn ifs_dollar_asks() {
@@ -1999,9 +2009,7 @@ mod tests {
     // ── validateMidWordHash ─────────────────────────────────────────────
     #[test]
     fn mid_word_hash_asks() {
-        assert!(message("traceroute#bar")
-            .unwrap()
-            .contains("mid-word #"));
+        assert!(message("traceroute#bar").unwrap().contains("mid-word #"));
     }
     #[test]
     fn dollar_brace_hash_is_not_mid_word_hash() {
@@ -2090,9 +2098,11 @@ mod tests {
     }
     #[test]
     fn shell_quote_single_quote_bug_asks() {
-        assert!(message(r"git ls-remote 'safe\' '--upload-pack=evil' 'repo'")
-            .unwrap()
-            .contains("single-quoted backslash"));
+        assert!(
+            message(r"git ls-remote 'safe\' '--upload-pack=evil' 'repo'")
+                .unwrap()
+                .contains("single-quoted backslash")
+        );
     }
 
     // ── ordering: misparsing beats deferred non-misparsing ──────────────

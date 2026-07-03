@@ -199,10 +199,7 @@ fn run(cli: &Cli) -> ExitCode {
 
     // Load config from file (settings override, else the default path), falling
     // back to the minimal default config.
-    let config_path = cli
-        .settings
-        .clone()
-        .unwrap_or_else(get_default_config_path);
+    let config_path = cli.settings.clone().unwrap_or_else(get_default_config_path);
     let runtime_config = load_config(&config_path).unwrap_or_else(|| {
         log_for_debugging(&format!(
             "No config found at {}, using default config",
@@ -217,9 +214,7 @@ fn run(cli: &Cli) -> ExitCode {
         log_for_debugging(&format!("Command string mode (-c): {c}"));
         c.clone()
     } else if cli.args.is_empty() {
-        eprintln!(
-            "Error: No command specified. Use -c <command> or provide command arguments."
-        );
+        eprintln!("Error: No command specified. Use -c <command> or provide command arguments.");
         return ExitCode::FAILURE;
     } else {
         // argv-style: shell-quote each arg so it survives the later `sh -c`
@@ -273,10 +268,7 @@ fn exec_wrapped(manager: &SandboxManager, command: &str, cwd: &str) -> ExitCode 
 
     // The TS `spawn(cmd, {shell:true})` runs the wrapped string through the host
     // shell (`/bin/sh -c` on POSIX). We do the same.
-    let status = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(&wrapped)
-        .status();
+    let status = Command::new("/bin/sh").arg("-c").arg(&wrapped).status();
 
     // Clean up bwrap mount-point artifacts (the TS `cleanupAfterCommand`;
     // no-op on macOS where the list is empty).

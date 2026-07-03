@@ -22,8 +22,8 @@ use crate::components::messages::assistant_tool_use::{
 use crate::components::messages::user_tool_result::{
     render_user_tool_result_to_string, UserToolResultProps,
 };
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Dot marker prefix (matches `assistant_text.rs` `● `).
 pub const MARKER: &str = "\u{25CF} ";

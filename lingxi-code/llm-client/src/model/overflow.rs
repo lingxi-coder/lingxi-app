@@ -162,9 +162,7 @@ pub fn adjusted_max_tokens(overflow: Overflow, thinking_budget: u64) -> Option<u
     // minRequired = thinkingBudget + 1 (at least one output token).
     let min_required = thinking_budget.saturating_add(1);
 
-    let adjusted = FLOOR_OUTPUT_TOKENS
-        .max(available_context)
-        .max(min_required);
+    let adjusted = FLOOR_OUTPUT_TOKENS.max(available_context).max(min_required);
 
     Some(u32::try_from(adjusted).unwrap_or(u32::MAX))
 }
@@ -253,10 +251,7 @@ mod parse_tests {
 
     #[test]
     fn parse_overflow_message_unrelated_returns_none() {
-        assert_eq!(
-            parse_overflow_message("some unrelated error message"),
-            None
-        );
+        assert_eq!(parse_overflow_message("some unrelated error message"), None);
     }
 }
 

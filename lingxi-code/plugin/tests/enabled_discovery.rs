@@ -68,7 +68,11 @@ async fn resolves_enabled_entries_to_versioned_cache_paths() {
     assert_eq!(manifest.name, "weather");
     assert_eq!(
         dir,
-        &root.join("cache").join("acme").join("weather").join("1.0.0"),
+        &root
+            .join("cache")
+            .join("acme")
+            .join("weather")
+            .join("1.0.0"),
         "resolved to the versioned cache dir"
     );
     assert_eq!(manifest.components.commands.len(), 1);
@@ -101,5 +105,8 @@ async fn missing_version_dir_for_enabled_entry_is_skipped() {
     enabled.insert("ghost@acme".to_string(), true);
 
     let discovered = plugin::discover_enabled_plugins(root, &enabled).await;
-    assert!(discovered.is_empty(), "uninstalled enabled entry is skipped");
+    assert!(
+        discovered.is_empty(),
+        "uninstalled enabled entry is skipped"
+    );
 }

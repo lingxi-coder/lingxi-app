@@ -45,8 +45,8 @@ pub use feature_configs::NetworkProxyUnixSocketPermissionToml;
 use feature_configs::RemovedAppsMcpPathOverrideConfigToml;
 pub use feature_configs::RolloutBudgetConfigToml;
 pub use feature_configs::TokenBudgetConfigToml;
-use legacy::LegacyFeatureToggles;
 pub use legacy::legacy_feature_keys;
+use legacy::LegacyFeatureToggles;
 
 /// High-level lifecycle stage for a feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

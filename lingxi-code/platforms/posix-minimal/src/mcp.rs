@@ -118,10 +118,7 @@ impl McpTransport for PosixMcp {
 /// `McpRegistry::with_raw_conn` and exercise the production client-bridge path;
 /// because no real connection ever exists, `get_client` correctly stays empty.
 impl mcp::RawConnectionProvider for PosixMcp {
-    fn connection_for(
-        &self,
-        _id: McpConnectionId,
-    ) -> Option<std::sync::Arc<jsonrpc::Connection>> {
+    fn connection_for(&self, _id: McpConnectionId) -> Option<std::sync::Arc<jsonrpc::Connection>> {
         None
     }
 }

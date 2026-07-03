@@ -110,7 +110,11 @@ pub async fn run_due_jobs(
 
     // Load the persisted (durable) jobs into a transient in-memory map, mirroring
     // `CronScheduler::load_persisted` (epoch-ms timestamps; invalid cron skipped).
-    let Ok(body) = fs.read_file(path.as_ref(), None, None).await.map(|c| c.content) else {
+    let Ok(body) = fs
+        .read_file(path.as_ref(), None, None)
+        .await
+        .map(|c| c.content)
+    else {
         return Vec::new(); // file absent → nothing to fire
     };
     let mut tasks: HashMap<String, CronTaskDef> = HashMap::new();
@@ -364,7 +368,12 @@ mod tests {
             Ok(SystemTime::UNIX_EPOCH)
         }
         async fn file_size(&self, path: &str) -> Result<u64, FsError> {
-            Ok(self.files.lock().await.get(path).map_or(0, |s| s.len() as u64))
+            Ok(self
+                .files
+                .lock()
+                .await
+                .get(path)
+                .map_or(0, |s| s.len() as u64))
         }
         async fn delete_file(&self, path: &str) -> Result<(), FsError> {
             self.files.lock().await.remove(path);
@@ -506,7 +515,10 @@ mod tests {
         )
         .await;
 
-        assert!(fired.is_empty(), "a job already fired this minute is not due");
+        assert!(
+            fired.is_empty(),
+            "a job already fired this minute is not due"
+        );
         assert!(firer.calls().is_empty());
     }
 

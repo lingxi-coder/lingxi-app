@@ -407,7 +407,11 @@ mod tests {
         let mut got = [0u8; 11];
         c.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"hello-socks");
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "echo upstream was dialed once");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "echo upstream was dialed once"
+        );
     }
 
     #[tokio::test]
@@ -426,7 +430,10 @@ mod tests {
             &req_ipv4(std::net::Ipv4Addr::LOCALHOST, tripwire_port),
         )
         .await;
-        assert_eq!(reply[1], REP_NOT_ALLOWED, "denied host must be REP_NOT_ALLOWED");
+        assert_eq!(
+            reply[1], REP_NOT_ALLOWED,
+            "denied host must be REP_NOT_ALLOWED"
+        );
         // Give any (erroneous) dial a beat to land, then assert the tripwire is untouched.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
@@ -464,7 +471,10 @@ mod tests {
 
         let mut c = TcpStream::connect(("127.0.0.1", socks_port)).await.unwrap();
         let reply = socks_handshake_and_request(&mut c, &req_domain(b"localhost", echo_port)).await;
-        assert_eq!(reply[1], REP_GRANTED, "DOMAINNAME localhost should be granted");
+        assert_eq!(
+            reply[1], REP_GRANTED,
+            "DOMAINNAME localhost should be granted"
+        );
         c.write_all(b"dn").await.unwrap();
         let mut got = [0u8; 2];
         c.read_exact(&mut got).await.unwrap();
@@ -498,9 +508,11 @@ mod tests {
 
         // Denied before update.
         let mut c = TcpStream::connect(("127.0.0.1", socks_port)).await.unwrap();
-        let reply =
-            socks_handshake_and_request(&mut c, &req_ipv4(std::net::Ipv4Addr::LOCALHOST, echo_port))
-                .await;
+        let reply = socks_handshake_and_request(
+            &mut c,
+            &req_ipv4(std::net::Ipv4Addr::LOCALHOST, echo_port),
+        )
+        .await;
         assert_eq!(reply[1], REP_NOT_ALLOWED, "deny-all before update");
 
         // LIVE swap: allow loopback.

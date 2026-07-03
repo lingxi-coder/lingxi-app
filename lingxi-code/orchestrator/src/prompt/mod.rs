@@ -23,7 +23,8 @@ pub mod tools_block;
 
 pub use memory_block::{
     build_memdir_prefetch, build_memdir_prefetch_from_anthropic, build_session_memory_handle,
-    real_provider, real_provider_with_excludes, MemoryHierarchyProvider, RealMemoryHierarchyProvider,
+    real_provider, real_provider_with_excludes, MemoryHierarchyProvider,
+    RealMemoryHierarchyProvider,
 };
 
 /// Re-export of the LINGXI.md tier enum so consumers that depend on
@@ -467,8 +468,13 @@ mod tests {
         assert!(i_env < i_style, "env must come before style");
         assert!(i_env < i_style, "env must come before style");
         // GAP-2: context management is now the LAST section, after output-style.
-        let i_ctx = out.find("# Context management").expect("context management present");
-        assert!(i_style < i_ctx, "context management must come AFTER output-style");
+        let i_ctx = out
+            .find("# Context management")
+            .expect("context management present");
+        assert!(
+            i_style < i_ctx,
+            "context management must come AFTER output-style"
+        );
         // The prompt now ends with context management, not the output-style body.
         assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }
@@ -510,15 +516,17 @@ mod tests {
         assert_eq!(blocks[0].text, HEADER);
         // The rest block now opens with the static BODY (the `Pym` opening
         // paragraph), which precedes the env block.
-        assert!(blocks[1]
-            .text
-            .starts_with("You are an interactive agent that helps users with software engineering tasks."));
+        assert!(blocks[1].text.starts_with(
+            "You are an interactive agent that helps users with software engineering tasks."
+        ));
         assert!(blocks[1]
             .text
             .contains("\n\n# Environment\nYou have been invoked in the following environment: "));
         // No `Notes:` FOOTER — the rest block ends with the `# Context management`
         // section's last line (GAP-2 fix: context management is now appended after env).
         assert!(!blocks[1].text.contains("Notes:"));
-        assert!(blocks[1].text.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(blocks[1]
+            .text
+            .ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }
 }

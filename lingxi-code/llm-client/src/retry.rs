@@ -13,9 +13,9 @@ impl RetryPolicy {
     #[must_use]
     pub fn classify_error(&self, error: &LlmError) -> RetryDecision {
         match error {
-            LlmError::Transport { .. } | LlmError::ProviderInternal | LlmError::Overloaded { .. } => {
-                RetryDecision::Retry { after: None }
-            }
+            LlmError::Transport { .. }
+            | LlmError::ProviderInternal
+            | LlmError::Overloaded { .. } => RetryDecision::Retry { after: None },
             LlmError::RateLimited { retry_after, .. } => RetryDecision::Retry {
                 after: *retry_after,
             },

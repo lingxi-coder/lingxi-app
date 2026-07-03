@@ -33,7 +33,9 @@ pub fn parse_routing(
             if let Some(s) = v.as_str() {
                 cfg.aliases.insert(k.clone(), s.to_string());
             } else {
-                warnings.push(format!("routing.aliases[{k:?}]: value is not a string; skipped"));
+                warnings.push(format!(
+                    "routing.aliases[{k:?}]: value is not a string; skipped"
+                ));
             }
         }
     }
@@ -41,13 +43,19 @@ pub fn parse_routing(
     if let Some(fb) = obj.get("fallback").and_then(Value::as_object) {
         for (k, v) in fb {
             let Some(arr) = v.as_array() else {
-                warnings.push(format!("routing.fallback[{k:?}]: value is not an array; skipped"));
+                warnings.push(format!(
+                    "routing.fallback[{k:?}]: value is not an array; skipped"
+                ));
                 continue;
             };
-            let targets: Vec<String> =
-                arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+            let targets: Vec<String> = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect();
             if targets.is_empty() {
-                warnings.push(format!("routing.fallback[{k:?}]: no string targets; skipped"));
+                warnings.push(format!(
+                    "routing.fallback[{k:?}]: no string targets; skipped"
+                ));
                 continue;
             }
             raw_fallback.insert(k.clone(), targets);
@@ -65,7 +73,10 @@ pub fn parse_routing(
             .get("backoffMs")
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_BACKOFF_MS);
-        cfg.retry = Some(RetryOverride { max_attempts, backoff_ms });
+        cfg.retry = Some(RetryOverride {
+            max_attempts,
+            backoff_ms,
+        });
     }
 
     (cfg, raw_fallback, warnings)
@@ -91,8 +102,14 @@ mod tests {
         let v = json!({ "aliases": { "fast": "deepseek/deepseek-chat", "smart": "openrouter/openai/gpt-4o" } });
         let (cfg, _fb, warns) = parse_routing(Some(&v));
         assert!(warns.is_empty());
-        assert_eq!(cfg.aliases.get("fast").map(String::as_str), Some("deepseek/deepseek-chat"));
-        assert_eq!(cfg.aliases.get("smart").map(String::as_str), Some("openrouter/openai/gpt-4o"));
+        assert_eq!(
+            cfg.aliases.get("fast").map(String::as_str),
+            Some("deepseek/deepseek-chat")
+        );
+        assert_eq!(
+            cfg.aliases.get("smart").map(String::as_str),
+            Some("openrouter/openai/gpt-4o")
+        );
     }
 
     #[test]
@@ -112,7 +129,9 @@ mod tests {
         assert_eq!(r.max_attempts, 3);
         assert_eq!(r.backoff_ms, 250);
 
-        let (cfg2, _fb2, _w2) = parse_routing(Some(&json!({ "retry": { "maxAttempts": 5, "backoffMs": 100 } })));
+        let (cfg2, _fb2, _w2) = parse_routing(Some(
+            &json!({ "retry": { "maxAttempts": 5, "backoffMs": 100 } }),
+        ));
         let r2 = cfg2.retry.unwrap();
         assert_eq!(r2.max_attempts, 5);
         assert_eq!(r2.backoff_ms, 100);
@@ -134,7 +153,8 @@ mod tests {
 
     #[test]
     fn malformed_fallback_value_warns_and_skips() {
-        let (_cfg, fb, warns) = parse_routing(Some(&json!({ "fallback": { "fast": "not-an-array" } })));
+        let (_cfg, fb, warns) =
+            parse_routing(Some(&json!({ "fallback": { "fast": "not-an-array" } })));
         assert!(fb.is_empty());
         assert_eq!(warns.len(), 1);
         assert!(warns[0].contains("not an array"));

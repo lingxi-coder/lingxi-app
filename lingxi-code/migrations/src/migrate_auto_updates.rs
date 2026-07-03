@@ -33,7 +33,11 @@ pub async fn run(env: &MigrationEnv) {
     // and `updateSettingsForSource` returns an ignored `{error}`
     // (settings.ts:416-523). So only the cleanup failure reaches
     // `tengu_migrate_autoupdates_error`.
-    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
+    let sp = settings_path(
+        SettingsSource::User,
+        &env.lingxi_config_home,
+        &env.project_dir,
+    );
     // TS: `getSettingsForSource('userSettings') || {}` (TS:26) — a broken
     // settings file parses to null, never throws; proceed with an empty map.
     let user = read_settings_map(&sp).unwrap_or_else(|e| {
@@ -58,8 +62,14 @@ pub async fn run(env: &MigrationEnv) {
     env.emit(
         telemetry::tengu::migration::MIGRATE_AUTOUPDATES_TO_SETTINGS,
         std::collections::HashMap::from([
-            ("was_user_preference".to_string(), AnalyticsValue::Bool(true)),
-            ("already_had_env_var".to_string(), AnalyticsValue::Bool(already_had)),
+            (
+                "was_user_preference".to_string(),
+                AnalyticsValue::Bool(true),
+            ),
+            (
+                "already_had_env_var".to_string(),
+                AnalyticsValue::Bool(already_had),
+            ),
         ]),
     )
     .await;
@@ -98,7 +108,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }

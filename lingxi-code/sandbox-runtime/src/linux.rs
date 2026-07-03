@@ -439,7 +439,10 @@ pub fn initialize_linux_network_bridge(
     // Start HTTP bridge.
     let http_args = host_socat_args(&http_socket_path.to_string_lossy(), http_proxy_port);
     let mut http_child = spawn_socat(http_args).map_err(|e| {
-        io::Error::new(e.kind(), format!("Failed to start HTTP bridge process: {e}"))
+        io::Error::new(
+            e.kind(),
+            format!("Failed to start HTTP bridge process: {e}"),
+        )
     })?;
 
     // Start SOCKS bridge; tear down HTTP on failure.
@@ -567,8 +570,7 @@ pub struct WrapParams<'a> {
 /// bridge process likely died).
 fn push_network_args(bwrap_args: &mut Vec<String>, params: &WrapParams<'_>) -> io::Result<()> {
     bwrap_args.push("--unshare-net".into());
-    let (Some(http_sock), Some(socks_sock)) =
-        (params.http_socket_path, params.socks_socket_path)
+    let (Some(http_sock), Some(socks_sock)) = (params.http_socket_path, params.socks_socket_path)
     else {
         // No sockets → bare --unshare-net (network fully blocked).
         return Ok(());
@@ -713,9 +715,8 @@ pub fn wrap_command_with_sandbox_linux(
 
     // ===== COMMAND =====
     let shell_name = params.bin_shell.unwrap_or("bash");
-    let shell = which_sync(shell_name).ok_or_else(|| {
-        io::Error::other(format!("Shell '{shell_name}' not found in PATH"))
-    })?;
+    let shell = which_sync(shell_name)
+        .ok_or_else(|| io::Error::other(format!("Shell '{shell_name}' not found in PATH")))?;
     let shell = shell.to_string_lossy().into_owned();
     bwrap_args.push("--".into());
     bwrap_args.push(shell.clone());
@@ -773,9 +774,7 @@ fn random_hex_8() -> String {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        let mixed = now
-            .as_secs()
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        let mixed = now.as_secs().wrapping_mul(0x9E37_79B9_7F4A_7C15)
             ^ u64::from(now.subsec_nanos()).rotate_left(17)
             ^ u64::from(std::process::id()).rotate_left(31);
         buf = mixed.to_le_bytes();
@@ -872,7 +871,10 @@ mod tests {
             assert!(st.has_seccomp_apply);
             // ...and the no-seccomp warning is suppressed.
             let chk = check_linux_dependencies(&opts);
-            assert!(!chk.warnings.iter().any(|w| w.contains("seccomp not available")));
+            assert!(!chk
+                .warnings
+                .iter()
+                .any(|w| w.contains("seccomp not available")));
         } else {
             assert!(!st.has_seccomp_apply);
         }
@@ -891,7 +893,10 @@ mod tests {
         fs::write(&bin, b"x").unwrap();
         let prefix = resolve_apply_seccomp_prefix(Some(&bin), None).unwrap();
         // Prefix = shell-quoted path + a trailing space.
-        assert!(prefix.ends_with(' '), "prefix must be space-terminated: {prefix:?}");
+        assert!(
+            prefix.ends_with(' '),
+            "prefix must be space-terminated: {prefix:?}"
+        );
         assert!(prefix.contains(&*bin.to_string_lossy()), "prefix: {prefix}");
     }
 
@@ -921,7 +926,8 @@ mod tests {
         let missing = Path::new("/nonexistent/apply-seccomp");
         let got = resolve_apply_seccomp_prefix(Some(missing), None);
         assert!(
-            got.as_deref().is_none_or(|p| !p.contains("/nonexistent/apply-seccomp")),
+            got.as_deref()
+                .is_none_or(|p| !p.contains("/nonexistent/apply-seccomp")),
             "missing explicit path must not be returned: {got:?}"
         );
     }
@@ -977,7 +983,10 @@ mod tests {
     #[test]
     fn host_socat_args_exact() {
         let args = host_socat_args("/tmp/claude-http-abc.sock", 8080);
-        assert_eq!(args[0], "UNIX-LISTEN:/tmp/claude-http-abc.sock,fork,reuseaddr");
+        assert_eq!(
+            args[0],
+            "UNIX-LISTEN:/tmp/claude-http-abc.sock,fork,reuseaddr"
+        );
         assert_eq!(
             args[1],
             "TCP:localhost:8080,keepalive,keepidle=10,keepintvl=5,keepcnt=3"
@@ -1012,7 +1021,10 @@ mod tests {
             Some("/usr/bin/socat"),
         );
         // The seccomp-wrapped command line.
-        let wrapped = format!("/opt/apply-seccomp {}", shjoin(["/bin/bash", "-c", "echo hi"]));
+        let wrapped = format!(
+            "/opt/apply-seccomp {}",
+            shjoin(["/bin/bash", "-c", "echo hi"])
+        );
         let expected_inner = format!(
             "/usr/bin/socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:/tmp/h.sock >/dev/null 2>&1 &\n\
              /usr/bin/socat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:/tmp/s.sock >/dev/null 2>&1 &\n\
@@ -1032,7 +1044,7 @@ mod tests {
             "/tmp/s.sock",
             "ls",
             None,
-            "", // empty shell -> bash
+            "",   // empty shell -> bash
             None, // no socat -> "socat"
         );
         assert!(cmd.starts_with("bash -c "));
@@ -1076,10 +1088,11 @@ mod tests {
     #[test]
     fn bridge_fails_when_socat_missing() {
         // Explicit bogus socat path -> spawn fails -> Err with the EXACT message.
-        let err = initialize_linux_network_bridge(8080, 8081, Some("/nonexistent/socat"))
-            .unwrap_err();
+        let err =
+            initialize_linux_network_bridge(8080, 8081, Some("/nonexistent/socat")).unwrap_err();
         assert!(
-            err.to_string().contains("Failed to start HTTP bridge process"),
+            err.to_string()
+                .contains("Failed to start HTTP bridge process"),
             "got: {err}"
         );
     }
@@ -1142,16 +1155,28 @@ mod tests {
         let (cmd, _mounts) = wrap_command_with_sandbox_linux(&p).unwrap();
         assert!(cmd.contains("--unshare-net"), "cmd: {cmd}");
         // Socket binds (each path bound to itself). shlex-quoted; the path is in.
-        assert!(cmd.contains(&format!("--bind {http_s} {http_s}")), "cmd: {cmd}");
-        assert!(cmd.contains(&format!("--bind {socks_s} {socks_s}")), "cmd: {cmd}");
+        assert!(
+            cmd.contains(&format!("--bind {http_s} {http_s}")),
+            "cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!("--bind {socks_s} {socks_s}")),
+            "cmd: {cmd}"
+        );
         // HTTP_PROXY setenv to the internal listener.
         assert!(
             cmd.contains("--setenv HTTP_PROXY http://localhost:3128"),
             "cmd: {cmd}"
         );
         // Host port transparency vars.
-        assert!(cmd.contains("--setenv LINGXI_HOST_HTTP_PROXY_PORT 8080"), "cmd: {cmd}");
-        assert!(cmd.contains("--setenv LINGXI_HOST_SOCKS_PROXY_PORT 8081"), "cmd: {cmd}");
+        assert!(
+            cmd.contains("--setenv LINGXI_HOST_HTTP_PROXY_PORT 8080"),
+            "cmd: {cmd}"
+        );
+        assert!(
+            cmd.contains("--setenv LINGXI_HOST_SOCKS_PROXY_PORT 8081"),
+            "cmd: {cmd}"
+        );
         // The sandbox socat command (build_sandbox_command) is embedded.
         assert!(cmd.contains("TCP-LISTEN:3128,fork,reuseaddr"), "cmd: {cmd}");
         assert!(cmd.contains("TCP-LISTEN:1080,fork,reuseaddr"), "cmd: {cmd}");
@@ -1200,8 +1225,14 @@ mod tests {
         p.write_config = Some(&wc);
         p.enable_weaker_nested_sandbox = true;
         let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
-        assert!(cmd.contains("--unshare-user --bind /proc /proc"), "cmd: {cmd}");
-        assert!(!cmd.contains("--proc /proc"), "should NOT have plain --proc: {cmd}");
+        assert!(
+            cmd.contains("--unshare-user --bind /proc /proc"),
+            "cmd: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--proc /proc"),
+            "should NOT have plain --proc: {cmd}"
+        );
     }
 
     #[test]
@@ -1242,7 +1273,10 @@ mod tests {
         // A trusted argv0 resolves without a host-side file (inside-bwrap PATH).
         p.seccomp_apply_argv0 = Some("apply-seccomp");
         let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
-        assert!(cmd.contains("apply-seccomp"), "seccomp prefix missing: {cmd}");
+        assert!(
+            cmd.contains("apply-seccomp"),
+            "seccomp prefix missing: {cmd}"
+        );
     }
 
     #[test]
@@ -1262,7 +1296,10 @@ mod tests {
         p.allow_all_unix_sockets = true;
         p.seccomp_apply_argv0 = Some("apply-seccomp");
         let (cmd, _m) = wrap_command_with_sandbox_linux(&p).unwrap();
-        assert!(!cmd.contains("apply-seccomp"), "seccomp prefix must be omitted: {cmd}");
+        assert!(
+            !cmd.contains("apply-seccomp"),
+            "seccomp prefix must be omitted: {cmd}"
+        );
     }
 
     #[test]
@@ -1287,6 +1324,9 @@ mod tests {
         // The seccomp prefix is embedded in build_sandbox_command's inner script,
         // and the eval branch is NOT taken.
         assert!(cmd.contains("apply-seccomp"), "cmd: {cmd}");
-        assert!(cmd.contains("TCP-LISTEN:3128"), "socat listener present: {cmd}");
+        assert!(
+            cmd.contains("TCP-LISTEN:3128"),
+            "socat listener present: {cmd}"
+        );
     }
 }

@@ -559,12 +559,13 @@ mod tests {
     fn parse_no_proxy_splits_suffix_cidr_and_star() {
         let r = parse_no_proxy("*");
         assert!(r.all);
-        let r = parse_no_proxy("example.com, .internal, 10.0.0.0/8, 127.0.0.1, host:8080, [::1]:443");
+        let r =
+            parse_no_proxy("example.com, .internal, 10.0.0.0/8, 127.0.0.1, host:8080, [::1]:443");
         assert!(!r.all);
         assert!(r.suffixes.contains(&"example.com".to_string()));
         assert!(r.suffixes.contains(&".internal".to_string()));
         assert!(r.suffixes.contains(&"host".to_string())); // :8080 stripped
-        // 10.0.0.0/8 + 127.0.0.1 + ::1 go to cidr
+                                                           // 10.0.0.0/8 + 127.0.0.1 + ::1 go to cidr
         assert!(cidr_contains(&r, "10.1.2.3"));
         assert!(cidr_contains(&r, "127.0.0.1"));
         assert!(cidr_contains(&r, "::1"));
@@ -668,11 +669,13 @@ mod tests {
         // percent-encoded userinfo is decoded before base64 (`a b:p@ss` form).
         assert_eq!(
             proxy_auth_header(&Url::parse("http://a%20b:p%40ss@x:3128").unwrap()).as_deref(),
-            Some(format!(
-                "Basic {}",
-                base64::engine::general_purpose::STANDARD.encode("a b:p@ss")
+            Some(
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("a b:p@ss")
+                )
+                .as_str()
             )
-            .as_str())
         );
     }
 
@@ -712,7 +715,9 @@ mod tests {
             let (mut s, _) = l.accept().await.unwrap();
             let mut buf = [0u8; 256];
             let _ = s.read(&mut buf).await.unwrap();
-            s.write_all(b"HTTP/1.1 200 OK\r\n\r\nLEFTOVER").await.unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\n\r\nLEFTOVER")
+                .await
+                .unwrap();
             // Echo whatever the client writes next over the tunnel.
             let mut b2 = [0u8; 16];
             let n = s.read(&mut b2).await.unwrap_or(0);
@@ -741,7 +746,9 @@ mod tests {
         let pport = l.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (mut s, _) = l.accept().await.unwrap();
-            s.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await.unwrap();
+            s.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                .await
+                .unwrap();
         });
         let sock = TcpStream::connect(("127.0.0.1", pport)).await.unwrap();
         assert!(open_connect_tunnel(sock, "example.com", 443, None)

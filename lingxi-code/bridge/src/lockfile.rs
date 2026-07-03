@@ -81,10 +81,7 @@ impl IdeLockfile {
     /// Build a lockfile body with a fresh auth token and an explicit `ide_name`
     /// (e.g. [`BRIDGE_IDE_NAME`] for the dedicated bridge discovery file).
     #[must_use]
-    pub fn new_body_with_ide_name(
-        ide_name: &str,
-        workspace_folders: Vec<PathBuf>,
-    ) -> LockfileBody {
+    pub fn new_body_with_ide_name(ide_name: &str, workspace_folders: Vec<PathBuf>) -> LockfileBody {
         LockfileBody {
             pid: std::process::id(),
             workspace_folders,
@@ -149,7 +146,11 @@ impl IdeLockfile {
             })?;
         let bridge_dir = config_home.join("bridge");
         std::fs::create_dir_all(&bridge_dir)?;
-        Ok(Self::new_for_bridge_dir(bridge_dir, port, workspace_folders))
+        Ok(Self::new_for_bridge_dir(
+            bridge_dir,
+            port,
+            workspace_folders,
+        ))
     }
 
     /// Construct a bridge discovery lockfile rooted at an arbitrary

@@ -56,7 +56,10 @@ mod tests {
     #[test]
     fn env_defined_falsy_matrix() {
         for v in ["0", "false", "FALSE", " no ", "Off"] {
-            assert!(is_env_defined_falsy(Some(v)), "{v:?} should be defined-falsy");
+            assert!(
+                is_env_defined_falsy(Some(v)),
+                "{v:?} should be defined-falsy"
+            );
         }
         // Not falsy: empty, unset, or out-of-set (incl. the truthy values).
         for v in ["", "1", "true", "yes", "on", "2", "disabled"] {

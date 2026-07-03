@@ -305,7 +305,9 @@ mod tests {
     use tokio::net::TcpStream;
 
     async fn send_get(port: u16, path_and_query: &str) -> String {
-        let mut client = TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
+        let mut client = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
         let req = format!("GET {path_and_query} HTTP/1.1\r\nHost: localhost\r\n\r\n");
         client.write_all(req.as_bytes()).await.expect("write");
         let mut resp = Vec::new();
@@ -357,7 +359,8 @@ mod tests {
         assert!(matches!(result, Err(CallbackError::StateMismatch)));
         // claude serves a 400 page even though the flow aborts.
         assert!(resp.contains("400 Bad Request"));
-        assert!(body_of(&resp).contains("Invalid state parameter. Close this tab and try again from LingXi."));
+        assert!(body_of(&resp)
+            .contains("Invalid state parameter. Close this tab and try again from LingXi."));
     }
 
     #[tokio::test]
@@ -462,7 +465,10 @@ http://localhost:5000/callback."
             Some("bad <tag> & \"quote\" 'apos'"),
         );
         assert!(body.contains("<span class=\"status err\">Error</span>"));
-        assert!(!body.contains("window.close()"), "error page has no auto-close");
+        assert!(
+            !body.contains("window.close()"),
+            "error page has no auto-close"
+        );
         assert!(body.contains(
             "<div class=\"detail\">bad &lt;tag&gt; &amp; &quot;quote&quot; &#39;apos&#39;</div>"
         ));

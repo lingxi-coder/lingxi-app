@@ -226,9 +226,7 @@ mod tests {
         // A 10-day-old entry => mtime is ~10 days before now (day-granular).
         let f = memory_entry_to_memory_file(&entry("/m/c.md", "X", 10));
         let now = std::time::SystemTime::now();
-        let age = now
-            .duration_since(f.mtime)
-            .expect("mtime is in the past");
+        let age = now.duration_since(f.mtime).expect("mtime is in the past");
         let days = age.as_secs() / 86_400;
         // Allow a 1-day slack for the test's wall-clock drift across the calls.
         assert!((9..=10).contains(&days), "expected ~10 days, got {days}");

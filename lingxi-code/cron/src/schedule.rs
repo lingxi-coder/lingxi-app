@@ -377,7 +377,9 @@ mod tests {
     #[test]
     fn next_match_after_every_minute() {
         let expr = parse_cron("* * * * *").unwrap();
-        let next = expr.next_match_after_with(at(TUE_2023_11_14), |_| 0).unwrap();
+        let next = expr
+            .next_match_after_with(at(TUE_2023_11_14), |_| 0)
+            .unwrap();
         assert_eq!(next, at((TUE_2023_11_14 / 60 + 1) * 60));
     }
 
@@ -387,7 +389,8 @@ mod tests {
         // NEXT one — this strictly-after property prevents catch-up double-fires.
         let expr = parse_cron("* * * * *").unwrap();
         assert_eq!(
-            expr.next_match_after_with(at(1_700_000_040), |_| 0).unwrap(),
+            expr.next_match_after_with(at(1_700_000_040), |_| 0)
+                .unwrap(),
             at(1_700_000_100)
         );
     }
@@ -396,9 +399,14 @@ mod tests {
     fn next_match_after_daily_rolls_to_next_day() {
         // `0 9 * * *` (09:00 UTC). From 2023-11-14 22:13 → 2023-11-15 09:00.
         let expr = parse_cron("0 9 * * *").unwrap();
-        let next = expr.next_match_after_with(at(TUE_2023_11_14), |_| 0).unwrap();
-        let (y, m, d, h, min, ..) =
-            decompose(next.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs());
+        let next = expr
+            .next_match_after_with(at(TUE_2023_11_14), |_| 0)
+            .unwrap();
+        let (y, m, d, h, min, ..) = decompose(
+            next.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
         assert_eq!((y, m, d, h, min), (2023, 11, 15, 9, 0));
     }
 

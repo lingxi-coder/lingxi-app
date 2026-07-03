@@ -14,8 +14,7 @@ use crate::process::kill_tree::kill_tree_force;
 use crate::process::spawn_unsafe::attach_setsid;
 use crate::process::wrap::{
     ai_agent_value, is_bash_provider_shell, task_output_path, DEFAULT_TIMEOUT, ENV_AI_AGENT,
-    ENV_LINGXI_MARKER, ENV_LINGXI_CHILD_SESSION, ENV_LINGXI_SESSION_ID, ENV_GIT_EDITOR,
-    ENV_SHELL,
+    ENV_GIT_EDITOR, ENV_LINGXI_CHILD_SESSION, ENV_LINGXI_MARKER, ENV_LINGXI_SESSION_ID, ENV_SHELL,
 };
 use async_trait::async_trait;
 use std::os::unix::fs::OpenOptionsExt;
@@ -177,10 +176,7 @@ impl PosixProcess {
         // 2. Spawn-env contract (overrides anything the caller set).
         tcmd.env(ENV_LINGXI_MARKER.0, ENV_LINGXI_MARKER.1);
         // #7: claude-code `Uot` always marks child processes as a child session.
-        tcmd.env(
-            ENV_LINGXI_CHILD_SESSION.0,
-            ENV_LINGXI_CHILD_SESSION.1,
-        );
+        tcmd.env(ENV_LINGXI_CHILD_SESSION.0, ENV_LINGXI_CHILD_SESSION.1);
         // #7: claude-code `Uot` injects `AI_AGENT=Mer("agent")` for the Bash
         // spawn (`source:"agent"`); a hook child (`source:"harness"`) gets
         // neither `AI_AGENT` nor `GIT_EDITOR` (#43 — the hook env is
@@ -431,7 +427,9 @@ mod hook_env_tests {
             "runner overwrites AI_AGENT on a non-hook child; env was:\n{dump}",
         );
         assert!(
-            lines.iter().any(|l| *l == format!("AI_AGENT={}", ai_agent_value())),
+            lines
+                .iter()
+                .any(|l| *l == format!("AI_AGENT={}", ai_agent_value())),
             "non-hook child carries the runner's AI_AGENT value; env was:\n{dump}",
         );
         assert!(

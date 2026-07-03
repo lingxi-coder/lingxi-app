@@ -149,9 +149,9 @@ fn is_allow_rule_shadowed_by_deny_rule<'a>(
     let tool_name = &allow_rule.value.tool_name;
 
     // Find any tool-wide deny rule for the same tool.
-    let shadowing = deny_rules.iter().find(|deny| {
-        &deny.value.tool_name == tool_name && deny.value.rule_content.is_none()
-    });
+    let shadowing = deny_rules
+        .iter()
+        .find(|deny| &deny.value.tool_name == tool_name && deny.value.rule_content.is_none());
 
     match shadowing {
         Some(deny) => ShadowResult::Shadowed { shadowed_by: deny },
@@ -179,9 +179,10 @@ fn is_allow_rule_shadowed_by_ask_rule<'a>(
     let tool_name = &allow_rule.value.tool_name;
 
     // Find any tool-wide ask rule for the same tool.
-    let Some(shadowing) = ask_rules.iter().find(|ask| {
-        &ask.value.tool_name == tool_name && ask.value.rule_content.is_none()
-    }) else {
+    let Some(shadowing) = ask_rules
+        .iter()
+        .find(|ask| &ask.value.tool_name == tool_name && ask.value.rule_content.is_none())
+    else {
         return ShadowResult::NotShadowed;
     };
 
@@ -190,7 +191,9 @@ fn is_allow_rule_shadowed_by_ask_rule<'a>(
     // rule's source. If the ask rule is from personal settings, the user's own
     // sandbox will auto-allow. If the ask rule is from shared settings, other
     // team members may not have sandbox enabled.
-    if tool_name == BASH_TOOL_NAME && sandbox_auto_allow && !is_shared_setting_source(shadowing.source)
+    if tool_name == BASH_TOOL_NAME
+        && sandbox_auto_allow
+        && !is_shared_setting_source(shadowing.source)
     {
         return ShadowResult::NotShadowed;
     }
@@ -297,8 +300,12 @@ mod tests {
 
     #[test]
     fn shared_sources_are_project_policy_command() {
-        assert!(is_shared_setting_source(PermissionRuleSource::ProjectSettings));
-        assert!(is_shared_setting_source(PermissionRuleSource::PolicySettings));
+        assert!(is_shared_setting_source(
+            PermissionRuleSource::ProjectSettings
+        ));
+        assert!(is_shared_setting_source(
+            PermissionRuleSource::PolicySettings
+        ));
         assert!(is_shared_setting_source(PermissionRuleSource::Command));
     }
 
@@ -319,7 +326,11 @@ mod tests {
 
     #[test]
     fn specific_allow_shadowed_by_tool_wide_deny() {
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::UserSettings,
+        )];
         let deny_rules = [deny("Bash", None, PermissionRuleSource::ProjectSettings)];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(out.len(), 1);
@@ -345,7 +356,11 @@ mod tests {
     #[test]
     fn deny_reported_when_both_deny_and_ask_present() {
         // Deny is checked first and ask-shadowing is suppressed for that rule.
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::UserSettings,
+        )];
         let ask_rules = [ask("Bash", None, PermissionRuleSource::ProjectSettings)];
         let deny_rules = [deny("Bash", None, PermissionRuleSource::ProjectSettings)];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &deny_rules, false);
@@ -355,7 +370,11 @@ mod tests {
 
     #[test]
     fn deny_only_matches_same_tool() {
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::UserSettings,
+        )];
         let deny_rules = [deny("Edit", None, PermissionRuleSource::ProjectSettings)];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert!(out.is_empty());
@@ -364,8 +383,16 @@ mod tests {
     #[test]
     fn specific_deny_does_not_shadow() {
         // A deny rule must be tool-wide (rule_content == None) to shadow.
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
-        let deny_rules = [deny("Bash", Some("rm:*"), PermissionRuleSource::ProjectSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::UserSettings,
+        )];
+        let deny_rules = [deny(
+            "Bash",
+            Some("rm:*"),
+            PermissionRuleSource::ProjectSettings,
+        )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert!(out.is_empty());
     }
@@ -374,7 +401,11 @@ mod tests {
 
     #[test]
     fn specific_allow_shadowed_by_tool_wide_ask() {
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::UserSettings,
+        )];
         let ask_rules = [ask("Bash", None, PermissionRuleSource::ProjectSettings)];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(out.len(), 1);
@@ -389,7 +420,11 @@ mod tests {
     fn ask_shadow_for_non_bash_tool_ignores_sandbox() {
         // The sandbox exception is Bash-only; an Edit ask rule still shadows
         // even with sandbox_auto_allow + a personal source.
-        let allow_rules = [allow("Edit", Some("src/**"), PermissionRuleSource::UserSettings)];
+        let allow_rules = [allow(
+            "Edit",
+            Some("src/**"),
+            PermissionRuleSource::UserSettings,
+        )];
         let ask_rules = [ask("Edit", None, PermissionRuleSource::UserSettings)];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
         assert_eq!(out.len(), 1);
@@ -408,18 +443,28 @@ mod tests {
             PermissionRuleSource::CliArg,
             PermissionRuleSource::Session,
         ] {
-            let allow_rules =
-                [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
+            let allow_rules = [allow(
+                "Bash",
+                Some("ls:*"),
+                PermissionRuleSource::UserSettings,
+            )];
             let ask_rules = [ask("Bash", None, personal)];
             let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
-            assert!(out.is_empty(), "{personal:?} ask should not shadow under sandbox");
+            assert!(
+                out.is_empty(),
+                "{personal:?} ask should not shadow under sandbox"
+            );
         }
     }
 
     #[test]
     fn bash_ask_from_personal_source_without_sandbox_is_shadowed() {
         // Same personal ask, sandbox DISABLED → still shadowed.
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::UserSettings,
+        )];
         let ask_rules = [ask("Bash", None, PermissionRuleSource::UserSettings)];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(out.len(), 1);
@@ -430,7 +475,11 @@ mod tests {
     fn bash_ask_from_shared_source_with_sandbox_still_shadowed() {
         // Same ask from a SHARED (projectSettings) source + sandbox → still
         // shadowed (other team members may not have sandbox).
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::UserSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::UserSettings,
+        )];
         let ask_rules = [ask("Bash", None, PermissionRuleSource::ProjectSettings)];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
         assert_eq!(out.len(), 1);
@@ -441,7 +490,11 @@ mod tests {
 
     #[test]
     fn deny_fix_string_matches_ts_template() {
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::LocalSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::LocalSettings,
+        )];
         let deny_rules = [deny("Bash", None, PermissionRuleSource::ProjectSettings)];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(
@@ -453,7 +506,11 @@ mod tests {
 
     #[test]
     fn ask_fix_string_matches_ts_template() {
-        let allow_rules = [allow("Bash", Some("ls:*"), PermissionRuleSource::LocalSettings)];
+        let allow_rules = [allow(
+            "Bash",
+            Some("ls:*"),
+            PermissionRuleSource::LocalSettings,
+        )];
         let ask_rules = [ask("Bash", None, PermissionRuleSource::ProjectSettings)];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(
@@ -488,7 +545,10 @@ mod tests {
 
     #[test]
     fn format_source_matches_ts_display_strings() {
-        assert_eq!(format_source(PermissionRuleSource::UserSettings), "user settings");
+        assert_eq!(
+            format_source(PermissionRuleSource::UserSettings),
+            "user settings"
+        );
         assert_eq!(
             format_source(PermissionRuleSource::ProjectSettings),
             "shared project settings"
@@ -510,6 +570,9 @@ mod tests {
             format_source(PermissionRuleSource::Command),
             "command configuration"
         );
-        assert_eq!(format_source(PermissionRuleSource::Session), "current session");
+        assert_eq!(
+            format_source(PermissionRuleSource::Session),
+            "current session"
+        );
     }
 }

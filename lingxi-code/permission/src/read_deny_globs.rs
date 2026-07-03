@@ -299,7 +299,10 @@ mod tests {
     fn relative_rule_passes_through_verbatim() {
         // `Read(./secrets/**)` → unrooted, leading `./` stripped → `secrets/**`.
         let p = policy_with(
-            vec![read_deny("./secrets/**", PermissionRuleSource::ProjectSettings)],
+            vec![read_deny(
+                "./secrets/**",
+                PermissionRuleSource::ProjectSettings,
+            )],
             "/proj",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/proj"));
@@ -322,7 +325,10 @@ mod tests {
         // A `/secrets/**` project rule resolves root = cwd (/proj) and pattern
         // `/secrets/**`; H_m with root==cwd → AHo("/secrets/**") = "/secrets/**".
         let p = policy_with(
-            vec![read_deny("/secrets/**", PermissionRuleSource::ProjectSettings)],
+            vec![read_deny(
+                "/secrets/**",
+                PermissionRuleSource::ProjectSettings,
+            )],
             "/proj",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/proj"));
@@ -370,7 +376,10 @@ mod tests {
         // `Read(~/private/**)` → root = home (/home/u), pattern `/private/**`.
         // cwd = /home/u → AHo("/private/**") = "/private/**".
         let p = policy_with(
-            vec![read_deny("~/private/**", PermissionRuleSource::ProjectSettings)],
+            vec![read_deny(
+                "~/private/**",
+                PermissionRuleSource::ProjectSettings,
+            )],
             "/home/u",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/home/u"));
@@ -427,8 +436,9 @@ mod tests {
 
     #[test]
     fn empty_policy_returns_empty() {
-        let p = PermissionPolicy::from_rules(crate::mode::PermissionMode::Default, std::iter::empty())
-            .with_roots(roots("/proj"));
+        let p =
+            PermissionPolicy::from_rules(crate::mode::PermissionMode::Default, std::iter::empty())
+                .with_roots(roots("/proj"));
         assert!(read_deny_exclude_globs(&p, Path::new("/proj")).is_empty());
     }
 
@@ -448,7 +458,10 @@ mod tests {
     #[test]
     fn repeated_slashes_collapse() {
         let p = policy_with(
-            vec![read_deny("/a//b///c/**", PermissionRuleSource::ProjectSettings)],
+            vec![read_deny(
+                "/a//b///c/**",
+                PermissionRuleSource::ProjectSettings,
+            )],
             "/proj",
         );
         let globs = read_deny_exclude_globs(&p, Path::new("/proj"));

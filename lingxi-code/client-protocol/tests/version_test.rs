@@ -20,7 +20,11 @@ fn version_is_semver() {
         3,
         "CLIENT_PROTOCOL_VERSION must be major.minor.patch, got {CLIENT_PROTOCOL_VERSION:?}"
     );
-    for (label, part) in [("major", parts[0]), ("minor", parts[1]), ("patch", parts[2])] {
+    for (label, part) in [
+        ("major", parts[0]),
+        ("minor", parts[1]),
+        ("patch", parts[2]),
+    ] {
         assert!(
             !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
             "{label} component must be numeric, got {part:?}"

@@ -42,7 +42,6 @@ use tool_api::tool_trait::{
 /// Tool name byte-lock. Asserted by `parity_registry.rs`.
 pub const REMOTE_TRIGGER_TOOL_NAME: &str = "RemoteTrigger";
 
-
 /// `anthropic-beta` header value (TS `TRIGGERS_BETA`).
 const TRIGGERS_BETA: &str = "ccr-triggers-2026-01-30";
 
@@ -249,7 +248,11 @@ impl Tool for RemoteTriggerTool {
             let tid = tid.as_str().ok_or_else(|| {
                 ValidationError("RemoteTrigger: trigger_id must be a string".into())
             })?;
-            if !tid.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') || tid.is_empty() {
+            if !tid
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                || tid.is_empty()
+            {
                 return Err(ValidationError(
                     "RemoteTrigger: trigger_id must match /^[\\w-]+$/".into(),
                 ));
@@ -326,8 +329,12 @@ impl Tool for RemoteTriggerTool {
             "list" => (HttpMethod::Get, base.clone(), None),
             "get" => {
                 let Some(id) = trigger_id.as_deref() else {
-                    emit_failed(&bus, "get_no_trigger_id", started.elapsed().as_millis() as u64)
-                        .await;
+                    emit_failed(
+                        &bus,
+                        "get_no_trigger_id",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
                     return Err(ToolError::InvalidInput("get requires trigger_id".into()));
                 };
                 (HttpMethod::Get, format!("{base}/{id}"), None)
@@ -357,11 +364,19 @@ impl Tool for RemoteTriggerTool {
             }
             "run" => {
                 let Some(id) = trigger_id.as_deref() else {
-                    emit_failed(&bus, "run_no_trigger_id", started.elapsed().as_millis() as u64)
-                        .await;
+                    emit_failed(
+                        &bus,
+                        "run_no_trigger_id",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
                     return Err(ToolError::InvalidInput("run requires trigger_id".into()));
                 };
-                (HttpMethod::Post, format!("{base}/{id}/run"), Some(json!({})))
+                (
+                    HttpMethod::Post,
+                    format!("{base}/{id}/run"),
+                    Some(json!({})),
+                )
             }
             // unreachable — `action` validated above.
             _ => unreachable!("action validated"),
@@ -389,16 +404,16 @@ impl Tool for RemoteTriggerTool {
         // `HttpError::Status` (non-2xx) is mapped back to a result, not an error.
         let resp = match self.ctx.http.request(req).await {
             Ok(r) => r,
-            Err(traits::http::HttpError::Status { status, body }) => {
-                protocol::HttpResponse {
-                    status,
-                    headers: vec![],
-                    body,
-                }
-            }
+            Err(traits::http::HttpError::Status { status, body }) => protocol::HttpResponse {
+                status,
+                headers: vec![],
+                body,
+            },
             Err(e) => {
                 emit_failed(&bus, "transport", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Io(format!("RemoteTrigger: HTTP transport error: {e}")));
+                return Err(ToolError::Io(format!(
+                    "RemoteTrigger: HTTP transport error: {e}"
+                )));
             }
         };
 
@@ -487,15 +502,16 @@ mod tests {
             })
         }
         fn take(&self) -> HttpRequest {
-            self.last.lock().unwrap().take().expect("a request was made")
+            self.last
+                .lock()
+                .unwrap()
+                .take()
+                .expect("a request was made")
         }
     }
     #[async_trait]
     impl HttpTransport for RecordingHttp {
-        async fn request(
-            &self,
-            req: HttpRequest,
-        ) -> Result<protocol::HttpResponse, HttpError> {
+        async fn request(&self, req: HttpRequest) -> Result<protocol::HttpResponse, HttpError> {
             *self.last.lock().unwrap() = Some(req);
             Ok(protocol::HttpResponse {
                 status: self.status,
@@ -665,7 +681,10 @@ mod tests {
 
     #[tokio::test]
     async fn get_requires_trigger_id() {
-        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
+        let tool = tool_with(
+            RecordingHttp::new(200, "{}"),
+            Some(Arc::new(MockAuth::full())),
+        );
         let err = tool
             .call(json!({"action": "get"}), fresh_ctx(), fresh_tx())
             .await
@@ -675,7 +694,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_requires_body() {
-        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
+        let tool = tool_with(
+            RecordingHttp::new(200, "{}"),
+            Some(Arc::new(MockAuth::full())),
+        );
         let err = tool
             .call(json!({"action": "create"}), fresh_ctx(), fresh_tx())
             .await
@@ -685,9 +707,16 @@ mod tests {
 
     #[tokio::test]
     async fn update_requires_trigger_id_and_body() {
-        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
+        let tool = tool_with(
+            RecordingHttp::new(200, "{}"),
+            Some(Arc::new(MockAuth::full())),
+        );
         let err = tool
-            .call(json!({"action": "update", "body": {}}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"action": "update", "body": {}}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect_err("missing trigger_id");
         assert!(format!("{err}").contains("update requires trigger_id"));
@@ -704,7 +733,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_requires_trigger_id() {
-        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
+        let tool = tool_with(
+            RecordingHttp::new(200, "{}"),
+            Some(Arc::new(MockAuth::full())),
+        );
         let err = tool
             .call(json!({"action": "run"}), fresh_ctx(), fresh_tx())
             .await

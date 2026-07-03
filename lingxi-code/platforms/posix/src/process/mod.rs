@@ -14,6 +14,6 @@ pub mod wrap;
 
 pub use runner::PosixProcess;
 pub use wrap::{
-    task_output_path, wrap_command_for_cwd_tracking, DEFAULT_TIMEOUT, ENV_LINGXI_MARKER,
-    ENV_LINGXI_SESSION_ID, ENV_GIT_EDITOR, ENV_SHELL,
+    task_output_path, wrap_command_for_cwd_tracking, DEFAULT_TIMEOUT, ENV_GIT_EDITOR,
+    ENV_LINGXI_MARKER, ENV_LINGXI_SESSION_ID, ENV_SHELL,
 };

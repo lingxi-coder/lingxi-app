@@ -73,8 +73,7 @@ Remember: DO NOT write or edit any files yet. This is a read-only exploration an
 
 /// Locked rejection string for using `EnterPlanMode` inside an agent context.
 /// Byte-faithful to the TS throw at `EnterPlanModeTool.ts:79`.
-const ENTER_PLAN_MODE_AGENT_GUARD_MSG: &str =
-    "EnterPlanMode tool cannot be used in agent contexts";
+const ENTER_PLAN_MODE_AGENT_GUARD_MSG: &str = "EnterPlanMode tool cannot be used in agent contexts";
 
 /// Full model-facing tool prompt for `ExitPlanMode` — byte-faithful port of
 /// `EXIT_PLAN_MODE_V2_TOOL_PROMPT` (`ExitPlanModeTool/prompt.ts:6-29`), returned
@@ -567,10 +566,14 @@ mod tests {
         assert_eq!(res.data["message"], ENTER_PLAN_MODE_INSTRUCTIONS);
         assert!(res.data.get("marker").is_none());
         assert!(res.data.get("plan_mode").is_none());
-        assert_eq!(res.model_content.as_deref(), Some(ENTER_PLAN_MODE_INSTRUCTIONS));
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some(ENTER_PLAN_MODE_INSTRUCTIONS)
+        );
         let instructions = res.data["message"].as_str().unwrap();
         assert!(instructions.starts_with("Entered plan mode."));
-        assert!(instructions.contains("6. When ready, use ExitPlanMode to present your plan for approval"));
+        assert!(instructions
+            .contains("6. When ready, use ExitPlanMode to present your plan for approval"));
         assert!(instructions.contains("DO NOT write or edit any files yet"));
         assert!(session.lock().await.plan_mode);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
@@ -743,6 +746,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: true,
                 model: None,
+                model_profile: None,
             })
             .await;
         // Verbatim port of `EXIT_PLAN_MODE_V2_TOOL_PROMPT` (prompt.ts:6-29).

@@ -19,9 +19,9 @@ use iocraft::prelude::*;
 
 use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::StyleColor;
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::state::AdvisorKind;
 use crate::theme::Theme;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// `figures.tick`. U+2714 (0xE2 0x9C 0x94).
 pub const TICK: &str = "\u{2714}";

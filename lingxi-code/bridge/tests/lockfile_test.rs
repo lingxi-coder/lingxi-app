@@ -143,7 +143,10 @@ fn bridge_lockfile_writes_to_bridge_dir() {
 
     std::fs::create_dir_all(&bridge_dir).unwrap();
     lf.write().expect("write bridge lockfile");
-    assert!(path.exists(), "bridge lockfile must be written to bridge dir");
+    assert!(
+        path.exists(),
+        "bridge lockfile must be written to bridge dir"
+    );
 
     // Round-trips with the distinct bridge ideName and a real auth token.
     let (body, port) = IdeLockfile::read(&path).unwrap();
@@ -165,11 +168,7 @@ fn bridge_lockfile_uses_distinct_ide_name() {
 
     let tmp = TempDir::new().unwrap();
     let bridge_dir = tmp.path().to_path_buf();
-    let lf = IdeLockfile::new_for_bridge_dir(
-        bridge_dir,
-        40741,
-        vec![PathBuf::from("/work/proj")],
-    );
+    let lf = IdeLockfile::new_for_bridge_dir(bridge_dir, 40741, vec![PathBuf::from("/work/proj")]);
     assert_eq!(
         lf.body().ide_name,
         BRIDGE_IDE_NAME,
@@ -182,15 +181,15 @@ fn bridge_lockfile_drop_cleans_up() {
     let tmp = TempDir::new().unwrap();
     let bridge_dir = tmp.path().to_path_buf();
     let path = {
-        let lf = IdeLockfile::new_for_bridge_dir(
-            bridge_dir,
-            40742,
-            vec![PathBuf::from("/work/proj")],
-        );
+        let lf =
+            IdeLockfile::new_for_bridge_dir(bridge_dir, 40742, vec![PathBuf::from("/work/proj")]);
         lf.write().expect("write bridge lockfile");
         let path = lf.path();
         let _guard = LockfileGuard::new(path.clone());
-        assert!(path.exists(), "bridge lockfile must exist while guard alive");
+        assert!(
+            path.exists(),
+            "bridge lockfile must exist while guard alive"
+        );
         path
         // _guard drops here.
     };

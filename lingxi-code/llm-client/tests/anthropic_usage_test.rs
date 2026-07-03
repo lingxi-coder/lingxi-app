@@ -20,7 +20,10 @@ fn normalizes_anthropic_usage_into_independent_billing_buckets() {
     assert_eq!(usage.billable_tokens.cache_read, 40);
     assert_eq!(usage.billable_tokens.reasoning_output, 0);
     assert_eq!(
-        usage.server_tool_use.expect("server tool usage").web_search_requests,
+        usage
+            .server_tool_use
+            .expect("server tool usage")
+            .web_search_requests,
         2
     );
 }

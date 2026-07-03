@@ -14,9 +14,26 @@ path = "src/lib.rs"
 # migration. `tui-rata` renders it with ratatui; it must never depend on iocraft.
 tui-core = { path = "../tui-core" }
 permission = { path = "../permission" }
+# (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
+# banner + subscription types the bridge events carry. Already in the graph via
+# tui-core (promoted from dev-dependencies; no new external dependency).
+traits = { path = "../traits" }
+# (fix round 1) `rate_limit_messages` reuses the existing 1:1
+# `formatResetTime` port instead of duplicating it (the old iocraft `tui`
+# reaches the SAME function through its `orchestrator` dependency).
+llm-client = { path = "../llm-client" }
 # Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
 # one crossterm version links (verified via `cargo tree -p tui-rata -i crossterm`).
-ratatui = "0.29"
+# All three features are dependency-free cfg gates, also enabled by codex-rs/tui:
+# `scrolling-regions` unlocks `Backend::scroll_region_up/down` (bottom-anchored
+# custom terminal room-making); `unstable-widget-ref` unlocks `WidgetRef` and
+# `unstable-rendered-line-info` unlocks `Paragraph::line_count`, both needed by
+# the `renderable` height/render contract ported from codex.
+ratatui = { version = "0.29", features = [
+    "scrolling-regions",
+    "unstable-rendered-line-info",
+    "unstable-widget-ref",
+] }
 crossterm = { workspace = true }
 # Inline-image widget (kitty/iTerm2/sixel). v5 targets ratatui 0.29. Its default
 # `image-defaults` feature enables `image/default`, which pulls the AVIF codec
@@ -28,10 +45,11 @@ image = { version = "0.25.5", default-features = false, features = ["png", "jpeg
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
+# Display-column width for CJK/wide-char-aware cursor positioning in the composer.
+unicode-width = "=0.1.14"
 
 [dev-dependencies]
 protocol = { path = "../protocol" }
-traits = { path = "../traits" }
 
 [lints]
 workspace = true

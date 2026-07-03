@@ -118,7 +118,10 @@ fn populated_writer_fields_serialize_with_their_keys() {
     assert_eq!(m.get("gitBranch").and_then(|v| v.as_str()), Some("main"));
     assert_eq!(m.get("entrypoint").and_then(|v| v.as_str()), Some("cli"));
     assert_eq!(m.get("slug").and_then(|v| v.as_str()), Some("my-plan"));
-    assert_eq!(m.get("promptId").and_then(|v| v.as_str()), Some("prompt-123"));
+    assert_eq!(
+        m.get("promptId").and_then(|v| v.as_str()),
+        Some("prompt-123")
+    );
     assert_eq!(
         m.get("logicalParentUuid").and_then(|v| v.as_str()),
         Some("parent-xyz"),
@@ -208,6 +211,9 @@ async fn fidelity_fields_round_trip_write_then_tolerant_read() {
         rb.logical_parent_uuid.as_deref(),
         Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
     );
-    assert_eq!(rb.prompt_id, None, "non-user boundary line carries no promptId");
+    assert_eq!(
+        rb.prompt_id, None,
+        "non-user boundary line carries no promptId"
+    );
     assert_eq!(rb.git_branch.as_deref(), Some("main"));
 }

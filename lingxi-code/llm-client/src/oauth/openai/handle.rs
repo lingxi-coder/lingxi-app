@@ -86,7 +86,10 @@ pub struct OpenAiOAuthHandle {
 impl OpenAiOAuthHandle {
     /// Construct a handle that opens a real browser for the login redirect.
     #[must_use]
-    pub fn new(client: Arc<OpenAiOAuthClient>, credentials: Arc<secret::CredentialManager>) -> Self {
+    pub fn new(
+        client: Arc<OpenAiOAuthClient>,
+        credentials: Arc<secret::CredentialManager>,
+    ) -> Self {
         Self {
             client,
             credentials,
@@ -125,9 +128,7 @@ impl OpenAiOAuthHandle {
         let redirect_uri = self.client.config().redirect_uri(bound_port);
 
         // (2) Build the authorize URL.
-        let (url, verifier, state) = self
-            .client
-            .build_authorize_url_with_redirect(&redirect_uri);
+        let (url, verifier, state) = self.client.build_authorize_url_with_redirect(&redirect_uri);
 
         // Start listening BEFORE opening the browser.
         let accept_state = state.clone();
@@ -179,7 +180,7 @@ impl OpenAiOAuthHandle {
                 tokens.access_token.expose_secret(),
                 refresh.as_deref(),
                 tokens.expires_at,
-                vec![],          // scopes not returned in exchange response body
+                vec![], // scopes not returned in exchange response body
                 claims.account_id.as_deref(),
                 claims.fedramp,
             )
@@ -314,12 +315,8 @@ impl OpenAiOAuthHandle {
 fn callback_to_auth_err(e: CallbackError) -> OpenAiAuthError {
     match e {
         CallbackError::StateMismatch => OpenAiAuthError::Cancelled,
-        CallbackError::Bind(m) => {
-            OpenAiAuthError::ServerError(format!("loopback bind: {m}"))
-        }
-        CallbackError::InvalidRequest(m) => {
-            OpenAiAuthError::ServerError(format!("callback: {m}"))
-        }
+        CallbackError::Bind(m) => OpenAiAuthError::ServerError(format!("loopback bind: {m}")),
+        CallbackError::InvalidRequest(m) => OpenAiAuthError::ServerError(format!("callback: {m}")),
     }
 }
 
@@ -365,23 +362,19 @@ mod tests {
     fn handle_with_token_body(
         token_body: &str,
     ) -> (OpenAiOAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
-        let http = MockHttp::new(vec![
-            (
-                "oauth/token",
-                Canned {
-                    status: 200,
-                    body: token_body.into(),
-                },
-            ),
-        ]);
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: token_body.into(),
+            },
+        )]);
         let clock = TestClock::new(1_000);
         let storage = MemStorage::new();
         let cm = mem_credential_manager(storage.clone(), clock.clone());
         let cfg = crate::oauth::openai::config::OpenAiOAuthConfig::default();
-        let client = Arc::new(
-            OpenAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>)
-                .with_clock(clock),
-        );
+        let client =
+            Arc::new(OpenAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>).with_clock(clock));
 
         let was_opened = Arc::new(AtomicBool::new(false));
         let browser_flag = was_opened.clone();

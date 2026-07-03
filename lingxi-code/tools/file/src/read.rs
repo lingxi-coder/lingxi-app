@@ -139,7 +139,11 @@ pub fn format_max_tokens_exceeded(token_count: u64, max_tokens: u64) -> String {
 /// `?? tokenEstimate` fallback also admits them when the API is unavailable),
 /// so behavior is identical to claude-code running offline / on a provider
 /// without count_tokens. Returns the byte-locked error string on overflow.
-fn validate_content_tokens(content: &str, ext: Option<&str>, max_tokens: u64) -> Result<(), String> {
+fn validate_content_tokens(
+    content: &str,
+    ext: Option<&str>,
+    max_tokens: u64,
+) -> Result<(), String> {
     let token_estimate = rough_token_count_estimation_for_file_type(content, ext);
     if token_estimate == 0 || token_estimate <= max_tokens / 4 {
         return Ok(());
@@ -386,21 +390,18 @@ static BINARY_EXTENSIONS: Lazy<std::collections::HashSet<&'static str>> = Lazy::
         // Archives
         ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar", ".xz", ".z", ".tgz", ".iso",
         // Executables/binaries
-        ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".lib", ".app", ".msi",
-        ".deb", ".rpm",
+        ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".lib", ".app", ".msi", ".deb",
+        ".rpm",
         // Documents (PDF is here; the call site excludes it — rendered natively)
         ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp",
         // Fonts
-        ".ttf", ".otf", ".woff", ".woff2", ".eot",
-        // Bytecode / VM artifacts
+        ".ttf", ".otf", ".woff", ".woff2", ".eot", // Bytecode / VM artifacts
         ".pyc", ".pyo", ".class", ".jar", ".war", ".ear", ".node", ".wasm", ".rlib",
         // Database files
-        ".sqlite", ".sqlite3", ".db", ".mdb", ".idx",
-        // Design / 3D
+        ".sqlite", ".sqlite3", ".db", ".mdb", ".idx", // Design / 3D
         ".psd", ".ai", ".eps", ".sketch", ".fig", ".xd", ".blend", ".3ds", ".max",
         // Flash
-        ".swf", ".fla",
-        // Lock/profiling data
+        ".swf", ".fla", // Lock/profiling data
         ".lockb", ".dat", ".data",
     ]
     .into_iter()
@@ -474,7 +475,10 @@ pub fn is_device_file(path: &str) -> bool {
         let mut parts = rest.split('/');
         if let (Some(seg), Some(name), None) = (parts.next(), parts.next(), parts.next()) {
             if !seg.is_empty()
-                && matches!(name, "environ" | "cmdline" | "auxv" | "maps" | "mem" | "stat")
+                && matches!(
+                    name,
+                    "environ" | "cmdline" | "auxv" | "maps" | "mem" | "stat"
+                )
             {
                 return true;
             }
@@ -523,7 +527,11 @@ fn get_alternate_screenshot_path(file_path: &std::path::Path) -> Option<PathBuf>
     if chars.as_str().is_empty() {
         return None;
     }
-    let alternate_space = if current_space == ' ' { THIN_SPACE } else { ' ' };
+    let alternate_space = if current_space == ' ' {
+        THIN_SPACE
+    } else {
+        ' '
+    };
     // TS replaces `${currentSpace}${AM|PM}${.png}` with the alternate-space
     // form in the FULL path string. Build the same needle/replacement and apply
     // it to the path's string form.
@@ -556,9 +564,7 @@ fn find_similar_file(file_path: &std::path::Path) -> Option<String> {
         let name = entry.file_name();
         let entry_path = dir.join(&name);
         // Same base name without extension, and not the target file itself.
-        if std::path::Path::new(&name).file_stem() == Some(target_stem)
-            && entry_path != file_path
-        {
+        if std::path::Path::new(&name).file_stem() == Some(target_stem) && entry_path != file_path {
             return Some(name.to_string_lossy().into_owned());
         }
     }
@@ -963,10 +969,22 @@ impl FileReadTool {
         limit: Option<u64>,
     ) {
         let mut md: LogEventMetadata = HashMap::new();
-        md.insert("totalLines".to_string(), AnalyticsValue::Int(total_lines as i64));
-        md.insert("readLines".to_string(), AnalyticsValue::Int(read_lines as i64));
-        md.insert("totalBytes".to_string(), AnalyticsValue::Int(total_bytes as i64));
-        md.insert("readBytes".to_string(), AnalyticsValue::Int(read_bytes as i64));
+        md.insert(
+            "totalLines".to_string(),
+            AnalyticsValue::Int(total_lines as i64),
+        );
+        md.insert(
+            "readLines".to_string(),
+            AnalyticsValue::Int(read_lines as i64),
+        );
+        md.insert(
+            "totalBytes".to_string(),
+            AnalyticsValue::Int(total_bytes as i64),
+        );
+        md.insert(
+            "readBytes".to_string(),
+            AnalyticsValue::Int(read_bytes as i64),
+        );
         md.insert("offset".to_string(), AnalyticsValue::Int(offset as i64));
         if let Some(l) = limit {
             md.insert("limit".to_string(), AnalyticsValue::Int(l as i64));
@@ -1163,27 +1181,33 @@ impl FileReadTool {
         last: u32,
         started: Instant,
     ) -> Result<ToolCallResult, ToolError> {
-        let page_jpegs = match crate::pdf_render::render_pdf_pages(canon, original_size, first, last).await {
-            Ok(p) => p,
-            Err(e) => {
-                self.emit_failed(invocation_id, e.telemetry_code()).await;
-                return Err(ToolError::Io(e.message(&canon.display().to_string())));
-            }
-        };
-        let (sources, data, model_content) = match build_pages_payload(canon, original_size, page_jpegs) {
-            Ok(v) => v,
-            Err(e) => {
-                self.emit_failed(invocation_id, "pdf_page_encode").await;
-                return Err(ToolError::Io(e));
-            }
-        };
+        let page_jpegs =
+            match crate::pdf_render::render_pdf_pages(canon, original_size, first, last).await {
+                Ok(p) => p,
+                Err(e) => {
+                    self.emit_failed(invocation_id, e.telemetry_code()).await;
+                    return Err(ToolError::Io(e.message(&canon.display().to_string())));
+                }
+            };
+        let (sources, data, model_content) =
+            match build_pages_payload(canon, original_size, page_jpegs) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.emit_failed(invocation_id, "pdf_page_encode").await;
+                    return Err(ToolError::Io(e));
+                }
+            };
         let msg = protocol::ConversationMessage::user_with_images(
             protocol::MessageId::new(),
             String::new(),
             sources,
         );
-        self.emit_completed(invocation_id, original_size, started.elapsed().as_millis() as u64)
-            .await;
+        self.emit_completed(
+            invocation_id,
+            original_size,
+            started.elapsed().as_millis() as u64,
+        )
+        .await;
         Ok(ToolCallResult {
             data,
             model_content: Some(model_content),
@@ -1215,8 +1239,8 @@ impl FileReadTool {
         started: Instant,
     ) -> Result<ToolCallResult, ToolError> {
         use crate::pdf_read::{
-            is_pdf_supported, parse_pdf_page_range, pdf_page_count, PDF_AT_MENTION_INLINE_THRESHOLD,
-            PDF_MAX_PAGES_PER_READ,
+            is_pdf_supported, parse_pdf_page_range, pdf_page_count,
+            PDF_AT_MENTION_INLINE_THRESHOLD, PDF_MAX_PAGES_PER_READ,
         };
         use base64::Engine;
 
@@ -1228,7 +1252,10 @@ impl FileReadTool {
         // the page-count gate) and, if small + supported, inlines garbage.
         if bytes.is_empty() {
             self.emit_failed(invocation_id, "pdf_empty").await;
-            return Err(ToolError::Io(format!("PDF file is empty: {}", canon.display())));
+            return Err(ToolError::Io(format!(
+                "PDF file is empty: {}",
+                canon.display()
+            )));
         }
         if !crate::pdf_read::looks_like_pdf(&bytes) {
             self.emit_failed(invocation_id, "pdf_invalid").await;
@@ -1274,7 +1301,14 @@ impl FileReadTool {
             #[cfg(feature = "pdf-render")]
             {
                 return self
-                    .read_pdf_pages_result(invocation_id, canon, original_size, first, last, started)
+                    .read_pdf_pages_result(
+                        invocation_id,
+                        canon,
+                        original_size,
+                        first,
+                        last,
+                        started,
+                    )
                     .await;
             }
             #[cfg(not(feature = "pdf-render"))]
@@ -1302,7 +1336,8 @@ impl FileReadTool {
         // Unsupported model ⇒ refuse inline; tell the model to use a newer model
         // or the `pages` parameter (claude-code FileReadTool.ts:979-985).
         if !supported {
-            self.emit_failed(invocation_id, "pdf_unsupported_model").await;
+            self.emit_failed(invocation_id, "pdf_unsupported_model")
+                .await;
             return Err(ToolError::Io(
                 "Reading full PDFs is not supported with this model. Use a newer model (Sonnet 3.5 v2 or later), or use the pages parameter to read specific page ranges (e.g., pages: \"1-5\", maximum 20 pages per request). Page extraction requires poppler-utils: install with `brew install poppler` on macOS or `apt-get install poppler-utils` on Debian/Ubuntu.".to_string(),
             ));
@@ -1332,10 +1367,17 @@ impl FileReadTool {
         // branch has no line/byte slice counts (`emit_session_file_read` is
         // text-only), so we emit the simpler completion event with the original
         // file size as the `bytes_read` figure.
-        self.emit_completed(invocation_id, original_size, started.elapsed().as_millis() as u64)
-            .await;
-        let model_content =
-            format!("PDF file read: {} ({})", canon.display(), format_file_size(original_size));
+        self.emit_completed(
+            invocation_id,
+            original_size,
+            started.elapsed().as_millis() as u64,
+        )
+        .await;
+        let model_content = format!(
+            "PDF file read: {} ({})",
+            canon.display(),
+            format_file_size(original_size)
+        );
         Ok(ToolCallResult {
             // binary `{type:"pdf", file:{filePath, base64, originalSize}}`; the
             // model receives the PDF as a document block via `new_messages`.
@@ -1513,9 +1555,7 @@ impl Tool for FileReadTool {
                                 m
                             } else {
                                 // Alt also missing — fall through to the friendly error.
-                                return self
-                                    .file_not_found(&invocation_id, &canon, &e)
-                                    .await;
+                                return self.file_not_found(&invocation_id, &canon, &e).await;
                             }
                         } else {
                             return self.file_not_found(&invocation_id, &canon, &e).await;
@@ -1567,8 +1607,12 @@ impl Tool for FileReadTool {
             // binary tests `f.offset===void 0` ("edit_write"); LingXi's
             // `from_read` flag is the faithful Read-vs-Edit/Write discriminator
             // (a full Read also has `offset==None`, so `offset` alone is wrong).
-            self.emit_file_read_reread(if entry.from_read { "read" } else { "edit_write" })
-                .await;
+            self.emit_file_read_reread(if entry.from_read {
+                "read"
+            } else {
+                "edit_write"
+            })
+            .await;
             let is_full_view = entry.offset.is_none() && entry.limit.is_none();
             let range_match = entry.offset == input_offset && entry.limit == input_limit;
             if entry.from_read && is_full_view && range_match && mtime_ms == entry.mtime_ms {
@@ -1743,10 +1787,10 @@ impl Tool for FileReadTool {
             // (`FileReadTool.ts:838`) on the notebook path too, after the
             // byte-size check and before recording state. `ext` is `"ipynb"`
             // (bytesPerToken 4).
-            if let Err(msg) =
-                validate_content_tokens(&cells_json, Some("ipynb"), max_output_tokens)
+            if let Err(msg) = validate_content_tokens(&cells_json, Some("ipynb"), max_output_tokens)
             {
-                self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
+                self.emit_failed(&invocation_id, "max_tokens_exceeded")
+                    .await;
                 return Err(ToolError::Io(msg));
             }
 
@@ -1832,8 +1876,7 @@ impl Tool for FileReadTool {
         //
         // `pages` is never set on the text path (it's a PDF-only input), so the
         // `k` flag here is `offset <= 1 && limit is None`.
-        let token_estimate =
-            rough_token_count_estimation_for_file_type(&slice, ext.as_deref());
+        let token_estimate = rough_token_count_estimation_for_file_type(&slice, ext.as_deref());
         let mut partial_note: Option<String> = None;
         // Mirror `validateContentTokens`'s early-pass band: skip when 0 or
         // `<= maxTokens/4`; otherwise the offline fallback is `effectiveCount ==
@@ -1855,7 +1898,8 @@ impl Tool for FileReadTool {
                 read_lines = trunc.line_count;
                 partial_note = Some(trunc.note);
             } else {
-                self.emit_failed(&invocation_id, "max_tokens_exceeded").await;
+                self.emit_failed(&invocation_id, "max_tokens_exceeded")
+                    .await;
                 return Err(ToolError::Io(format_max_tokens_exceeded(
                     token_estimate,
                     max_output_tokens,
@@ -1981,9 +2025,18 @@ mod tests {
     fn is_device_file_matches_claude_set() {
         // `/dev` set members ($3p / U3p).
         for p in [
-            "/dev/zero", "/dev/random", "/dev/urandom", "/dev/full", "/dev/stdin",
-            "/dev/tty", "/dev/console", "/dev/stdout", "/dev/stderr", "/dev/fd/0",
-            "/dev/fd/1", "/dev/fd/2",
+            "/dev/zero",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/full",
+            "/dev/stdin",
+            "/dev/tty",
+            "/dev/console",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/dev/fd/0",
+            "/dev/fd/1",
+            "/dev/fd/2",
         ] {
             assert!(is_device_file(p), "{p} should be a device file");
         }
@@ -2175,7 +2228,10 @@ mod tests {
         assert_eq!(result.data["file"]["totalLines"], 3);
         // Model-facing string: cat -n (compact tab format, 1-based from offset).
         // No cyber-risk reminder (parity verdict 12/14 — removed).
-        assert_eq!(result.model_content.as_deref().unwrap(), "1\thello\n2\tworld\n3\t");
+        assert_eq!(
+            result.model_content.as_deref().unwrap(),
+            "1\thello\n2\tworld\n3\t"
+        );
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_read_started"));
@@ -2325,7 +2381,10 @@ mod tests {
         for i in 1..=2500u32 {
             body.push_str(&format!("L{i}\n"));
         }
-        assert!((body.len() as u64) < MAX_FILE_READ_SIZE, "must stay under byte cap");
+        assert!(
+            (body.len() as u64) < MAX_FILE_READ_SIZE,
+            "must stay under byte cap"
+        );
         // ~14 KB / 4 ≈ 3500 tokens, well under the 25000 token budget.
         assert!(
             rough_token_count_estimation_for_file_type(&body, Some("txt"))
@@ -2344,8 +2403,18 @@ mod tests {
             .await
             .expect("no-limit read must succeed");
         // ALL 2500 lines returned (no cap).
-        assert_eq!(result.data["file"]["content"].as_str().unwrap().lines().count(), 2500);
-        assert!(result.data["file"]["content"].as_str().unwrap().ends_with("L2500\n"));
+        assert_eq!(
+            result.data["file"]["content"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .count(),
+            2500
+        );
+        assert!(result.data["file"]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("L2500\n"));
         // startLine = 1, numLines = 2500 (lines returned); totalLines = 2501
         // (trailing-newline phantom line).
         assert_eq!(result.data["file"]["startLine"], 1);
@@ -2383,7 +2452,14 @@ mod tests {
             .await
             .expect("explicit-limit read must succeed");
         // 2200 lines returned (> 2000 — not clamped).
-        assert_eq!(result.data["file"]["content"].as_str().unwrap().lines().count(), 2200);
+        assert_eq!(
+            result.data["file"]["content"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .count(),
+            2200
+        );
         let mc = result.model_content.as_deref().unwrap();
         assert!(
             !mc.contains("Truncated") && !mc.contains("File truncated"),
@@ -2409,6 +2485,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         // model:None ⇒ Dh(undefined)=false ⇒ LONG prompt.
@@ -2417,9 +2494,14 @@ mod tests {
         assert!(prompt.starts_with(
             "Reads a file from the local filesystem. You can access any file directly by using this tool."
         ));
-        assert!(prompt.contains("By default, it reads up to 2000 lines starting from the beginning of the file\n"));
-        assert!(prompt.contains("- Results are returned using cat -n format, with line numbers starting at 1"));
-        assert!(prompt.contains("it's recommended to read the whole file by not providing these parameters"));
+        assert!(prompt.contains(
+            "By default, it reads up to 2000 lines starting from the beginning of the file\n"
+        ));
+        assert!(prompt.contains(
+            "- Results are returned using cat -n format, with line numbers starting at 1"
+        ));
+        assert!(prompt
+            .contains("it's recommended to read the whole file by not providing these parameters"));
         // PDF fragment is INCLUDED in the default (PDF-supported) build.
         assert!(prompt.contains("This tool can read PDF files (.pdf)."));
         // R-T3: directory line uses the registered-shell-tool wording.
@@ -2441,10 +2523,13 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
+                model_profile: None,
             })
             .await;
         assert_eq!(prompt, READ_PROMPT_SHORT);
-        assert!(prompt.starts_with("Reads a file from the local filesystem.\n\n- `file_path` must be an absolute path."));
+        assert!(prompt.starts_with(
+            "Reads a file from the local filesystem.\n\n- `file_path` must be an absolute path."
+        ));
         assert!(prompt.contains("- Reads up to 2000 lines by default.\n"));
         assert!(prompt.contains("Reads PDFs via the `pages` parameter (e.g. \"1-5\", max 20 pages/request; required for PDFs over 10 pages)."));
         assert!(prompt.ends_with(
@@ -2896,7 +2981,10 @@ mod tests {
             .unwrap();
         // Fresh content returned, not the stub.
         assert_eq!(again.data["file"]["content"], "v1\n");
-        assert_eq!(again.data["type"], "text", "fresh read is a text result, not a dedup");
+        assert_eq!(
+            again.data["type"], "text",
+            "fresh read is a text result, not a dedup"
+        );
     }
 
     #[tokio::test]
@@ -2925,7 +3013,10 @@ mod tests {
             .unwrap();
         // Different range → real content, no stub.
         assert_eq!(ranged.data["file"]["content"], "l2\n");
-        assert_eq!(ranged.data["type"], "text", "fresh read is a text result, not a dedup");
+        assert_eq!(
+            ranged.data["type"], "text",
+            "fresh read is a text result, not a dedup"
+        );
     }
 
     #[tokio::test]
@@ -2968,7 +3059,10 @@ mod tests {
             .unwrap();
         // Real content returned (the write entry is not a dedup candidate).
         assert_eq!(result.data["file"]["content"], "seed\n");
-        assert_eq!(result.data["type"], "text", "fresh read is a text result, not a dedup");
+        assert_eq!(
+            result.data["type"], "text",
+            "fresh read is a text result, not a dedup"
+        );
     }
 
     // ───────────────────────── Token-budget gate ────────────────────────────
@@ -3034,7 +3128,10 @@ mod tests {
             body.push_str(&format!("line {i:05}\n"));
         }
         // Byte length / 4 > 25000 tokens but < 256 KB.
-        assert!((body.len() as u64) < MAX_FILE_READ_SIZE, "must stay under byte cap");
+        assert!(
+            (body.len() as u64) < MAX_FILE_READ_SIZE,
+            "must stay under byte cap"
+        );
         assert!(
             rough_token_count_estimation_for_file_type(&body, Some("txt"))
                 > DEFAULT_MAX_OUTPUT_TOKENS,
@@ -3064,8 +3161,15 @@ mod tests {
         assert!(mc.contains(" or Grep to find a specific section."));
         assert!(mc.contains("Do NOT answer from this page alone"));
         // The returned slice is strictly smaller than the whole file.
-        let returned_lines = result.data["file"]["content"].as_str().unwrap().lines().count();
-        assert!(returned_lines < 14_000, "must be truncated, got {returned_lines}");
+        let returned_lines = result.data["file"]["content"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .count();
+        assert!(
+            returned_lines < 14_000,
+            "must be truncated, got {returned_lines}"
+        );
         // Emits read_COMPLETED (graceful path), not read_failed.
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
@@ -3186,7 +3290,10 @@ mod tests {
             Some("rs")
         );
         // No extension → None (TS `undefined`).
-        assert_eq!(get_file_extension_for_analytics(Path::new("/a/README")), None);
+        assert_eq!(
+            get_file_extension_for_analytics(Path::new("/a/README")),
+            None
+        );
         // Over MAX_FILE_EXTENSION_LENGTH (10) → "other".
         assert_eq!(
             get_file_extension_for_analytics(Path::new("/a/b.abcdefghijk")).as_deref(),
@@ -3226,7 +3333,10 @@ mod tests {
         assert!(matches!(md.get("readLines"), Some(AnalyticsValue::Int(3))));
         // totalBytes = full content byte length; readBytes = selected slice bytes;
         // a full read makes them equal (17 bytes).
-        assert!(matches!(md.get("totalBytes"), Some(AnalyticsValue::Int(17))));
+        assert!(matches!(
+            md.get("totalBytes"),
+            Some(AnalyticsValue::Int(17))
+        ));
         assert!(matches!(md.get("readBytes"), Some(AnalyticsValue::Int(17))));
         // offset defaulted to 1; limit omitted (only-if-present).
         assert!(matches!(md.get("offset"), Some(AnalyticsValue::Int(1))));
@@ -3272,7 +3382,10 @@ mod tests {
         assert!(matches!(md.get("readLines"), Some(AnalyticsValue::Int(2))));
         // readBytes = bytes of "l2\nl3\n" = 6; totalBytes = full file = 12.
         assert!(matches!(md.get("readBytes"), Some(AnalyticsValue::Int(6))));
-        assert!(matches!(md.get("totalBytes"), Some(AnalyticsValue::Int(12))));
+        assert!(matches!(
+            md.get("totalBytes"),
+            Some(AnalyticsValue::Int(12))
+        ));
         // ext "txt" present.
         assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "txt"));
     }
@@ -3356,10 +3469,7 @@ mod tests {
         let trans = config_home.join("projects/foo/bar.jsonl");
         let plain = config_home.join("settings.json");
         assert_eq!(detect_session_file_type(&mem), Some("session_memory"));
-        assert_eq!(
-            detect_session_file_type(&trans),
-            Some("session_transcript")
-        );
+        assert_eq!(detect_session_file_type(&trans), Some("session_transcript"));
         // .md under the config home but NOT under session-memory/ → None.
         assert_eq!(detect_session_file_type(&plain), None);
         // Outside the config home → None.
@@ -3442,10 +3552,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("exceeds maximum"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("exceeds maximum"), "got: {err}");
     }
 
     #[cfg(feature = "pdf-read")]
@@ -3636,7 +3743,10 @@ mod tests {
         assert_eq!(data["type"], "parts");
         assert_eq!(data["file"]["filePath"], "/docs/report.pdf");
         assert_eq!(data["file"]["count"], 2);
-        assert!(data.get("model_content").is_none(), "render rides on the channel");
+        assert!(
+            data.get("model_content").is_none(),
+            "render rides on the channel"
+        );
         assert_eq!(
             model_content,
             "PDF pages extracted: 2 page(s) from /docs/report.pdf (4KB)"
@@ -3649,7 +3759,7 @@ mod tests {
         use super::format_file_size;
         assert_eq!(format_file_size(0), "0 bytes");
         assert_eq!(format_file_size(512), "512 bytes");
-        assert_eq!(format_file_size(1024), "1KB");          // 1.0 → trim .0
+        assert_eq!(format_file_size(1024), "1KB"); // 1.0 → trim .0
         assert_eq!(format_file_size(1536), "1.5KB");
         assert_eq!(format_file_size(3 * 1024 * 1024), "3MB");
         assert_eq!(format_file_size(20 * 1024 * 1024), "20MB");
@@ -3865,7 +3975,9 @@ mod tests {
         // succeeds by retrying the alternate-space path.
         let tmp = TempDir::new().unwrap();
         // Real file uses the thin space (U+202F) before PM.
-        let real = tmp.path().join("Screenshot 2024-01-01 at 3.04.05\u{202F}PM.png");
+        let real = tmp
+            .path()
+            .join("Screenshot 2024-01-01 at 3.04.05\u{202F}PM.png");
         std::fs::write(&real, "PNG-BYTES-NOT-REALLY").unwrap();
         // Requested path uses a regular space.
         let requested = tmp.path().join("Screenshot 2024-01-01 at 3.04.05 PM.png");

@@ -52,16 +52,16 @@ mod jittered_delay_tests {
         // (lingxi_attempt_index, expected_pre_jitter_base_ms)
         // binary attempt A = index + 1; base = min(500 * 2^(A-1), 32000).
         let expected = [
-            (0u8, 500u64),    // A=1: 500 * 2^0  = 500
-            (1, 1_000),       // A=2: 500 * 2^1  = 1000
-            (2, 2_000),       // A=3: 500 * 2^2  = 2000
-            (3, 4_000),       // A=4: 500 * 2^3  = 4000
-            (4, 8_000),       // A=5: 500 * 2^4  = 8000
-            (5, 16_000),      // A=6: 500 * 2^5  = 16000
-            (6, 32_000),      // A=7: 500 * 2^6  = 32000 (== cap)
-            (7, 32_000),      // A=8: 500 * 2^7  = 64000 → capped at 32000
-            (8, 32_000),      // A=9: capped
-            (9, 32_000),      // A=10: capped
+            (0u8, 500u64), // A=1: 500 * 2^0  = 500
+            (1, 1_000),    // A=2: 500 * 2^1  = 1000
+            (2, 2_000),    // A=3: 500 * 2^2  = 2000
+            (3, 4_000),    // A=4: 500 * 2^3  = 4000
+            (4, 8_000),    // A=5: 500 * 2^4  = 8000
+            (5, 16_000),   // A=6: 500 * 2^5  = 16000
+            (6, 32_000),   // A=7: 500 * 2^6  = 32000 (== cap)
+            (7, 32_000),   // A=8: 500 * 2^7  = 64000 → capped at 32000
+            (8, 32_000),   // A=9: capped
+            (9, 32_000),   // A=10: capped
         ];
         for (attempt, want) in expected {
             assert_eq!(
@@ -89,7 +89,10 @@ mod jittered_delay_tests {
         // Absent → default.
         assert_eq!(max_retries_from_env_value(None), DEFAULT_MAX_RETRIES);
         // Unparseable → default (mirrors parseInt fallback semantics here).
-        assert_eq!(max_retries_from_env_value(Some("notanint")), DEFAULT_MAX_RETRIES);
+        assert_eq!(
+            max_retries_from_env_value(Some("notanint")),
+            DEFAULT_MAX_RETRIES
+        );
     }
 
     #[test]
@@ -135,7 +138,12 @@ mod next_step_tests {
         let mut state = RetryState::default();
         let ctl = ctl_with_fallback();
         // First two overloads: counter < MAX_529_RETRIES (3), budget not exhausted.
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert!(
             matches!(step, DriveStep::RetryAfter(_)),
             "first overload should retry, got {step:?}"
@@ -143,7 +151,12 @@ mod next_step_tests {
         assert_eq!(state.consecutive_overloaded, 1);
         assert_eq!(state.attempt, 1);
 
-        let step2 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let step2 = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert!(
             matches!(step2, DriveStep::RetryAfter(_)),
             "second overload should retry, got {step2:?}"
@@ -157,9 +170,24 @@ mod next_step_tests {
         let mut state = RetryState::default();
         let ctl = ctl_with_fallback();
         // Drive 3 overloads: on the 3rd, consecutive >= MAX_529_RETRIES.
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0); // consecutive=1
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0); // consecutive=2
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0); // consecutive=3
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        ); // consecutive=1
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        ); // consecutive=2
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        ); // consecutive=3
         assert_eq!(
             step,
             DriveStep::Fallback {
@@ -174,8 +202,18 @@ mod next_step_tests {
         let mut state = RetryState::default();
         let ctl = ctl_with_fallback();
         // Two overloads then a transport error resets the counter.
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert_eq!(state.consecutive_overloaded, 2);
 
         next_step(
@@ -200,7 +238,12 @@ mod next_step_tests {
             ..RetryState::default()
         };
         let ctl = ctl_default();
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert_eq!(
             step,
             DriveStep::Terminal,
@@ -222,14 +265,24 @@ mod next_step_tests {
         // gate never terminates early, so the loop is budget-driven. Drive the
         // full default budget (10 retries) then assert the 11th call is Terminal.
         for _ in 0..DEFAULT_MAX_RETRIES {
-            let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+            let step = next_step(
+                &mut state,
+                &ctl,
+                &LlmError::Overloaded { repeated: false },
+                0,
+            );
             assert!(
                 matches!(step, DriveStep::RetryAfter(_)),
                 "within budget overloaded should RetryAfter, got {step:?}"
             );
         }
         // Budget exhausted: the next call is terminal.
-        let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let step = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert_eq!(
             step,
             DriveStep::Terminal,
@@ -260,12 +313,22 @@ mod next_step_tests {
         };
         // Drive consecutive_overloaded up to max_529_retries.
         // Attempts 1 and 2: below threshold, should still retry.
-        let s1 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let s1 = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert!(
             matches!(s1, DriveStep::RetryAfter(_)),
             "attempt 1 should be RetryAfter, got {s1:?}"
         );
-        let s2 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let s2 = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert!(
             matches!(s2, DriveStep::RetryAfter(_)),
             "attempt 2 should be RetryAfter, got {s2:?}"
@@ -276,7 +339,12 @@ mod next_step_tests {
             state.attempt, 2,
             "should have used 2 budget slots (not budget exhausted)"
         );
-        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        let s3 = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         assert_eq!(
             s3,
             DriveStep::RepeatedOverloaded,
@@ -298,9 +366,24 @@ mod next_step_tests {
             max_retries: DEFAULT_MAX_RETRIES,
         };
         // Drive through the threshold — sandbox must NOT terminate early.
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
-        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
+        let s3 = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         // consecutive_overloaded == 3 == MAX_529_RETRIES, but is_sandbox → keep retrying.
         assert!(
             matches!(s3, DriveStep::RetryAfter(_)),
@@ -321,9 +404,24 @@ mod next_step_tests {
             max_529_retries: MAX_529_RETRIES,
             max_retries: DEFAULT_MAX_RETRIES,
         };
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
-        next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
-        let s3 = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
+        next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
+        let s3 = next_step(
+            &mut state,
+            &ctl,
+            &LlmError::Overloaded { repeated: false },
+            0,
+        );
         // consecutive_overloaded == 3, but is_external=false → keep retrying (budget-driven).
         assert!(
             matches!(s3, DriveStep::RetryAfter(_)),
@@ -648,11 +746,7 @@ mod next_step_tests {
             let mut state = RetryState::default();
             let ctl = ctl_default();
             let step = next_step(&mut state, &ctl, error, 0);
-            assert_eq!(
-                step,
-                DriveStep::Terminal,
-                "{error:?} should be Terminal"
-            );
+            assert_eq!(step, DriveStep::Terminal, "{error:?} should be Terminal");
         }
     }
 
@@ -785,10 +879,7 @@ mod next_step_tests {
         ];
         for error in &do_retry {
             assert!(
-                matches!(
-                    policy.classify_error(error),
-                    RetryDecision::Retry { .. }
-                ),
+                matches!(policy.classify_error(error), RetryDecision::Retry { .. }),
                 "RetryPolicy expected Retry for {error:?}"
             );
             let mut state = RetryState::default();
@@ -886,7 +977,7 @@ mod next_step_tests {
         assert_eq!(scaled_base_delay_ms(5, None), 16_000);
         assert_eq!(scaled_base_delay_ms(6, None), 32_000);
         assert_eq!(scaled_base_delay_ms(20, None), 32_000); // capped, no overflow
-        // backoff_ms override sets the first rung but keeps exponential + cap.
+                                                            // backoff_ms override sets the first rung but keeps exponential + cap.
         assert_eq!(scaled_base_delay_ms(0, Some(1_000)), 1_000);
         assert_eq!(scaled_base_delay_ms(1, Some(1_000)), 2_000);
         assert_eq!(scaled_base_delay_ms(5, Some(1_000)), 32_000); // 1000*2^5=32000 == cap
@@ -900,7 +991,11 @@ mod resolve_retry_control_tests {
     use super::*;
     use crate::LlmError;
 
-    fn env(fallback_for_all: Option<&str>, user_type: Option<&str>, is_sandbox: bool) -> ResolveRetryEnv {
+    fn env(
+        fallback_for_all: Option<&str>,
+        user_type: Option<&str>,
+        is_sandbox: bool,
+    ) -> ResolveRetryEnv {
         ResolveRetryEnv {
             fallback_for_all: fallback_for_all.map(str::to_string),
             user_type: user_type.map(str::to_string),
@@ -924,18 +1019,16 @@ mod resolve_retry_control_tests {
             true, // is_subscriber
             &env(Some("1"), None, false),
         );
-        assert!(ctl.allow_fallback, "non-empty FALLBACK_FOR_ALL_PRIMARY_MODELS must set allow_fallback");
+        assert!(
+            ctl.allow_fallback,
+            "non-empty FALLBACK_FOR_ALL_PRIMARY_MODELS must set allow_fallback"
+        );
     }
 
     /// `FALLBACK_FOR_ALL_PRIMARY_MODELS` empty string is falsy (JS semantics).
     #[test]
     fn fallback_for_all_empty_string_is_falsy() {
-        let ctl = resolve_retry_control(
-            SONNET_MODEL,
-            None,
-            false,
-            &env(Some(""), None, false),
-        );
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(Some(""), None, false));
         assert!(
             !ctl.allow_fallback,
             "empty FALLBACK_FOR_ALL_PRIMARY_MODELS must be falsy"
@@ -963,32 +1056,43 @@ mod resolve_retry_control_tests {
             true, // subscriber
             &env(None, None, false),
         );
-        assert!(!ctl.allow_fallback, "subscriber + opus must NOT set allow_fallback unless FALLBACK_FOR_ALL");
+        assert!(
+            !ctl.allow_fallback,
+            "subscriber + opus must NOT set allow_fallback unless FALLBACK_FOR_ALL"
+        );
     }
 
     /// Non-subscriber + non-Opus model → `allow_fallback = false`.
     #[test]
     fn non_subscriber_non_opus_no_fallback() {
-        let ctl = resolve_retry_control(
-            SONNET_MODEL,
-            None,
-            false,
-            &env(None, None, false),
+        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, None, false));
+        assert!(
+            !ctl.allow_fallback,
+            "non-subscriber + non-opus must NOT allow fallback"
         );
-        assert!(!ctl.allow_fallback, "non-subscriber + non-opus must NOT allow fallback");
     }
 
     // --- is_external ---
 
     #[test]
     fn user_type_external_sets_is_external() {
-        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, Some("external"), false));
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            false,
+            &env(None, Some("external"), false),
+        );
         assert!(ctl.is_external);
     }
 
     #[test]
     fn user_type_non_external_clears_is_external() {
-        let ctl = resolve_retry_control(SONNET_MODEL, None, false, &env(None, Some("internal"), false));
+        let ctl = resolve_retry_control(
+            SONNET_MODEL,
+            None,
+            false,
+            &env(None, Some("internal"), false),
+        );
         assert!(!ctl.is_external);
     }
 
@@ -1103,10 +1207,7 @@ mod resolve_retry_control_tests {
             ..ResolveRetryEnv::default()
         };
         let ctl = resolve_retry_control_with_settings(SONNET_MODEL, None, false, &env, Some(7));
-        assert_eq!(
-            ctl.max_retries, 2,
-            "env(2) must beat settings(7)"
-        );
+        assert_eq!(ctl.max_retries, 2, "env(2) must beat settings(7)");
     }
 
     /// `settings_max_retries` beats `DEFAULT_MAX_RETRIES` when env absent.
@@ -1155,7 +1256,7 @@ mod backoff_scaling_tests {
         assert_eq!(scaled_base_delay_ms(3, Some(1000)), 8000);
         assert_eq!(scaled_base_delay_ms(4, Some(1000)), 16000);
         assert_eq!(scaled_base_delay_ms(5, Some(1000)), 32000); // 1000*2^5 == cap
-        // Beyond the cap (and at extreme attempts) clamps to MAX_BACKOFF_MS, no overflow.
+                                                                // Beyond the cap (and at extreme attempts) clamps to MAX_BACKOFF_MS, no overflow.
         assert_eq!(scaled_base_delay_ms(6, Some(1000)), MAX_BACKOFF_MS);
         assert_eq!(scaled_base_delay_ms(10, Some(1000)), MAX_BACKOFF_MS);
     }

@@ -523,6 +523,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         assert!(
@@ -554,6 +555,7 @@ mod tests {
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
+                model_profile: None,
             })
             .await;
         assert!(prompt.contains("mksh"), "still mksh dialect: {prompt}");

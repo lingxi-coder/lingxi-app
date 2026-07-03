@@ -40,7 +40,9 @@ fn exact_price_match_computes_independent_token_bucket_costs() {
     );
     let estimator = CostEstimator::new(catalog, PricingPolicy::MarkUnestimated);
 
-    let estimate = estimator.estimate(pricing_model(), &usage()).expect("estimate");
+    let estimate = estimator
+        .estimate(pricing_model(), &usage())
+        .expect("estimate");
 
     assert!(estimate.estimated);
     assert_eq!(estimate.input_cost_usd, Some(3.0));
@@ -66,7 +68,9 @@ fn external_override_wins_over_builtin_price() {
         );
     let estimator = CostEstimator::new(catalog, PricingPolicy::MarkUnestimated);
 
-    let estimate = estimator.estimate(pricing_model(), &usage()).expect("estimate");
+    let estimate = estimator
+        .estimate(pricing_model(), &usage())
+        .expect("estimate");
 
     assert_eq!(estimate.input_cost_usd, Some(1.0));
     assert_eq!(estimate.output_cost_usd, Some(4.0));
@@ -77,7 +81,9 @@ fn external_override_wins_over_builtin_price() {
 fn mark_unestimated_policy_returns_unestimated_cost_for_unknown_pricing() {
     let estimator = CostEstimator::new(PricingCatalog::empty(), PricingPolicy::MarkUnestimated);
 
-    let estimate = estimator.estimate(pricing_model(), &usage()).expect("estimate");
+    let estimate = estimator
+        .estimate(pricing_model(), &usage())
+        .expect("estimate");
 
     assert!(!estimate.estimated);
     assert_eq!(estimate.total_cost_usd, None);
@@ -115,17 +121,29 @@ fn add_override_wins_over_builtin_price() {
     let estimator = CostEstimator::new(catalog, PricingPolicy::MarkUnestimated);
 
     let usage_1m = Usage {
-        billable_tokens: TokenUsage { input: 1_000_000, output: 1_000_000, ..Default::default() },
+        billable_tokens: TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            ..Default::default()
+        },
         ..Default::default()
     };
-    let estimate = estimator.estimate(pricing_model(), &usage_1m).expect("estimate");
+    let estimate = estimator
+        .estimate(pricing_model(), &usage_1m)
+        .expect("estimate");
 
     assert_eq!(estimate.pricing_source.as_deref(), Some("override"));
     // 1M input × $1.5/M = $1.5 + 1M output × $7.0/M = $7.0 → $8.5
     let total = estimate.total_cost_usd.expect("total must be Some");
-    assert!((total - 8.5).abs() < 1e-9, "total must be $8.5, got ${total}");
+    assert!(
+        (total - 8.5).abs() < 1e-9,
+        "total must be $8.5, got ${total}"
+    );
     let input = estimate.input_cost_usd.expect("input must be Some");
-    assert!((input - 1.5).abs() < 1e-9, "input must be $1.5/M, got ${input}");
+    assert!(
+        (input - 1.5).abs() < 1e-9,
+        "input must be $1.5/M, got ${input}"
+    );
 }
 
 /// `PricingConfig` with overrides round-trips through JSON serde.
@@ -164,7 +182,10 @@ fn pricing_config_absent_overrides_deserializes_to_empty() {
     // The old config shape only had `require_priced`.
     let json = r#"{"require_priced": false}"#;
     let cfg: PricingConfig = serde_json::from_str(json).expect("must deserialize");
-    assert!(cfg.overrides.is_empty(), "absent overrides must default to empty");
+    assert!(
+        cfg.overrides.is_empty(),
+        "absent overrides must default to empty"
+    );
 
     // Also the default-derived shape must have an empty overrides.
     let default_cfg = PricingConfig::default();
@@ -190,8 +211,14 @@ fn token_pricing_serde_roundtrip_camel_case() {
 
     // Serialized form must use camelCase keys.
     let back = serde_json::to_string(&tp).expect("serialize");
-    assert!(back.contains("inputPerMtok"), "must serialize to camelCase: {back}");
-    assert!(back.contains("outputPerMtok"), "must serialize to camelCase: {back}");
+    assert!(
+        back.contains("inputPerMtok"),
+        "must serialize to camelCase: {back}"
+    );
+    assert!(
+        back.contains("outputPerMtok"),
+        "must serialize to camelCase: {back}"
+    );
 }
 
 /// Optional `TokenPricing` fields default to 0.0 when absent.

@@ -28,7 +28,9 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResult};
 use hooks::HookExecutorImpl;
-use orchestrator::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider};
+use orchestrator::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
 use orchestrator::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockStreamingApiClient,
@@ -170,10 +172,10 @@ fn orch_with(
 async fn message_display_fires_once_at_assistant_stream_begin() {
     let log: FiredLog = Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook("record-message-display", HookEventType::MessageDisplay));
+    registry.write().await.register(builtin_hook(
+        "record-message-display",
+        HookEventType::MessageDisplay,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
 

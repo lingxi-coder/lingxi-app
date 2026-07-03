@@ -21,10 +21,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
-use traits::env::is_env_truthy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
+use traits::env::is_env_truthy;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -115,10 +115,7 @@ impl std::error::Error for WorkflowLaunchError {}
 /// (the host provides real I/O); `name` resolution looks under
 /// `.lingxi/workflows/<name>` with common script extensions. (LingXi ships no
 /// built-in workflow library, so a `name` that isn't a saved file is an error.)
-pub fn resolve_script<R>(
-    spec: &WorkflowLaunchSpec,
-    read: R,
-) -> Result<String, WorkflowLaunchError>
+pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, WorkflowLaunchError>
 where
     R: Fn(&str) -> std::io::Result<String>,
 {
@@ -332,8 +329,8 @@ impl Tool for WorkflowTool {
         // Reproduces the binary's D7a() resolution logic with exact error strings.
         let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
         let script_path = s("scriptPath").filter(|v| !v.is_empty());
-        let script      = s("script").filter(|v| !v.is_empty());
-        let name        = s("name").filter(|v| !v.is_empty());
+        let script = s("script").filter(|v| !v.is_empty());
+        let name = s("name").filter(|v| !v.is_empty());
 
         // Resolved script text (for errorCode 2 and 4 checks below).
         let resolved_script: String;
@@ -374,7 +371,10 @@ impl Tool for WorkflowTool {
             for ext in [".js", ".mjs", ".ts", ""] {
                 let candidate = format!("{}/workflows/{wf_name}{ext}", branding::DOT_DIR);
                 match std::fs::read_to_string(&candidate) {
-                    Ok(src) => { found = Some(src); break; }
+                    Ok(src) => {
+                        found = Some(src);
+                        break;
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(_) => continue,
                 }
@@ -383,8 +383,7 @@ impl Tool for WorkflowTool {
                 resolved_script = src;
             } else {
                 // 1b — workflow name not found; list available names
-                let available: String = Self::list_available_workflow_names()
-                    .unwrap_or_default();
+                let available: String = Self::list_available_workflow_names().unwrap_or_default();
                 let list = if available.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -468,9 +467,9 @@ impl Tool for WorkflowTool {
         //   + optional "\nRun ID: …\nTo resume …"
         //   + "\n\nYou will be notified when it completes. Use /workflows to watch live progress."
         let task_id = launched.task_id.clone();
-        let summary    = launched.summary.as_deref();
+        let summary = launched.summary.as_deref();
         let transcript = launched.transcript_dir.as_deref();
-        let script_p   = launched.script_path.as_deref();
+        let script_p = launched.script_path.as_deref();
         let run_id_str = launched.run_id.as_deref();
 
         let n = summary.map_or_else(String::new, |s| format!("\nSummary: {s}"));
@@ -766,9 +765,8 @@ mod tests {
         // Clean up before asserting so we don't leave stray files.
         let _ = std::fs::remove_file(&wf_path);
 
-        result.expect(
-            "name-resolved workflow with Date.now() must NOT be rejected for determinism",
-        );
+        result
+            .expect("name-resolved workflow with Date.now() must NOT be rejected for determinism");
     }
 
     #[tokio::test]
@@ -785,8 +783,7 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(
-            err.0,
-            "Dynamic workflows are disabled by managed settings (`disableWorkflows`).",
+            err.0, "Dynamic workflows are disabled by managed settings (`disableWorkflows`).",
             "errorCode 5 message must be byte-exact"
         );
     }
@@ -806,8 +803,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            err.0,
-            "script contains control characters that would be hidden in the approval dialog",
+            err.0, "script contains control characters that would be hidden in the approval dialog",
             "control-char refine message must be byte-exact"
         );
     }
@@ -931,12 +927,17 @@ mod tests {
         assert_eq!(res.data["workflowName"], "my-wf");
 
         // model_content text — byte-exact per oracle §1 async_launched template
-        let mc = res.data["model_content"].as_str().expect("model_content string");
+        let mc = res.data["model_content"]
+            .as_str()
+            .expect("model_content string");
         assert!(
             mc.starts_with("Workflow launched in background. Task ID: w_t1"),
             "must start with task id header: {mc}"
         );
-        assert!(mc.contains("\nSummary: A test workflow"), "must have Summary line: {mc}");
+        assert!(
+            mc.contains("\nSummary: A test workflow"),
+            "must have Summary line: {mc}"
+        );
         assert!(
             mc.contains("\nTranscript dir: /home/.lingxi/projects/-Users-me-proj/sess123/subagents/workflows/wf_abc123def456"),
             "must have Transcript dir line: {mc}"
@@ -981,15 +982,35 @@ mod tests {
 
         // Optional fields absent from JSON
         assert!(res.data.get("summary").is_none(), "summary must be absent");
-        assert!(res.data.get("transcriptDir").is_none(), "transcriptDir must be absent");
-        assert!(res.data.get("runId").is_none(), "runId must be absent when None");
-        assert!(res.data.get("scriptPath").is_none(), "scriptPath must be absent when None");
+        assert!(
+            res.data.get("transcriptDir").is_none(),
+            "transcriptDir must be absent"
+        );
+        assert!(
+            res.data.get("runId").is_none(),
+            "runId must be absent when None"
+        );
+        assert!(
+            res.data.get("scriptPath").is_none(),
+            "scriptPath must be absent when None"
+        );
 
         // model_content has no conditional lines
-        let mc = res.data["model_content"].as_str().expect("model_content string");
-        assert!(!mc.contains("Summary:"), "no Summary line when absent: {mc}");
-        assert!(!mc.contains("Transcript dir:"), "no Transcript dir line when absent: {mc}");
-        assert!(!mc.contains("Script file:"), "no Script file line when absent: {mc}");
+        let mc = res.data["model_content"]
+            .as_str()
+            .expect("model_content string");
+        assert!(
+            !mc.contains("Summary:"),
+            "no Summary line when absent: {mc}"
+        );
+        assert!(
+            !mc.contains("Transcript dir:"),
+            "no Transcript dir line when absent: {mc}"
+        );
+        assert!(
+            !mc.contains("Script file:"),
+            "no Script file line when absent: {mc}"
+        );
         assert!(!mc.contains("Run ID:"), "no Run ID line when absent: {mc}");
         // Footer always present
         assert!(
@@ -1022,7 +1043,9 @@ mod tests {
             .await
             .expect("call ok");
 
-        let mc = res.data["model_content"].as_str().expect("model_content string");
+        let mc = res.data["model_content"]
+            .as_str()
+            .expect("model_content string");
 
         // Verify the EXACT string per §1 oracle template
         let expected = concat!(
@@ -1098,6 +1121,9 @@ mod tests {
         let t = tool(None);
         let enabled = t.is_enabled(&ToolStaticContext::default());
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
-        assert!(enabled, "Workflow must stay enabled when env var is '0' (falsy)");
+        assert!(
+            enabled,
+            "Workflow must stay enabled when env var is '0' (falsy)"
+        );
     }
 }

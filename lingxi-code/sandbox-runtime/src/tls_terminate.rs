@@ -223,7 +223,10 @@ where
 {
     // Server TLS config: SNI cert resolver (default host = the CONNECT target),
     // http/1.1 ALPN only (we do not terminate HTTP/2 — clients negotiate down).
-    let resolver = Arc::new(MitmCertResolver::new(Arc::clone(&ca), target.hostname.clone()));
+    let resolver = Arc::new(MitmCertResolver::new(
+        Arc::clone(&ca),
+        target.hostname.clone(),
+    ));
     let mut server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_cert_resolver(resolver);
@@ -330,8 +333,7 @@ async fn forward_upstream(
     fwd_headers: Vec<(String, String)>,
     body: Full<Bytes>,
 ) -> Response<ProxyBody> {
-    let Ok(connector) = upstream_connector(target.upstream_ca.as_deref().map(Vec::as_slice))
-    else {
+    let Ok(connector) = upstream_connector(target.upstream_ca.as_deref().map(Vec::as_slice)) else {
         return bad_gateway();
     };
 
@@ -403,7 +405,8 @@ async fn forward_upstream(
     for (k, v) in stripped {
         out = out.header(k, v);
     }
-    out.body(resp_body.boxed()).unwrap_or_else(|_| bad_gateway())
+    out.body(resp_body.boxed())
+        .unwrap_or_else(|_| bad_gateway())
 }
 
 /// Build the SNI [`ServerName`] for an upstream handshake. An IP literal is
@@ -501,8 +504,7 @@ mod tests {
     #[tokio::test]
     async fn peek_decides_immediately_when_head_long_enough() {
         let mut empty = tokio::io::empty();
-        let (is_tls, head) =
-            peek_client_hello(&mut empty, vec![0x16, 0x03, 0x01, 0xAA]).await;
+        let (is_tls, head) = peek_client_hello(&mut empty, vec![0x16, 0x03, 0x01, 0xAA]).await;
         assert!(is_tls);
         assert_eq!(head, vec![0x16, 0x03, 0x01, 0xAA]);
     }
@@ -548,8 +550,7 @@ mod tests {
     fn self_signed_origin(host: &str) -> (rustls::ServerConfig, CertificateDer<'static>) {
         // Origin CA.
         let ca_key = rcgen::KeyPair::generate().unwrap();
-        let mut ca_params =
-            rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca_params
             .distinguished_name
@@ -626,10 +627,9 @@ mod tests {
             if let Some(certs) = conn.peer_certificates() {
                 if let Some(leaf) = certs.first() {
                     use x509_parser::prelude::FromDer as _;
-                    let parsed =
-                        x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
-                            .unwrap()
-                            .1;
+                    let parsed = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
+                        .unwrap()
+                        .1;
                     if let Ok(Some(san)) = parsed.subject_alternative_name() {
                         for gn in &san.value.general_names {
                             match gn {
@@ -667,7 +667,11 @@ mod tests {
         let resp = sender.send_request(req).await.unwrap();
         let status = resp.status().as_u16();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, String::from_utf8_lossy(&body).into_owned(), leaf_sans)
+        (
+            status,
+            String::from_utf8_lossy(&body).into_owned(),
+            leaf_sans,
+        )
     }
 
     /// Extract the first certificate (the CA) from a PEM string as DER.
@@ -725,7 +729,10 @@ mod tests {
         let (status, body, sans) = drive_mitm_client(client_side, ca_der, host, "/hello").await;
         assert_eq!(status, 200);
         assert_eq!(body, "ok", "MITM must round-trip the origin response");
-        assert!(sans.contains(&host.to_string()), "leaf SAN must match host: {sans:?}");
+        assert!(
+            sans.contains(&host.to_string()),
+            "leaf SAN must match host: {sans:?}"
+        );
         dispose_mitm_ca(&ca);
     }
 

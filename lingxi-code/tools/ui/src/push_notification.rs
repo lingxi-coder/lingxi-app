@@ -173,7 +173,8 @@ fn render(
         }
         Some("no_transport") => {
             if local_sent {
-                "Terminal notification sent. Mobile push not sent (Remote Control inactive).".to_string()
+                "Terminal notification sent. Mobile push not sent (Remote Control inactive)."
+                    .to_string()
             } else {
                 "Mobile push not sent (Remote Control inactive).".to_string()
             }
@@ -277,7 +278,13 @@ impl Tool for PushNotificationTool {
 
         // PARITY: config_off — transport exists, not remote, mobile-push opt-in off.
         if has_transport && !is_remote && !agent_push_notif_enabled() {
-            telemetry::emit_push_notification_send(message.len(), false, false, is_remote, "config_off");
+            telemetry::emit_push_notification_send(
+                message.len(),
+                false,
+                false,
+                is_remote,
+                "config_off",
+            );
             return Ok(result(
                 &message,
                 false,
@@ -291,7 +298,13 @@ impl Tool for PushNotificationTool {
 
         // PARITY: user_present — not remote and the user is actively at the terminal.
         if !is_remote && user_present() {
-            telemetry::emit_push_notification_send(message.len(), false, false, is_remote, "user_present");
+            telemetry::emit_push_notification_send(
+                message.len(),
+                false,
+                false,
+                is_remote,
+                "user_present",
+            );
             return Ok(result(
                 &message,
                 false,
@@ -312,7 +325,13 @@ impl Tool for PushNotificationTool {
 
         // PARITY: no_transport — no remote + no mobile push.
         if !has_transport {
-            telemetry::emit_push_notification_send(message.len(), false, local_sent, is_remote, "no_transport");
+            telemetry::emit_push_notification_send(
+                message.len(),
+                false,
+                local_sent,
+                is_remote,
+                "no_transport",
+            );
             return Ok(result(
                 &message,
                 false,
@@ -326,7 +345,9 @@ impl Tool for PushNotificationTool {
 
         // PARITY: success.
         telemetry::emit_push_notification_send(message.len(), true, local_sent, is_remote, "");
-        Ok(result(&message, true, local_sent, None, None, None, &sent_at))
+        Ok(result(
+            &message, true, local_sent, None, None, None, &sent_at,
+        ))
     }
 }
 

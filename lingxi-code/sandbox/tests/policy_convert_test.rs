@@ -140,8 +140,14 @@ fn deny_webfetch_domain_populates_denied_domains() {
     );
     let cfg = convert_settings_to_runtime_config(&s, &ctx());
     assert_eq!(cfg.network.denied_domains, vec!["evil.com".to_string()]);
-    assert!(cfg.network.allowed_domains.contains(&"good.com".to_string()));
-    assert!(!cfg.network.allowed_domains.contains(&"evil.com".to_string()));
+    assert!(cfg
+        .network
+        .allowed_domains
+        .contains(&"good.com".to_string()));
+    assert!(!cfg
+        .network
+        .allowed_domains
+        .contains(&"evil.com".to_string()));
 }
 
 #[test]
@@ -279,19 +285,25 @@ fn webfetch_and_edit_rules_reach_runtime_config() {
     let cfg = convert_settings_to_runtime_config(&s, &SandboxConvertContext::default());
 
     assert!(
-        cfg.network.allowed_domains.contains(&"example.com".to_string()),
+        cfg.network
+            .allowed_domains
+            .contains(&"example.com".to_string()),
         "WebFetch domain allow must reach allowed_domains: {:?}",
         cfg.network.allowed_domains
     );
     // `/src/**` resolves relative to settings_dir = /proj.
     assert!(
-        cfg.filesystem.allow_write.contains(&"/proj/src/**".to_string()),
+        cfg.filesystem
+            .allow_write
+            .contains(&"/proj/src/**".to_string()),
         "Edit allow must reach allow_write resolved against settings_dir: {:?}",
         cfg.filesystem.allow_write
     );
     // `/secret` resolves relative to settings_dir = /proj.
     assert!(
-        cfg.filesystem.deny_read.contains(&"/proj/secret".to_string()),
+        cfg.filesystem
+            .deny_read
+            .contains(&"/proj/secret".to_string()),
         "Read deny must reach deny_read resolved against settings_dir: {:?}",
         cfg.filesystem.deny_read
     );
@@ -435,7 +447,10 @@ fn no_override_keeps_merged_allowlist() {
 fn managed_domain_allowlist_collects_subsection_and_webfetch() {
     use sandbox::policy_convert::managed_domain_allowlist;
     use sandbox::runtime_config::{NetworkRestrictionConfig, SandboxSettingsJson};
-    let mut s = settings(vec!["WebFetch(domain:from-rule.com)", "Bash(curl:*)"], vec![]);
+    let mut s = settings(
+        vec!["WebFetch(domain:from-rule.com)", "Bash(curl:*)"],
+        vec![],
+    );
     s.sandbox = Some(SandboxSettingsJson {
         enabled: Some(true),
         network: Some(NetworkRestrictionConfig {
@@ -447,6 +462,9 @@ fn managed_domain_allowlist_collects_subsection_and_webfetch() {
     // Subsection domains first, then WebFetch-derived; Bash ignored.
     assert_eq!(
         managed_domain_allowlist(&s),
-        vec!["from-subsection.com".to_string(), "from-rule.com".to_string()]
+        vec![
+            "from-subsection.com".to_string(),
+            "from-rule.com".to_string()
+        ]
     );
 }

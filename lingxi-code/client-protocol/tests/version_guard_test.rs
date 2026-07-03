@@ -264,7 +264,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CoordinatorStatus.team", "Option<String>");
 
     put("ClientEvent::CoordinatorWorker", "coordinator_worker");
-    put("ClientEvent::CoordinatorWorker.worker", "CoordinatorWorkerDto");
+    put(
+        "ClientEvent::CoordinatorWorker.worker",
+        "CoordinatorWorkerDto",
+    );
 
     put("ClientEvent::ThinkingDelta", "thinking_delta");
     put("ClientEvent::ThinkingDelta.thinking", "String");
@@ -299,7 +302,10 @@ fn current_contract_index() -> ContractIndex {
     // ── ClientCommand (commands.rs) ───────────────────────────────────────
     put("ClientCommand::SendPrompt", "send_prompt");
     put("ClientCommand::SendPrompt.text", "String");
-    put("ClientCommand::SendPrompt.prompt_mode", "Option<PromptModeDto>");
+    put(
+        "ClientCommand::SendPrompt.prompt_mode",
+        "Option<PromptModeDto>",
+    );
     put("ClientCommand::SendPrompt.images", "Vec<ImageRefDto>");
     put("ClientCommand::SendPrompt.turn_id", "Option<u64>");
 
@@ -325,7 +331,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::RunSlashCommand.raw", "String");
 
     put("ClientCommand::RefreshListings", "refresh_listings");
-    put("ClientCommand::RefreshListings.which", "Vec<ListingKindDto>");
+    put(
+        "ClientCommand::RefreshListings.which",
+        "Vec<ListingKindDto>",
+    );
 
     put("ClientCommand::NewSession", "new_session");
     put("ClientCommand::NewSession.cwd", "Option<String>");
@@ -344,7 +353,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::ClearSession", "clear_session");
 
     put("ClientCommand::TaskList", "task_list");
-    put("ClientCommand::TaskList.status_filter", "Option<TaskStatusDto>");
+    put(
+        "ClientCommand::TaskList.status_filter",
+        "Option<TaskStatusDto>",
+    );
 
     put("ClientCommand::TaskOutput", "task_output");
     put("ClientCommand::TaskOutput.task_id", "String");
@@ -419,13 +431,19 @@ fn current_contract_index() -> ContractIndex {
 
     put("PermissionKindDto::ToolUseConfirm", "tool_use_confirm");
     put("PermissionKindDto::ToolUseConfirm.tool_name", "String");
-    put("PermissionKindDto::ToolUseConfirm.tool_input_json", "String");
+    put(
+        "PermissionKindDto::ToolUseConfirm.tool_input_json",
+        "String",
+    );
     put("PermissionKindDto::ToolUseConfirm.default_allow", "bool");
 
     put("PermissionKindDto::ExitPlanMode", "exit_plan_mode");
     put("PermissionKindDto::ExitPlanMode.plan", "String");
 
-    put("PermissionKindDto::BypassPermissionsMode", "bypass_permissions_mode");
+    put(
+        "PermissionKindDto::BypassPermissionsMode",
+        "bypass_permissions_mode",
+    );
 
     put("WorkerInfoDto.name", "String");
     put("WorkerInfoDto.color", "String");
@@ -582,7 +600,10 @@ fn renaming_a_variant_requires_major_bump() {
     doctored
         .remove("ClientCommand::SetModel")
         .expect("variant tag key exists");
-    doctored.insert("ClientCommand::ChangeModel".to_string(), "change_model".to_string());
+    doctored.insert(
+        "ClientCommand::ChangeModel".to_string(),
+        "change_model".to_string(),
+    );
 
     assert_eq!(
         classify(&base, &doctored),
@@ -748,7 +769,8 @@ fn contract_index_covers_every_dto() {
     use client_protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+        MemoryTierDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
+        TaskStatusDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
@@ -790,7 +812,9 @@ fn contract_index_covers_every_dto() {
     };
     let _msg = MessageDto {
         role: String::new(),
-        blocks: vec![MessageBlockDto::Text { text: String::new() }],
+        blocks: vec![MessageBlockDto::Text {
+            text: String::new(),
+        }],
     };
     let _req = PermissionRequest {
         request_id: 0,

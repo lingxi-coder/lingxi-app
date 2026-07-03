@@ -195,7 +195,10 @@ mod tests {
     #[tokio::test]
     async fn source_drains_once_then_empty() {
         let src = OnceSource(std::sync::Mutex::new(Some("queued\ninput".to_string())));
-        assert_eq!(src.take_mid_turn_input().await.as_deref(), Some("queued\ninput"));
+        assert_eq!(
+            src.take_mid_turn_input().await.as_deref(),
+            Some("queued\ninput")
+        );
         assert_eq!(src.take_mid_turn_input().await, None);
     }
 }

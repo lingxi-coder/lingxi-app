@@ -65,7 +65,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }

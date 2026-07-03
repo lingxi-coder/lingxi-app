@@ -295,10 +295,7 @@ pub(crate) fn handle_select(query: &str, entries: &[ToolSearchEntry]) -> Option<
         if name.is_empty() {
             continue;
         }
-        if let Some(entry) = entries
-            .iter()
-            .find(|e| e.name.eq_ignore_ascii_case(name))
-        {
+        if let Some(entry) = entries.iter().find(|e| e.name.eq_ignore_ascii_case(name)) {
             if !found.contains(&entry.name) {
                 found.push(entry.name.clone());
             }
@@ -797,10 +794,7 @@ mod tests {
             entry("Write", "write to a notebook somewhere"),
         ];
         let got = search_tools_with_keywords("notebook", &v, 5);
-        assert_eq!(
-            got,
-            vec!["NotebookEdit".to_string(), "Write".to_string()]
-        );
+        assert_eq!(got, vec!["NotebookEdit".to_string(), "Write".to_string()]);
     }
 
     #[test]
@@ -874,7 +868,10 @@ mod tests {
 
     #[test]
     fn max_results_honors_input() {
-        assert_eq!(resolve_max_results(&json!({"query": "x", "max_results": 3})), 3);
+        assert_eq!(
+            resolve_max_results(&json!({"query": "x", "max_results": 3})),
+            3
+        );
     }
 
     #[test]
@@ -887,7 +884,10 @@ mod tests {
 
     #[test]
     fn max_results_floor_one() {
-        assert_eq!(resolve_max_results(&json!({"query": "x", "max_results": 0})), 1);
+        assert_eq!(
+            resolve_max_results(&json!({"query": "x", "max_results": 0})),
+            1
+        );
     }
 
     // ---- call() ----
@@ -896,10 +896,17 @@ mod tests {
     async fn call_select_returns_matches() {
         let tool = ToolSearchTool::with_view(
             shell_test_ctx(dummy_out()),
-            mk_view(vec![entry("Read", "read a file"), entry("Write", "write a file")]),
+            mk_view(vec![
+                entry("Read", "read a file"),
+                entry("Write", "write a file"),
+            ]),
         );
         let out = tool
-            .call(json!({"query": "select:Read,Write"}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"query": "select:Read,Write"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         assert_eq!(out.data["matches"], json!(["Read", "Write"]));
@@ -942,10 +949,13 @@ mod tests {
         let entries: Vec<ToolSearchEntry> = (0..10)
             .map(|i| entry(&format!("Tool{i:02}"), "match me please"))
             .collect();
-        let tool =
-            ToolSearchTool::with_view(shell_test_ctx(dummy_out()), mk_view(entries));
+        let tool = ToolSearchTool::with_view(shell_test_ctx(dummy_out()), mk_view(entries));
         let out = tool
-            .call(json!({"query": "match", "max_results": 2}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"query": "match", "max_results": 2}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         assert_eq!(out.data["matches"].as_array().unwrap().len(), 2);
@@ -965,18 +975,9 @@ mod tests {
     #[test]
     fn schema_has_max_results_default() {
         let schema = &*SCHEMA;
-        assert_eq!(
-            schema["properties"]["max_results"]["default"],
-            json!(5)
-        );
+        assert_eq!(schema["properties"]["max_results"]["default"], json!(5));
         // Binary uses A.number() → JSON schema type "number" (not "integer").
-        assert_eq!(
-            schema["properties"]["max_results"]["type"],
-            json!("number")
-        );
-        assert_eq!(
-            schema["properties"]["max_results"]["minimum"],
-            json!(1)
-        );
+        assert_eq!(schema["properties"]["max_results"]["type"], json!("number"));
+        assert_eq!(schema["properties"]["max_results"]["minimum"], json!(1));
     }
 }

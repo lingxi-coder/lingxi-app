@@ -114,7 +114,9 @@ pub fn sign_request(
         all_headers.insert(k.to_lowercase(), trimall(v));
     }
     // Host must be present.
-    all_headers.entry("host".to_string()).or_insert_with(|| host.clone());
+    all_headers
+        .entry("host".to_string())
+        .or_insert_with(|| host.clone());
     // x-amz-date is always injected and signed.
     all_headers.insert("x-amz-date".to_string(), x_amz_date.clone());
     // x-amz-content-sha256 is signed only when the caller includes it
@@ -143,9 +145,8 @@ pub fn sign_request(
     // ── String to sign ────────────────────────────────────────────────────────
     let credential_scope = format!("{date}/{region}/{service}/aws4_request");
     let canonical_request_hash = hex_sha256(canonical_request.as_bytes());
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{datetime}\n{credential_scope}\n{canonical_request_hash}"
-    );
+    let string_to_sign =
+        format!("AWS4-HMAC-SHA256\n{datetime}\n{credential_scope}\n{canonical_request_hash}");
 
     // ── Signing key chain ─────────────────────────────────────────────────────
     let signing_key = derive_signing_key(secret_access_key, date, region, service);
@@ -187,11 +188,13 @@ pub(crate) fn hex_sha256(data: &[u8]) -> String {
 
 /// Lowercase hex encoding.
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
-        use std::fmt::Write as _;
-        let _ = write!(acc, "{b:02x}");
-        acc
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
 }
 
 /// Derive the `SigV4` signing key via HMAC cascade:
@@ -246,9 +249,7 @@ fn percent_decode_raw(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) =
-                (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
-            {
+            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
                 decoded_bytes.push((h << 4) | l);
                 i += 3;
                 continue;
@@ -382,7 +383,10 @@ fn canonical_query_string(raw_query: &str) -> String {
                     uri_encode_component(&percent_decode_raw(v)),
                 )
             } else {
-                (uri_encode_component(&percent_decode_raw(pair)), String::new())
+                (
+                    uri_encode_component(&percent_decode_raw(pair)),
+                    String::new(),
+                )
             }
         })
         .collect();
@@ -500,10 +504,17 @@ mod tests {
             result.authorization
         );
         // Structural check of the Authorization header.
-        assert!(result.authorization.starts_with("AWS4-HMAC-SHA256 "), "must start with algorithm");
-        assert!(result.authorization.contains(&format!("Credential={ACCESS_KEY}/{DATE}/{REGION}/{SERVICE}/aws4_request")));
+        assert!(
+            result.authorization.starts_with("AWS4-HMAC-SHA256 "),
+            "must start with algorithm"
+        );
+        assert!(result.authorization.contains(&format!(
+            "Credential={ACCESS_KEY}/{DATE}/{REGION}/{SERVICE}/aws4_request"
+        )));
         // Official test vectors sign only host;x-amz-date (no x-amz-content-sha256).
-        assert!(result.authorization.contains("SignedHeaders=host;x-amz-date"));
+        assert!(result
+            .authorization
+            .contains("SignedHeaders=host;x-amz-date"));
     }
 
     // ── Vector 2: get-vanilla-query-order-key-case ────────────────────────────
@@ -541,17 +552,21 @@ mod tests {
         assert!(result.authorization.contains(&format!(
             "Credential={ACCESS_KEY}/{DATE}/{REGION}/{SERVICE}/aws4_request"
         )));
-        assert!(result.authorization.contains("SignedHeaders=host;x-amz-date"));
+        assert!(result
+            .authorization
+            .contains("SignedHeaders=host;x-amz-date"));
 
         // Independent derivation: manually build canonical request + string-to-sign + signature.
         let body_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; // SHA256("")
-        // Canonical query: Param1 and Param2 are already in sorted order; values must be encoded.
+                                                                                            // Canonical query: Param1 and Param2 are already in sorted order; values must be encoded.
         let canonical_query = "Param1=value2&Param2=value1";
         let canonical_request_independent = format!(
             "GET\n/\n{canonical_query}\nhost:example.amazonaws.com\nx-amz-date:{DATETIME}\n\nhost;x-amz-date\n{body_hash}"
         );
         let creq_hash = hex_sha256(canonical_request_independent.as_bytes());
-        let sts = format!("AWS4-HMAC-SHA256\n{DATETIME}\n{DATE}/{REGION}/{SERVICE}/aws4_request\n{creq_hash}");
+        let sts = format!(
+            "AWS4-HMAC-SHA256\n{DATETIME}\n{DATE}/{REGION}/{SERVICE}/aws4_request\n{creq_hash}"
+        );
         let signing_key = derive_signing_key(SECRET_KEY, DATE, REGION, SERVICE);
         let sig_independent = hmac_sha256_hex(&signing_key, sts.as_bytes());
 
@@ -649,7 +664,9 @@ mod tests {
         assert!(result.authorization.contains(&format!(
             "Credential={ACCESS_KEY}/{DATE}/{REGION}/{SERVICE}/aws4_request"
         )));
-        assert!(result.authorization.contains("SignedHeaders=content-type;host;x-amz-date"));
+        assert!(result
+            .authorization
+            .contains("SignedHeaders=content-type;host;x-amz-date"));
 
         // ── Independent verification path ────────────────────────────────────
         // 1) Payload hash: independently compute SHA-256 of the body bytes.
@@ -674,8 +691,10 @@ mod tests {
             "AWS4-HMAC-SHA256\n{DATETIME}\n{DATE}/{REGION}/{SERVICE}/aws4_request\n{creq_hash_independent}"
         );
         let signing_key_independent = derive_signing_key(SECRET_KEY, DATE, REGION, SERVICE);
-        let sig_independent =
-            hmac_sha256_hex(&signing_key_independent, string_to_sign_independent.as_bytes());
+        let sig_independent = hmac_sha256_hex(
+            &signing_key_independent,
+            string_to_sign_independent.as_bytes(),
+        );
 
         // Both the primary signer and the independent path must produce the same signature.
         assert!(
@@ -718,7 +737,9 @@ mod tests {
 
         // Structural verification.
         assert!(result.authorization.starts_with("AWS4-HMAC-SHA256 "));
-        assert!(result.authorization.contains("SignedHeaders=host;x-amz-date"));
+        assert!(result
+            .authorization
+            .contains("SignedHeaders=host;x-amz-date"));
 
         // Independent derivation matching our double-encoding implementation.
         // percent_decode_raw("%E1%88%B4") → "\u{E1}\u{88}\u{B4}" (raw chars)
@@ -730,7 +751,9 @@ mod tests {
             "GET\n{canonical_path}\n\nhost:example.amazonaws.com\nx-amz-date:{DATETIME}\n\nhost;x-amz-date\n{body_hash}"
         );
         let creq_hash = hex_sha256(canonical_request_independent.as_bytes());
-        let sts = format!("AWS4-HMAC-SHA256\n{DATETIME}\n{DATE}/{REGION}/{SERVICE}/aws4_request\n{creq_hash}");
+        let sts = format!(
+            "AWS4-HMAC-SHA256\n{DATETIME}\n{DATE}/{REGION}/{SERVICE}/aws4_request\n{creq_hash}"
+        );
         let signing_key = derive_signing_key(SECRET_KEY, DATE, REGION, SERVICE);
         let sig_independent = hmac_sha256_hex(&signing_key, sts.as_bytes());
 
@@ -923,10 +946,7 @@ mod tests {
     fn canonical_path_resolves_dot_segments() {
         let parsed = url::Url::parse("https://example.amazonaws.com/a/./b/../c").unwrap();
         let path = canonical_uri_path(&parsed);
-        assert_eq!(
-            path, "/a/c",
-            "dot segments must be resolved; got: {path}"
-        );
+        assert_eq!(path, "/a/c", "dot segments must be resolved; got: {path}");
     }
 
     /// Fix 2: Empty path → `/`.
@@ -963,8 +983,9 @@ mod tests {
     #[test]
     fn canonical_path_colon_in_segment_double_encodes() {
         let parsed = url::Url::parse(
-            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-v2%3A1/invoke"
-        ).unwrap();
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-v2%3A1/invoke",
+        )
+        .unwrap();
         let path = canonical_uri_path(&parsed);
         // Segment `anthropic.claude-v2:1`:
         //   percent_decode_raw("%3A") → ":"
@@ -985,7 +1006,11 @@ mod tests {
     /// Fix 3 RED → GREEN: sequential interior spaces collapse to one.
     #[test]
     fn trimall_collapses_interior_spaces() {
-        assert_eq!(trimall("a  b   c"), "a b c", "sequential spaces must collapse to one");
+        assert_eq!(
+            trimall("a  b   c"),
+            "a b c",
+            "sequential spaces must collapse to one"
+        );
         assert_eq!(trimall("  a  b  "), "a b", "leading/trailing trimmed too");
         assert_eq!(trimall("no extra"), "no extra", "single space unchanged");
         assert_eq!(trimall(""), "", "empty string");
@@ -1019,7 +1044,9 @@ mod tests {
             "GET\n/\n\nhost:example.amazonaws.com\nx-amz-date:{DATETIME}\nx-custom:a b c\n\nhost;x-amz-date;x-custom\n{body_hash}"
         );
         let creq_hash = hex_sha256(canonical_request_expected.as_bytes());
-        let sts = format!("AWS4-HMAC-SHA256\n{DATETIME}\n{DATE}/{REGION}/{SERVICE}/aws4_request\n{creq_hash}");
+        let sts = format!(
+            "AWS4-HMAC-SHA256\n{DATETIME}\n{DATE}/{REGION}/{SERVICE}/aws4_request\n{creq_hash}"
+        );
         let signing_key = derive_signing_key(SECRET_KEY, DATE, REGION, SERVICE);
         let sig_expected = hmac_sha256_hex(&signing_key, sts.as_bytes());
 
@@ -1083,5 +1110,4 @@ mod tests {
         );
         assert!(err.is_err(), "short datetime must return Err; got ok");
     }
-
 }

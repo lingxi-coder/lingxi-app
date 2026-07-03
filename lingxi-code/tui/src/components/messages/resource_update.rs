@@ -13,8 +13,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Refresh-arrow glyph (U+21BB, claude-code `REFRESH_ARROW`).
 pub const REFRESH_ARROW: &str = "\u{21BB}";

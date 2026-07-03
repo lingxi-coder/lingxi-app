@@ -98,8 +98,8 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
     use client_protocol::events::CostDto;
+    use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
     use tokio::sync::Mutex;
 
     use crate::sink::ClientEventSink;

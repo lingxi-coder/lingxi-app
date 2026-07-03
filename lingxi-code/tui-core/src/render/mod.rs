@@ -342,14 +342,20 @@ mod tests {
             agent_color_from_name("magenta"),
             StyleColor::Named(NamedColor::Magenta)
         );
-        assert_eq!(agent_color_from_name("Orange"), StyleColor::Rgb(255, 165, 0));
+        assert_eq!(
+            agent_color_from_name("Orange"),
+            StyleColor::Rgb(255, 165, 0)
+        );
         assert_eq!(agent_color_from_name("teal"), StyleColor::Rgb(0, 160, 160));
         // Unknown / empty → cyan (claude-code cyan_FOR_SUBAGENTS_ONLY default).
         assert_eq!(
             agent_color_from_name("chartreuse"),
             StyleColor::Named(NamedColor::Cyan)
         );
-        assert_eq!(agent_color_from_name(""), StyleColor::Named(NamedColor::Cyan));
+        assert_eq!(
+            agent_color_from_name(""),
+            StyleColor::Named(NamedColor::Cyan)
+        );
     }
 
     #[test]

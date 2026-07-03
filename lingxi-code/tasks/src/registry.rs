@@ -99,10 +99,7 @@ impl TaskRegistry {
     /// tests stay no-op; the composition root threads the orchestrator's firer
     /// here so a terminal status transition fires the `TaskCompleted` hook.
     #[must_use]
-    pub fn with_task_completed_firer(
-        mut self,
-        firer: Arc<dyn hooks::TaskCompletedFirer>,
-    ) -> Self {
+    pub fn with_task_completed_firer(mut self, firer: Arc<dyn hooks::TaskCompletedFirer>) -> Self {
         self.task_completed_firer = Some(firer);
         self
     }
@@ -113,10 +110,7 @@ impl TaskRegistry {
     /// orchestrator's firer here so creating a task fires the `TaskCreated`
     /// hook.
     #[must_use]
-    pub fn with_task_created_firer(
-        mut self,
-        firer: Arc<dyn hooks::TaskCreatedFirer>,
-    ) -> Self {
+    pub fn with_task_created_firer(mut self, firer: Arc<dyn hooks::TaskCreatedFirer>) -> Self {
         self.task_created_firer = Some(firer);
         self
     }
@@ -180,7 +174,8 @@ impl TaskRegistry {
         self.tasks.write().await.insert(id.clone(), state);
         // Best-effort `TaskCreated` fire (claude-code `executeTaskCreatedHooks`,
         // fired from `TaskCreateTool`). No-op when no firer is registered.
-        self.fire_task_created(&id, task_type, &description_for_hook).await;
+        self.fire_task_created(&id, task_type, &description_for_hook)
+            .await;
         Ok(id)
     }
 
@@ -295,7 +290,8 @@ impl TaskRegistry {
         // (alongside `create`'s placeholder path). Both insert a new task row,
         // so both fire. Runs after the write guards drop. No-op when no firer is
         // registered.
-        self.fire_task_created(&id, task_type, &description_for_hook).await;
+        self.fire_task_created(&id, task_type, &description_for_hook)
+            .await;
 
         Ok(id)
     }
@@ -909,7 +905,10 @@ pub fn register_self_contained_handlers(
     );
     reg.register_handler(
         TaskType::MonitorMcp,
-        Arc::new(MonitorMcpHandler::with_default_interval(mcp, output_manager)),
+        Arc::new(MonitorMcpHandler::with_default_interval(
+            mcp,
+            output_manager,
+        )),
     );
 }
 
@@ -996,7 +995,12 @@ pub fn register_dream_handler(
     let output_manager = reg.output_manager.clone();
     reg.register_handler(
         TaskType::Dream,
-        Arc::new(DreamHandler::new(spawner, tool_invoker, budget, output_manager)),
+        Arc::new(DreamHandler::new(
+            spawner,
+            tool_invoker,
+            budget,
+            output_manager,
+        )),
     );
 }
 

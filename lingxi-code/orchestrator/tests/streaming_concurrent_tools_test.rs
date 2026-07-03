@@ -205,9 +205,9 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
             OutputEvent::ToolCall { .. } => Some("ToolCall"),
             OutputEvent::ToolResult { .. } => Some("ToolResult"),
             OutputEvent::EndTurn { .. } => Some("EndTurn"),
-            OutputEvent::Text { .. }
-            | OutputEvent::Usage { .. }
-            | OutputEvent::Thinking { .. } => None,
+            OutputEvent::Text { .. } | OutputEvent::Usage { .. } | OutputEvent::Thinking { .. } => {
+                None
+            }
             _ => Some("Other"),
         })
         .collect();

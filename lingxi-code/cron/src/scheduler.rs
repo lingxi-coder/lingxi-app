@@ -105,7 +105,11 @@ pub(crate) fn finalize_fired_job(
 /// Recording the last-fire time is what makes missed-run CATCH-UP safe ACROSS
 /// RESTARTS — without it a reloaded job would re-fire a run it already fired in
 /// a prior session (claude-code persists `lastFiredAt` for the same reason).
-pub(crate) fn tasks_file_with_last_fired(body: &str, id: &str, last_fired_at_ms: u64) -> Option<String> {
+pub(crate) fn tasks_file_with_last_fired(
+    body: &str,
+    id: &str,
+    last_fired_at_ms: u64,
+) -> Option<String> {
     let mut doc = crate::tasks_file::parse_tasks(body);
     let task = doc.tasks.iter_mut().find(|t| t.id == id)?;
     task.last_fired_at = Some(last_fired_at_ms);
@@ -224,7 +228,12 @@ impl CronScheduler {
     /// [`Self::start`].
     pub async fn load_persisted(&self) {
         let path = self.tasks_file.to_string_lossy();
-        let Ok(body) = self.fs.read_file(&path, None, None).await.map(|c| c.content) else {
+        let Ok(body) = self
+            .fs
+            .read_file(&path, None, None)
+            .await
+            .map(|c| c.content)
+        else {
             return; // file absent → nothing to load
         };
         let doc = crate::tasks_file::parse_tasks(&body);
@@ -464,7 +473,12 @@ impl CronScheduler {
     /// is a no-op.
     async fn remove_task_from_file(&self, id: &str) {
         let path = self.tasks_file.to_string_lossy();
-        if let Ok(body) = self.fs.read_file(&path, None, None).await.map(|c| c.content) {
+        if let Ok(body) = self
+            .fs
+            .read_file(&path, None, None)
+            .await
+            .map(|c| c.content)
+        {
             if let Some(updated) = tasks_file_without(&body, id) {
                 let _ = self.fs.write_file(&path, &updated).await;
             }
@@ -476,7 +490,12 @@ impl CronScheduler {
     /// file / missing id is a no-op.
     async fn set_last_fired_in_file(&self, id: &str, last_fired_at_ms: u64) {
         let path = self.tasks_file.to_string_lossy();
-        if let Ok(body) = self.fs.read_file(&path, None, None).await.map(|c| c.content) {
+        if let Ok(body) = self
+            .fs
+            .read_file(&path, None, None)
+            .await
+            .map(|c| c.content)
+        {
             if let Some(updated) = tasks_file_with_last_fired(&body, id, last_fired_at_ms) {
                 let _ = self.fs.write_file(&path, &updated).await;
             }
@@ -559,7 +578,12 @@ mod expiry_tests {
     #[test]
     fn one_shot_job_is_never_aged_by_max_age() {
         // !recurring → never aged out here (one-shot auto-deletes after firing).
-        assert!(!is_recurring_task_aged(at(100), at(0), false, Some(DAY * 30)));
+        assert!(!is_recurring_task_aged(
+            at(100),
+            at(0),
+            false,
+            Some(DAY * 30)
+        ));
     }
 
     #[test]
@@ -658,29 +682,46 @@ mod expiry_tests {
         let ten_am = sec(1_700_042_400); // same day 10:00
         let yest_nine = sec(1_700_038_800 - 86_400); // 2023-11-14 09:00
 
-        let mk = |last_run: Option<SystemTime>, created_at: SystemTime, enabled: bool| CronTaskDef {
-            id: "j".into(),
-            schedule: parse_cron("0 9 * * *").unwrap(),
-            prompt: "p".into(),
-            agent_type: None,
-            last_run,
-            enabled,
-            created_at,
-            recurring: true,
-        };
+        let mk =
+            |last_run: Option<SystemTime>, created_at: SystemTime, enabled: bool| CronTaskDef {
+                id: "j".into(),
+                schedule: parse_cron("0 9 * * *").unwrap(),
+                prompt: "p".into(),
+                agent_type: None,
+                last_run,
+                enabled,
+                created_at,
+                recurring: true,
+            };
 
         // UTC (offset 0) for deterministic assertions; the live `is_job_due`
         // resolves the offset per-instant via the system timezone.
         let utc = |_: u64| 0_i64;
         // LIVE: last fired yesterday 09:00, now today 09:00 → due.
-        assert!(is_job_due_with(&mk(Some(yest_nine), eight_am, true), nine_am, utc));
+        assert!(is_job_due_with(
+            &mk(Some(yest_nine), eight_am, true),
+            nine_am,
+            utc
+        ));
         // Before the scheduled minute (now 08:00) → not due.
-        assert!(!is_job_due_with(&mk(Some(yest_nine), eight_am, true), eight_am, utc));
+        assert!(!is_job_due_with(
+            &mk(Some(yest_nine), eight_am, true),
+            eight_am,
+            utc
+        ));
         // CATCH-UP: never fired, created 08:00, now 10:00 (missed 09:00) → due.
         assert!(is_job_due_with(&mk(None, eight_am, true), ten_am, utc));
         // NO DOUBLE-FIRE: just fired at 09:00, still 09:00 → next run tomorrow → not due.
-        assert!(!is_job_due_with(&mk(Some(nine_am), eight_am, true), nine_am, utc));
+        assert!(!is_job_due_with(
+            &mk(Some(nine_am), eight_am, true),
+            nine_am,
+            utc
+        ));
         // Per-task disabled → never due.
-        assert!(!is_job_due_with(&mk(Some(yest_nine), eight_am, false), nine_am, utc));
+        assert!(!is_job_due_with(
+            &mk(Some(yest_nine), eight_am, false),
+            nine_am,
+            utc
+        ));
     }
 }

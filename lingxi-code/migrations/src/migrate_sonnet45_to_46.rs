@@ -36,7 +36,11 @@ pub async fn run(env: &MigrationEnv) {
         return;
     }
 
-    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
+    let sp = settings_path(
+        SettingsSource::User,
+        &env.lingxi_config_home,
+        &env.project_dir,
+    );
     let Some(model) = read_settings_map(&sp)
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from))
@@ -63,7 +67,10 @@ pub async fn run(env: &MigrationEnv) {
         .unwrap_or(0);
     if num_startups > 1 {
         if let Err(e) = global_config::save_map(&env.global_config_path, |mut m| {
-            m.insert("sonnet45To46MigrationTimestamp".into(), json!(MigrationEnv::now_ms()));
+            m.insert(
+                "sonnet45To46MigrationTimestamp".into(),
+                json!(MigrationEnv::now_ms()),
+            );
             m
         }) {
             // TS `saveGlobalConfig` throws here, before logEvent (no catch in
@@ -94,7 +101,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }
@@ -122,7 +132,10 @@ mod tests {
         let mut env = test_env(&t);
         env.ctx.subscription_type = Some(SubscriptionType::Max);
         run(&env).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("sonnet[1m]"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("sonnet[1m]")
+        );
         let m = crate::global_config::read_map(&t.global).unwrap();
         assert!(m["sonnet45To46MigrationTimestamp"].is_i64());
 
@@ -134,7 +147,10 @@ mod tests {
         let mut env2 = test_env(&t2);
         env2.ctx.subscription_type = Some(SubscriptionType::Max);
         run(&env2).await;
-        assert_eq!(read_settings_map(&sp2).unwrap()["model"], serde_json::json!("sonnet"));
+        assert_eq!(
+            read_settings_map(&sp2).unwrap()["model"],
+            serde_json::json!("sonnet")
+        );
         let m2 = crate::global_config::read_map(&t2.global).unwrap();
         assert!(m2.get("sonnet45To46MigrationTimestamp").is_none());
     }
@@ -156,7 +172,10 @@ mod tests {
         run(&env).await;
         let ev = events.lock().unwrap();
         assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].0, telemetry::tengu::migration::SONNET45_TO_46_MIGRATION);
+        assert_eq!(
+            ev[0].0,
+            telemetry::tengu::migration::SONNET45_TO_46_MIGRATION
+        );
         assert_eq!(
             ev[0].1,
             serde_json::json!({"from_model": "sonnet-4-5-20250929[1m]", "has_1m": true})
@@ -176,7 +195,10 @@ mod tests {
             let mut env = test_env(&t);
             env.ctx.subscription_type = Some(tier);
             run(&env).await;
-            assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("sonnet"));
+            assert_eq!(
+                read_settings_map(&sp).unwrap()["model"],
+                serde_json::json!("sonnet")
+            );
         }
     }
 

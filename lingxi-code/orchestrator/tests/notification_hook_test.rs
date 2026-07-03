@@ -155,10 +155,10 @@ fn orch_with(hooks: Arc<HookExecutorImpl>) -> ConversationOrchestrator {
 async fn fire_notification_dispatches_byte_faithful_idle_prompt() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook("record-notification", HookEventType::Notification));
+    registry.write().await.register(builtin_hook(
+        "record-notification",
+        HookEventType::Notification,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
     let orch = orch_with(Arc::new(exec));
@@ -182,10 +182,10 @@ async fn fire_notification_dispatches_byte_faithful_idle_prompt() {
 #[tokio::test]
 async fn failing_notification_hook_does_not_break_fire() {
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook("broken-notification", HookEventType::Notification));
+    registry.write().await.register(builtin_hook(
+        "broken-notification",
+        HookEventType::Notification,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(FailingHandler));
     let orch = orch_with(Arc::new(exec));
@@ -230,7 +230,11 @@ async fn has_notification_hook_gate_is_event_type_specific() {
         .write()
         .await
         .register(builtin_hook("some-stop-hook", HookEventType::Stop));
-    let exec = HookExecutorImpl::new(registry.clone(), Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    let exec = HookExecutorImpl::new(
+        registry.clone(),
+        Arc::new(UnusedHttp),
+        Arc::new(UnusedRuntime),
+    );
     let orch = orch_with(Arc::new(exec));
     assert!(
         !orch.has_notification_hook().await,
@@ -238,10 +242,10 @@ async fn has_notification_hook_gate_is_event_type_specific() {
     );
 
     // Now register a Notification hook: gate flips true.
-    registry
-        .write()
-        .await
-        .register(builtin_hook("record-notification", HookEventType::Notification));
+    registry.write().await.register(builtin_hook(
+        "record-notification",
+        HookEventType::Notification,
+    ));
     assert!(
         orch.has_notification_hook().await,
         "gate must report true once a Notification hook is registered"

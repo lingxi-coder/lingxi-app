@@ -213,10 +213,7 @@ mod tests {
 
     #[test]
     fn multiple_refs_in_one_string() {
-        let r = expand(
-            "${A}/${B}/${C:-def}/${MISSING}",
-            &[("A", "1"), ("B", "2")],
-        );
+        let r = expand("${A}/${B}/${C:-def}/${MISSING}", &[("A", "1"), ("B", "2")]);
         assert_eq!(r.expanded, "1/2/def/${MISSING}");
         assert_eq!(r.missing_vars, vec!["MISSING".to_string()]);
     }

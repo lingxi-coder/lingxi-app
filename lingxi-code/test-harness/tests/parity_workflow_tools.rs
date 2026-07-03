@@ -12,9 +12,7 @@ use telemetry::tengu::tool::{
 };
 use test_harness::parity::load_fixture;
 use tool_plan::plan_mode::{PLAN_MODE_ENTER_MARKER, PLAN_MODE_EXIT_MARKER};
-use tool_task::todo_write::{
-    TODO_STATE_COMPLETED, TODO_STATE_IN_PROGRESS, TODO_STATE_PENDING,
-};
+use tool_task::todo_write::{TODO_STATE_COMPLETED, TODO_STATE_IN_PROGRESS, TODO_STATE_PENDING};
 use tool_worktree::worktree::{
     flatten_slug, validate_worktree_slug, MAX_WORKTREE_SLUG_LENGTH, WORKTREE_BRANCH_PREFIX,
     WORKTREE_FLATTEN_CHAR, WORKTREE_PATH_SEGMENT,

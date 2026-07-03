@@ -305,9 +305,8 @@ fn build_autonomous(loop_file: Option<&LoopFile>, dynamic: bool, interval: &str)
     // `d` — the inlined-instructions section header.
     let header = match loop_file {
         Some(f) => format!("## Loop tasks (from {})", f.path.display()),
-        None => {
-            "## Autonomous-loop instructions (for the immediate execution and every fire)".to_string()
-        }
+        None => "## Autonomous-loop instructions (for the immediate execution and every fire)"
+            .to_string(),
     };
     // `p` — the inlined instruction body. Absent loop.md → log activation +
     // preamble (binary `else QVe.logAutonomousLoopActivation(),p=…preamble`).
@@ -596,17 +595,18 @@ mod tests {
         // a(null, u=false, i="10m") — the autonomous-default cron prompt.
         assert_eq!(build_autonomous(None, false, "10m"), fixture("a_auto_cron"));
         // Sanity: the inlined body IS the binary default preamble (aJr).
-        assert!(build_autonomous(None, false, "10m")
-            .ends_with(tool_cron::AUTONOMOUS_LOOP_PREAMBLE));
+        assert!(build_autonomous(None, false, "10m").ends_with(tool_cron::AUTONOMOUS_LOOP_PREAMBLE));
     }
 
     #[test]
     fn autonomous_dynamic_builder_byte_exact() {
         let _g = no_persistent_guard();
         // a(null, u=true, i unused) — the autonomous-default dynamic-pacing prompt.
-        assert_eq!(build_autonomous(None, true, "10m"), fixture("a_auto_dynamic"));
-        assert!(build_autonomous(None, true, "10m")
-            .ends_with(tool_cron::AUTONOMOUS_LOOP_PREAMBLE));
+        assert_eq!(
+            build_autonomous(None, true, "10m"),
+            fixture("a_auto_dynamic")
+        );
+        assert!(build_autonomous(None, true, "10m").ends_with(tool_cron::AUTONOMOUS_LOOP_PREAMBLE));
     }
 
     #[test]
@@ -657,7 +657,9 @@ mod tests {
         // guard() clears the prompt/dynamic flags → branch 3 only.
         // Empty → dZm usage, prompt → fZm cron.
         assert_eq!(LoopPromptFn.build(""), USAGE_MESSAGE);
-        assert!(LoopPromptFn.build("5m /foo").starts_with("# /loop — schedule a recurring prompt"));
+        assert!(LoopPromptFn
+            .build("5m /foo")
+            .starts_with("# /loop — schedule a recurring prompt"));
         // No autonomous/dynamic headers leak in.
         assert!(!LoopPromptFn.build("").contains("autonomous default"));
     }

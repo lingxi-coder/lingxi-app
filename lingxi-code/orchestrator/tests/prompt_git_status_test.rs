@@ -120,7 +120,9 @@ snapshot in time, and will not update during the conversation.\n\n"
 
     // The rendered block prefixes the `gitStatus: ` key (claude-code `WZa`).
     let block = git_status::render_git_status_block(tmp.path()).expect("block");
-    assert!(block.starts_with("gitStatus: This is the git status at the start of the conversation."));
+    assert!(
+        block.starts_with("gitStatus: This is the git status at the start of the conversation.")
+    );
 }
 
 #[test]

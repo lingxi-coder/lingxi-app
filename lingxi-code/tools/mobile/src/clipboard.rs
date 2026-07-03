@@ -6,7 +6,6 @@
 //! camera/voice/share seams) — there is no user-facing UI affordance. The two
 //! actions are `set` (write `text`) and `get` (read the current contents).
 
-
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -130,7 +129,10 @@ impl Tool for ClipboardTool {
             ToolError::Internal("clipboard not available on this platform".into())
         })?;
 
-        let action = input.get("action").and_then(Value::as_str).unwrap_or_default();
+        let action = input
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
 
         let data = match action {
             "set" => {

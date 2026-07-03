@@ -53,8 +53,7 @@ impl FileSystem for InMemoryFs {
     async fn watch(
         &self,
         _: &str,
-    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
-    {
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError> {
         Err(FsError::Io("not supported".into()))
     }
     async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
@@ -186,7 +185,11 @@ async fn spawn_invokes_handler_and_returns_handler_task_id() {
 
     // And it differs from a `create()` placeholder id for the same type.
     let created = registry
-        .create(TaskType::InProcessTeammate, teammate_input(), "placeholder".into())
+        .create(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "placeholder".into(),
+        )
         .await
         .unwrap();
     assert_ne!(
@@ -266,7 +269,10 @@ async fn spawn_local_agent_dispatches_once_registered() {
     let state = registry.get(&id).await.expect("LocalAgent task is tracked");
     match state {
         TaskState::LocalAgent(a) => {
-            assert!(a.is_backgrounded, "is_backgrounded threads through from input");
+            assert!(
+                a.is_backgrounded,
+                "is_backgrounded threads through from input"
+            );
             assert_eq!(a.prompt, "do the work");
         }
         other => panic!("expected a LocalAgent state, got {other:?}"),
@@ -324,7 +330,11 @@ async fn team_spawn_seam_spawns_real_teammate() {
     // Non-empty, handler-generated id (NOT the worker AgentId).
     assert!(!task_id.is_empty(), "seam returns a non-empty task_id");
     assert_eq!(task_id, "tseamid", "seam returns the handler-generated id");
-    assert_eq!(handler.spawn_count(), 1, "the teammate handler ran exactly once");
+    assert_eq!(
+        handler.spawn_count(),
+        1,
+        "the teammate handler ran exactly once"
+    );
 
     // The spawned task is tracked under the handler id (so a later kill
     // routes back to the owning handler).
@@ -491,10 +501,7 @@ async fn seam_send_message_unknown_task_is_terminated() {
     let (_d, registry) = make_registry();
     let seam: &dyn TeamSpawnSeam = &registry;
     // Nothing spawned ⇒ the id is not in the spawned-id index.
-    let err = seam
-        .send_message("nope", "hi".into())
-        .await
-        .unwrap_err();
+    let err = seam.send_message("nope", "hi".into()).await.unwrap_err();
     assert!(
         matches!(err, TeamSpawnError::Terminated),
         "a non-existent task maps to Terminated; got {err:?}"
@@ -602,10 +609,13 @@ async fn registry_with_firer(
         fs.clone(),
     ));
     let firer = RecordingFirer::new();
-    let registry = TaskRegistry::new(runtime, fs, out_mgr)
-        .with_task_completed_firer(firer.clone());
+    let registry = TaskRegistry::new(runtime, fs, out_mgr).with_task_completed_firer(firer.clone());
     let task_id = registry
-        .create(TaskType::LocalBash, teammate_input(), description.to_string())
+        .create(
+            TaskType::LocalBash,
+            teammate_input(),
+            description.to_string(),
+        )
         .await
         .unwrap();
     (dir, registry, firer, task_id)
@@ -613,8 +623,7 @@ async fn registry_with_firer(
 
 #[tokio::test]
 async fn completed_transition_fires_byte_faithful_payload() {
-    let (_d, registry, firer, task_id) =
-        registry_with_firer("ship the parity port").await;
+    let (_d, registry, firer, task_id) = registry_with_firer("ship the parity port").await;
 
     let updated = registry
         .set_status(&task_id, TaskStatus::Completed)
@@ -623,7 +632,11 @@ async fn completed_transition_fires_byte_faithful_payload() {
     assert_eq!(updated.base().status, TaskStatus::Completed);
 
     let recorded = firer.recorded();
-    assert_eq!(recorded.len(), 1, "exactly one TaskCompleted fire: {recorded:?}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "exactly one TaskCompleted fire: {recorded:?}"
+    );
     let f = &recorded[0];
     assert_eq!(f.task_id, task_id);
     assert_eq!(f.status, "completed");
@@ -649,7 +662,11 @@ async fn failed_transition_also_fires() {
         .unwrap();
 
     let recorded = firer.recorded();
-    assert_eq!(recorded.len(), 1, "a Failed transition fires TaskCompleted: {recorded:?}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "a Failed transition fires TaskCompleted: {recorded:?}"
+    );
     assert_eq!(recorded[0].status, "failed");
     assert_eq!(recorded[0].task_subject, "do the thing");
 }
@@ -747,8 +764,7 @@ impl hooks::TaskCreatedFirer for RecordingCreatedFirer {
     }
 }
 
-fn registry_with_created_firer() -> (tempfile::TempDir, TaskRegistry, Arc<RecordingCreatedFirer>)
-{
+fn registry_with_created_firer() -> (tempfile::TempDir, TaskRegistry, Arc<RecordingCreatedFirer>) {
     let dir = tempdir().unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let runtime = Arc::new(MockRuntimeSpawner::default());
@@ -757,8 +773,7 @@ fn registry_with_created_firer() -> (tempfile::TempDir, TaskRegistry, Arc<Record
         fs.clone(),
     ));
     let firer = RecordingCreatedFirer::new();
-    let registry =
-        TaskRegistry::new(runtime, fs, out_mgr).with_task_created_firer(firer.clone());
+    let registry = TaskRegistry::new(runtime, fs, out_mgr).with_task_created_firer(firer.clone());
     (dir, registry, firer)
 }
 
@@ -772,7 +787,11 @@ async fn create_fires_byte_faithful_task_created_payload() {
         .unwrap();
 
     let recorded = firer.recorded();
-    assert_eq!(recorded.len(), 1, "exactly one TaskCreated fire: {recorded:?}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "exactly one TaskCreated fire: {recorded:?}"
+    );
     let f = &recorded[0];
     assert_eq!(f.task_id, task_id);
     // Wire payload (`TaskCreatedHookInputSchema`): subject sources from the
@@ -859,11 +878,7 @@ impl FileSystem for ExclusiveCountingFs {
             total_lines,
         })
     }
-    async fn write_file(
-        &self,
-        path: &str,
-        body: &str,
-    ) -> Result<(), traits::filesystem::FsError> {
+    async fn write_file(&self, path: &str, body: &str) -> Result<(), traits::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -891,11 +906,7 @@ impl FileSystem for ExclusiveCountingFs {
     > {
         Err(traits::filesystem::FsError::Io("nope".into()))
     }
-    async fn append_file(
-        &self,
-        path: &str,
-        body: &str,
-    ) -> Result<(), traits::filesystem::FsError> {
+    async fn append_file(&self, path: &str, body: &str) -> Result<(), traits::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -1067,7 +1078,10 @@ async fn mark_notified_on_running_task_keeps_it() {
     registry.mark_notified(&id).await.unwrap();
 
     let state = registry.get(&id).await.expect("non-terminal task survives");
-    assert!(state.base().notified, "the notified flag is set even when kept");
+    assert!(
+        state.base().notified,
+        "the notified flag is set even when kept"
+    );
 }
 
 #[tokio::test]
@@ -1113,10 +1127,20 @@ async fn evict_terminal_tasks_sweeps_terminal_notified_only() {
     registry.mark_notified(&c).await.unwrap();
 
     let evicted = registry.evict_terminal_tasks().await;
-    assert_eq!(evicted, vec![a.clone()], "only the terminal+notified task is swept");
+    assert_eq!(
+        evicted,
+        vec![a.clone()],
+        "only the terminal+notified task is swept"
+    );
     assert!(registry.get(&a).await.is_none());
-    assert!(registry.get(&b).await.is_some(), "terminal but un-notified survives");
-    assert!(registry.get(&c).await.is_some(), "notified but non-terminal survives");
+    assert!(
+        registry.get(&b).await.is_some(),
+        "terminal but un-notified survives"
+    );
+    assert!(
+        registry.get(&c).await.is_some(),
+        "notified but non-terminal survives"
+    );
 }
 
 // ---- T35: take_pending_task_notifications drain --------------------------
@@ -1143,7 +1167,9 @@ async fn take_pending_drains_terminal_bash_once_with_exit_code() {
     assert_eq!(n.exit_code, Some(0), "local_bash carries its exit_code");
     assert!(n.error.is_none());
     assert!(
-        n.output_path.as_deref().is_some_and(|p| p.ends_with(&format!("{id}.output"))),
+        n.output_path
+            .as_deref()
+            .is_some_and(|p| p.ends_with(&format!("{id}.output"))),
         "output_path is the spool path: {:?}",
         n.output_path
     );
@@ -1297,9 +1323,15 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
         Some("w-run")
     );
     // A completed workflow with that id is NOT found (resume allowed).
-    assert_eq!(registry.find_running_workflow_by_run_id("wf_bbb").await, None);
+    assert_eq!(
+        registry.find_running_workflow_by_run_id("wf_bbb").await,
+        None
+    );
     // Unknown id → None.
-    assert_eq!(registry.find_running_workflow_by_run_id("wf_zzz").await, None);
+    assert_eq!(
+        registry.find_running_workflow_by_run_id("wf_zzz").await,
+        None
+    );
 }
 
 #[tokio::test]
@@ -1441,10 +1473,17 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
         .await;
 
     let drained = registry.take_pending_task_notifications().await;
-    assert_eq!(drained.len(), 1, "only the terminal+un-notified task drains");
+    assert_eq!(
+        drained.len(),
+        1,
+        "only the terminal+un-notified task drains"
+    );
     assert_eq!(drained[0].task_id, fresh);
 
     // The already-notified task and the pending task both survive untouched.
-    assert!(registry.get("bnotified").await.is_some(), "already-notified survives");
+    assert!(
+        registry.get("bnotified").await.is_some(),
+        "already-notified survives"
+    );
     assert!(registry.get(&pending).await.is_some(), "pending survives");
 }

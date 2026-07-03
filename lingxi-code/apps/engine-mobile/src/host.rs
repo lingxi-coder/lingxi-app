@@ -36,9 +36,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use llm_client::oauth::anthropic::handle::OAuthHandle;
 use async_trait::async_trait;
 use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
@@ -51,6 +48,10 @@ use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
 use command_api::RegistrySlashDispatcher;
+use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
+use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use llm_client::oauth::anthropic::handle::OAuthHandle;
+use llm_client::LlmTransportBridge;
 use llm_client::{DefaultLlmClient, Transport};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
@@ -61,7 +62,6 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use llm_client::LlmTransportBridge;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use tokio::sync::{Mutex, RwLock};
@@ -472,9 +472,9 @@ pub async fn build_mobile_inner(
     // `/login` is short-circuited with a clear message below (it cannot store
     // tokens); a real injected store flips `oauth_supported` true and enables
     // subscription login. Computed before `storage` moves into CredentialManager.
-    let storage: Arc<dyn traits::SecureStorage> = platform.secure_storage().unwrap_or_else(|| {
-        Arc::new(platform_posix_minimal::PlainTextSecureStorage::new())
-    });
+    let storage: Arc<dyn traits::SecureStorage> = platform
+        .secure_storage()
+        .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
     let oauth_supported = traits::SecureStorage::is_encrypted(storage.as_ref());
 
     // Audit fix (telemetry parity): ONE shared AnalyticsBus drives the whole
@@ -967,7 +967,10 @@ pub async fn build_mobile_inner(
         )
         .await,
     );
-    let tools = Arc::new(mobile_tool_registry_with_skill_loader(tool_ctx, skill_loader));
+    let tools = Arc::new(mobile_tool_registry_with_skill_loader(
+        tool_ctx,
+        skill_loader,
+    ));
 
     // P0.1 ACTIVATION on mobile (gated, default OFF) — the same gate as desktop,
     // `LINGXI_MEMDIR_PREFETCH`. When truthy, wire the memdir-backed memory
@@ -979,8 +982,7 @@ pub async fn build_mobile_inner(
     // off unless the host app explicitly sets it. A missing/unusable key makes the
     // side query fail → empty surfaced set (never breaks a turn).
     let memdir_prefetch =
-        if traits::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref())
-        {
+        if traits::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref()) {
             // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
             // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
             let home = cfg
@@ -1480,7 +1482,8 @@ impl MobileEngineHandle {
                             if let Err(err) =
                                 orch.run_turn_streaming_with_cancel(&prompt, cancel).await
                             {
-                                sink.emit(client_adapter::map_orchestrator_error(&err)).await;
+                                sink.emit(client_adapter::map_orchestrator_error(&err))
+                                    .await;
                             }
                         });
                     }
@@ -2079,9 +2082,15 @@ impl cron::CronJobFirer for MobileTurnFirer {
             text: captured.clone(),
         });
         let sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
-        let rt = build_mobile_inner(self.cfg.clone(), self.platform.clone(), listener, sink, None)
-            .await
-            .map_err(|e| e.to_string())?;
+        let rt = build_mobile_inner(
+            self.cfg.clone(),
+            self.platform.clone(),
+            listener,
+            sink,
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         let run = rt.orchestrator.run_turn_streaming(prompt);
         let result = match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
@@ -2243,9 +2252,7 @@ impl MobileEngineHandle {
         doc.tasks.push(task.clone());
         fs.write_file(&path_str, &cron::tasks_file::serialize_tasks(&doc))
             .await
-            .map_err(|e| {
-                MobileEngineError::Internal(format!("write scheduled_tasks.json: {e}"))
-            })?;
+            .map_err(|e| MobileEngineError::Internal(format!("write scheduled_tasks.json: {e}")))?;
         Ok(CronTaskDto {
             human: tool_cron::schedule_cron::cron_to_human(&task.cron),
             next_fire_ms: task_next_fire_ms(&task.cron, now_ms, None, now),
@@ -2550,7 +2557,8 @@ mod tests {
                 &self,
                 service: &str,
                 account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+            ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError>
+            {
                 Ok(self
                     .map
                     .lock()

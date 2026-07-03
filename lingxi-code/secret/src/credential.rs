@@ -485,9 +485,8 @@ impl CredentialManager {
 
         let access = String::from_utf8(access_raw.expose_secret_bytes().to_vec())
             .map_err(|_| CredentialError::Unavailable)?;
-        let meta: OpenAiOAuthSessionMeta =
-            serde_json::from_slice(meta_raw.expose_secret_bytes())
-                .map_err(|_| CredentialError::Unavailable)?;
+        let meta: OpenAiOAuthSessionMeta = serde_json::from_slice(meta_raw.expose_secret_bytes())
+            .map_err(|_| CredentialError::Unavailable)?;
 
         let refresh = match self
             .storage
@@ -645,7 +644,9 @@ mod oauth_tests {
         let got = cm.get_oauth_tokens().await.expect("get").expect("present");
         assert_eq!(got.access_token.expose_secret(), "access-abc");
         assert_eq!(
-            got.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
+            got.refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().clone()),
             Some("refresh-xyz".to_string())
         );
         assert_eq!(got.expires_at, expires);
@@ -695,37 +696,67 @@ mod oauth_tests {
     #[tokio::test]
     async fn provider_key_round_trips() {
         let (_storage, cm) = manager();
-        cm.set_provider_key("openrouter", "sk-or-secret").await.expect("set");
-        let got = cm.get_provider_key("openrouter").await.expect("get").expect("present");
+        cm.set_provider_key("openrouter", "sk-or-secret")
+            .await
+            .expect("set");
+        let got = cm
+            .get_provider_key("openrouter")
+            .await
+            .expect("get")
+            .expect("present");
         assert_eq!(got.expose_secret(), "sk-or-secret");
     }
 
     #[tokio::test]
     async fn get_provider_key_returns_none_when_absent() {
         let (_storage, cm) = manager();
-        assert!(cm.get_provider_key("deepseek").await.expect("get").is_none());
+        assert!(cm
+            .get_provider_key("deepseek")
+            .await
+            .expect("get")
+            .is_none());
     }
 
     #[tokio::test]
     async fn set_provider_key_overwrites_previous() {
         let (_storage, cm) = manager();
-        cm.set_provider_key("glm-coding", "old-key").await.expect("first set");
-        cm.set_provider_key("glm-coding", "new-key").await.expect("second set");
-        let got = cm.get_provider_key("glm-coding").await.expect("get").expect("present");
+        cm.set_provider_key("glm-coding", "old-key")
+            .await
+            .expect("first set");
+        cm.set_provider_key("glm-coding", "new-key")
+            .await
+            .expect("second set");
+        let got = cm
+            .get_provider_key("glm-coding")
+            .await
+            .expect("get")
+            .expect("present");
         assert_eq!(got.expose_secret(), "new-key");
     }
 
     #[tokio::test]
     async fn provider_keys_are_isolated_by_id() {
         let (_storage, cm) = manager();
-        cm.set_provider_key("openrouter", "key-a").await.expect("set a");
-        cm.set_provider_key("deepseek", "key-b").await.expect("set b");
+        cm.set_provider_key("openrouter", "key-a")
+            .await
+            .expect("set a");
+        cm.set_provider_key("deepseek", "key-b")
+            .await
+            .expect("set b");
         assert_eq!(
-            cm.get_provider_key("openrouter").await.expect("get a").expect("present a").expose_secret(),
+            cm.get_provider_key("openrouter")
+                .await
+                .expect("get a")
+                .expect("present a")
+                .expose_secret(),
             "key-a"
         );
         assert_eq!(
-            cm.get_provider_key("deepseek").await.expect("get b").expect("present b").expose_secret(),
+            cm.get_provider_key("deepseek")
+                .await
+                .expect("get b")
+                .expect("present b")
+                .expose_secret(),
             "key-b"
         );
     }
@@ -733,7 +764,9 @@ mod oauth_tests {
     #[tokio::test]
     async fn provider_key_persisted_under_lingxi_service_with_generic_kind() {
         let (storage, cm) = manager();
-        cm.set_provider_key("github-copilot", "ghu_token").await.expect("set");
+        cm.set_provider_key("github-copilot", "ghu_token")
+            .await
+            .expect("set");
         let raw = storage
             .retrieve("lingxi", "provider-key-github-copilot")
             .await
@@ -807,11 +840,7 @@ mod oauth_tests {
             .await
             .expect("store");
         cm.delete_openai_oauth_tokens().await.expect("delete");
-        assert!(cm
-            .get_openai_oauth_tokens()
-            .await
-            .expect("get")
-            .is_none());
+        assert!(cm.get_openai_oauth_tokens().await.expect("get").is_none());
         // Second delete on an empty store is not an error.
         cm.delete_openai_oauth_tokens()
             .await
@@ -857,7 +886,11 @@ mod oauth_tests {
             .await
             .expect("store openai");
 
-        let ant = cm.get_oauth_tokens().await.expect("get ant").expect("present");
+        let ant = cm
+            .get_oauth_tokens()
+            .await
+            .expect("get ant")
+            .expect("present");
         assert_eq!(ant.access_token.expose_secret(), "ant-acc");
 
         let oai = cm
@@ -868,7 +901,9 @@ mod oauth_tests {
         assert_eq!(oai.access_token.expose_secret(), "oai-acc");
 
         // Delete OpenAI — Anthropic survives.
-        cm.delete_openai_oauth_tokens().await.expect("delete openai");
+        cm.delete_openai_oauth_tokens()
+            .await
+            .expect("delete openai");
         assert!(cm.get_openai_oauth_tokens().await.expect("get").is_none());
         assert!(cm.get_oauth_tokens().await.expect("get").is_some());
     }

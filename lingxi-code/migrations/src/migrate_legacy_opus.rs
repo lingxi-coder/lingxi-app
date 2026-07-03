@@ -27,7 +27,11 @@ pub async fn run(env: &MigrationEnv) {
         return;
     }
 
-    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
+    let sp = settings_path(
+        SettingsSource::User,
+        &env.lingxi_config_home,
+        &env.project_dir,
+    );
     let Some(model) = read_settings_map(&sp)
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from))
@@ -77,7 +81,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }
@@ -130,7 +137,10 @@ mod tests {
         run(&test_env(&t)).await;
         std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o644)).unwrap();
         // write failed → model unchanged…
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("claude-opus-4-1"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            json!("claude-opus-4-1")
+        );
         // …but the timestamp is STILL stamped (and the emit ran; bus is None).
         let m = crate::global_config::read_map(&t.global).unwrap();
         assert!(m["legacyOpusMigrationTimestamp"].is_i64());
@@ -174,12 +184,18 @@ mod tests {
         let mut env = test_env(&t);
         env.ctx.first_party = false;
         run(&env).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("claude-opus-4-0"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            json!("claude-opus-4-0")
+        );
 
         // env opt-out
         std::env::set_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP", "1");
         run(&test_env(&t)).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("claude-opus-4-0"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            json!("claude-opus-4-0")
+        );
         std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
 
         // non-legacy model

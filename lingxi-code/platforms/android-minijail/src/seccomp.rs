@@ -472,6 +472,9 @@ mod tests {
         let prog = build_net_deny_bpf(ARM64_SOCKET_NRS, AUDIT_ARCH_AARCH64);
         // If the arch tag is wrong, the arch guard fires.
         let ret = simulate(&prog, 63, 0xC000_003E /* x86_64 AUDIT_ARCH */);
-        assert_eq!(ret, SECCOMP_RET_KILL_PROCESS, "wrong arch must reach KILL_PROCESS");
+        assert_eq!(
+            ret, SECCOMP_RET_KILL_PROCESS,
+            "wrong arch must reach KILL_PROCESS"
+        );
     }
 }

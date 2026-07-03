@@ -277,7 +277,11 @@ mod tests {
             ("ReadMcpResource", "ReadMcpResourceTool"),
             ("ReadMcpResourceDir", "ReadMcpResourceDirTool"),
         ] {
-            assert_eq!(normalize_legacy_tool_name(legacy), canonical, "alias {legacy}");
+            assert_eq!(
+                normalize_legacy_tool_name(legacy),
+                canonical,
+                "alias {legacy}"
+            );
         }
         // Non-legacy names pass through unchanged.
         assert_eq!(normalize_legacy_tool_name("Bash"), "Bash");

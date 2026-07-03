@@ -9,22 +9,42 @@ mod tests {
 
     #[test]
     fn ssh_url_allowed_only_with_ssh_config() {
-        let ssh = crate::auth::SshConfig { private_key_path: "/x/id".into(), ..Default::default() };
+        let ssh = crate::auth::SshConfig {
+            private_key_path: "/x/id".into(),
+            ..Default::default()
+        };
         assert!(ssh_allowed("git@github.com:o/r.git", Some(&ssh)).is_ok());
         let err = ssh_allowed("git@github.com:o/r.git", None).unwrap_err();
         assert!(matches!(err, GitOpError::InvalidInput(ref m) if m.to_lowercase().contains("ssh")));
-        assert!(ssh_allowed("https://github.com/o/r.git", None).is_ok(), "https unaffected");
-        assert!(ssh_allowed("ssh://git@host/o/r.git", Some(&ssh)).is_ok(), "ssh:// allowed with config");
+        assert!(
+            ssh_allowed("https://github.com/o/r.git", None).is_ok(),
+            "https unaffected"
+        );
+        assert!(
+            ssh_allowed("ssh://git@host/o/r.git", Some(&ssh)).is_ok(),
+            "ssh:// allowed with config"
+        );
     }
 
     #[test]
     fn transport_allowlist_is_https_only() {
-        let ssh = crate::auth::SshConfig { private_key_path: "/x/id".into(), ..Default::default() };
+        let ssh = crate::auth::SshConfig {
+            private_key_path: "/x/id".into(),
+            ..Default::default()
+        };
         // https is the only allowed remote scheme in production.
         assert!(transport_allowed("https://github.com/o/r.git", None).is_ok());
-        assert!(transport_allowed("HTTPS://GitHub.com/o/r.git", None).is_ok(), "case-insensitive");
+        assert!(
+            transport_allowed("HTTPS://GitHub.com/o/r.git", None).is_ok(),
+            "case-insensitive"
+        );
         // http:// leaks the PAT in cleartext; git:// is unauthenticated — both rejected.
-        for bad in ["http://attacker/x.git", "git://attacker/x.git", "/data/data/pkg/db", "ftp://h/x"] {
+        for bad in [
+            "http://attacker/x.git",
+            "git://attacker/x.git",
+            "/data/data/pkg/db",
+            "ftp://h/x",
+        ] {
             let err = transport_allowed(bad, None).unwrap_err();
             assert!(
                 matches!(err, GitOpError::InvalidInput(ref m) if m.to_lowercase().contains("https")),
@@ -33,9 +53,15 @@ mod tests {
         }
         // SSH remotes still flow through the SSH credential gate.
         assert!(transport_allowed("git@github.com:o/r.git", Some(&ssh)).is_ok());
-        assert!(transport_allowed("git@github.com:o/r.git", None).is_err(), "ssh needs config");
+        assert!(
+            transport_allowed("git@github.com:o/r.git", None).is_err(),
+            "ssh needs config"
+        );
         // file:// is permitted only under cfg(test) (this suite relies on it).
-        assert!(transport_allowed("file:///tmp/x", None).is_ok(), "file:// allowed in tests");
+        assert!(
+            transport_allowed("file:///tmp/x", None).is_ok(),
+            "file:// allowed in tests"
+        );
     }
 
     /// Build a repo at `dir` with a known two-commit history:
@@ -678,7 +704,10 @@ mod tests {
             .unwrap();
         assert_eq!(remote_ref.target().unwrap(), second);
         let cfg = repo.config().unwrap();
-        assert_eq!(cfg.get_string(&format!("branch.{branch}.remote")).unwrap(), "origin");
+        assert_eq!(
+            cfg.get_string(&format!("branch.{branch}.remote")).unwrap(),
+            "origin"
+        );
         assert_eq!(
             cfg.get_string(&format!("branch.{branch}.merge")).unwrap(),
             format!("refs/heads/{branch}")
@@ -727,11 +756,9 @@ mod tests {
         push(&net, &repo_a, "origin", "").expect("A initial push");
 
         let clone_b = tempdir().unwrap();
-        let repo_b = git2::Repository::clone(
-            &format!("file://{}", bare.path().display()),
-            clone_b.path(),
-        )
-        .unwrap();
+        let repo_b =
+            git2::Repository::clone(&format!("file://{}", bare.path().display()), clone_b.path())
+                .unwrap();
         {
             let sig = git2::Signature::now("B", "b@example.com").unwrap();
             std::fs::write(clone_b.path().join("c.txt"), "gamma\n").unwrap();
@@ -769,7 +796,8 @@ mod tests {
     fn push_rejects_ssh_remote() {
         let work = tempdir().unwrap();
         let (repo, _f, _s) = init_history(work.path());
-        repo.remote("origin", "git@github.com:owner/repo.git").unwrap();
+        repo.remote("origin", "git@github.com:owner/repo.git")
+            .unwrap();
         let net = GitNetConfig::default();
         let err = push(&net, &repo, "origin", "").unwrap_err();
         assert!(matches!(err, GitOpError::InvalidInput(ref m) if m.contains("ssh")));

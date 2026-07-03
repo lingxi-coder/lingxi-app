@@ -20,11 +20,7 @@ use std::path::{Path, PathBuf};
 /// `sess:` prefix) so the filename matches the on-disk JSONL the writer/loader
 /// use and claude-code's `${sessionId}.jsonl`.
 #[must_use]
-pub fn main_transcript_path(
-    lingxi_home: &Path,
-    cwd: &str,
-    session_uuid: &str,
-) -> PathBuf {
+pub fn main_transcript_path(lingxi_home: &Path, cwd: &str, session_uuid: &str) -> PathBuf {
     session::jsonl::path::session_path(lingxi_home, cwd, session_uuid)
 }
 
@@ -70,7 +66,9 @@ mod tests {
         // `agent_transcript_path` resolves to (claude-code getAgentTranscriptPath).
         assert_eq!(
             got.join("agent-xyz.jsonl"),
-            PathBuf::from("/home/.lingxi/projects/-Users-me-proj/abc-123/subagents/agent-xyz.jsonl"),
+            PathBuf::from(
+                "/home/.lingxi/projects/-Users-me-proj/abc-123/subagents/agent-xyz.jsonl"
+            ),
         );
     }
 }

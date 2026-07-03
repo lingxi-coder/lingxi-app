@@ -169,7 +169,10 @@ fn settings_json_with_unknown_platform_still_parses_other_fields() {
     }))
     .expect("tier must not be dropped over an unknown platform");
     assert!(s.permissions.is_some());
-    assert_eq!(s.sandbox.unwrap().enabled_platforms.as_deref(), Some(&[][..]));
+    assert_eq!(
+        s.sandbox.unwrap().enabled_platforms.as_deref(),
+        Some(&[][..])
+    );
 }
 
 #[test]
@@ -230,9 +233,10 @@ fn network_emits_denied_domains_camelcase() {
 
 #[test]
 fn ripgrep_argv0_roundtrips() {
-    let cfg: SandboxRuntimeConfig =
-        serde_json::from_value(serde_json::json!({ "ripgrep": { "command": "rg", "argv0": "rg" } }))
-            .expect("parse ripgrep argv0");
+    let cfg: SandboxRuntimeConfig = serde_json::from_value(
+        serde_json::json!({ "ripgrep": { "command": "rg", "argv0": "rg" } }),
+    )
+    .expect("parse ripgrep argv0");
     assert_eq!(cfg.ripgrep.argv0, Some("rg".to_string()));
 
     // `argv0: None` is skipped on serialize (skip_serializing_if).

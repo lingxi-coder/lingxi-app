@@ -117,10 +117,7 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
         fx.settings.project_settings_file_suffix,
         ".lingxi/settings.json"
     );
-    assert_eq!(
-        fx.settings.env_prefix_priority,
-        vec!["LINGXI_".to_string()]
-    );
+    assert_eq!(fx.settings.env_prefix_priority, vec!["LINGXI_".to_string()]);
     assert_eq!(fx.settings.tengu_settings_events.len(), 3);
     assert!(fx
         .settings

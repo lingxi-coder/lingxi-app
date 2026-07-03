@@ -649,7 +649,9 @@ mod tests {
     #[test]
     fn append_redirect_outside_cwd_asks() {
         let a = check("echo x >> /var/log/out").expect("should ask");
-        assert!(a.message.starts_with("Output redirection to '/var/log/out' was blocked."));
+        assert!(a
+            .message
+            .starts_with("Output redirection to '/var/log/out' was blocked."));
     }
 
     #[test]
@@ -677,13 +679,17 @@ mod tests {
     fn stderr_redirect_outside_cwd_asks() {
         // `2> /etc/err` IS a file output to a path outside cwd.
         let a = check("echo x 2> /etc/err").expect("should ask");
-        assert!(a.message.starts_with("Output redirection to '/etc/err' was blocked."));
+        assert!(a
+            .message
+            .starts_with("Output redirection to '/etc/err' was blocked."));
     }
 
     #[test]
     fn ampersand_redirect_outside_cwd_asks() {
         let a = check("echo x &> /etc/both").expect("should ask");
-        assert!(a.message.starts_with("Output redirection to '/etc/both' was blocked."));
+        assert!(a
+            .message
+            .starts_with("Output redirection to '/etc/both' was blocked."));
     }
 
     // ── shell expansion in a redirect target → ask ─────────────────────────
@@ -691,21 +697,33 @@ mod tests {
     #[test]
     fn shell_expansion_in_redirect_target_asks() {
         let a = check("echo x > $HOME/foo").expect("should ask");
-        assert_eq!(a.message, "Shell expansion syntax in paths requires manual approval");
-        assert_eq!(a.reason, "Shell expansion syntax in paths requires manual approval");
+        assert_eq!(
+            a.message,
+            "Shell expansion syntax in paths requires manual approval"
+        );
+        assert_eq!(
+            a.reason,
+            "Shell expansion syntax in paths requires manual approval"
+        );
     }
 
     #[test]
     fn tilde_redirect_target_asks() {
         // `~` prefixed targets are flagged dangerous by hasDangerousExpansion.
         let a = check("echo x > ~/secret").expect("should ask");
-        assert_eq!(a.message, "Shell expansion syntax in paths requires manual approval");
+        assert_eq!(
+            a.message,
+            "Shell expansion syntax in paths requires manual approval"
+        );
     }
 
     #[test]
     fn glob_redirect_target_asks() {
         let a = check("echo x > *.sh").expect("should ask");
-        assert_eq!(a.message, "Shell expansion syntax in paths requires manual approval");
+        assert_eq!(
+            a.message,
+            "Shell expansion syntax in paths requires manual approval"
+        );
     }
 
     // ── process substitution → ask ─────────────────────────────────────────
@@ -824,7 +842,9 @@ mod tests {
     #[test]
     fn quoted_redirect_target_outside_cwd_asks() {
         let a = check("echo x > \"/etc/foo\"").expect("should ask");
-        assert!(a.message.starts_with("Output redirection to '/etc/foo' was blocked."));
+        assert!(a
+            .message
+            .starts_with("Output redirection to '/etc/foo' was blocked."));
     }
 
     #[test]

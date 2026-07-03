@@ -116,17 +116,26 @@ mod tests {
     #[test]
     fn chain_entry_carries_provider_and_model() {
         let e = ChainEntry {
-            provider_id: ProviderId::OpenAICompatible { name: "deepseek".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "deepseek".to_string(),
+            },
             model: "deepseek-chat".to_string(),
         };
         assert_eq!(e.model, "deepseek-chat");
-        assert_eq!(e.provider_id, ProviderId::OpenAICompatible { name: "deepseek".to_string() });
+        assert_eq!(
+            e.provider_id,
+            ProviderId::OpenAICompatible {
+                name: "deepseek".to_string()
+            }
+        );
     }
 
     #[test]
     fn credential_source_records_profile_and_env_fallback() {
         let s = CredentialSource {
-            provider_id: ProviderId::OpenAICompatible { name: "openrouter".to_string() },
+            provider_id: ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
             profile_name: "openrouter".to_string(),
             credential_id: "openrouter".to_string(),
             env_var: Some("OPENROUTER_API_KEY".to_string()),

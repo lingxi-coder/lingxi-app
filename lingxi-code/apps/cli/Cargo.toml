@@ -54,6 +54,7 @@ msgqueue = { path = "../../msgqueue" }
 llm-client = { path = "../../llm-client" }
 dirs = "5"
 tui = { path = "../../tui" }
+tui-rata = { path = "../../tui-rata" }
 session = { path = "../../session" }
 # M9-05: desktop TaskRegistry type (the `Runtime` bundle re-surfaces the handle
 # built by `engine_desktop::build` for the TUI poller).
@@ -74,6 +75,11 @@ permission = { path = "../../permission" }
 # direct CLI deps.
 mcp = { path = "../../mcp" }
 plugin = { path = "../../plugin" }
+# Phase 8 (tui-rata command registry): the `/skills` + `/memory` startup
+# snapshots — the same on-disk walks the iocraft screens used, captured once
+# into `tui_rata::session::SessionInfo` before the TUI loop starts.
+skill-api = { path = "../../skill-api" }
+memory = { path = "../../memory" }
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }

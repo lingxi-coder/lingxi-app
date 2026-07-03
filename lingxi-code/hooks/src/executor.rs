@@ -15,16 +15,15 @@ use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
     parse_response, ConfigChangePayload, CwdChangedPayload, ElicitationPayload,
-    ElicitationResultPayload, FileChangedPayload,
-    HookEventNameConfigChange, HookEventNameCwdChanged, HookEventNameElicitation,
-    HookEventNameElicitationResult,
-    HookEventNameFileChanged, HookEventNameInstructionsLoaded, HookEventNameNotification,
-    HookEventNamePermissionDenied, HookEventNamePermissionRequest, HookEventNamePost,
-    HookEventNamePostCompact, HookEventNamePostToolUseFailure, HookEventNamePre,
-    HookEventNamePreCompact, HookEventNameSessionEnd, HookEventNameSessionStart,
-    HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStart,
-    HookEventNameSubagentStop, HookEventNameTaskCompleted, HookEventNameTaskCreated,
-    HookEventNameMessageDisplay, HookEventNamePostToolBatch, HookEventNameTeammateIdle,
+    ElicitationResultPayload, FileChangedPayload, HookEventNameConfigChange,
+    HookEventNameCwdChanged, HookEventNameElicitation, HookEventNameElicitationResult,
+    HookEventNameFileChanged, HookEventNameInstructionsLoaded, HookEventNameMessageDisplay,
+    HookEventNameNotification, HookEventNamePermissionDenied, HookEventNamePermissionRequest,
+    HookEventNamePost, HookEventNamePostCompact, HookEventNamePostToolBatch,
+    HookEventNamePostToolUseFailure, HookEventNamePre, HookEventNamePreCompact,
+    HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
+    HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
+    HookEventNameTaskCompleted, HookEventNameTaskCreated, HookEventNameTeammateIdle,
     HookEventNameUserPromptExpansion, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
     HookEventNameWorktreeRemove, InstructionsLoadedPayload, MessageDisplayPayload,
     NotificationPayload, PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
@@ -48,7 +47,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use traits::subagent_spawn::SubagentSpawner;
-use traits::{HttpTransport, OutputStream, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner, Sandbox};
+use traits::{
+    HttpTransport, OutputStream, ProcessCommand, ProcessError, ProcessRunner, RuntimeSpawner,
+    Sandbox,
+};
 
 /// Default HTTP hook timeout (10 minutes — matches
 /// `claude-code/src/utils/hooks/execHttpHook.ts:12` `DEFAULT_HTTP_HOOK_TIMEOUT_MS`).
@@ -428,7 +430,11 @@ impl HookExecutorImpl {
     /// they never consume the deadline), and a strict no-op (default aggregate)
     /// when no `SessionEnd` hook is registered. The batch still stops early when
     /// the shared shutdown deadline elapses.
-    pub async fn execute_session_end(&self, event: HookEvent, ctx: HookContext) -> AggregateHookResult {
+    pub async fn execute_session_end(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+    ) -> AggregateHookResult {
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips the
         // SessionEnd batch entirely (the binary's `cH` head runs before the
         // SessionEnd deadline race too).
@@ -445,8 +451,7 @@ impl HookExecutorImpl {
         let env_value = std::env::var(SESSION_END_HOOKS_TIMEOUT_ENV).ok();
         let batch_timeout_ms =
             session_end_batch_timeout_ms(env_value.as_deref(), max_per_hook_timeout_ms(&matched));
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_millis(batch_timeout_ms);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(batch_timeout_ms);
 
         let mut agg = AggregateHookResult::default();
         let hook_event = format!("{:?}", event.event_type());
@@ -460,11 +465,7 @@ impl HookExecutorImpl {
                 // Emit hook_started BEFORE dispatch (for --include-hook-events).
                 if let Some(observer) = &self.hook_observer {
                     observer
-                        .emit_hook_started(
-                            &hook.id.to_string(),
-                            &hook.name,
-                            &hook_event,
-                        )
+                        .emit_hook_started(&hook.id.to_string(), &hook.name, &hook_event)
                         .await;
                 }
                 // Bound this hook by the remaining batch budget. Once the batch
@@ -606,11 +607,7 @@ impl HookExecutorImpl {
                 // Emit hook_started BEFORE dispatch (for --include-hook-events).
                 if let Some(observer) = &self.hook_observer {
                     observer
-                        .emit_hook_started(
-                            &hook.id.to_string(),
-                            &hook.name,
-                            &hook_event,
-                        )
+                        .emit_hook_started(&hook.id.to_string(), &hook.name, &hook_event)
                         .await;
                 }
                 // Synchronous path — unchanged from M5-06.
@@ -975,10 +972,7 @@ impl Dispatcher {
                 // `Evt()` is effectively false and the binary would omit it too; the
                 // same documented residual as the Bash spawn path.
                 child_env.insert("LINGXI".to_string(), "1".to_string());
-                child_env.insert(
-                    "LINGXI_SESSION_ID".to_string(),
-                    ctx.session_id.to_string(),
-                );
+                child_env.insert("LINGXI_SESSION_ID".to_string(), ctx.session_id.to_string());
                 child_env.insert("LINGXI_CHILD_SESSION".to_string(), "1".to_string());
                 if let Some(effort) = &ctx.effort {
                     child_env.insert("LINGXI_EFFORT".to_string(), effort.level.clone());
@@ -1131,9 +1125,7 @@ impl HookExecutorImpl {
             Some(q) => format!("{event_name}:{q}"),
             None => event_name,
         };
-        tracing::info!(
-            "Skipping hooks for {label} due to 'disableAllHooks' managed setting"
-        );
+        tracing::info!("Skipping hooks for {label} due to 'disableAllHooks' managed setting");
         Some(AggregateHookResult::default())
     }
 
@@ -1427,7 +1419,9 @@ fn build_lifecycle_envelope_body(
             Some(("Stop", serde_json::to_string(&payload).ok()?))
         }
         HookEvent::SubagentStop {
-            agent_id, agent_type, ..
+            agent_id,
+            agent_type,
+            ..
         } => {
             let payload = SubagentStopPayload {
                 hook_event_name: HookEventNameSubagentStop,

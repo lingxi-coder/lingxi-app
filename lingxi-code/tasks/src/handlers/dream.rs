@@ -51,8 +51,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use traits::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance, SubagentResult,
-    SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
+    BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
+    SubagentResult, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
 
 // Re-use the status-sink seam from the bash handler so callers wire a single
@@ -244,7 +244,9 @@ impl DreamHandler {
         let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
         for (task_id, rec) in pending {
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink.set_status(&task_id, TaskStatus::Killed).await;
+            self.status_sink
+                .set_status(&task_id, TaskStatus::Killed)
+                .await;
         }
     }
 }
@@ -445,7 +447,9 @@ impl Task for DreamHandler {
         }
         // Flip status to Killed regardless (best-effort; a worker that already
         // reported a terminal status simply gets a redundant Killed).
-        self.status_sink.set_status(task_id, TaskStatus::Killed).await;
+        self.status_sink
+            .set_status(task_id, TaskStatus::Killed)
+            .await;
         Ok(())
     }
 
@@ -769,7 +773,10 @@ mod tests {
             777,
         ));
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
 
         let handler = make_handler(spawner.clone(), mgr.clone(), sink.clone());
@@ -799,7 +806,10 @@ mod tests {
             .read(&spool_path, crate::output_manager::OutputOptions::default())
             .await
             .unwrap();
-        assert!(read.content.contains("\"consolidated\""), "content key spooled");
+        assert!(
+            read.content.contains("\"consolidated\""),
+            "content key spooled"
+        );
         assert!(
             read.content.contains("<total_tokens>777</total_tokens>"),
             "token usage spooled in the usage footer"
@@ -811,7 +821,10 @@ mod tests {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let spawner = MockSpawner::new(CannedResult::Failed("consolidation refused".into()));
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
 
         let handler = make_handler(spawner, mgr.clone(), sink.clone());
@@ -825,7 +838,10 @@ mod tests {
             .read(&spool_path, crate::output_manager::OutputOptions::default())
             .await
             .unwrap();
-        assert!(read.content.contains("consolidation refused"), "reason spooled");
+        assert!(
+            read.content.contains("consolidation refused"),
+            "reason spooled"
+        );
         // No usage footer on the failed path.
         assert!(!read.content.contains("<total_tokens>"));
     }
@@ -835,7 +851,10 @@ mod tests {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let spawner = MockSpawner::new(CannedResult::Err("pool full".into()));
         let dir = tempdir().unwrap();
-        let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let mgr = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let sink = Arc::new(RecordingSink::default());
 
         let handler = make_handler(spawner, mgr.clone(), sink.clone());

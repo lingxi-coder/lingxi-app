@@ -27,10 +27,8 @@ fn build_orch(cwd: std::path::PathBuf) -> ConversationOrchestrator {
 
 #[tokio::test]
 async fn setting_sources_includes_project_tier_when_its_file_exists() {
-    let tmp = std::env::temp_dir().join(format!(
-        "lx-status-setting-sources-{}",
-        std::process::id()
-    ));
+    let tmp =
+        std::env::temp_dir().join(format!("lx-status-setting-sources-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join(".lingxi")).unwrap();
     std::fs::write(tmp.join(".lingxi").join("settings.json"), b"{}").unwrap();

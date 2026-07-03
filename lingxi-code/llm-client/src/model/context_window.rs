@@ -45,7 +45,11 @@ pub const CONTEXT_1M_BETA_HEADER: &str = "context-1m-2025-08-07";
 /// `true` if 1M context is disabled via `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
 /// Mirrors `is1mContextDisabled`.
 fn is_1m_context_disabled() -> bool {
-    is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_1M_CONTEXT").ok().as_deref())
+    is_env_truthy(
+        std::env::var("CLAUDE_CODE_DISABLE_1M_CONTEXT")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// `true` if `model` carries an explicit `[1m]` suffix (case-insensitive),
@@ -283,10 +287,7 @@ fn parse_positive_i64(raw: &str) -> Option<u64> {
     let trimmed = raw.trim_start();
     // JS parseInt reads a leading run of digits (with optional sign). We accept
     // a clean unsigned integer, which covers every realistic override value.
-    let digits: String = trimmed
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
+    let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
         return None;
     }
@@ -345,27 +346,54 @@ mod tests {
 
     #[test]
     fn max_output_tokens_canonical_table() {
-        assert_eq!(max_output_tokens_for_model("claude-opus-4-6-20260101"), 64_000);
+        assert_eq!(
+            max_output_tokens_for_model("claude-opus-4-6-20260101"),
+            64_000
+        );
         assert_eq!(
             max_output_tokens_for_model("claude-sonnet-4-6-20251001"),
             32_000
         );
         assert_eq!(max_output_tokens_for_model("claude-opus-4-5-x"), 32_000);
-        assert_eq!(max_output_tokens_for_model("claude-sonnet-4-20250101"), 32_000);
+        assert_eq!(
+            max_output_tokens_for_model("claude-sonnet-4-20250101"),
+            32_000
+        );
         assert_eq!(max_output_tokens_for_model("claude-haiku-4-5-x"), 32_000);
         assert_eq!(max_output_tokens_for_model("claude-opus-4-1-x"), 32_000);
         // Binary YCe: opus-4-8/4-7/fable-5/mythos-5 → 64k (NOT the bare-opus-4 32k).
-        assert_eq!(max_output_tokens_for_model("claude-opus-4-8-20260115"), 64_000);
+        assert_eq!(
+            max_output_tokens_for_model("claude-opus-4-8-20260115"),
+            64_000
+        );
         assert_eq!(max_output_tokens_for_model("claude-opus-4-7-x"), 64_000);
         assert_eq!(max_output_tokens_for_model("claude-fable-5"), 64_000);
         assert_eq!(max_output_tokens_for_model("claude-mythos-5"), 64_000);
-        assert_eq!(max_output_tokens_for_model("claude-opus-4-20250514"), 32_000);
+        assert_eq!(
+            max_output_tokens_for_model("claude-opus-4-20250514"),
+            32_000
+        );
         assert_eq!(max_output_tokens_for_model("claude-3-opus-20240229"), 4_096);
-        assert_eq!(max_output_tokens_for_model("claude-3-sonnet-20240229"), 8_192);
-        assert_eq!(max_output_tokens_for_model("claude-3-haiku-20240307"), 4_096);
-        assert_eq!(max_output_tokens_for_model("claude-3-5-sonnet-20241022"), 8_192);
-        assert_eq!(max_output_tokens_for_model("claude-3-5-haiku-20241022"), 8_192);
-        assert_eq!(max_output_tokens_for_model("claude-3-7-sonnet-20250219"), 32_000);
+        assert_eq!(
+            max_output_tokens_for_model("claude-3-sonnet-20240229"),
+            8_192
+        );
+        assert_eq!(
+            max_output_tokens_for_model("claude-3-haiku-20240307"),
+            4_096
+        );
+        assert_eq!(
+            max_output_tokens_for_model("claude-3-5-sonnet-20241022"),
+            8_192
+        );
+        assert_eq!(
+            max_output_tokens_for_model("claude-3-5-haiku-20241022"),
+            8_192
+        );
+        assert_eq!(
+            max_output_tokens_for_model("claude-3-7-sonnet-20250219"),
+            32_000
+        );
         // Unknown model → default.
         assert_eq!(max_output_tokens_for_model("mystery-model"), 32_000);
     }
@@ -400,15 +428,24 @@ mod tests {
             context_window_for_model("claude-opus-4-8-20260115", &[]),
             200_000
         );
-        assert_eq!(max_output_tokens_for_model("claude-opus-4-8-20260115"), 64_000);
+        assert_eq!(
+            max_output_tokens_for_model("claude-opus-4-8-20260115"),
+            64_000
+        );
     }
 
     #[test]
     fn unregistered_non_claude_still_falls_back_to_claude_defaults() {
         // Parity: an unknown, unregistered non-Claude id keeps the 200k / 32k
         // defaults (the claude-code behavior) — the registry is additive only.
-        assert_eq!(context_window_for_model("totally-unregistered-xyz", &[]), 200_000);
-        assert_eq!(max_output_tokens_for_model("totally-unregistered-xyz"), 32_000);
+        assert_eq!(
+            context_window_for_model("totally-unregistered-xyz", &[]),
+            200_000
+        );
+        assert_eq!(
+            max_output_tokens_for_model("totally-unregistered-xyz"),
+            32_000
+        );
     }
 
     #[test]

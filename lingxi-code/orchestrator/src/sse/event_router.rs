@@ -269,18 +269,18 @@ pub async fn dispatch_event(
                 // Low-frequency server-side block preserved verbatim from the
                 // start event — appended to the assistant message unchanged so
                 // resume/replay JSONL bytes stay intact.
-                CompletedBlock::Preserved(block) => {
-                    Ok(RouterAction::AppendAssistantBlock(block))
-                }
+                CompletedBlock::Preserved(block) => Ok(RouterAction::AppendAssistantBlock(block)),
                 CompletedBlock::Skipped => Ok(RouterAction::Continue),
             }
         }
         LlmEvent::MessageDelta { delta, usage } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             {
-                let usage_val = usage.as_ref().map(|u| json!({
-                    "output_tokens": u.billable_tokens.output
-                }));
+                let usage_val = usage.as_ref().map(|u| {
+                    json!({
+                        "output_tokens": u.billable_tokens.output
+                    })
+                });
                 let mut delta_obj = serde_json::Map::new();
                 if let Some(sr) = &delta.stop_reason {
                     delta_obj.insert("stop_reason".into(), json!(sr));
@@ -361,10 +361,17 @@ fn reconstruct_content_block_json(block: &LlmContentBlock) -> Value {
         LlmContentBlock::ServerToolUse { id, name, input } => {
             json!({"type": "server_tool_use", "id": id, "name": name, "input": input})
         }
-        LlmContentBlock::ConnectorText { connector_text, signature } => {
+        LlmContentBlock::ConnectorText {
+            connector_text,
+            signature,
+        } => {
             json!({"type": "connector_text", "connector_text": connector_text, "signature": signature})
         }
-        LlmContentBlock::AdvisorToolResult { tool_use_id, content, is_error } => {
+        LlmContentBlock::AdvisorToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
             json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error})
         }
         _ => json!({"type": "unknown"}),
@@ -385,8 +392,12 @@ fn reconstruct_delta_json(delta: &ContentDelta) -> Value {
         ContentDelta::SignatureDelta { signature } => {
             json!({"type": "signature_delta", "signature": signature})
         }
-        ContentDelta::CitationsDelta { citation } => json!({"type": "citations_delta", "citation": citation}),
-        ContentDelta::ConnectorTextDelta { connector_text } => json!({"type": "connector_text_delta", "connector_text": connector_text}),
+        ContentDelta::CitationsDelta { citation } => {
+            json!({"type": "citations_delta", "citation": citation})
+        }
+        ContentDelta::ConnectorTextDelta { connector_text } => {
+            json!({"type": "connector_text_delta", "connector_text": connector_text})
+        }
     }
 }
 
@@ -459,7 +470,7 @@ mod tests {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
-                stop_details: None,
+                    stop_details: None,
                 },
                 usage: None,
             },
@@ -504,7 +515,9 @@ mod tests {
             provider_metadata: serde_json::Value::Null,
         };
         let action = dispatch_event(
-            LlmEvent::Completed { response: Box::new(resp) },
+            LlmEvent::Completed {
+                response: Box::new(resp),
+            },
             &mut acc,
             &out,
         )

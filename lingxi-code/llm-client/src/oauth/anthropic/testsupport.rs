@@ -221,7 +221,13 @@ pub fn mem_credential_manager(
     clock: Arc<dyn Clock>,
 ) -> Arc<secret::CredentialManager> {
     // Re-use a never-called HTTP mock for the credential manager's http field.
-    let http = MockHttp::new(vec![("__never__", Canned { status: 500, body: String::new() })]);
+    let http = MockHttp::new(vec![(
+        "__never__",
+        Canned {
+            status: 500,
+            body: String::new(),
+        },
+    )]);
     Arc::new(secret::CredentialManager::new(
         storage as Arc<dyn SecureStorage>,
         clock,

@@ -40,8 +40,8 @@ pub fn perm_mode_label(mode: PermissionMode) -> Option<String> {
 
 use crate::components::prompt_input::{mode_indicator, VimMode};
 use crate::render::truncate_to_width_ellipsis;
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// The mode-indicator label for the footer. `None` when vim is disabled
 /// (M6/default footer shows no mode line).

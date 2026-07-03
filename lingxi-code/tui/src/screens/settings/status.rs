@@ -13,9 +13,9 @@
 
 use iocraft::prelude::*;
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Dim placeholder for the empty session name (claude-code Status.tsx literal).
 pub const SESSION_NAME_PLACEHOLDER: &str = "/rename to add a name";

@@ -170,5 +170,8 @@ fn unrecognized_extra_key_tail_appended_after_trailer() {
         extra,
     };
     let s = serde_json::to_string(&msg).expect("ser");
-    assert!(s.ends_with(r#""version":"0.6.0","agentId":"agent-42"}"#), "{s}");
+    assert!(
+        s.ends_with(r#""version":"0.6.0","agentId":"agent-42"}"#),
+        "{s}"
+    );
 }

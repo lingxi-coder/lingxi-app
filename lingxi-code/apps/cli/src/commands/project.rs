@@ -205,8 +205,8 @@ fn purge_one(
     // path outside it (guards against any resolution edge that collapses the
     // encoded component to empty). The legitimate target is always a strict
     // descendant `<projects_root>/<encoded>`.
-    let safe_target = target.transcript_dir.starts_with(projects_root)
-        && target.transcript_dir != projects_root;
+    let safe_target =
+        target.transcript_dir.starts_with(projects_root) && target.transcript_dir != projects_root;
     if !safe_target {
         eprintln!(
             "  refusing to remove transcripts at an unsafe path: {}",
@@ -218,7 +218,10 @@ fn purge_one(
     // (1) Transcripts: `<config-home>/projects/<encoded>/`.
     if target.transcript_dir.exists() {
         if args.dry_run {
-            println!("  would remove transcripts: {}", target.transcript_dir.display());
+            println!(
+                "  would remove transcripts: {}",
+                target.transcript_dir.display()
+            );
         } else if !args.interactive
             || confirm(&format!(
                 "  remove transcripts {}?",
@@ -237,7 +240,10 @@ fn purge_one(
             }
         }
     } else {
-        println!("  no transcripts found ({})", target.transcript_dir.display());
+        println!(
+            "  no transcripts found ({})",
+            target.transcript_dir.display()
+        );
     }
 
     // (2) Config entry: remove `projects[<key>]` from `~/.lingxi.json`.
@@ -246,7 +252,10 @@ fn purge_one(
             if args.dry_run {
                 let present = project_entry_present(path, &target.config_key);
                 if present {
-                    println!("  would remove config entry: projects[\"{}\"]", target.config_key);
+                    println!(
+                        "  would remove config entry: projects[\"{}\"]",
+                        target.config_key
+                    );
                 } else {
                     println!("  no config entry found");
                 }
@@ -258,7 +267,10 @@ fn purge_one(
             {
                 match remove_config_entry(path, &target.config_key) {
                     Ok(true) => {
-                        println!("  removed config entry: projects[\"{}\"]", target.config_key)
+                        println!(
+                            "  removed config entry: projects[\"{}\"]",
+                            target.config_key
+                        )
                     }
                     Ok(false) => println!("  no config entry found"),
                     Err(e) => {

@@ -47,8 +47,9 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
     // orchestrator's `AdapterOutputStream` lowers every callback into a
     // `ClientEvent` and forwards it here.
     let sink = MockSink::arc();
-    let output: Arc<dyn traits::OutputStream> =
-        Arc::new(AdapterOutputStream::new(sink.clone() as Arc<dyn client_adapter::ClientEventSink>));
+    let output: Arc<dyn traits::OutputStream> = Arc::new(AdapterOutputStream::new(
+        sink.clone() as Arc<dyn client_adapter::ClientEventSink>
+    ));
 
     let tools = Arc::new(tool_api::registry::ToolRegistry::new());
 
@@ -72,10 +73,13 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
     let events = sink.events().await;
 
     // The streamed assistant text arrives first.
-    let saw_text = events.iter().any(|e| {
-        matches!(e, ClientEvent::TextDelta { text } if text == "hello from the engine")
-    });
-    assert!(saw_text, "expected a TextDelta with the streamed text, got: {events:?}");
+    let saw_text = events
+        .iter()
+        .any(|e| matches!(e, ClientEvent::TextDelta { text } if text == "hello from the engine"));
+    assert!(
+        saw_text,
+        "expected a TextDelta with the streamed text, got: {events:?}"
+    );
 
     // The turn ends with `end_turn`.
     let turn_ended_idx = events.iter().position(|e| {
@@ -86,7 +90,10 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
                     && stop_reason.as_deref() == Some("end_turn")
         )
     });
-    assert!(turn_ended_idx.is_some(), "expected a TurnEnded(end_turn), got: {events:?}");
+    assert!(
+        turn_ended_idx.is_some(),
+        "expected a TurnEnded(end_turn), got: {events:?}"
+    );
 
     // Ordering: TextDelta must precede TurnEnded.
     let text_idx = events

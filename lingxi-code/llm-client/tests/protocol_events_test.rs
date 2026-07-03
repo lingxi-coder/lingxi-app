@@ -1,4 +1,4 @@
-use llm_client::{ContentBlock, ContentDelta, LlmEvent, MessageDeltaPayload, LlmResponse, Usage};
+use llm_client::{ContentBlock, ContentDelta, LlmEvent, LlmResponse, MessageDeltaPayload, Usage};
 
 fn sample_response() -> LlmResponse {
     LlmResponse {
@@ -20,15 +20,23 @@ fn stream_events_support_block_lifecycle_and_terminal_delta() {
     };
     let block_start = LlmEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::Text { text: String::new(), cache_control: None },
+        content_block: ContentBlock::Text {
+            text: String::new(),
+            cache_control: None,
+        },
     };
     let delta = LlmEvent::ContentBlockDelta {
         index: 0,
-        delta: ContentDelta::TextDelta { text: "hi".to_string() },
+        delta: ContentDelta::TextDelta {
+            text: "hi".to_string(),
+        },
     };
     let stop = LlmEvent::ContentBlockStop { index: 0 };
     let terminal = LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload { stop_reason: Some("end_turn".to_string()), stop_details: None },
+        delta: MessageDeltaPayload {
+            stop_reason: Some("end_turn".to_string()),
+            stop_details: None,
+        },
         usage: None,
     };
 
@@ -46,15 +54,23 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
     };
     let block_start = LlmEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::Text { text: String::new(), cache_control: None },
+        content_block: ContentBlock::Text {
+            text: String::new(),
+            cache_control: None,
+        },
     };
     let delta = LlmEvent::ContentBlockDelta {
         index: 0,
-        delta: ContentDelta::InputJsonDelta { partial_json: "{\"a\":1".to_string() },
+        delta: ContentDelta::InputJsonDelta {
+            partial_json: "{\"a\":1".to_string(),
+        },
     };
     let stop = LlmEvent::ContentBlockStop { index: 0 };
     let terminal = LlmEvent::MessageDelta {
-        delta: MessageDeltaPayload { stop_reason: Some("end_turn".to_string()), stop_details: None },
+        delta: MessageDeltaPayload {
+            stop_reason: Some("end_turn".to_string()),
+            stop_details: None,
+        },
         usage: Some(Usage::default()),
     };
 
@@ -90,7 +106,10 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
     });
 
     assert_eq!(serde_json::to_value(&start).unwrap(), start_json);
-    assert_eq!(serde_json::to_value(&block_start).unwrap(), block_start_json);
+    assert_eq!(
+        serde_json::to_value(&block_start).unwrap(),
+        block_start_json
+    );
     assert_eq!(serde_json::to_value(&delta).unwrap(), delta_json);
     assert_eq!(serde_json::to_value(&stop).unwrap(), stop_json);
     assert_eq!(serde_json::to_value(&terminal).unwrap(), terminal_json);

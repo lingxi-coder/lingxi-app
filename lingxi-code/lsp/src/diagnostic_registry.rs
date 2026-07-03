@@ -174,7 +174,10 @@ mod new_diagnostics_tests {
         // First publish → surfaced once.
         reg.publish(
             uri.clone(),
-            DiagnosticEntry { version: None, diagnostics: vec![err(0, "e1")] },
+            DiagnosticEntry {
+                version: None,
+                diagnostics: vec![err(0, "e1")],
+            },
         )
         .await;
         let block = reg.take_new_diagnostics_block().await.expect("a block");
@@ -188,7 +191,10 @@ mod new_diagnostics_tests {
         // A new snapshot adding e2 (e1 still present) → only e2 surfaces.
         reg.publish(
             uri.clone(),
-            DiagnosticEntry { version: None, diagnostics: vec![err(0, "e1"), err(1, "e2")] },
+            DiagnosticEntry {
+                version: None,
+                diagnostics: vec![err(0, "e1"), err(1, "e2")],
+            },
         )
         .await;
         let block = reg.take_new_diagnostics_block().await.expect("e2 block");

@@ -2,9 +2,9 @@
 //! remaining/2 (not at a fixed 5 min lead). Handle is owned by `AuthState` and
 //! cancellable via `AuthState::shutdown` (Task 6).
 
+use async_trait::async_trait;
 use llm_client::oauth::anthropic::refresh::{AuthState, RefreshDriver};
 use llm_client::oauth::anthropic::ClaudeAiOAuthConfig;
-use async_trait::async_trait;
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::future::Future;
 use std::pin::Pin;

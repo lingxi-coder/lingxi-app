@@ -160,9 +160,15 @@ mod tests {
     #[test]
     fn maps_domains_and_ports() {
         let rt = to_runtime_config(&engine_full());
-        assert_eq!(rt.network.allowed_domains, vec!["github.com", "*.npmjs.org"]);
+        assert_eq!(
+            rt.network.allowed_domains,
+            vec!["github.com", "*.npmjs.org"]
+        );
         // denied_domains forwarded verbatim (engine_full carries none).
-        assert_eq!(rt.network.denied_domains, engine_full().network.denied_domains);
+        assert_eq!(
+            rt.network.denied_domains,
+            engine_full().network.denied_domains
+        );
         assert_eq!(rt.network.http_proxy_port, Some(8080));
         assert_eq!(rt.network.socks_proxy_port, Some(1080));
     }
@@ -193,7 +199,10 @@ mod tests {
         assert_eq!(rt.filesystem.allow_write, vec!["/work"]);
         assert_eq!(rt.filesystem.deny_write, vec!["/work/.git"]);
         assert_eq!(rt.filesystem.deny_read, vec!["/secret"]);
-        assert_eq!(rt.filesystem.allow_read, Some(vec!["/secret/ok".to_string()]));
+        assert_eq!(
+            rt.filesystem.allow_read,
+            Some(vec!["/secret/ok".to_string()])
+        );
     }
 
     #[test]
@@ -208,7 +217,10 @@ mod tests {
     #[test]
     fn maps_nonempty_unix_sockets_to_some() {
         let rt = to_runtime_config(&engine_full());
-        assert_eq!(rt.network.allow_unix_sockets, Some(vec!["/tmp/sock".to_string()]));
+        assert_eq!(
+            rt.network.allow_unix_sockets,
+            Some(vec!["/tmp/sock".to_string()])
+        );
     }
 
     #[test]
@@ -255,8 +267,11 @@ mod tests {
         // The converted config must pass the runtime's own validation so
         // `SandboxManager::initialize` accepts it.
         let rt = to_runtime_config(&EngineConfig::default());
-        rt.validate().expect("converted default config must validate");
+        rt.validate()
+            .expect("converted default config must validate");
         let rt_full = to_runtime_config(&engine_full());
-        rt_full.validate().expect("converted full config must validate");
+        rt_full
+            .validate()
+            .expect("converted full config must validate");
     }
 }

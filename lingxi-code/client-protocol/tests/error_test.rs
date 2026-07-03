@@ -65,11 +65,36 @@ fn client_error_round_trips() {
 #[test]
 fn client_error_tags_are_snake_case() {
     let cases = [
-        (ClientError::Transport { message: "x".into() }, "transport"),
-        (ClientError::Protocol { message: "x".into() }, "protocol"),
-        (ClientError::Rejected { message: "x".into() }, "rejected"),
-        (ClientError::NotFound { message: "x".into() }, "not_found"),
-        (ClientError::Internal { message: "x".into() }, "internal"),
+        (
+            ClientError::Transport {
+                message: "x".into(),
+            },
+            "transport",
+        ),
+        (
+            ClientError::Protocol {
+                message: "x".into(),
+            },
+            "protocol",
+        ),
+        (
+            ClientError::Rejected {
+                message: "x".into(),
+            },
+            "rejected",
+        ),
+        (
+            ClientError::NotFound {
+                message: "x".into(),
+            },
+            "not_found",
+        ),
+        (
+            ClientError::Internal {
+                message: "x".into(),
+            },
+            "internal",
+        ),
     ];
     for (err, tag) in cases {
         let json = serde_json::to_value(&err).expect("serialize ClientError");

@@ -59,8 +59,13 @@ mod tests {
 
     fn parse(yaml: &str, body: &str) -> Skill {
         let raw = format!("---\n{yaml}\n---\n{body}");
-        parse_skill_markdown(raw.as_str(), "/tmp/x.md".into(), SkillSource::User, LoadedFrom::Skills)
-            .expect("parse ok")
+        parse_skill_markdown(
+            raw.as_str(),
+            "/tmp/x.md".into(),
+            SkillSource::User,
+            LoadedFrom::Skills,
+        )
+        .expect("parse ok")
     }
 
     // ---- disable-model-invocation (P1 gap #2) --------------------------------
@@ -99,8 +104,7 @@ mod tests {
     fn user_invocable_defaults_none() {
         let s = parse("name: x", "body");
         assert_eq!(
-            s.frontmatter.user_invocable,
-            None,
+            s.frontmatter.user_invocable, None,
             "user-invocable absent → None (unset, not false)"
         );
     }
@@ -160,7 +164,10 @@ mod tests {
 
     #[test]
     fn effort_version_shell_parsed() {
-        let s = parse("effort: high\nversion: \"1.2.3\"\nshell: zsh\nname: x", "body");
+        let s = parse(
+            "effort: high\nversion: \"1.2.3\"\nshell: zsh\nname: x",
+            "body",
+        );
         assert_eq!(s.frontmatter.effort.as_deref(), Some("high"));
         assert_eq!(s.frontmatter.version.as_deref(), Some("1.2.3"));
         assert_eq!(s.frontmatter.shell.as_deref(), Some("zsh"));
@@ -230,8 +237,13 @@ mod tests {
     #[test]
     fn no_frontmatter_falls_back_to_defaults() {
         let raw = "just body text";
-        let s = parse_skill_markdown(raw, "/tmp/x.md".into(), SkillSource::User, LoadedFrom::Skills)
-            .expect("ok");
+        let s = parse_skill_markdown(
+            raw,
+            "/tmp/x.md".into(),
+            SkillSource::User,
+            LoadedFrom::Skills,
+        )
+        .expect("ok");
         assert!(!s.frontmatter.disable_model_invocation);
         assert!(s.frontmatter.user_invocable.is_none());
         assert!(s.frontmatter.disallowed_tools.is_none());

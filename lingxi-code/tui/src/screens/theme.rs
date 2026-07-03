@@ -13,9 +13,9 @@
 //! M7-02 `render::diff`) over the locked `greet()` snippet.
 #![forbid(unsafe_code)]
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 use crate::render::diff;
 use crate::state::AppState;

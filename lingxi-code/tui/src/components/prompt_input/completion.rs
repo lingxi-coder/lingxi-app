@@ -11,8 +11,8 @@ use std::path::Path;
 use iocraft::prelude::*;
 
 use super::fuzzy::filtered_ranked;
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// Max dropdown rows (shared with the palette; claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;

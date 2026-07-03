@@ -190,7 +190,10 @@ mod tests {
 
     #[test]
     fn bel_alone_is_accepted() {
-        assert_eq!(validate_terminal_sequence("\u{0007}"), Some("\u{0007}".to_string()));
+        assert_eq!(
+            validate_terminal_sequence("\u{0007}"),
+            Some("\u{0007}".to_string())
+        );
     }
 
     #[test]
@@ -218,7 +221,10 @@ mod tests {
     #[test]
     fn osc_with_disallowed_ps_is_rejected() {
         // OSC 8 (hyperlink) is NOT in the allowlist.
-        assert_eq!(validate_terminal_sequence("\u{001B}]8;;http://x\u{0007}"), None);
+        assert_eq!(
+            validate_terminal_sequence("\u{001B}]8;;http://x\u{0007}"),
+            None
+        );
     }
 
     #[test]
@@ -245,7 +251,10 @@ mod tests {
 
     #[test]
     fn oversize_input_is_rejected() {
-        let big = format!("\u{001B}]0;{}\u{0007}", "x".repeat(MAX_TERMINAL_SEQUENCE_BYTES));
+        let big = format!(
+            "\u{001B}]0;{}\u{0007}",
+            "x".repeat(MAX_TERMINAL_SEQUENCE_BYTES)
+        );
         assert_eq!(validate_terminal_sequence(&big), None);
     }
 

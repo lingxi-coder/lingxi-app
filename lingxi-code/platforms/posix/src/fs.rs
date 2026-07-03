@@ -288,7 +288,9 @@ mod tests {
 
         fs.create_new_file(ps).await.unwrap();
         // Simulate a worker appending output between the two allocations.
-        fs.append_file_no_follow(ps, "worker output\n").await.unwrap();
+        fs.append_file_no_follow(ps, "worker output\n")
+            .await
+            .unwrap();
 
         let err = fs
             .create_new_file(ps)

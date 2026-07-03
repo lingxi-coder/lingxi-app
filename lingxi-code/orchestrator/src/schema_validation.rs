@@ -157,7 +157,10 @@ mod tests {
             "required": ["path"],
         });
         let err = validate_tool_input_schema(&schema, &json!({ "path": 123 })).unwrap_err();
-        assert!(err.contains("/path"), "message should locate the field: {err}");
+        assert!(
+            err.contains("/path"),
+            "message should locate the field: {err}"
+        );
     }
 
     #[test]
@@ -204,7 +207,10 @@ mod tests {
             "required": ["result"],
         });
         let err = validate_tool_output_schema(&schema, &json!({})).unwrap_err();
-        assert!(err.contains("result"), "message should name the field: {err}");
+        assert!(
+            err.contains("result"),
+            "message should name the field: {err}"
+        );
     }
 
     #[test]
@@ -214,9 +220,7 @@ mod tests {
             "properties": { "result": { "type": "string" } },
             "required": ["result"],
         });
-        assert!(
-            validate_tool_output_schema(&schema, &json!({ "result": "ok" })).is_ok()
-        );
+        assert!(validate_tool_output_schema(&schema, &json!({ "result": "ok" })).is_ok());
     }
 
     #[test]

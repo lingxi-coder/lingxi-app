@@ -157,7 +157,11 @@ pub fn apply_settings_providers(
     routing: Option<&serde_json::Value>,
 ) -> Result<(), LlmError> {
     for profile_name in providers.keys() {
-        if cfg.providers.iter().any(|p| p.profile_name == *profile_name) {
+        if cfg
+            .providers
+            .iter()
+            .any(|p| p.profile_name == *profile_name)
+        {
             return Err(LlmError::InvalidRequest {
                 message: format!("duplicate provider profile name: {profile_name:?}"),
             });

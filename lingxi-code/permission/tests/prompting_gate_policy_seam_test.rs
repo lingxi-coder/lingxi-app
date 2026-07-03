@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use permission::{
-    InteractivePromptingGate, PermissionDecision, PermissionGate, PermissionMode,
-    PermissionPolicy, PolicyPermissionGate,
+    InteractivePromptingGate, PermissionDecision, PermissionGate, PermissionMode, PermissionPolicy,
+    PolicyPermissionGate,
 };
 use tokio::io::{duplex, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
@@ -21,12 +21,13 @@ use tokio::sync::Mutex;
 /// Empty-rules, Default-mode policy: read-only tools auto-allow, mutating
 /// tools fall through to the injected inner gate as an unresolved `Ask`.
 fn default_policy() -> Arc<PermissionPolicy> {
-    Arc::new(PermissionPolicy::from_rules(PermissionMode::Default, Vec::new()))
+    Arc::new(PermissionPolicy::from_rules(
+        PermissionMode::Default,
+        Vec::new(),
+    ))
 }
 
-fn make_gate(
-    shared: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>,
-) -> PolicyPermissionGate {
+fn make_gate(shared: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>>) -> PolicyPermissionGate {
     // `tokio::io::sink()` is an always-open `AsyncWrite` — the prompt bytes are
     // discarded but the write never breaks (no dropped reader half to race).
     let inner = Arc::new(InteractivePromptingGate::new(
@@ -45,8 +46,14 @@ async fn unresolved_write_ask_with_y_allows() {
         Arc::new(Mutex::new(BufReader::new(client)));
     let gate = make_gate(shared);
 
-    let decision = gate.check("Write", &serde_json::json!({"file_path": "/tmp/x"})).await;
-    assert_eq!(decision, PermissionDecision::Allow, "y on a Write ask → Allow");
+    let decision = gate
+        .check("Write", &serde_json::json!({"file_path": "/tmp/x"}))
+        .await;
+    assert_eq!(
+        decision,
+        PermissionDecision::Allow,
+        "y on a Write ask → Allow"
+    );
 }
 
 #[tokio::test]
@@ -58,7 +65,10 @@ async fn unresolved_write_ask_with_n_denies() {
         Arc::new(Mutex::new(BufReader::new(client)));
     let gate = make_gate(shared);
 
-    match gate.check("Write", &serde_json::json!({"file_path": "/tmp/x"})).await {
+    match gate
+        .check("Write", &serde_json::json!({"file_path": "/tmp/x"}))
+        .await
+    {
         PermissionDecision::Deny { .. } => {}
         PermissionDecision::Allow => panic!("expected Deny on `n`, got Allow"),
     }
@@ -73,14 +83,24 @@ async fn read_only_tool_auto_allows_consuming_no_byte() {
         Arc::new(Mutex::new(BufReader::new(client)));
     let gate = make_gate(shared.clone());
 
-    let decision = gate.check("Read", &serde_json::json!({"file_path": "/tmp/x"})).await;
-    assert_eq!(decision, PermissionDecision::Allow, "Read auto-allows in the policy");
+    let decision = gate
+        .check("Read", &serde_json::json!({"file_path": "/tmp/x"}))
+        .await;
+    assert_eq!(
+        decision,
+        PermissionDecision::Allow,
+        "Read auto-allows in the policy"
+    );
 
     // The queued `"y\n"` was NOT consumed — the gate never prompted.
     let mut buf = String::new();
     let mut guard = shared.lock().await;
     let n = guard.read_line(&mut buf).await.unwrap();
-    assert_eq!(n, "y\n".len(), "read-only auto-allow must consume NO stdin byte");
+    assert_eq!(
+        n,
+        "y\n".len(),
+        "read-only auto-allow must consume NO stdin byte"
+    );
     assert_eq!(buf, "y\n");
     // keep `writer` alive until after the read so EOF doesn't race the assert
     drop(writer);

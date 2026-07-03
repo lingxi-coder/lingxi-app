@@ -29,3 +29,11 @@ pub fn load_protocol(picker: &Picker, path: &Path) -> Option<StatefulProtocol> {
     let img = image::ImageReader::open(path).ok()?.decode().ok()?;
     Some(picker.new_resize_protocol(img))
 }
+
+/// Pixel `(width, height)` of the image at `path`, from a header-only read.
+/// `None` when the file is missing or not a decodable image — this doubles as
+/// the "is this really an image?" gate before emitting inline-image escapes.
+#[must_use]
+pub fn image_pixel_size(path: &Path) -> Option<(u32, u32)> {
+    image::image_dimensions(path).ok()
+}

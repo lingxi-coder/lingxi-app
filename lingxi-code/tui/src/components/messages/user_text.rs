@@ -21,8 +21,8 @@ use iocraft::prelude::*;
 
 use crate::components::messages::text_guard::is_empty_message_text;
 use crate::components::messages::user_tool_result::{INTERRUPTED_LINE, INTERRUPT_MESSAGE, MARKER};
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Props for `UserTextMessage`.
 #[derive(Default, Props)]

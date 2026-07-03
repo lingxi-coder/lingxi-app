@@ -91,7 +91,10 @@ mod tests {
     use std::time::SystemTime;
 
     fn messages(body: &str) -> Vec<ConversationMessage> {
-        vec![ConversationMessage::user(MessageId::new(), body.to_string())]
+        vec![ConversationMessage::user(
+            MessageId::new(),
+            body.to_string(),
+        )]
     }
 
     fn computed_summary(input: Vec<ConversationMessage>) -> MicrocompactResult {

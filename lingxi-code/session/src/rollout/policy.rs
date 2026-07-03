@@ -88,7 +88,9 @@ pub fn should_persist_event_msg(ev: &Value) -> bool {
         ) => true,
         // ItemCompleted persists only for Plan / Sleep items.
         Some("item_completed") => matches!(
-            ev.get("item").and_then(|item| item.get("type")).and_then(Value::as_str),
+            ev.get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str),
             Some("plan" | "sleep")
         ),
         _ => false,

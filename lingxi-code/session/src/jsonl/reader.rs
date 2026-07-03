@@ -208,7 +208,10 @@ impl JsonlReader {
         // Strip a leading UTF-8 BOM (claude-code parseJSONLBuffer, live in
         // v2.1.193) so `extract_json_string_field` sees a clean line 1 — without
         // it a BOM-prefixed transcript's first line yields no sessionId/cwd.
-        let content = read.content.strip_prefix('\u{FEFF}').unwrap_or(&read.content);
+        let content = read
+            .content
+            .strip_prefix('\u{FEFF}')
+            .unwrap_or(&read.content);
         let head = if content.len() > super::LITE_READ_BUF_SIZE {
             &content[..super::LITE_READ_BUF_SIZE]
         } else {
@@ -318,8 +321,7 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                 let prev_explicit = out.last_prompt_explicit;
                 let prev_uuid = out.last_prompt_leaf_uuid.as_deref().unwrap_or("");
                 // TS: L = N.explicit===true || L && N.leafUuid===O
-                let new_explicit =
-                    entry_explicit || (prev_explicit && leaf_uuid == prev_uuid);
+                let new_explicit = entry_explicit || (prev_explicit && leaf_uuid == prev_uuid);
                 out.last_prompt_leaf_uuid = Some(leaf_uuid.to_string());
                 out.last_prompt_explicit = new_explicit;
             }

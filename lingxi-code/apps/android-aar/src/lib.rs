@@ -614,8 +614,7 @@ pub trait AndroidSecureStorage: Send + Sync {
         account: String,
     ) -> Result<Option<Vec<u8>>, SecureStorageFfiError>;
     /// Remove `(service, account)` (removing a non-existent entry is not an error).
-    async fn delete(&self, service: String, account: String)
-        -> Result<(), SecureStorageFfiError>;
+    async fn delete(&self, service: String, account: String) -> Result<(), SecureStorageFfiError>;
     /// List every `account` stored under `service`.
     async fn list(&self, service: String) -> Result<Vec<String>, SecureStorageFfiError>;
 }
@@ -1487,8 +1486,10 @@ pub fn build_android_engine(
             })),
             clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
             shell: shell_cfg,
-            secure_storage: secure_storage
-                .map(|s| std::sync::Arc::new(AndroidSecureStorageBridge { inner: s }) as std::sync::Arc<dyn traits::SecureStorage>),
+            secure_storage: secure_storage.map(|s| {
+                std::sync::Arc::new(AndroidSecureStorageBridge { inner: s })
+                    as std::sync::Arc<dyn traits::SecureStorage>
+            }),
         });
 
         // D8: run the eager capability probe and populate the SHARED cache
@@ -1629,9 +1630,12 @@ pub fn build_android_engine(
                     let pub_canon = if c.ssh_public_key_path.is_empty() {
                         None
                     } else {
-                        tool_git_mobile::auth::validate_ssh_key_path(&c.ssh_public_key_path, ssh_root)
-                            .ok()
-                            .map(|p| p.to_string_lossy().into_owned())
+                        tool_git_mobile::auth::validate_ssh_key_path(
+                            &c.ssh_public_key_path,
+                            ssh_root,
+                        )
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
                     };
                     (
                         Some(priv_canon.to_string_lossy().into_owned()),
@@ -2238,7 +2242,8 @@ pub fn android_git_probe_authed(
 /// rather than silently passing.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export)]
-#[allow(clippy::needless_pass_by_value)] // FFI export: UniFFI marshals owned `String`.
+#[allow(clippy::needless_pass_by_value)]
+// FFI export: UniFFI marshals owned `String`.
 // Single linear probe body (raw mksh exec + symlink-farm + command-rewrite
 // applet resolution); the length is intrinsic to the three-mechanism probe, not
 // decomposable. Pre-existing P5a debt surfaced by the android-target clippy gate.
@@ -2614,10 +2619,11 @@ mod tests {
         // Secrets now ride the per-op `AndroidGitCredentialProvider` callback
         // rather than the FFI config; `has_token` reflects whether that provider
         // is present (mirrors `build_android_engine`'s `credential_provider.is_some()`).
-        let credential_provider: Option<std::sync::Arc<dyn tool_api::GitCredentialProvider>> =
-            Some(std::sync::Arc::new(super::AndroidGitCredentialProviderBridge {
+        let credential_provider: Option<std::sync::Arc<dyn tool_api::GitCredentialProvider>> = Some(
+            std::sync::Arc::new(super::AndroidGitCredentialProviderBridge {
                 inner: Box::new(TestCredProvider),
-            }));
+            }),
+        );
 
         let ctx = tool_api::AndroidGitToolCtx {
             enabled: android_git_gate(cfg.enable_git, workspace_ready, ca_store_reachable),

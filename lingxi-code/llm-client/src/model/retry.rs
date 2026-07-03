@@ -476,7 +476,10 @@ pub fn next_step_with_backoff(
                 // verbatim value: `return Math.max(header*1000, jittered_backoff)`.
                 // So a small server delay never undercuts our own exponential
                 // backoff during sustained rate-limiting (and a large one still wins).
-                Some(d) => (*d).max(jittered_delay(scaled_base_delay_ms(state.attempt, backoff_ms))),
+                Some(d) => (*d).max(jittered_delay(scaled_base_delay_ms(
+                    state.attempt,
+                    backoff_ms,
+                ))),
                 None => jittered_delay(scaled_base_delay_ms(state.attempt, backoff_ms)),
             };
             state.attempt = state.attempt.saturating_add(1);
@@ -502,9 +505,10 @@ pub fn next_step_with_backoff(
 
             // Overflow check: parse the message and compute adjusted max_tokens.
             if let Some(overflow) = crate::model::overflow::parse_overflow_message(message) {
-                if let Some(new_max) =
-                    crate::model::overflow::adjusted_max_tokens(overflow, u64::from(thinking_budget))
-                {
+                if let Some(new_max) = crate::model::overflow::adjusted_max_tokens(
+                    overflow,
+                    u64::from(thinking_budget),
+                ) {
                     // AdjustMaxTokens does NOT consume a budget attempt.
                     return DriveStep::AdjustMaxTokens(new_max);
                 }

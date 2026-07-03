@@ -17,11 +17,11 @@ use crate::context::SubagentContext;
 use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
-use permission::PermissionMode;
 use crate::display::{AgentColor, AgentDisplay};
 use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
 use async_trait::async_trait;
+use permission::PermissionMode;
 use protocol::{AgentId, ConversationMessage, MessageId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -182,8 +182,7 @@ pub struct PoolSubagentSpawner {
 /// Renders the subagent `<env>` block for a resolved model id (claude-code
 /// `tIm`). The static environment is captured by the closure at the composition
 /// root; only the resolved model id varies per spawn.
-pub type SubagentEnvRenderer =
-    Arc<dyn Fn(&str, Option<&std::path::Path>) -> String + Send + Sync>;
+pub type SubagentEnvRenderer = Arc<dyn Fn(&str, Option<&std::path::Path>) -> String + Send + Sync>;
 
 impl PoolSubagentSpawner {
     /// Construct an adapter wrapping `pool` with no API client (legacy stub
@@ -220,9 +219,7 @@ impl PoolSubagentSpawner {
     /// (same cycle-break as [`Self::tool_wide_deny_names_handle`]). First fill
     /// wins. Unfilled ⇒ no env block appended (byte-identical legacy).
     #[must_use]
-    pub fn subagent_env_renderer_handle(
-        &self,
-    ) -> Arc<std::sync::OnceLock<SubagentEnvRenderer>> {
+    pub fn subagent_env_renderer_handle(&self) -> Arc<std::sync::OnceLock<SubagentEnvRenderer>> {
         self.subagent_env_renderer.clone()
     }
 
@@ -614,7 +611,10 @@ impl PoolSubagentSpawner {
         let prompt_messages = if is_fork {
             vec![]
         } else {
-            vec![ConversationMessage::user(MessageId::new(), prompt.to_string())]
+            vec![ConversationMessage::user(
+                MessageId::new(),
+                prompt.to_string(),
+            )]
         };
         SubagentContext {
             agent_id: AgentId::new(),
@@ -732,14 +732,14 @@ impl PoolSubagentSpawner {
             } else {
                 let requested = AgentModel::Alias(model_pref.to_string());
                 def.model = match &self.default_model {
-                    Some(parent) => AgentModel::Explicit(
-                        crate::model_resolution::resolve_agent_model(
+                    Some(parent) => {
+                        AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
                             &requested,
                             parent,
                             self.permission_mode,
                             self.model_setting.as_deref(),
-                        ),
-                    ),
+                        ))
+                    }
                     None => requested,
                 };
             }
@@ -766,8 +766,8 @@ impl PoolSubagentSpawner {
         // parent's rendered prompt verbatim with no `enhanceSystemPromptWithEnvDetails`.
         // Rendered with THIS spawn's resolved model id so a model-override agent's
         // env line matches the model it actually runs as. Unfilled cell ⇒ no-op.
-        let is_fork_spawn = request.fork_parent_system_prompt.is_some()
-            || request.fork_context_messages.is_some();
+        let is_fork_spawn =
+            request.fork_parent_system_prompt.is_some() || request.fork_context_messages.is_some();
         if !is_fork_spawn {
             if let (Some(render), Some(body)) = (
                 self.subagent_env_renderer.get(),
@@ -815,8 +815,9 @@ impl PoolSubagentSpawner {
         // stamped it as parent.depth + 1. Drives the resolver's `Agent` depth-gate
         // and is threaded by the runner into the child's dispatched tools.
         ctx.depth = request.depth;
-        let (tool_schemas, allowed_tools) =
-            self.resolve_tools(&ctx.agent_definition, request.depth).await;
+        let (tool_schemas, allowed_tools) = self
+            .resolve_tools(&ctx.agent_definition, request.depth)
+            .await;
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
         ctx.schema = request.schema.clone();
@@ -859,8 +860,7 @@ pub trait StreamingSubagentSpawner: Send + Sync {
     /// `injectUserMessageToTeammate` analogue): the parked runner wakes, appends
     /// it to history, and runs the next turn-set. Errors when the agent id is
     /// unknown / its runner has terminated.
-    async fn resume(&self, agent_id: &AgentId, message: String)
-        -> Result<(), SubagentSpawnError>;
+    async fn resume(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError>;
 }
 
 #[async_trait]
@@ -880,11 +880,7 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         Ok((agent_id, rx))
     }
 
-    async fn resume(
-        &self,
-        agent_id: &AgentId,
-        message: String,
-    ) -> Result<(), SubagentSpawnError> {
+    async fn resume(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError> {
         self.pool
             .send_event(
                 agent_id,
@@ -1093,12 +1089,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         reason: error,
                     };
                 }
-                Some(SubagentEvent::Killed {
-                    agent_id: child_id,
-                }) => {
-                    break SubagentResult::Killed {
-                        agent_id: child_id,
-                    };
+                Some(SubagentEvent::Killed { agent_id: child_id }) => {
+                    break SubagentResult::Killed { agent_id: child_id };
                 }
                 Some(_) => continue,
                 None => {
@@ -1365,10 +1357,7 @@ mod tests {
     fn registry_with(names: &[&'static str]) -> Arc<ToolRegistry> {
         let mut reg = ToolRegistry::new();
         for name in names {
-            reg.register_builtin(Arc::new(StubTool {
-                name,
-                aliases: &[],
-            }));
+            reg.register_builtin(Arc::new(StubTool { name, aliases: &[] }));
         }
         Arc::new(reg)
     }
@@ -1420,8 +1409,8 @@ mod tests {
     async fn resolve_tools_all_policy_advertises_full_set_and_allow_list() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
-        let spawner = PoolSubagentSpawner::new(pool)
-            .with_tool_registry(registry_with(&["Read", "Bash"]));
+        let spawner =
+            PoolSubagentSpawner::new(pool).with_tool_registry(registry_with(&["Read", "Bash"]));
 
         let (schemas, allowed) = spawner
             .resolve_tools(
@@ -1433,7 +1422,10 @@ mod tests {
             .await;
         // Full set, and allow-list = resolved names — both in the faithful
         // `assembleToolPool` order (builtins sorted by name).
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["Bash", "Read"]);
         // allow-list mirrors the resolved order, which now follows
         // `available_tools()`'s locale-sorted order (Bash < Read).
@@ -1450,9 +1442,15 @@ mod tests {
         // Explicit allow-list: only "Read" survives — both the advertised set
         // AND the dispatch allow-list narrow together.
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])), 0)
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])),
+                0,
+            )
             .await;
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["Read"]);
         assert_eq!(allowed, vec!["Read".to_string()]);
     }
@@ -1476,8 +1474,15 @@ mod tests {
                 0,
             )
             .await;
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["Bash", "Read"], "WebFetch denied → not advertised");
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Bash", "Read"],
+            "WebFetch denied → not advertised"
+        );
         assert!(
             !allowed.contains(&"WebFetch".to_string()),
             "denied tool must not be in the dispatch allow-list either"
@@ -1506,7 +1511,10 @@ mod tests {
                 0,
             )
             .await;
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert!(
             !names.contains(&"mcp__github__issue"),
             "mcp__github deny must strip mcp__github__issue, got: {names:?}"
@@ -1574,7 +1582,10 @@ mod tests {
             )
             .await;
         // Advertised: canonical name only.
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["Bash"]);
         // Allow-list: canonical name AND the alias.
         assert_eq!(allowed, vec!["Bash".to_string(), "Shell".to_string()]);
@@ -1604,14 +1615,23 @@ mod tests {
         };
         // depth 0: Agent kept (0 < 5).
         let (schemas0, allowed0) = spawner.resolve_tools(&policy(), 0).await;
-        let names0: Vec<&str> = schemas0.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names0: Vec<&str> = schemas0
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names0, vec!["Agent"], "Agent kept at depth 0");
         assert!(allowed0.contains(&"Agent".to_string()));
-        assert!(allowed0.contains(&"Task".to_string()), "alias in allow-list");
+        assert!(
+            allowed0.contains(&"Task".to_string()),
+            "alias in allow-list"
+        );
         // depth 5: Agent gated → empty pool.
         let (schemas5, allowed5) = spawner.resolve_tools(&policy(), 5).await;
         assert!(schemas5.is_empty(), "Agent gated at depth 5 → no schemas");
-        assert!(allowed5.is_empty(), "Agent (and alias Task) gated → empty allow-list");
+        assert!(
+            allowed5.is_empty(),
+            "Agent (and alias Task) gated → empty allow-list"
+        );
     }
 
     #[tokio::test]
@@ -1634,7 +1654,10 @@ mod tests {
                 0,
             )
             .await;
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["Agent", "Bash", "Read"]);
         assert!(allowed.contains(&"Agent".to_string()));
         assert!(allowed.contains(&"Bash".to_string()));
@@ -1661,7 +1684,10 @@ mod tests {
                 0,
             )
             .await;
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         // available_tools() locale-sorts the builtin set (Grep < Read < WebFetch).
         assert_eq!(names, vec!["Grep", "Read", "WebFetch"]);
         assert!(!allowed.contains(&"Bash".to_string()));
@@ -1686,11 +1712,17 @@ mod tests {
         // Except drops the named tools from BOTH the advertised set and the
         // allow-list.
         let (schemas, allowed) = spawner
-            .resolve_tools(&agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])), 0)
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])),
+                0,
+            )
             .await;
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["Edit", "Read"]); // sorted by name
-        // resolved/allow-list order = available_tools() locale sort (Edit < Read)
+                                                 // resolved/allow-list order = available_tools() locale sort (Edit < Read)
         assert_eq!(allowed, vec!["Edit".to_string(), "Read".to_string()]);
     }
 
@@ -1790,9 +1822,9 @@ mod tests {
         // stays first, joined to the trailer by a blank line.
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(sys.starts_with("AGENT SYSTEM PROMPT\n\n"));
-        assert!(sys.contains(
-            "Notes:\n- Agent threads always have their cwd reset between bash calls"
-        ));
+        assert!(
+            sys.contains("Notes:\n- Agent threads always have their cwd reset between bash calls")
+        );
         // Task prompt -> first (and only) user message (NOT the system slot).
         assert_eq!(ctx.prompt_messages.len(), 1);
         assert!(matches!(
@@ -1829,13 +1861,9 @@ mod tests {
         assert!(sys.contains(
             "Notes:\n- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths."
         ));
-        assert!(sys.contains(
-            "the caller asked for) — do not recap code you merely read."
-        ));
+        assert!(sys.contains("the caller asked for) — do not recap code you merely read."));
         assert!(sys.contains("the assistant MUST avoid using emojis."));
-        assert!(sys.contains(
-            "just be \"Let me read the file.\" with a period."
-        ));
+        assert!(sys.contains("just be \"Let me read the file.\" with a period."));
         // Bullet 5 is SUBAGENT-specific (the main FOOTER omits it — a main agent
         // has no parent): never write report/summary .md files; return findings
         // in the final assistant message.
@@ -1882,7 +1910,9 @@ mod tests {
         // Synthetic, not the catalog shadow.
         assert!(matches!(
             def.tools,
-            AgentToolPolicy::All { use_exact_tools: true }
+            AgentToolPolicy::All {
+                use_exact_tools: true
+            }
         ));
         assert_eq!(def.max_turns, 200);
         assert!(matches!(def.permission_mode, AgentPermissionMode::Bubble));
@@ -1905,7 +1935,10 @@ mod tests {
         );
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         assert_eq!(sys, parent_prompt);
-        assert!(!sys.contains("Notes:"), "fork must NOT append the Notes trailer");
+        assert!(
+            !sys.contains("Notes:"),
+            "fork must NOT append the Notes trailer"
+        );
     }
 
     #[test]
@@ -1928,8 +1961,13 @@ mod tests {
             Some(prefix.clone()),
             Some("parent sys".to_string()),
         );
-        assert!(ctx.prompt_messages.is_empty(), "fork seeds empty prompt_messages");
-        let fc = ctx.fork_context_messages.expect("fork_context_messages set");
+        assert!(
+            ctx.prompt_messages.is_empty(),
+            "fork seeds empty prompt_messages"
+        );
+        let fc = ctx
+            .fork_context_messages
+            .expect("fork_context_messages set");
         assert_eq!(fc.len(), 2);
         // runner replays fork_context_messages ++ prompt_messages = the prefix.
     }
@@ -1945,7 +1983,10 @@ mod tests {
             .with_tool_registry(registry_with(&["Read", "Grep", "Edit", "Write"]));
         let def = spawner.resolve_definition("Explore").await;
         let (schemas, allowed) = spawner.resolve_tools(&def, 0).await;
-        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["Grep", "Read"]); // sorted; Edit+Write dropped
         assert!(allowed.contains(&"Read".to_string()));
         assert!(allowed.contains(&"Grep".to_string()));
@@ -2018,7 +2059,9 @@ mod tests {
         defs.push(AgentDefinition {
             agent_type: "custom-agent".to_string(),
             when_to_use: "a project agent".to_string(),
-            ..agent_def(AgentToolPolicy::All { use_exact_tools: false })
+            ..agent_def(AgentToolPolicy::All {
+                use_exact_tools: false,
+            })
         });
 
         let entries = crate::agent_listing_entries(&defs);
@@ -2178,12 +2221,25 @@ mod tests {
             budget: Arc::new(DummyBudget),
         };
 
-        let persistent = spawner.build_subagent_context(&req, mk_inherit(), true).await;
-        assert!(persistent.persistent, "persistent agent must park (come to rest)");
-        assert!(persistent.is_async, "persistent agent is background-scheduled");
+        let persistent = spawner
+            .build_subagent_context(&req, mk_inherit(), true)
+            .await;
+        assert!(
+            persistent.persistent,
+            "persistent agent must park (come to rest)"
+        );
+        assert!(
+            persistent.is_async,
+            "persistent agent is background-scheduled"
+        );
 
-        let one_shot = spawner.build_subagent_context(&req, mk_inherit(), false).await;
-        assert!(!one_shot.persistent, "the one-shot spawn path must NOT park");
+        let one_shot = spawner
+            .build_subagent_context(&req, mk_inherit(), false)
+            .await;
+        assert!(
+            !one_shot.persistent,
+            "the one-shot spawn path must NOT park"
+        );
         assert!(!one_shot.is_async);
     }
 
@@ -2198,12 +2254,14 @@ mod tests {
         // A renderer that echoes the resolved model id into a sentinel block.
         let spawner = PoolSubagentSpawner::new(pool)
             .with_default_model("claude-opus-4-8[1m]")
-            .with_subagent_env_renderer(Arc::new(|model_id: &str, cwd: Option<&std::path::Path>| {
-                format!(
-                    "<env>\nMODEL: {model_id}\nCWD: {}\n</env>",
-                    cwd.map_or("<none>".to_string(), |p| p.display().to_string())
-                )
-            }));
+            .with_subagent_env_renderer(Arc::new(
+                |model_id: &str, cwd: Option<&std::path::Path>| {
+                    format!(
+                        "<env>\nMODEL: {model_id}\nCWD: {}\n</env>",
+                        cwd.map_or("<none>".to_string(), |p| p.display().to_string())
+                    )
+                },
+            ));
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
             budget: Arc::new(DummyBudget),
@@ -2234,7 +2292,9 @@ mod tests {
 
         // Non-fork: env block appended after the body, joined by a blank line,
         // rendered with the resolved default model id.
-        let ctx = spawner.build_subagent_context(&req, mk_inherit(), false).await;
+        let ctx = spawner
+            .build_subagent_context(&req, mk_inherit(), false)
+            .await;
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\nCWD: <none>\n</env>"),
@@ -2247,7 +2307,9 @@ mod tests {
         // env renderer so the agent's env block reflects the worktree.
         let mut wt_req = req.clone();
         wt_req.cwd = Some("/repo/.lingxi/worktrees/agent-x".to_string());
-        let wt_ctx = spawner.build_subagent_context(&wt_req, mk_inherit(), false).await;
+        let wt_ctx = spawner
+            .build_subagent_context(&wt_req, mk_inherit(), false)
+            .await;
         let wt_sys = wt_ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             wt_sys.contains("CWD: /repo/.lingxi/worktrees/agent-x"),
@@ -2261,7 +2323,9 @@ mod tests {
 
         // Fork path: the parent's rendered prompt is replayed verbatim — NO env.
         req.fork_parent_system_prompt = Some("PARENT VERBATIM".to_string());
-        let fork_ctx = spawner.build_subagent_context(&req, mk_inherit(), false).await;
+        let fork_ctx = spawner
+            .build_subagent_context(&req, mk_inherit(), false)
+            .await;
         assert_eq!(
             fork_ctx.rendered_system_prompt.as_deref(),
             Some("PARENT VERBATIM"),
@@ -2289,7 +2353,10 @@ mod tests {
             agent_source_to_claude_str(AgentSource::PolicySettings),
             "policySettings"
         );
-        assert_eq!(agent_source_to_claude_str(AgentSource::Flag), "flagSettings");
+        assert_eq!(
+            agent_source_to_claude_str(AgentSource::Flag),
+            "flagSettings"
+        );
     }
 
     #[tokio::test]
@@ -2367,7 +2434,13 @@ mod tests {
             depth: 0,
         };
         let err = spawner
-            .spawn_async(req, SubagentInheritance { tool_invoker: invoker, budget })
+            .spawn_async(
+                req,
+                SubagentInheritance {
+                    tool_invoker: invoker,
+                    budget,
+                },
+            )
             .await
             .expect_err("default spawn_async is unwired → clear error");
         assert!(format!("{err}").contains("not wired"));

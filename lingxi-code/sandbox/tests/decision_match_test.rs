@@ -21,7 +21,10 @@ fn excluded_command_bare_prefix() {
     assert!(should_use_sandbox_for_command("cargo build", &cfg));
 
     let cfg_prefix = cfg_with_excluded(&["bazel:*"]);
-    assert!(!should_use_sandbox_for_command("bazel build //...", &cfg_prefix));
+    assert!(!should_use_sandbox_for_command(
+        "bazel build //...",
+        &cfg_prefix
+    ));
 }
 
 #[test]

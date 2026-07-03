@@ -50,7 +50,10 @@ async fn resume_session_adopts_history_and_named_id_keeping_model() {
 
     // A named target session + a two-message replayed transcript.
     let named = SessionId::new();
-    assert_ne!(named, original_id, "the named target must differ from the live id");
+    assert_ne!(
+        named, original_id,
+        "the named target must differ from the live id"
+    );
     let history = vec![
         ConversationMessage::user(MessageId::new(), "prior user turn".to_string()),
         ConversationMessage::Assistant {
@@ -63,13 +66,20 @@ async fn resume_session_adopts_history_and_named_id_keeping_model() {
     ];
 
     handle
-        .resume_session(named, history.clone(), Some("11111111-1111-4111-8111-111111111111".to_string()))
+        .resume_session(
+            named,
+            history.clone(),
+            Some("11111111-1111-4111-8111-111111111111".to_string()),
+        )
         .await
         .expect("resume_session must succeed on the production handle");
 
     // History was adopted in place — the next turn will see prior context.
     let restored = handle.conversation_transcript().await;
-    assert_eq!(restored, history, "resume must adopt the replayed transcript");
+    assert_eq!(
+        restored, history,
+        "resume must adopt the replayed transcript"
+    );
 
     // The NAMED id was adopted (resume does NOT mint a fresh one).
     assert_eq!(

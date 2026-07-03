@@ -94,7 +94,11 @@ impl PatCredentialProvider {
     /// Build from a PAT + its resolved metadata (the engine calls [`whoami`] once).
     #[must_use]
     pub fn new(pat: impl Into<String>, metadata: PatMetadata) -> Self {
-        Self { pat: pat.into(), account_id: metadata.account_id, fedramp: metadata.fedramp }
+        Self {
+            pat: pat.into(),
+            account_id: metadata.account_id,
+            fedramp: metadata.fedramp,
+        }
     }
 }
 
@@ -150,7 +154,10 @@ mod tests {
     async fn whoami_non_200_errors() {
         let http: Arc<dyn HttpTransport> = MockHttp::new(vec![(
             "whoami",
-            Canned { status: 401, body: "{}".into() },
+            Canned {
+                status: 401,
+                body: "{}".into(),
+            },
         )]);
         assert!(whoami(&cfg(), &http, "at-bad").await.is_err());
     }
@@ -159,15 +166,25 @@ mod tests {
     async fn provider_returns_chatgpt_oauth() {
         let p = PatCredentialProvider::new(
             "at-token",
-            PatMetadata { account_id: Some("acc_7".into()), fedramp: false, ..Default::default() },
+            PatMetadata {
+                account_id: Some("acc_7".into()),
+                fedramp: false,
+                ..Default::default()
+            },
         );
         let scope = CredentialScope::new(
-            crate::ProviderId::OpenAICompatible { name: "openai-chatgpt".into() },
+            crate::ProviderId::OpenAICompatible {
+                name: "openai-chatgpt".into(),
+            },
             "openai-chatgpt",
         );
         let got = p.load(&scope).await.expect("load");
         match got {
-            Credential::ChatGptOAuth { access_token, account_id, fedramp } => {
+            Credential::ChatGptOAuth {
+                access_token,
+                account_id,
+                fedramp,
+            } => {
                 assert_eq!(access_token, "at-token");
                 assert_eq!(account_id.as_deref(), Some("acc_7"));
                 assert!(!fedramp);

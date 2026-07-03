@@ -402,7 +402,10 @@ fn is_lingxi_config_file_path(expanded: &Path, roots: &FsRoots) -> bool {
     let cwd = &roots.cwd;
     for sub in ["commands", "agents", "skills"] {
         let dir = cwd.join(branding::DOT_DIR).join(sub);
-        if path_at_or_under(&normalized, &normalize_case_for_comparison(&dir.to_string_lossy())) {
+        if path_at_or_under(
+            &normalized,
+            &normalize_case_for_comparison(&dir.to_string_lossy()),
+        ) {
             return true;
         }
     }

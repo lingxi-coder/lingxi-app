@@ -5,9 +5,11 @@
 //!   2. Expired token triggers single-flight refresh; refreshed token returned.
 //!   3. Refresh failure maps to `LlmError::Authentication` (no secret material leaked).
 
-use llm_client::oauth::anthropic::{refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig};
-use llm_client::oauth::anthropic::OAuthCredentialProvider;
 use async_trait::async_trait;
+use llm_client::oauth::anthropic::OAuthCredentialProvider;
+use llm_client::oauth::anthropic::{
+    refresh::AuthState, refresh::RefreshDriver, ClaudeAiOAuthConfig,
+};
 use llm_client::{Credential, CredentialProvider, CredentialScope, LlmError, ProviderId};
 use protocol::{HttpRequest, HttpResponse, Secret};
 use std::sync::Arc;
@@ -39,10 +41,7 @@ impl HttpTransport for FreshTokenTransport {
             body: r#"{"access_token":"tok-refreshed","refresh_token":"ref-new","expires_in":3600,"scope":"read:user"}"#.to_string(),
         })
     }
-    async fn stream_sse(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
         unimplemented!("sse not used");
     }
 }
@@ -59,10 +58,7 @@ impl HttpTransport for FailingTransport {
             body: r#"{"error":"invalid_grant"}"#.to_string(),
         })
     }
-    async fn stream_sse(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
         unimplemented!("sse not used");
     }
 }
@@ -81,8 +77,9 @@ fn fresh_driver() -> Arc<RefreshDriver> {
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS + 3_600),
         // Transport must never be invoked here: a returned credential other than "tok-fresh" would fail the assertion below.
         Arc::new(FreshTokenTransport) as Arc<dyn HttpTransport>,
-        Arc::new(FixedClock(SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS)))
-            as Arc<dyn Clock>,
+        Arc::new(FixedClock(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
+        )) as Arc<dyn Clock>,
         None,
         None,
     );
@@ -99,8 +96,9 @@ fn expired_driver_ok() -> Arc<RefreshDriver> {
         // Expired: `expires_at` is before the clock's `now`.
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS - 1),
         Arc::new(FreshTokenTransport) as Arc<dyn HttpTransport>,
-        Arc::new(FixedClock(SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS)))
-            as Arc<dyn Clock>,
+        Arc::new(FixedClock(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
+        )) as Arc<dyn Clock>,
         None,
         None,
     );
@@ -116,8 +114,9 @@ fn expired_driver_fail() -> Arc<RefreshDriver> {
         Some(Secret::new("ref-expired".to_string())),
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS - 1),
         Arc::new(FailingTransport) as Arc<dyn HttpTransport>,
-        Arc::new(FixedClock(SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS)))
-            as Arc<dyn Clock>,
+        Arc::new(FixedClock(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
+        )) as Arc<dyn Clock>,
         None,
         None,
     );
@@ -133,7 +132,10 @@ async fn load_returns_current_token_when_fresh() {
     let provider = OAuthCredentialProvider::new(fresh_driver());
 
     let credential = provider
-        .load(&CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic"))
+        .load(&CredentialScope::new(
+            ProviderId::AnthropicFirstParty,
+            "anthropic",
+        ))
         .await
         .expect("credential");
 
@@ -145,7 +147,10 @@ async fn load_refreshes_expired_token_single_flight() {
     let provider = OAuthCredentialProvider::new(expired_driver_ok());
 
     let credential = provider
-        .load(&CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic"))
+        .load(&CredentialScope::new(
+            ProviderId::AnthropicFirstParty,
+            "anthropic",
+        ))
         .await
         .expect("credential");
 
@@ -160,7 +165,10 @@ async fn refresh_failure_maps_to_authentication_error() {
     let provider = OAuthCredentialProvider::new(expired_driver_fail());
 
     let err = provider
-        .load(&CredentialScope::new(ProviderId::AnthropicFirstParty, "anthropic"))
+        .load(&CredentialScope::new(
+            ProviderId::AnthropicFirstParty,
+            "anthropic",
+        ))
         .await
         .expect_err("must fail");
 

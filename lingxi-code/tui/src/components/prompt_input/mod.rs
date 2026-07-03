@@ -16,10 +16,10 @@
 //! and moves always land at a `char` boundary; out-of-bounds requests
 //! saturate.
 
+use crate::render_iocraft::StyleColorIocraftExt;
 use iocraft::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use crate::render_iocraft::StyleColorIocraftExt;
 
 pub mod banner;
 pub use banner::{render_session_color_banner, SessionColorBanner, SessionColorBannerProps};

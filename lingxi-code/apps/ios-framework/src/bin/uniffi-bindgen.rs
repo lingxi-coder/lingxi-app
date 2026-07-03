@@ -134,12 +134,14 @@ mod cli {
         while let Some(arg) = raw.next() {
             match arg.as_str() {
                 "--library" => {
-                    library_path =
-                        Some(Utf8PathBuf::from(raw.next().context("--library needs a value")?));
+                    library_path = Some(Utf8PathBuf::from(
+                        raw.next().context("--library needs a value")?,
+                    ));
                 }
                 "--out-dir" | "-o" => {
-                    out_dir =
-                        Some(Utf8PathBuf::from(raw.next().context("--out-dir needs a value")?));
+                    out_dir = Some(Utf8PathBuf::from(
+                        raw.next().context("--out-dir needs a value")?,
+                    ));
                 }
                 "--language" | "-l" => {
                     languages.push(raw.next().context("--language needs a value")?);
@@ -148,8 +150,9 @@ mod cli {
                     crate_name = Some(raw.next().context("--crate needs a value")?);
                 }
                 "--config" => {
-                    config_path =
-                        Some(Utf8PathBuf::from(raw.next().context("--config needs a value")?));
+                    config_path = Some(Utf8PathBuf::from(
+                        raw.next().context("--config needs a value")?,
+                    ));
                 }
                 "--no-format" | "-n" => no_format = true,
                 // Accepted-and-ignored: we never invoke `cargo metadata`.
@@ -339,8 +342,8 @@ mod cli {
     /// too) and non-error records (`ClientEvent.Error`, which has no override)
     /// are untouched. Swift never hits this (no `override`/`message` collision).
     fn fix_message_field_error_variants(file: &Utf8Path) -> Result<()> {
-        let text = std::fs::read_to_string(file)
-            .with_context(|| format!("reading generated {file}"))?;
+        let text =
+            std::fs::read_to_string(file).with_context(|| format!("reading generated {file}"))?;
 
         // The exact getter block the template emits for a lone `message` field.
         const GETTER: &str =
@@ -349,15 +352,12 @@ mod cli {
         // anchor that distinguishes an ERROR variant (own-line `) :`) from the
         // `ClientEvent.Error` record (`…kotlin.String) : ClientEvent()` inline).
         const CTOR_PROP: &str = "        val `message`: kotlin.String\n        ) : ";
-        const CTOR_PROP_FIXED: &str =
-            "        override val `message`: kotlin.String\n        ) : ";
+        const CTOR_PROP_FIXED: &str = "        override val `message`: kotlin.String\n        ) : ";
 
         if !text.contains(GETTER) {
             return Ok(()); // no colliding variant in this file
         }
-        let patched = text
-            .replace(GETTER, "")
-            .replace(CTOR_PROP, CTOR_PROP_FIXED);
+        let patched = text.replace(GETTER, "").replace(CTOR_PROP, CTOR_PROP_FIXED);
         std::fs::write(file, patched).with_context(|| format!("writing patched {file}"))?;
         Ok(())
     }
@@ -452,9 +452,7 @@ mod cli {
     // ----- Kotlin merge: de-externalize cross-crate references -----------------
 
     use std::collections::HashMap;
-    use uniffi_meta::{
-        EnumMetadata, FieldMetadata, FnParamMetadata, ObjectImpl, VariantMetadata,
-    };
+    use uniffi_meta::{EnumMetadata, FieldMetadata, FnParamMetadata, ObjectImpl, VariantMetadata};
 
     /// What LOCAL `Type` a user-defined name resolves to once all four crates
     /// share one namespace (so we can undo the `group_metadata` externalization).

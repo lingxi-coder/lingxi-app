@@ -52,9 +52,7 @@ use bridge::{
 use client_adapter::{ClientEventSink, PermissionRequestSink};
 use client_protocol::commands::{ClientCommand, ImageRefDto};
 use client_protocol::events::ClientEvent;
-use client_protocol::permission::{
-    PermissionKindDto, PermissionRequest, PermissionResponseDto,
-};
+use client_protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
 use msgqueue::{
     join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
     QueuedCommandContent, TelemetryQueueRecorder,
@@ -145,7 +143,10 @@ impl PermissionRequestSink for FramePermissionSink {
             _ => None,
         };
         if let Some(name) = tool_name {
-            self.tool_names.lock().await.insert(request.request_id, name);
+            self.tool_names
+                .lock()
+                .await
+                .insert(request.request_id, name);
         }
         if let Some(sink) = self.out.lock().await.as_ref() {
             let _ = sink.send(Frame::PermissionRequest(request));
@@ -372,9 +373,7 @@ impl BridgeConnection {
     /// drained request count directly.
     #[must_use]
     pub fn gate_handle(&self) -> Arc<AdapterPermissionGate> {
-        self.gate
-            .clone()
-            .expect("gate_handle called before bind()")
+        self.gate.clone().expect("gate_handle called before bind()")
     }
 
     /// Ensure the connection's outbound cell points at the live [`FrameSink`].
@@ -444,8 +443,7 @@ impl BridgeConnection {
                 ),
                 (true, false) => format!(
                     "incompatible client-protocol version (server {}, client {})",
-                    server_caps.client_protocol_version,
-                    hello.capabilities.client_protocol_version,
+                    server_caps.client_protocol_version, hello.capabilities.client_protocol_version,
                 ),
                 (true, true) => unreachable!("the accept branch already handled both-compatible"),
             };
@@ -647,14 +645,12 @@ impl FramePump for BridgeConnection {
             // error, and is the ONLY frame routed before `handshaken` is set.
             Frame::Request(BridgeRequest {
                 id, method, params, ..
-            }) if method == "hello" => {
-                match serde_json::from_value::<ClientHello>(params) {
-                    Ok(hello) => self.handle_hello(id, hello).await,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "bridge-server: undecodable ClientHello");
-                    }
+            }) if method == "hello" => match serde_json::from_value::<ClientHello>(params) {
+                Ok(hello) => self.handle_hello(id, hello).await,
+                Err(e) => {
+                    tracing::debug!(error = %e, "bridge-server: undecodable ClientHello");
                 }
-            }
+            },
             Frame::Request(BridgeRequest { params, .. }) => {
                 // A peer that disagreed on a breaking version was REFUSED at the
                 // handshake (`handshake_refused` set); drop its commands so a
@@ -692,7 +688,10 @@ impl FramePump for BridgeConnection {
         if let Some(gate) = self.gate.as_ref() {
             let drained = gate.drain().await;
             if drained > 0 {
-                tracing::debug!(drained, "bridge-server: drained parked permissions on close");
+                tracing::debug!(
+                    drained,
+                    "bridge-server: drained parked permissions on close"
+                );
             }
         }
     }
@@ -993,7 +992,8 @@ mod tests {
         // Drain settles: queue empty, flag cleared, both prompts ran in order.
         // (Yield until the spawned loop finishes its post-drain bookkeeping.)
         for _ in 0..100 {
-            if !connection.turn_running.load(Ordering::SeqCst) && connection.queue.is_empty().await {
+            if !connection.turn_running.load(Ordering::SeqCst) && connection.queue.is_empty().await
+            {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1028,11 +1028,16 @@ mod tests {
     /// the drain — proving the tag was written on the batched path.
     #[tokio::test]
     async fn drain_tags_non_slash_cron_tick_in_flight() {
-        let _g = crate::driver::LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         tool_cron::reset_loop_runtime_state();
         let queue = Arc::new(super::MessageQueueManager::new());
         queue
-            .enqueue(drain_test_command("# Autonomous loop tick", super::QueueSource::Cron))
+            .enqueue(drain_test_command(
+                "# Autonomous loop tick",
+                super::QueueSource::Cron,
+            ))
             .await;
         let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
             captured: Arc::new(Mutex::new(None)),
@@ -1051,11 +1056,16 @@ mod tests {
     /// NOT leave an in-flight loop-tick tag.
     #[tokio::test]
     async fn drain_does_not_tag_user_prompt_in_flight() {
-        let _g = crate::driver::LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::driver::LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         tool_cron::reset_loop_runtime_state();
         let queue = Arc::new(super::MessageQueueManager::new());
         queue
-            .enqueue(drain_test_command("just a user prompt", super::QueueSource::PromptInput))
+            .enqueue(drain_test_command(
+                "just a user prompt",
+                super::QueueSource::PromptInput,
+            ))
             .await;
         let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
             captured: Arc::new(Mutex::new(None)),

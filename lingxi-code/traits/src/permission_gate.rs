@@ -244,7 +244,10 @@ pub trait PermissionGate: Send + Sync {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        match self.check_with_worker(name, input, ctx.worker.clone()).await {
+        match self
+            .check_with_worker(name, input, ctx.worker.clone())
+            .await
+        {
             PermissionDecision::Allow => PermissionOutcome::Allow {
                 updated_input: None,
                 permission_updates: Vec::new(),

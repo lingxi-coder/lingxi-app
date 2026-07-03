@@ -177,7 +177,10 @@ pub fn resolve_output_style_from(
 /// back to the builtins. Combines [`load_output_styles_from_dir`] +
 /// [`resolve_output_style_from`].
 #[must_use]
-pub fn resolve_output_style(setting: Option<&str>, dirs: &[PathBuf]) -> Option<ResolvedOutputStyle> {
+pub fn resolve_output_style(
+    setting: Option<&str>,
+    dirs: &[PathBuf],
+) -> Option<ResolvedOutputStyle> {
     let disk: Vec<DiskOutputStyle> = dirs
         .iter()
         .flat_map(|d| load_output_styles_from_dir(d))
@@ -284,10 +287,6 @@ mod tests {
     #[test]
     fn force_for_plugin_defaults_none() {
         let s = parse_output_style("Just a body.", "no-plugin");
-        assert_eq!(
-            s.force_for_plugin,
-            None,
-            "force-for-plugin absent → None"
-        );
+        assert_eq!(s.force_for_plugin, None, "force-for-plugin absent → None");
     }
 }

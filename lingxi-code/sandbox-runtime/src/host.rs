@@ -89,7 +89,10 @@ mod tests {
             canonicalize_host("2130706433").as_deref(),
             Some("127.0.0.1")
         );
-        assert_eq!(canonicalize_host("0x7f.0.0.1").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            canonicalize_host("0x7f.0.0.1").as_deref(),
+            Some("127.0.0.1")
+        );
         assert_eq!(canonicalize_host("0:0:0:0:0:0:0:1").as_deref(), Some("::1"));
         assert_eq!(
             canonicalize_host("Example.COM.").as_deref(),

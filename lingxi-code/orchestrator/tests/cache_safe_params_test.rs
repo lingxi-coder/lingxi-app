@@ -111,6 +111,8 @@ async fn no_slot_wired_is_a_strict_noop() {
     // non-existent slot, so the guarantee is simply that the turn succeeds.
     let (orch, api) = make_orch(None);
     seed_history(&orch, 2).await;
-    orch.run_turn("hello").await.expect("turn ok without a slot");
+    orch.run_turn("hello")
+        .await
+        .expect("turn ok without a slot");
     assert_eq!(api.captured_msgs().await.len(), 1, "one API call, no panic");
 }

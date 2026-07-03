@@ -183,7 +183,10 @@ mod tests {
             input: TaskSpawnInput,
             _ctx: TaskContext,
         ) -> Result<TaskHandle, TaskError> {
-            if let TaskSpawnInput::LocalAgent { is_backgrounded, .. } = input {
+            if let TaskSpawnInput::LocalAgent {
+                is_backgrounded, ..
+            } = input
+            {
                 *self.seen_backgrounded.lock().unwrap() = Some(is_backgrounded);
             }
             Ok(TaskHandle {
@@ -271,8 +274,10 @@ mod tests {
         let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
         let dir = tempfile::tempdir().unwrap();
         let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
-        let output_manager =
-            Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
         let mut reg = TaskRegistry::new(runtime.clone(), fs, output_manager);
         let seen = Arc::new(StdMutex::new(None));
         reg.register_handler(

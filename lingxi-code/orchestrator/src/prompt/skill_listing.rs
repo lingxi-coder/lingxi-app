@@ -56,7 +56,11 @@ fn char_budget(context_window_tokens: Option<usize>) -> usize {
         return v;
     }
     match context_window_tokens {
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         Some(t) => ((t * CHARS_PER_TOKEN) as f64 * SKILL_BUDGET_CONTEXT_PERCENT).floor() as usize,
         None => DEFAULT_CHAR_BUDGET,
     }
@@ -111,7 +115,9 @@ pub fn format_within_budget(
         .filter(|(_, e)| e.is_bundled)
         .map(|(i, _)| full[i].chars().count() + 1) // +1 newline
         .sum();
-    let rest: Vec<usize> = (0..entries.len()).filter(|&i| !entries[i].is_bundled).collect();
+    let rest: Vec<usize> = (0..entries.len())
+        .filter(|&i| !entries[i].is_bundled)
+        .collect();
     if rest.is_empty() {
         return full.join("\n");
     }
@@ -187,7 +193,12 @@ mod tests {
         std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
         let entries = vec![
             entry("debug", "Debug a failing test", None, false),
-            entry("loop", "Run a prompt on a loop", Some("for repeated tasks"), false),
+            entry(
+                "loop",
+                "Run a prompt on a loop",
+                Some("for repeated tasks"),
+                false,
+            ),
         ];
         let got = render_reminder(&entries, Some(200_000)).expect("some");
         let want = "<system-reminder>\n\
@@ -221,8 +232,18 @@ mod tests {
         std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
         let entries = vec![
             entry("bundled_one", "Bundled stays full", None, true),
-            entry("user_a", "Some user skill description that is long", None, false),
-            entry("user_b", "Another user skill description that is long", None, false),
+            entry(
+                "user_a",
+                "Some user skill description that is long",
+                None,
+                false,
+            ),
+            entry(
+                "user_b",
+                "Another user skill description that is long",
+                None,
+                false,
+            ),
         ];
         let body = format_within_budget(&entries, Some(1_000)); // budget = 40 chars
         assert!(body.contains("- bundled_one: Bundled stays full"));

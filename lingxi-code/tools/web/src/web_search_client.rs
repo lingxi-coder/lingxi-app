@@ -6,15 +6,17 @@
 //! runs the search itself over the injected [`traits::http::HttpTransport`] and
 //! returns markdown result blocks the model can read — no provider hosting.
 //!
-//! Provider selection is env-driven (highest-quality first), with a keyless
-//! DuckDuckGo fallback so it works zero-config:
-//!   `TAVILY_API_KEY` → `BRAVE_API_KEY` → `LINGXI_SEARXNG_URL` → DuckDuckGo Lite.
+//! Provider selection prefers credentials explicitly saved through LingXi's
+//! settings/secure store, then environment fallbacks for headless use, with a
+//! keyless DuckDuckGo fallback so it works zero-config:
+//!   saved Tavily → `TAVILY_API_KEY` → saved Brave → `BRAVE_API_KEY` →
+//!   `LINGXI_SEARXNG_URL` → DuckDuckGo Lite.
 
+use crate::web_search_config::{WebSearchConfig, WebSearchProvider};
 use protocol::{HttpMethod, HttpRequest};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use crate::web_search_config::{WebSearchConfig, WebSearchProvider};
 use traits::http::HttpTransport;
 
 /// One normalized search result.
@@ -25,7 +27,7 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// Backend used for a client-side search, resolved from the environment.
+/// Backend used for a client-side search.
 #[derive(Debug, Clone)]
 pub enum ClientSearchProvider {
     Tavily(String),
@@ -56,7 +58,11 @@ pub struct EnvSearchConfig {
 impl EnvSearchConfig {
     #[must_use]
     pub fn empty() -> Self {
-        Self { tavily_key: None, brave_key: None, searxng_url: None }
+        Self {
+            tavily_key: None,
+            brave_key: None,
+            searxng_url: None,
+        }
     }
 
     #[must_use]
@@ -64,7 +70,9 @@ impl EnvSearchConfig {
         Self {
             tavily_key: env_trimmed("TAVILY_API_KEY"),
             brave_key: env_trimmed("BRAVE_API_KEY"),
-            searxng_url: env_trimmed("LINGXI_SEARXNG_URL").map(|u| u.trim_end_matches('/').to_string()).filter(|s| !s.is_empty()),
+            searxng_url: env_trimmed("LINGXI_SEARXNG_URL")
+                .map(|u| u.trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -72,13 +80,19 @@ impl EnvSearchConfig {
 impl ResolvedWebCredentials {
     #[must_use]
     pub fn empty() -> Self {
-        Self { tavily_key: None, brave_key: None }
+        Self {
+            tavily_key: None,
+            brave_key: None,
+        }
     }
 
     #[must_use]
     pub fn from_env() -> Self {
         let env = EnvSearchConfig::from_env();
-        Self { tavily_key: env.tavily_key, brave_key: env.brave_key }
+        Self {
+            tavily_key: env.tavily_key,
+            brave_key: env.brave_key,
+        }
     }
 }
 
@@ -88,12 +102,16 @@ const DEFAULT_MAX_RESULTS: usize = 8;
 impl ClientSearchProvider {
     /// Resolve the backend from env keys, preferring higher-quality providers;
     /// always resolves (DuckDuckGo is keyless), so client search works zero-config.
+    ///
+    /// This helper has no access to LingXi's secure store, so it treats env
+    /// values as the only configured credentials.
     #[must_use]
     pub fn from_env() -> Self {
         let cfg = WebSearchConfig::default();
         let secure = ResolvedWebCredentials::from_env();
         let env = EnvSearchConfig::from_env();
-        resolve_client_search_provider_with_credentials(&cfg, &secure, &env).unwrap_or(Self::DuckDuckGo)
+        resolve_client_search_provider_with_credentials(&cfg, &secure, &env)
+            .unwrap_or(Self::DuckDuckGo)
     }
 
     #[must_use]
@@ -126,41 +144,99 @@ pub fn resolve_client_search_provider_with_credentials(
     secure: &ResolvedWebCredentials,
     env: &EnvSearchConfig,
 ) -> Result<ClientSearchProvider, String> {
-    let searxng_url = cfg
-        .searxng_url
-        .clone()
-        .or_else(|| env.searxng_url.clone().map(|u| u.trim_end_matches('/').to_string()));
+    let candidates = resolve_client_search_candidates(cfg, secure, env);
+    candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| match cfg.provider {
+            WebSearchProvider::Tavily => {
+                "Tavily is selected but no API key is configured".to_string()
+            }
+            WebSearchProvider::Brave => {
+                "Brave is selected but no API key is configured".to_string()
+            }
+            WebSearchProvider::Searxng => {
+                "SearXNG is selected but no URL is configured".to_string()
+            }
+            WebSearchProvider::DuckDuckGo | WebSearchProvider::Auto => {
+                "No web search provider is configured".to_string()
+            }
+        })
+}
 
-    let pick_tavily = || {
-        secure
-            .tavily_key
+#[must_use]
+/// Return the ordered client-side search candidates for the configured backend.
+///
+/// `Auto` keeps every configured provider in fallback order so a stale key
+/// cannot block the next credential source or the keyless fallback. Secure-store
+/// credentials are tried before environment variables because `/web` writes are
+/// the explicit in-app configuration, while env vars are primarily a
+/// headless/CI fallback.
+pub fn resolve_client_search_candidates(
+    cfg: &WebSearchConfig,
+    secure: &ResolvedWebCredentials,
+    env: &EnvSearchConfig,
+) -> Vec<ClientSearchProvider> {
+    let searxng_url = cfg.searxng_url.clone().or_else(|| {
+        env.searxng_url
             .clone()
-            .or_else(|| env.tavily_key.clone())
-            .map(ClientSearchProvider::Tavily)
-            .ok_or_else(|| "Tavily is selected but no API key is configured".to_string())
-    };
-    let pick_brave = || {
-        secure
-            .brave_key
-            .clone()
-            .or_else(|| env.brave_key.clone())
-            .map(ClientSearchProvider::Brave)
-            .ok_or_else(|| "Brave is selected but no API key is configured".to_string())
-    };
-    let pick_searxng = || {
-        searxng_url
-            .clone()
-            .map(ClientSearchProvider::Searxng)
-            .ok_or_else(|| "SearXNG is selected but no URL is configured".to_string())
-    };
+            .map(|u| u.trim_end_matches('/').to_string())
+    });
+
+    fn push_tavily(out: &mut Vec<ClientSearchProvider>, key: Option<String>) {
+        if let Some(key) = key {
+            if !out
+                .iter()
+                .any(|p| matches!(p, ClientSearchProvider::Tavily(existing) if existing == &key))
+            {
+                out.push(ClientSearchProvider::Tavily(key));
+            }
+        }
+    }
+    fn push_brave(out: &mut Vec<ClientSearchProvider>, key: Option<String>) {
+        if let Some(key) = key {
+            if !out
+                .iter()
+                .any(|p| matches!(p, ClientSearchProvider::Brave(existing) if existing == &key))
+            {
+                out.push(ClientSearchProvider::Brave(key));
+            }
+        }
+    }
+    fn push_searxng(out: &mut Vec<ClientSearchProvider>, url: Option<String>) {
+        if let Some(url) = url {
+            if !out
+                .iter()
+                .any(|p| matches!(p, ClientSearchProvider::Searxng(existing) if existing == &url))
+            {
+                out.push(ClientSearchProvider::Searxng(url));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
 
     match cfg.provider {
-        WebSearchProvider::Tavily => pick_tavily(),
-        WebSearchProvider::Brave => pick_brave(),
-        WebSearchProvider::Searxng => pick_searxng(),
-        WebSearchProvider::DuckDuckGo => Ok(ClientSearchProvider::DuckDuckGo),
-        WebSearchProvider::Auto => pick_tavily().or_else(|_| pick_brave()).or_else(|_| pick_searxng()).or(Ok(ClientSearchProvider::DuckDuckGo)),
+        WebSearchProvider::Tavily => {
+            push_tavily(&mut out, secure.tavily_key.clone());
+            push_tavily(&mut out, env.tavily_key.clone());
+        }
+        WebSearchProvider::Brave => {
+            push_brave(&mut out, secure.brave_key.clone());
+            push_brave(&mut out, env.brave_key.clone());
+        }
+        WebSearchProvider::Searxng => push_searxng(&mut out, searxng_url),
+        WebSearchProvider::DuckDuckGo => out.push(ClientSearchProvider::DuckDuckGo),
+        WebSearchProvider::Auto => {
+            push_tavily(&mut out, secure.tavily_key.clone());
+            push_tavily(&mut out, env.tavily_key.clone());
+            push_brave(&mut out, secure.brave_key.clone());
+            push_brave(&mut out, env.brave_key.clone());
+            push_searxng(&mut out, searxng_url);
+            out.push(ClientSearchProvider::DuckDuckGo);
+        }
     }
+    out
 }
 
 /// Run a client-side web search and return normalized hits (already
@@ -229,7 +305,10 @@ fn enc(q: &str) -> String {
 }
 
 fn env_trimmed(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|s| !s.is_empty())
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 // ── request builders ────────────────────────────────────────────────────────
@@ -568,27 +647,134 @@ mod tests {
 
         #[test]
         fn active_specific_provider_requires_configured_key() {
-            let cfg = WebSearchConfig { provider: WebSearchProvider::Tavily, searxng_url: None };
-            let keys = WebSearchKeyPresence { tavily: false, brave: false };
-            let err = resolve_client_search_provider(&cfg, &keys, EnvSearchConfig::empty()).unwrap_err();
+            let cfg = WebSearchConfig {
+                provider: WebSearchProvider::Tavily,
+                searxng_url: None,
+            };
+            let keys = WebSearchKeyPresence {
+                tavily: false,
+                brave: false,
+            };
+            let err =
+                resolve_client_search_provider(&cfg, &keys, EnvSearchConfig::empty()).unwrap_err();
             assert!(err.contains("Tavily is selected but no API key is configured"));
         }
 
         #[test]
         fn active_specific_provider_uses_env_key_when_secure_key_absent() {
-            let cfg = WebSearchConfig { provider: WebSearchProvider::Tavily, searxng_url: None };
-            let keys = WebSearchKeyPresence { tavily: false, brave: false };
-            let env = EnvSearchConfig { tavily_key: Some("env-tavily".into()), brave_key: None, searxng_url: None };
-            assert!(matches!(resolve_client_search_provider(&cfg, &keys, env).unwrap(), ClientSearchProvider::Tavily(k) if k == "env-tavily"));
+            let cfg = WebSearchConfig {
+                provider: WebSearchProvider::Tavily,
+                searxng_url: None,
+            };
+            let keys = WebSearchKeyPresence {
+                tavily: false,
+                brave: false,
+            };
+            let env = EnvSearchConfig {
+                tavily_key: Some("env-tavily".into()),
+                brave_key: None,
+                searxng_url: None,
+            };
+            assert!(
+                matches!(resolve_client_search_provider(&cfg, &keys, env).unwrap(), ClientSearchProvider::Tavily(k) if k == "env-tavily")
+            );
+        }
+
+        #[test]
+        fn active_specific_provider_prefers_secure_key_over_env_key() {
+            let cfg = WebSearchConfig {
+                provider: WebSearchProvider::Tavily,
+                searxng_url: None,
+            };
+            let secure = ResolvedWebCredentials {
+                tavily_key: Some("secure-tavily".into()),
+                brave_key: None,
+            };
+            let env = EnvSearchConfig {
+                tavily_key: Some("env-tavily".into()),
+                brave_key: None,
+                searxng_url: None,
+            };
+            assert!(
+                matches!(resolve_client_search_provider_with_credentials(&cfg, &secure, &env).unwrap(), ClientSearchProvider::Tavily(k) if k == "secure-tavily")
+            );
+        }
+
+        #[test]
+        fn auto_candidates_try_secure_before_env_and_keep_fallbacks() {
+            let cfg = WebSearchConfig::default();
+            let secure = ResolvedWebCredentials {
+                tavily_key: Some("secure-tavily".into()),
+                brave_key: None,
+            };
+            let env = EnvSearchConfig {
+                tavily_key: Some("env-tavily".into()),
+                brave_key: None,
+                searxng_url: None,
+            };
+            let candidates = resolve_client_search_candidates(&cfg, &secure, &env);
+            assert_eq!(candidates.len(), 3);
+            assert!(
+                matches!(&candidates[0], ClientSearchProvider::Tavily(k) if k == "secure-tavily")
+            );
+            assert!(matches!(&candidates[1], ClientSearchProvider::Tavily(k) if k == "env-tavily"));
+            assert!(matches!(candidates[2], ClientSearchProvider::DuckDuckGo));
         }
 
         #[test]
         fn auto_fallback_prefers_secure_keys_then_searxng_then_duckduckgo() {
             let cfg = WebSearchConfig::default();
-            assert!(matches!(resolve_client_search_provider(&cfg, &WebSearchKeyPresence { tavily: true, brave: true }, EnvSearchConfig::empty()).unwrap(), ClientSearchProvider::Tavily(_)));
-            assert!(matches!(resolve_client_search_provider(&cfg, &WebSearchKeyPresence { tavily: false, brave: true }, EnvSearchConfig::empty()).unwrap(), ClientSearchProvider::Brave(_)));
-            assert!(matches!(resolve_client_search_provider(&WebSearchConfig { provider: WebSearchProvider::Auto, searxng_url: Some("https://s.example".into()) }, &WebSearchKeyPresence { tavily: false, brave: false }, EnvSearchConfig::empty()).unwrap(), ClientSearchProvider::Searxng(_)));
-            assert!(matches!(resolve_client_search_provider(&cfg, &WebSearchKeyPresence { tavily: false, brave: false }, EnvSearchConfig::empty()).unwrap(), ClientSearchProvider::DuckDuckGo));
+            assert!(matches!(
+                resolve_client_search_provider(
+                    &cfg,
+                    &WebSearchKeyPresence {
+                        tavily: true,
+                        brave: true
+                    },
+                    EnvSearchConfig::empty()
+                )
+                .unwrap(),
+                ClientSearchProvider::Tavily(_)
+            ));
+            assert!(matches!(
+                resolve_client_search_provider(
+                    &cfg,
+                    &WebSearchKeyPresence {
+                        tavily: false,
+                        brave: true
+                    },
+                    EnvSearchConfig::empty()
+                )
+                .unwrap(),
+                ClientSearchProvider::Brave(_)
+            ));
+            assert!(matches!(
+                resolve_client_search_provider(
+                    &WebSearchConfig {
+                        provider: WebSearchProvider::Auto,
+                        searxng_url: Some("https://s.example".into())
+                    },
+                    &WebSearchKeyPresence {
+                        tavily: false,
+                        brave: false
+                    },
+                    EnvSearchConfig::empty()
+                )
+                .unwrap(),
+                ClientSearchProvider::Searxng(_)
+            ));
+            assert!(matches!(
+                resolve_client_search_provider(
+                    &cfg,
+                    &WebSearchKeyPresence {
+                        tavily: false,
+                        brave: false
+                    },
+                    EnvSearchConfig::empty()
+                )
+                .unwrap(),
+                ClientSearchProvider::DuckDuckGo
+            ));
         }
     }
 

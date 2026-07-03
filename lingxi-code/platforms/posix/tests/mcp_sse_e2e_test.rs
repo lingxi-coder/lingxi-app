@@ -61,9 +61,9 @@ async fn sse_handler(
         }
     });
     // `warmup` yields one `None` (just the delay), then the real replies flow.
-    let stream = warmup.chain(replies).filter_map(|maybe| async move {
-        maybe.map(|v| Ok(Event::default().data(v.to_string())))
-    });
+    let stream = warmup
+        .chain(replies)
+        .filter_map(|maybe| async move { maybe.map(|v| Ok(Event::default().data(v.to_string()))) });
     Sse::new(stream)
 }
 

@@ -199,9 +199,6 @@ mod tests {
 
         // Unique bare model → no profile.
         let _ = h.handle(&args("gpt-4.1")).await;
-        assert_eq!(
-            mock.last_switch(),
-            Some(("gpt-4.1".to_string(), None))
-        );
+        assert_eq!(mock.last_switch(), Some(("gpt-4.1".to_string(), None)));
     }
 }

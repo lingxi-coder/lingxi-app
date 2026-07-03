@@ -376,6 +376,9 @@ mod tests {
 
     #[test]
     fn classify_lookup_nonzero_with_stderr_payload_is_failed() {
-        assert_eq!(classify_lookup(false, "daemon error"), LookupOutcome::Failed);
+        assert_eq!(
+            classify_lookup(false, "daemon error"),
+            LookupOutcome::Failed
+        );
     }
 }

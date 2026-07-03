@@ -12,7 +12,6 @@
 //! 2. A tool that SUCCEEDS fires `PostToolUse` (and NOT `PostToolUseFailure`).
 //! 3. A `PostToolUseFailure` hook that itself returns an error outcome does NOT
 //!    break the turn (the loop still reaches `end_turn`).
-use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -20,8 +19,10 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResult};
 use hooks::HookExecutorImpl;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -203,7 +204,10 @@ impl Tool for AlwaysFailTool {
 /// What the recording handler observed for a post-dispatch hook event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Seen {
-    Post { tool_name: String, tool_use_id: String },
+    Post {
+        tool_name: String,
+        tool_use_id: String,
+    },
     PostFailure {
         tool_name: String,
         tool_input: serde_json::Value,
@@ -441,15 +445,11 @@ async fn failing_post_tool_use_failure_hook_does_not_break_turn() {
     let api = two_turn_api(tool_use_id.clone(), "AlwaysFail");
 
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook(
-            "broken-failure-hook",
-            HookEventType::PostToolUseFailure,
-        ));
-    let mut exec =
-        HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+    registry.write().await.register(builtin_hook(
+        "broken-failure-hook",
+        HookEventType::PostToolUseFailure,
+    ));
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(FailingFailureHook));
     let hooks = Arc::new(exec);
 

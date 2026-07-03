@@ -15,7 +15,10 @@ use tool_api::registry::ToolRegistry;
 async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     let tmp = TempDir::new().unwrap();
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![LlmContentBlock::Text { text: "ok".into(), cache_control: None }],
+        vec![LlmContentBlock::Text {
+            text: "ok".into(),
+            cache_control: None,
+        }],
         Some("end_turn"),
     )]));
     let tools = Arc::new(ToolRegistry::new());

@@ -42,11 +42,11 @@
 use base64::Engine;
 use serde_json::Value;
 
-use crate::{
-    eventstream::EventStreamSplitter, LlmError, LlmEvent, LlmRequest, ProviderRequest,
-    ProviderResponse, LlmResponse, RawStreamFrame, StreamDecoder, StreamFraming, WireCodec,
-};
 use super::AnthropicMessagesCodec;
+use crate::{
+    eventstream::EventStreamSplitter, LlmError, LlmEvent, LlmRequest, LlmResponse, ProviderRequest,
+    ProviderResponse, RawStreamFrame, StreamDecoder, StreamFraming, WireCodec,
+};
 
 /// The Anthropic API version inserted into Bedrock request bodies.
 const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
@@ -83,7 +83,11 @@ impl BedrockClaudeCodec {
     /// Build the Bedrock invoke URL for a given model id.
     fn invoke_url(&self, model_id: &str, stream: bool) -> String {
         let base = self.base_url.trim_end_matches('/');
-        let suffix = if stream { "invoke-with-response-stream" } else { "invoke" };
+        let suffix = if stream {
+            "invoke-with-response-stream"
+        } else {
+            "invoke"
+        };
         format!("{base}/model/{model_id}/{suffix}")
     }
 }
@@ -213,16 +217,16 @@ impl StreamDecoder for BedrockClaudeStreamDecoder {
             match message_type {
                 Some("event") => {
                     // Payload is JSON `{"bytes": "<base64>"}`.
-                    let payload_str =
-                        std::str::from_utf8(&msg.payload).map_err(|_| LlmError::StreamInterrupted {
+                    let payload_str = std::str::from_utf8(&msg.payload).map_err(|_| {
+                        LlmError::StreamInterrupted {
                             message: "Bedrock event-stream payload is not valid UTF-8".to_string(),
-                        })?;
-                    let payload_json: Value =
-                        serde_json::from_str(payload_str).map_err(|e| LlmError::StreamInterrupted {
-                            message: format!(
-                                "Bedrock event-stream payload is not valid JSON: {e}"
-                            ),
-                        })?;
+                        }
+                    })?;
+                    let payload_json: Value = serde_json::from_str(payload_str).map_err(|e| {
+                        LlmError::StreamInterrupted {
+                            message: format!("Bedrock event-stream payload is not valid JSON: {e}"),
+                        }
+                    })?;
                     let b64 = payload_json
                         .get("bytes")
                         .and_then(Value::as_str)
@@ -249,9 +253,7 @@ impl StreamDecoder for BedrockClaudeStreamDecoder {
                         .iter()
                         .find(|(n, _)| n == ":exception-type")
                         .map_or("unknown", |(_, v)| v.as_str());
-                    let payload_str = std::str::from_utf8(&msg.payload)
-                        .unwrap_or("")
-                        .to_string();
+                    let payload_str = std::str::from_utf8(&msg.payload).unwrap_or("").to_string();
                     return Err(LlmError::StreamInterrupted {
                         message: format!(
                             "Bedrock event-stream {}: {}: {}",
@@ -291,8 +293,8 @@ mod tests {
     #[test]
     fn encode_non_streaming_shape() {
         let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
-        let req = LlmRequest::new("anthropic.claude-3-5-sonnet-20241022-v2:0")
-            .with_user_text("hello");
+        let req =
+            LlmRequest::new("anthropic.claude-3-5-sonnet-20241022-v2:0").with_user_text("hello");
 
         let provider_req = codec.encode_request(&req).expect("encode must succeed");
 
@@ -312,7 +314,10 @@ mod tests {
 
         // anthropic_version must be present (body-level, snake_case).
         assert_eq!(
-            provider_req.body_json.get("anthropic_version").and_then(Value::as_str),
+            provider_req
+                .body_json
+                .get("anthropic_version")
+                .and_then(Value::as_str),
             Some("bedrock-2023-05-31"),
             "anthropic_version must be in body"
         );
@@ -367,7 +372,10 @@ mod tests {
 
         // anthropic_version still in body.
         assert_eq!(
-            provider_req.body_json.get("anthropic_version").and_then(Value::as_str),
+            provider_req
+                .body_json
+                .get("anthropic_version")
+                .and_then(Value::as_str),
             Some("bedrock-2023-05-31")
         );
 
@@ -401,9 +409,15 @@ mod tests {
         let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
         let mut decoder = codec.stream_decoder();
         let raw_frame = RawStreamFrame::new(frame_bytes);
-        let events = decoder.decode_frame(raw_frame).expect("decode must succeed");
+        let events = decoder
+            .decode_frame(raw_frame)
+            .expect("decode must succeed");
 
-        assert_eq!(events.len(), 1, "expected exactly one event; got {events:?}");
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly one event; got {events:?}"
+        );
         match &events[0] {
             LlmEvent::MessageStart { response } => {
                 assert_eq!(response.id, "msg_01", "response id must match");
@@ -419,7 +433,10 @@ mod tests {
         let payload = br#"{"message":"the model is overloaded"}"#;
 
         let mut headers = encode_string_header(":message-type", "exception");
-        headers.extend(encode_string_header(":exception-type", "ModelStreamErrorException"));
+        headers.extend(encode_string_header(
+            ":exception-type",
+            "ModelStreamErrorException",
+        ));
         let frame_bytes = build_frame(&headers, payload);
 
         let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
@@ -453,9 +470,14 @@ mod tests {
     #[test]
     fn decode_response_bedrock_400_top_level_message_becomes_invalid_request() {
         let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
-        let response = make_response(400, serde_json::json!({"message": "Input validation failed"}));
+        let response = make_response(
+            400,
+            serde_json::json!({"message": "Input validation failed"}),
+        );
 
-        let err = codec.decode_response(response).expect_err("400 must be an error");
+        let err = codec
+            .decode_response(response)
+            .expect_err("400 must be an error");
         match err {
             LlmError::InvalidRequest { message } => {
                 assert!(
@@ -474,7 +496,9 @@ mod tests {
         let codec = BedrockClaudeCodec::new("https://bedrock-runtime.us-east-1.amazonaws.com");
         let response = make_response(429, serde_json::json!({"message": "Too many requests"}));
 
-        let err = codec.decode_response(response).expect_err("429 must be an error");
+        let err = codec
+            .decode_response(response)
+            .expect_err("429 must be an error");
         assert!(
             matches!(err, LlmError::RateLimited { .. }),
             "expected RateLimited, got: {err:?}"
@@ -498,7 +522,9 @@ mod tests {
             }),
         );
 
-        let err = codec.decode_response(response).expect_err("400 must be an error");
+        let err = codec
+            .decode_response(response)
+            .expect_err("400 must be an error");
         assert!(
             matches!(err, LlmError::InvalidRequest { .. } | LlmError::ContextOverflow { .. }),
             "expected InvalidRequest or ContextOverflow for 400 with anthropic envelope; got: {err:?}"

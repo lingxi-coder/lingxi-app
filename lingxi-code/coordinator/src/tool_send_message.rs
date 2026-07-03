@@ -271,9 +271,10 @@ impl SendMessageTool {
             .route(to, msg)
             .await
             .map_err(|e| match e {
-                MailboxError::NotFound(id) => {
-                    ToolError::InvalidInput(format!("SendMessage: no such worker: {}", id.as_uuid()))
-                }
+                MailboxError::NotFound(id) => ToolError::InvalidInput(format!(
+                    "SendMessage: no such worker: {}",
+                    id.as_uuid()
+                )),
                 other => ToolError::Internal(format!("SendMessage: {other}")),
             })
     }
@@ -404,9 +405,13 @@ impl SendMessageTool {
         // cancel — the in-process analog of `task.abortController.abort()`.
         if approve {
             if let (Some(seam), Some(agent_id)) = (&self.spawn_seam, ctx.agent_id) {
-                if let Some(worker) = self.team.list().await.into_iter().find(|w| {
-                    w.agent_id == agent_id && !w.task_id.is_empty()
-                }) {
+                if let Some(worker) = self
+                    .team
+                    .list()
+                    .await
+                    .into_iter()
+                    .find(|w| w.agent_id == agent_id && !w.task_id.is_empty())
+                {
                     // Best-effort: a kill failure does not fail the response send.
                     let _ = seam.kill(&worker.task_id).await;
                 }
@@ -743,17 +748,18 @@ fn display_target(raw: &str, addr: &Address) -> String {
 /// TS discriminated union + `semanticBoolean` coercion (`SendMessageTool.ts:
 /// 46-65`). `request_id` / `approve` are required on the response variants.
 fn parse_structured(obj: &serde_json::Map<String, Value>) -> Result<StructuredMessage, ToolError> {
-    let ty = obj
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolError::InvalidInput("SendMessage: structured message missing 'type'".into()))?;
+    let ty = obj.get("type").and_then(Value::as_str).ok_or_else(|| {
+        ToolError::InvalidInput("SendMessage: structured message missing 'type'".into())
+    })?;
 
     let request_id = || -> Result<String, ToolError> {
         obj.get("request_id")
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| {
-                ToolError::InvalidInput("SendMessage: structured message missing 'request_id'".into())
+                ToolError::InvalidInput(
+                    "SendMessage: structured message missing 'request_id'".into(),
+                )
             })
     };
     let approve = || -> Result<bool, ToolError> {
@@ -800,6 +806,7 @@ mod tests {
                 debug: false,
                 verbose: false,
                 main_loop_model: "test".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 is_non_interactive_session: false,
@@ -865,13 +872,25 @@ mod tests {
     #[test]
     fn parse_address_covers_all_schemes() {
         assert_eq!(parse_address("*"), Address::Broadcast);
-        assert_eq!(parse_address("uds:/tmp/s.sock"), Address::Uds("/tmp/s.sock".into()));
-        assert_eq!(parse_address("/tmp/s.sock"), Address::Uds("/tmp/s.sock".into()));
+        assert_eq!(
+            parse_address("uds:/tmp/s.sock"),
+            Address::Uds("/tmp/s.sock".into())
+        );
+        assert_eq!(
+            parse_address("/tmp/s.sock"),
+            Address::Uds("/tmp/s.sock".into())
+        );
         assert_eq!(parse_address("bridge:abc"), Address::Bridge("abc".into()));
         assert_eq!(parse_address("scout"), Address::Name("scout".into()));
         let id = AgentId::new();
-        assert_eq!(parse_address(&id.as_uuid().to_string()), Address::AgentId(id));
-        assert_eq!(parse_address(&format!("agent:{}", id.as_uuid())), Address::AgentId(id));
+        assert_eq!(
+            parse_address(&id.as_uuid().to_string()),
+            Address::AgentId(id)
+        );
+        assert_eq!(
+            parse_address(&format!("agent:{}", id.as_uuid())),
+            Address::AgentId(id)
+        );
     }
 
     #[test]
@@ -888,9 +907,9 @@ mod tests {
     fn is_read_only_true_only_for_string_message() {
         let tool = SendMessageTool::new(make_registry());
         assert!(tool.is_read_only(&json!({ "to": "x", "message": "hi" })));
-        assert!(!tool.is_read_only(
-            &json!({ "to": "x", "message": { "type": "shutdown_request" } })
-        ));
+        assert!(
+            !tool.is_read_only(&json!({ "to": "x", "message": { "type": "shutdown_request" } }))
+        );
     }
 
     #[tokio::test]
@@ -953,9 +972,18 @@ mod tests {
     #[tokio::test]
     async fn broadcast_fans_out_to_all_but_self() {
         let registry = make_registry();
-        let a = registry.spawn_worker("e".into(), "alpha".into(), "t-a".into()).await.unwrap();
-        let b = registry.spawn_worker("e".into(), "beta".into(), "t-b".into()).await.unwrap();
-        let c = registry.spawn_worker("e".into(), "gamma".into(), "t-c".into()).await.unwrap();
+        let a = registry
+            .spawn_worker("e".into(), "alpha".into(), "t-a".into())
+            .await
+            .unwrap();
+        let b = registry
+            .spawn_worker("e".into(), "beta".into(), "t-b".into())
+            .await
+            .unwrap();
+        let c = registry
+            .spawn_worker("e".into(), "gamma".into(), "t-c".into())
+            .await
+            .unwrap();
         let mb_a = observable_mailbox(&registry, a).await;
         let mb_b = observable_mailbox(&registry, b).await;
         let mb_c = observable_mailbox(&registry, c).await;
@@ -968,7 +996,10 @@ mod tests {
         let recipients = res.data["recipients"].as_array().unwrap();
         assert_eq!(recipients.len(), 2, "self excluded: {recipients:?}");
 
-        assert!(mb_a.drain().is_empty(), "sender must not receive its own broadcast");
+        assert!(
+            mb_a.drain().is_empty(),
+            "sender must not receive its own broadcast"
+        );
         assert_eq!(mb_b.drain().len(), 1);
         assert_eq!(mb_c.drain().len(), 1);
     }
@@ -976,7 +1007,10 @@ mod tests {
     #[tokio::test]
     async fn broadcast_alone_reports_no_teammates() {
         let registry = make_registry();
-        let solo = registry.spawn_worker("e".into(), "solo".into(), "t".into()).await.unwrap();
+        let solo = registry
+            .spawn_worker("e".into(), "solo".into(), "t".into())
+            .await
+            .unwrap();
         let tool = SendMessageTool::new(registry);
         let input = json!({ "to": "*", "summary": "hi", "message": "anyone?" });
         let res = tool.call(input, ctx_as(solo), fresh_tx()).await.unwrap();
@@ -1047,7 +1081,10 @@ mod tests {
     #[tokio::test]
     async fn shutdown_response_to_wrong_target_is_rejected() {
         let registry = make_registry();
-        let _w = registry.spawn_worker("e".into(), "worker".into(), "t".into()).await.unwrap();
+        let _w = registry
+            .spawn_worker("e".into(), "worker".into(), "t".into())
+            .await
+            .unwrap();
         let tool = SendMessageTool::new(registry);
         let input = json!({
             "to": "worker",
@@ -1055,7 +1092,9 @@ mod tests {
         });
         let err = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap_err();
         match err {
-            ToolError::InvalidInput(m) => assert_eq!(m, "shutdown_response must be sent to \"team-lead\""),
+            ToolError::InvalidInput(m) => {
+                assert_eq!(m, "shutdown_response must be sent to \"team-lead\"")
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
     }
@@ -1123,8 +1162,14 @@ mod tests {
         });
         tool.call(input, ctx_as(worker), fresh_tx()).await.unwrap();
 
-        assert!(seam.killed.load(Ordering::SeqCst), "approved shutdown must signal kill");
-        assert_eq!(seam.killed_task.lock().unwrap().as_deref(), Some("task-worker"));
+        assert!(
+            seam.killed.load(Ordering::SeqCst),
+            "approved shutdown must signal kill"
+        );
+        assert_eq!(
+            seam.killed_task.lock().unwrap().as_deref(),
+            Some("task-worker")
+        );
     }
 
     #[tokio::test]
@@ -1259,7 +1304,9 @@ mod tests {
             .await
             .expect_err("an '@'-bearing recipient must be rejected");
         match err {
-            ToolError::InvalidInput(m) => assert!(m.contains("there is only one team per session"), "got {m}"),
+            ToolError::InvalidInput(m) => {
+                assert!(m.contains("there is only one team per session"), "got {m}")
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
     }

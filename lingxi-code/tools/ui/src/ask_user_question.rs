@@ -221,7 +221,9 @@ fn parse_option(idx_q: usize, idx_o: usize, v: &Value) -> Result<QuestionOption,
 /// and `header` length.
 fn parse_question(idx_q: usize, v: &Value) -> Result<Question, ToolError> {
     let obj = v.as_object().ok_or_else(|| {
-        ToolError::InvalidInput(format!("AskUserQuestion: questions[{idx_q}] must be an object"))
+        ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}] must be an object"
+        ))
     })?;
     let question = obj.get("question").and_then(Value::as_str).ok_or_else(|| {
         ToolError::InvalidInput(format!(
@@ -246,11 +248,14 @@ fn parse_question(idx_q: usize, v: &Value) -> Result<Question, ToolError> {
         )));
     }
 
-    let opts_v = obj.get("options").and_then(Value::as_array).ok_or_else(|| {
-        ToolError::InvalidInput(format!(
-            "AskUserQuestion: questions[{idx_q}].options must be an array"
-        ))
-    })?;
+    let opts_v = obj
+        .get("options")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ToolError::InvalidInput(format!(
+                "AskUserQuestion: questions[{idx_q}].options must be an array"
+            ))
+        })?;
     if opts_v.len() < MIN_ASK_OPTIONS {
         return Err(ToolError::InvalidInput(format!(
             "AskUserQuestion: questions[{idx_q}].options must have at least {MIN_ASK_OPTIONS} options"
@@ -806,7 +811,10 @@ mod tests {
         });
         let qs = validate_input_internal(&input).expect("ok");
         assert!(!qs[0].multi_select);
-        assert_eq!(qs[0].options[0].preview.as_deref(), Some("```rust\nfn a(){}\n```"));
+        assert_eq!(
+            qs[0].options[0].preview.as_deref(),
+            Some("```rust\nfn a(){}\n```")
+        );
         assert_eq!(qs[0].options[1].preview, None);
     }
 

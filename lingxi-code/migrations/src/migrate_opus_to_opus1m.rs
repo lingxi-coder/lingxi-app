@@ -59,7 +59,11 @@ pub async fn run(env: &MigrationEnv) {
     if !is_opus1m_merge_enabled(env) {
         return;
     }
-    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
+    let sp = settings_path(
+        SettingsSource::User,
+        &env.lingxi_config_home,
+        &env.project_dir,
+    );
     let model = read_settings_map(&sp)
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from));
@@ -99,7 +103,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }
@@ -117,7 +124,10 @@ mod tests {
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
         run(&test_env(&t)).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("opus")
+        );
     }
 
     // See tier_none_fails_closed for the lock rationale.
@@ -151,7 +161,10 @@ mod tests {
         let mut env = test_env(&t);
         env.ctx.subscription_type = Some(SubscriptionType::Enterprise);
         run(&env).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus[1m]"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("opus[1m]")
+        );
     }
 
     /// Gate coverage: not first-party is a noop even with an eligible tier
@@ -170,7 +183,10 @@ mod tests {
         env.ctx.first_party = false;
         env.ctx.subscription_type = Some(SubscriptionType::Max);
         run(&env).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("opus")
+        );
     }
 
     // See tier_none_fails_closed for the lock rationale.
@@ -188,20 +204,29 @@ mod tests {
         let mut env = test_env(&t);
         env.ctx.subscription_type = Some(SubscriptionType::Max);
         run(&env).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("opus")
+        );
         std::env::remove_var("CLAUDE_CODE_DISABLE_1M_CONTEXT");
 
         // Pro subscribers keep separate Opus / Opus 1M options
         let mut env = test_env(&t);
         env.ctx.subscription_type = Some(SubscriptionType::Pro);
         run(&env).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("opus")
+        );
 
         // non-'opus' pin untouched
         std::fs::write(&sp, r#"{"model": "opus[1m]"}"#).unwrap();
         let mut env = test_env(&t);
         env.ctx.subscription_type = Some(SubscriptionType::Max);
         run(&env).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], serde_json::json!("opus[1m]"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            serde_json::json!("opus[1m]")
+        );
     }
 }

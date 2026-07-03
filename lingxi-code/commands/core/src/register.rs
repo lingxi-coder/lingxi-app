@@ -958,9 +958,17 @@ mod connect_tests {
     fn connect_resolves_after_registration() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        register_core_connect(&mut reg, Arc::new(NoopWriter), Arc::new(NoopCopilot), Arc::new(NoopChatGpt));
+        register_core_connect(
+            &mut reg,
+            Arc::new(NoopWriter),
+            Arc::new(NoopCopilot),
+            Arc::new(NoopChatGpt),
+        );
         assert!(reg.resolve("connect").is_some(), "/connect missing");
-        assert!(reg.get_handler("connect").is_some(), "/connect handler missing");
+        assert!(
+            reg.get_handler("connect").is_some(),
+            "/connect handler missing"
+        );
     }
 }
 

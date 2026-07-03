@@ -99,7 +99,11 @@ pub fn domain_check_failed_msg(domain: &str) -> String {
 #[must_use]
 fn encode_uri_component(s: &str) -> String {
     fn is_unreserved(b: u8) -> bool {
-        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            )
     }
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -107,8 +111,16 @@ fn encode_uri_component(s: &str) -> String {
             out.push(b as char);
         } else {
             out.push('%');
-            out.push(char::from_digit(u32::from(b >> 4), 16).unwrap().to_ascii_uppercase());
-            out.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap().to_ascii_uppercase());
+            out.push(
+                char::from_digit(u32::from(b >> 4), 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            out.push(
+                char::from_digit(u32::from(b & 0x0f), 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
         }
     }
     out
@@ -244,10 +256,7 @@ fn parse_can_fetch(body: &str) -> bool {
 /// with the [`DOMAIN_CHECK_TIMEOUT`] and maps the result. A transport error or
 /// non-200 status yields [`DomainCheckResult::CheckFailed`] (fail-open: the
 /// caller surfaces a user-facing `DomainCheckFailedError`).
-pub async fn check_domain_blocklist(
-    http: &dyn HttpTransport,
-    domain: &str,
-) -> DomainCheckResult {
+pub async fn check_domain_blocklist(http: &dyn HttpTransport, domain: &str) -> DomainCheckResult {
     check_domain_blocklist_at(http, domain, Instant::now()).await
 }
 
@@ -259,7 +268,9 @@ pub async fn check_domain_blocklist_at(
 ) -> DomainCheckResult {
     // Cache hit short-circuit (`utils.ts:179-181`).
     {
-        let mut cache = DOMAIN_CHECK_CACHE.lock().expect("DOMAIN_CHECK_CACHE poisoned");
+        let mut cache = DOMAIN_CHECK_CACHE
+            .lock()
+            .expect("DOMAIN_CHECK_CACHE poisoned");
         if cache.has(domain, now) {
             return DomainCheckResult::Allowed;
         }
@@ -277,7 +288,9 @@ pub async fn check_domain_blocklist_at(
     match http.request(req).await {
         Ok(resp) if resp.status == 200 => {
             if parse_can_fetch(&resp.body) {
-                let mut cache = DOMAIN_CHECK_CACHE.lock().expect("DOMAIN_CHECK_CACHE poisoned");
+                let mut cache = DOMAIN_CHECK_CACHE
+                    .lock()
+                    .expect("DOMAIN_CHECK_CACHE poisoned");
                 cache.set(domain.to_string(), now);
                 DomainCheckResult::Allowed
             } else {
@@ -341,7 +354,10 @@ mod tests {
     fn encode_uri_component_passes_through_hostnames() {
         // Plain hostnames are all unreserved → identity.
         assert_eq!(encode_uri_component("example.com"), "example.com");
-        assert_eq!(encode_uri_component("sub-domain.example.co.uk"), "sub-domain.example.co.uk");
+        assert_eq!(
+            encode_uri_component("sub-domain.example.co.uk"),
+            "sub-domain.example.co.uk"
+        );
     }
 
     #[test]
@@ -490,7 +506,10 @@ mod tests {
         let t0 = Instant::now();
         c.set("ttl.example".into(), t0);
         // Just under the TTL: hit.
-        let almost = t0 + DOMAIN_CHECK_CACHE_TTL.checked_sub(Duration::from_millis(1)).unwrap();
+        let almost = t0
+            + DOMAIN_CHECK_CACHE_TTL
+                .checked_sub(Duration::from_millis(1))
+                .unwrap();
         assert!(c.has("ttl.example", almost));
         // At/after the TTL: miss + eviction.
         let after = t0 + DOMAIN_CHECK_CACHE_TTL;

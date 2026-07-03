@@ -863,12 +863,7 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                 match mtype {
                     "shutdown_request" => {
                         Self::handle_shutdown_request(
-                            &router,
-                            &from,
-                            &recipient,
-                            &to,
-                            reason,
-                            &sender,
+                            &router, &from, &recipient, &to, reason, &sender,
                         )
                         .await
                     }
@@ -1034,14 +1029,16 @@ mod tests {
         assert!(schema["properties"]["to"].is_object());
         assert!(schema["properties"]["summary"].is_object());
         assert!(schema["properties"]["message"]["oneOf"].is_array());
-        let variants = schema["properties"]["message"]["oneOf"]
-            .as_array()
-            .unwrap();
+        let variants = schema["properties"]["message"]["oneOf"].as_array().unwrap();
         assert_eq!(variants.len(), 2);
         assert_eq!(variants[0]["type"], "string");
         assert_eq!(
             variants[1]["properties"]["type"]["enum"],
-            json!(["shutdown_request", "shutdown_response", "plan_approval_response"])
+            json!([
+                "shutdown_request",
+                "shutdown_response",
+                "plan_approval_response"
+            ])
         );
     }
 
@@ -1102,7 +1099,10 @@ mod tests {
     async fn validate_string_message_requires_summary() {
         let tool = SendMessageTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .validate_input(&json!({ "to": "researcher", "message": "hi" }), &fresh_ctx())
+            .validate_input(
+                &json!({ "to": "researcher", "message": "hi" }),
+                &fresh_ctx(),
+            )
             .await
             .expect_err("string message without summary must reject");
         assert_eq!(err.0, "summary is required when message is a string");
@@ -1120,7 +1120,11 @@ mod tests {
             )
             .await
             .expect_err("structured broadcast must reject");
-        assert!(err_structured.0.contains("no longer supported"), "structured: {}", err_structured.0);
+        assert!(
+            err_structured.0.contains("no longer supported"),
+            "structured: {}",
+            err_structured.0
+        );
 
         let err_string = tool
             .validate_input(
@@ -1129,7 +1133,11 @@ mod tests {
             )
             .await
             .expect_err("string broadcast must also reject");
-        assert!(err_string.0.contains("no longer supported"), "string: {}", err_string.0);
+        assert!(
+            err_string.0.contains("no longer supported"),
+            "string: {}",
+            err_string.0
+        );
     }
 
     #[tokio::test]
@@ -1161,7 +1169,10 @@ mod tests {
             )
             .await
             .expect_err("rejecting shutdown without a reason must reject");
-        assert_eq!(err.0, "reason is required when rejecting a shutdown request");
+        assert_eq!(
+            err.0,
+            "reason is required when rejecting a shutdown request"
+        );
     }
 
     #[tokio::test]
@@ -1244,7 +1255,10 @@ mod tests {
             .expect("shutdown_request must succeed");
         assert_eq!(res.data["success"], true);
         assert_eq!(res.data["target"], "researcher");
-        assert!(res.data["request_id"].as_str().unwrap().starts_with("shutdown-"));
+        assert!(res.data["request_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("shutdown-"));
         let msg = res.data["message"].as_str().unwrap();
         assert!(msg.starts_with("Shutdown request sent to researcher. Request ID: shutdown-"));
         // Model-facing text mirrors the brief status string, not the data dump.

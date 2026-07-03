@@ -231,7 +231,10 @@ pub async fn emit_api_success(bus: &Arc<AnalyticsBus>, f: &ApiSuccessFields) {
     }
     // `ttftMs:l??void 0` — OMITTED when unknown.
     if let Some(t) = f.ttft_ms {
-        metadata.insert("ttftMs".into(), AnalyticsValue::Int(i64_from_u64_saturating(t)));
+        metadata.insert(
+            "ttftMs".into(),
+            AnalyticsValue::Int(i64_from_u64_saturating(t)),
+        );
     }
     // `fastMode:H` — bare unconditional bool, always serialized.
     metadata.insert("fastMode".into(), AnalyticsValue::Bool(f.fast_mode));

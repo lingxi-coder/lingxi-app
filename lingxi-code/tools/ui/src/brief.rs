@@ -383,11 +383,9 @@ mod tests {
             && b[16] == b':'
             && b[19] == b'.'
             && b[23] == b'Z'
-            && [
-                0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21, 22,
-            ]
-            .iter()
-            .all(|&i| b[i].is_ascii_digit())
+            && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21, 22]
+                .iter()
+                .all(|&i| b[i].is_ascii_digit())
     }
 
     #[test]
@@ -438,7 +436,10 @@ mod tests {
     #[test]
     fn iso8601_utc_known_values() {
         // 0 secs → epoch.
-        assert_eq!(iso8601_utc(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            iso8601_utc(SystemTime::UNIX_EPOCH),
+            "1970-01-01T00:00:00.000Z"
+        );
         // 1_000_000_000 secs → the Unix billennium.
         assert_eq!(
             iso8601_utc(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
@@ -493,7 +494,9 @@ mod tests {
             )
             .await
             .expect("ok");
-        let atts = out.data["attachments"].as_array().expect("attachments array");
+        let atts = out.data["attachments"]
+            .as_array()
+            .expect("attachments array");
         assert_eq!(atts.len(), 1);
         assert_eq!(atts[0]["path"].as_str().unwrap(), img.to_str().unwrap());
         assert_eq!(atts[0]["size"], json!(1));

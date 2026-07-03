@@ -119,7 +119,10 @@ pub const SLEEP_BLOCK_THRESHOLD_SECS: f64 = 25.0;
 #[must_use]
 pub fn sleep_block_enabled() -> bool {
     std::env::var("tengu_amber_sentinel").ok().is_some_and(|v| {
-        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
     })
 }
 
@@ -171,7 +174,10 @@ pub fn detect_blocked_sleep_pattern(command: &str) -> Option<String> {
         }
     }
     let (num_str, tail) = after_ws.split_at(i);
-    if !tail.trim_end_matches(|c: char| c.is_ascii_whitespace()).is_empty() {
+    if !tail
+        .trim_end_matches(|c: char| c.is_ascii_whitespace())
+        .is_empty()
+    {
         return None;
     }
     // `parseFloat`: a trailing `.` (e.g. `30.`) is fine in JS but not for Rust's
@@ -501,8 +507,14 @@ fn bash_result_data(
     background_task_id: Option<&str>,
 ) -> serde_json::Value {
     let mut m = serde_json::Map::new();
-    m.insert("stdout".into(), serde_json::Value::String(stdout.to_string()));
-    m.insert("stderr".into(), serde_json::Value::String(stderr.to_string()));
+    m.insert(
+        "stdout".into(),
+        serde_json::Value::String(stdout.to_string()),
+    );
+    m.insert(
+        "stderr".into(),
+        serde_json::Value::String(stderr.to_string()),
+    );
     m.insert("interrupted".into(), serde_json::Value::Bool(interrupted));
     m.insert("isImage".into(), serde_json::Value::Bool(is_image));
     if let Some(rci) = return_code_interpretation {
@@ -531,14 +543,17 @@ fn bash_result_data(
 /// `<error>Command was aborted before completion</error>` marker appended to
 /// stderr (`BashTool.tsx:602-604`). `is_error` follows `interrupted` (TS
 /// `is_error: interrupted`) and is therefore `true`.
-fn build_interrupted_result(stdout_partial: &str, stderr_partial: &str, cmd_str: &str) -> ToolCallResult {
+fn build_interrupted_result(
+    stdout_partial: &str,
+    stderr_partial: &str,
+    cmd_str: &str,
+) -> ToolCallResult {
     let (stdout_clean, _ansi_out) = strip_ansi_count(stdout_partial);
     let (stderr_clean, _ansi_err) = strip_ansi_count(stderr_partial);
     let normalized =
         crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(&stdout_clean));
     // `truncated` is telemetry-only, not part of the result data — discard it.
-    let (stdout_final, _truncated_out) =
-        truncate_bash_output(normalized, bash_max_output_length());
+    let (stdout_final, _truncated_out) = truncate_bash_output(normalized, bash_max_output_length());
 
     // claude-code appends the abort marker to stderr, preceded by EOL when
     // stderr is non-empty (`BashTool.tsx:602-604`).
@@ -1477,9 +1492,9 @@ impl Tool for BashTool {
                 };
                 // Model-facing stdout normalization (claude-code): strip leading
                 // whitespace-only lines + trimEnd, then drop outer empty lines.
-                let normalized = crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(
-                    &stdout_clean,
-                ));
+                let normalized = crate::shared::strip_empty_lines(
+                    &crate::shared::normalize_stdout(&stdout_clean),
+                );
 
                 // Image-output short-circuit (claude-code `BashTool/utils.ts`
                 // `formatOutput`:138-144 + `BashTool.tsx`:785-802): when the
@@ -1684,7 +1699,10 @@ mod tests {
         // stderr only (empty stdout ⇒ dropped).
         assert_eq!(bash_model_content("", "boom", false, None), "boom");
         // Leading blank lines stripped + trimEnd (normalize_stdout / the `c` rule).
-        assert_eq!(bash_model_content("\n\n  data  \n", "", false, None), "  data");
+        assert_eq!(
+            bash_model_content("\n\n  data  \n", "", false, None),
+            "  data"
+        );
         // Interrupt appends the abort marker after a newline (rYa) when stderr present.
         assert_eq!(
             bash_model_content("partial\n", "err", true, None),
@@ -1697,7 +1715,12 @@ mod tests {
         );
         // Background note is the `d` part.
         assert_eq!(
-            bash_model_content("", "", false, Some("Command running in background with ID: 7. Output is being written to: /p.")),
+            bash_model_content(
+                "",
+                "",
+                false,
+                Some("Command running in background with ID: 7. Output is being written to: /p.")
+            ),
             "Command running in background with ID: 7. Output is being written to: /p."
         );
     }
@@ -2130,7 +2153,8 @@ mod tests {
         std::env::remove_var("tengu_amber_sentinel");
         let err = result.expect_err("sleep 30 && ... must be blocked when the gate is on");
         assert!(
-            err.0.starts_with("Blocked: sleep 30 followed by: echo done. To wait"),
+            err.0
+                .starts_with("Blocked: sleep 30 followed by: echo done. To wait"),
             "got: {}",
             err.0
         );
@@ -2155,8 +2179,18 @@ mod tests {
         std::env::set_var("tengu_amber_sentinel", "1");
         // < 25 (incl. fractional, and non-sleep commands) are never blocked.
         let mut results = Vec::new();
-        for ok in ["sleep 24", "sleep 24.9", "sleep 0.5", "echo hi", "sleeper foo"] {
-            results.push((ok, tool.validate_input(&json!({ "command": ok }), &use_ctx()).await));
+        for ok in [
+            "sleep 24",
+            "sleep 24.9",
+            "sleep 0.5",
+            "echo hi",
+            "sleeper foo",
+        ] {
+            results.push((
+                ok,
+                tool.validate_input(&json!({ "command": ok }), &use_ctx())
+                    .await,
+            ));
         }
         std::env::remove_var("tengu_amber_sentinel");
         for (ok, r) in results {
@@ -2243,9 +2277,18 @@ mod tests {
         assert_eq!(resolve_timeout_ms(&json!({"timeout": "30000"})), 30_000);
         assert_eq!(resolve_timeout_ms(&json!({"timeout": " 5000 "})), 5_000);
         // 0 / negative / non-numeric string / absent → default (H5a).
-        assert_eq!(resolve_timeout_ms(&json!({"timeout": 0})), BASH_DEFAULT_TIMEOUT_MS);
-        assert_eq!(resolve_timeout_ms(&json!({"timeout": -5})), BASH_DEFAULT_TIMEOUT_MS);
-        assert_eq!(resolve_timeout_ms(&json!({"timeout": "abc"})), BASH_DEFAULT_TIMEOUT_MS);
+        assert_eq!(
+            resolve_timeout_ms(&json!({"timeout": 0})),
+            BASH_DEFAULT_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolve_timeout_ms(&json!({"timeout": -5})),
+            BASH_DEFAULT_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolve_timeout_ms(&json!({"timeout": "abc"})),
+            BASH_DEFAULT_TIMEOUT_MS
+        );
         assert_eq!(resolve_timeout_ms(&json!({})), BASH_DEFAULT_TIMEOUT_MS);
     }
 
@@ -2253,9 +2296,12 @@ mod tests {
     async fn validate_input_no_longer_rejects_over_max_timeout() {
         // #4: an over-600000 timeout is accepted (no schema/runtime max).
         let tool = bash_tool_noop();
-        tool.validate_input(&json!({"command": "echo hi", "timeout": 900_000}), &use_ctx())
-            .await
-            .expect("over-max timeout must be accepted (no max rejection)");
+        tool.validate_input(
+            &json!({"command": "echo hi", "timeout": 900_000}),
+            &use_ctx(),
+        )
+        .await
+        .expect("over-max timeout must be accepted (no max rejection)");
     }
 
     #[tokio::test]
@@ -2334,7 +2380,10 @@ mod tests {
             timed_out: false,
         }));
         let props = &tool.input_schema()["properties"];
-        assert!(props.get("timeout").is_some(), "schema must expose `timeout`");
+        assert!(
+            props.get("timeout").is_some(),
+            "schema must expose `timeout`"
+        );
         assert!(
             props.get("timeout_ms").is_none(),
             "schema must NOT expose the old `timeout_ms`"
@@ -2356,8 +2405,14 @@ mod tests {
             timed_out: false,
         }));
         let timeout = &tool.input_schema()["properties"]["timeout"];
-        assert_eq!(timeout["type"], "number", "timeout type must be number not integer");
-        assert!(timeout.get("minimum").is_none(), "timeout must have no minimum constraint");
+        assert_eq!(
+            timeout["type"], "number",
+            "timeout type must be number not integer"
+        );
+        assert!(
+            timeout.get("minimum").is_none(),
+            "timeout must have no minimum constraint"
+        );
     }
 
     #[tokio::test]
@@ -2507,10 +2562,16 @@ mod tests {
             rewrite_windows_null_redirect("a 2>nul | b"),
             "a 2>/dev/null | b"
         );
-        assert_eq!(rewrite_windows_null_redirect("(x 2>nul)"), "(x 2>/dev/null)");
+        assert_eq!(
+            rewrite_windows_null_redirect("(x 2>nul)"),
+            "(x 2>/dev/null)"
+        );
         // Non-matching cases (must pass through unchanged).
         assert_eq!(rewrite_windows_null_redirect("ls >null"), "ls >null");
-        assert_eq!(rewrite_windows_null_redirect("ls >nullable"), "ls >nullable");
+        assert_eq!(
+            rewrite_windows_null_redirect("ls >nullable"),
+            "ls >nullable"
+        );
         assert_eq!(rewrite_windows_null_redirect("ls >nul.txt"), "ls >nul.txt");
         assert_eq!(rewrite_windows_null_redirect("cat nul.txt"), "cat nul.txt");
         // UTF-8 passthrough around a rewritten redirect.
@@ -2531,7 +2592,7 @@ mod tests {
         assert_eq!(resolve_max_output_length(Some("-5")), 30_000); // negative → default
         assert_eq!(resolve_max_output_length(Some("999999")), 150_000); // capped
         assert_eq!(resolve_max_output_length(Some("150000")), 150_000); // at limit
-        // The env-reading wrapper falls back to the default when unset.
+                                                                        // The env-reading wrapper falls back to the default when unset.
         if std::env::var_os("BASH_MAX_OUTPUT_LENGTH").is_none() {
             assert_eq!(bash_max_output_length(), 30_000);
         }
@@ -2546,10 +2607,7 @@ mod tests {
     #[async_trait]
     impl ProcessRunner for CapturingRunner {
         async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
-            self.last_args
-                .lock()
-                .unwrap()
-                .clone_from(&cmd.inner().args);
+            self.last_args.lock().unwrap().clone_from(&cmd.inner().args);
             Ok(self.out.clone())
         }
         async fn spawn_background(
@@ -2849,7 +2907,10 @@ mod tests {
                         source: protocol::ImageSource::Base64 { media_type, data },
                     } => {
                         assert_eq!(media_type, "image/png");
-                        assert_eq!(data, TINY_PNG_B64, "payload must be the URI's base64 verbatim");
+                        assert_eq!(
+                            data, TINY_PNG_B64,
+                            "payload must be the URI's base64 verbatim"
+                        );
                     }
                     other => panic!("expected Image/Base64 block, got {other:?}"),
                 }
@@ -2875,7 +2936,10 @@ mod tests {
             .expect("ok");
         assert_eq!(res.data["isImage"], false);
         assert_eq!(res.data["stdout"], "hello");
-        assert!(res.new_messages.is_empty(), "no image message for plain text");
+        assert!(
+            res.new_messages.is_empty(),
+            "no image message for plain text"
+        );
     }
 
     #[tokio::test]
@@ -2924,7 +2988,9 @@ mod tests {
             "LONG prompt opening missing; got:\n{p}"
         );
         assert!(
-            p.contains("The working directory persists between commands, but shell state does not."),
+            p.contains(
+                "The working directory persists between commands, but shell state does not."
+            ),
             "LONG cwd sentence missing"
         );
         assert!(

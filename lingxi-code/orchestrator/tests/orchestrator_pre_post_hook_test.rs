@@ -9,7 +9,6 @@
 //!    a hook-blocked `ToolResult` (`is_error: true`).
 //! 2. `PostToolUse` hook returns `system_message` → the orchestrator
 //!    appends it to the result content.
-use llm_client::ContentBlock as LlmContentBlock;
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
@@ -17,6 +16,7 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use llm_client::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,

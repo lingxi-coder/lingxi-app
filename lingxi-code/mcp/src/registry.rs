@@ -256,9 +256,7 @@ impl McpRegistry {
     /// configured.
     #[must_use]
     pub fn has_xaa(&self) -> bool {
-        self.oauth
-            .as_ref()
-            .is_some_and(|d| d.xaa_config.is_some())
+        self.oauth.as_ref().is_some_and(|d| d.xaa_config.is_some())
     }
 
     /// Cache an `Arc<McpClient>` for `name` (M4-07).
@@ -373,56 +371,57 @@ impl McpRegistry {
             }
         };
 
-        let (conn, caps) = match tokio::time::timeout(connect_timeout, attempt(connect_spec.clone()))
-            .await
-            .map_err(|_elapsed| {
-                McpError::Connection(format!(
-                    "MCP server \"{}\" connection timed out after {}ms",
-                    config.name,
-                    connect_timeout.as_millis()
-                ))
-            })? {
-            Ok(pair) => pair,
-            // 403 `insufficient_scope` for an OAuth server → step-up: the AS
-            // requires an elevated scope (RFC 6750). Re-run the interactive flow
-            // requesting that scope (RFC 6749 §6 forbids scope elevation via
-            // refresh, so we MUST do a fresh PKCE flow), re-inject the Bearer,
-            // and retry ONCE. Mirrors auth.ts `wrapFetchWithStepUpDetection`
-            // (1354-1374) + `markStepUpPending`/`cachedStepUpScope` persistence.
-            // Checked BEFORE the 401 branch so a 403 never falls into refresh.
-            Err(e) if oauth_key.is_some() => {
-                if let Some(scope) = error_is_403_insufficient_scope(&e) {
-                    let stepped = self.step_up_oauth_spec(&config, &scope).await?;
-                    tokio::time::timeout(connect_timeout, attempt(stepped))
-                        .await
-                        .map_err(|_elapsed| {
-                            McpError::Connection(format!(
-                                "MCP server \"{}\" connection timed out after {}ms",
-                                config.name,
-                                connect_timeout.as_millis()
-                            ))
-                        })??
-                } else if error_is_401(&e) {
-                    // 401 → the access token is stale: force a refresh (or a
-                    // fresh interactive flow), re-inject the Bearer, retry ONCE.
-                    // Faithful-core 401 detection: the transport flattens errors
-                    // to strings (structured status is a noted residual).
-                    let refreshed = self.reauth_oauth_spec(&config).await?;
-                    tokio::time::timeout(connect_timeout, attempt(refreshed))
-                        .await
-                        .map_err(|_elapsed| {
-                            McpError::Connection(format!(
-                                "MCP server \"{}\" connection timed out after {}ms",
-                                config.name,
-                                connect_timeout.as_millis()
-                            ))
-                        })??
-                } else {
-                    return Err(e);
+        let (conn, caps) =
+            match tokio::time::timeout(connect_timeout, attempt(connect_spec.clone()))
+                .await
+                .map_err(|_elapsed| {
+                    McpError::Connection(format!(
+                        "MCP server \"{}\" connection timed out after {}ms",
+                        config.name,
+                        connect_timeout.as_millis()
+                    ))
+                })? {
+                Ok(pair) => pair,
+                // 403 `insufficient_scope` for an OAuth server → step-up: the AS
+                // requires an elevated scope (RFC 6750). Re-run the interactive flow
+                // requesting that scope (RFC 6749 §6 forbids scope elevation via
+                // refresh, so we MUST do a fresh PKCE flow), re-inject the Bearer,
+                // and retry ONCE. Mirrors auth.ts `wrapFetchWithStepUpDetection`
+                // (1354-1374) + `markStepUpPending`/`cachedStepUpScope` persistence.
+                // Checked BEFORE the 401 branch so a 403 never falls into refresh.
+                Err(e) if oauth_key.is_some() => {
+                    if let Some(scope) = error_is_403_insufficient_scope(&e) {
+                        let stepped = self.step_up_oauth_spec(&config, &scope).await?;
+                        tokio::time::timeout(connect_timeout, attempt(stepped))
+                            .await
+                            .map_err(|_elapsed| {
+                                McpError::Connection(format!(
+                                    "MCP server \"{}\" connection timed out after {}ms",
+                                    config.name,
+                                    connect_timeout.as_millis()
+                                ))
+                            })??
+                    } else if error_is_401(&e) {
+                        // 401 → the access token is stale: force a refresh (or a
+                        // fresh interactive flow), re-inject the Bearer, retry ONCE.
+                        // Faithful-core 401 detection: the transport flattens errors
+                        // to strings (structured status is a noted residual).
+                        let refreshed = self.reauth_oauth_spec(&config).await?;
+                        tokio::time::timeout(connect_timeout, attempt(refreshed))
+                            .await
+                            .map_err(|_elapsed| {
+                                McpError::Connection(format!(
+                                    "MCP server \"{}\" connection timed out after {}ms",
+                                    config.name,
+                                    connect_timeout.as_millis()
+                                ))
+                            })??
+                    } else {
+                        return Err(e);
+                    }
                 }
-            }
-            Err(e) => return Err(e),
-        };
+                Err(e) => return Err(e),
+            };
         let mut tools = self.transport.list_tools(&conn).await?;
         let resources = self.transport.list_resources(&conn).await?;
         let prompts = self.transport.list_prompts(&conn).await?;
@@ -566,10 +565,16 @@ impl McpRegistry {
                         oauth::save_tokens(&deps.storage, &deps.clock, &key, &refreshed).await?;
                         refreshed
                     }
-                    None => self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?,
+                    None => {
+                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
+                            .await?
+                    }
                 }
             }
-            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?,
+            None => {
+                self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
+                    .await?
+            }
         };
 
         Ok((
@@ -617,15 +622,22 @@ impl McpRegistry {
                     }
                     // Refresh token rejected → fall back to a fresh flow.
                     Err(oauth::OAuthError::RefreshRejected(_)) => {
-                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?
+                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
+                            .await?
                     }
                     Err(e) => return Err(e.into()),
                 }
             }
-            None => self.run_interactive_oauth(config, oauth_cfg, &key, deps, None).await?,
+            None => {
+                self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
+                    .await?
+            }
         };
 
-        Ok(inject_bearer(&config.spec, token.access_token.expose_secret()))
+        Ok(inject_bearer(
+            &config.spec,
+            token.access_token.expose_secret(),
+        ))
     }
 
     /// Step-up re-auth after a 403 `insufficient_scope`: persist the required
@@ -657,7 +669,10 @@ impl McpRegistry {
         let token = self
             .run_interactive_oauth(config, oauth_cfg, &key, deps, Some(scope))
             .await?;
-        Ok(inject_bearer(&config.spec, token.access_token.expose_secret()))
+        Ok(inject_bearer(
+            &config.spec,
+            token.access_token.expose_secret(),
+        ))
     }
 
     /// Resolve an access token for an XAA-flagged server (auth.ts
@@ -1024,9 +1039,7 @@ impl McpRegistry {
             // token, then unconditionally clear the local blob. Only fires for
             // OAuth-configured servers when the OAuth seam is wired; static-token
             // and oauth-unwired servers are untouched. Never fails the disconnect.
-            if let (Some(deps), Some(oauth_cfg)) =
-                (self.oauth.as_ref(), spec_oauth(&config.spec))
-            {
+            if let (Some(deps), Some(oauth_cfg)) = (self.oauth.as_ref(), spec_oauth(&config.spec)) {
                 let key = oauth::server_key(&config.name, &config.spec);
                 oauth::revoke_server_tokens(
                     &deps.storage,
@@ -1189,7 +1202,9 @@ fn mcp_connection_timeout() -> Duration {
 /// [`MAX_BACKOFF`]. Mirrors claude-code's
 /// `min(INITIAL_BACKOFF_MS * 2^(attempt-1), MAX_BACKOFF_MS)`.
 fn backoff_for(attempt: u32) -> Duration {
-    let factor = 1u64.checked_shl(attempt.saturating_sub(1)).unwrap_or(u64::MAX);
+    let factor = 1u64
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u64::MAX);
     let base = u64::try_from(INITIAL_BACKOFF.as_millis()).unwrap_or(u64::MAX);
     let millis = base.saturating_mul(factor);
     Duration::from_millis(millis).min(MAX_BACKOFF)
@@ -1337,7 +1352,9 @@ mod backoff_schedule_tests {
 /// transports (stdio, websocket, …) never carry OAuth → `None`.
 fn spec_oauth(spec: &McpTransportSpec) -> Option<&traits::McpOAuthConfigDto> {
     match spec {
-        McpTransportSpec::Sse { oauth, .. } | McpTransportSpec::Http { oauth, .. } => oauth.as_ref(),
+        McpTransportSpec::Sse { oauth, .. } | McpTransportSpec::Http { oauth, .. } => {
+            oauth.as_ref()
+        }
         _ => None,
     }
 }
@@ -1798,8 +1815,7 @@ mod tests {
         registry.connect(cfg("claude.ai Linear")).await.unwrap();
 
         let conns = registry.connections.read().await;
-        let McpConnectionState::Connected { tools, .. } =
-            conns.get("claude.ai Linear").unwrap()
+        let McpConnectionState::Connected { tools, .. } = conns.get("claude.ai Linear").unwrap()
         else {
             panic!("expected Connected state");
         };

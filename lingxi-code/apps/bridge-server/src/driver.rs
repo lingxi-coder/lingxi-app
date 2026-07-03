@@ -291,10 +291,7 @@ impl OrchestratorTurnDriver {
     /// never arms a keepalive. `boot::assemble` passes the SAME
     /// [`MsgQueueWakeupScheduler`] it uses to fill the tool's `WakeupSchedulerCell`.
     #[must_use]
-    pub fn with_wakeup_scheduler(
-        mut self,
-        scheduler: Arc<dyn tool_cron::WakeupScheduler>,
-    ) -> Self {
+    pub fn with_wakeup_scheduler(mut self, scheduler: Arc<dyn tool_cron::WakeupScheduler>) -> Self {
         self.wakeup_scheduler = Some(scheduler);
         self
     }
@@ -312,8 +309,9 @@ impl OrchestratorTurnDriver {
             OrchestratorError::ApiCall(_)
             | OrchestratorError::Streaming(_)
             | OrchestratorError::RateLimitRejected { .. } => ErrorKindDto::Transport,
-            OrchestratorError::StreamingProtocol(_)
-            | OrchestratorError::StreamEndedWithoutStop => ErrorKindDto::Protocol,
+            OrchestratorError::StreamingProtocol(_) | OrchestratorError::StreamEndedWithoutStop => {
+                ErrorKindDto::Protocol
+            }
             OrchestratorError::MaxTurnsReached { .. } => ErrorKindDto::MaxTurns,
             _ => ErrorKindDto::Internal,
         };
@@ -616,7 +614,9 @@ mod tests {
     fn user_cmd(uuid: &str, prio: QueuePriority, text: &str) -> QueuedCommand {
         QueuedCommand {
             uuid: uuid.to_string(),
-            content: QueuedCommandContent::UserInput { text: text.to_string() },
+            content: QueuedCommandContent::UserInput {
+                text: text.to_string(),
+            },
             priority: prio,
             queued_at: SystemTime::now(),
             source: QueueSource::PromptInput,
@@ -632,8 +632,12 @@ mod tests {
     #[tokio::test]
     async fn mid_turn_adapter_joins_and_consumes_queued_prompts() {
         let queue = Arc::new(MessageQueueManager::new());
-        queue.enqueue(user_cmd("a", QueuePriority::Next, "first")).await;
-        queue.enqueue(user_cmd("b", QueuePriority::Next, "second")).await;
+        queue
+            .enqueue(user_cmd("a", QueuePriority::Next, "first"))
+            .await;
+        queue
+            .enqueue(user_cmd("b", QueuePriority::Next, "second"))
+            .await;
         let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
 
         let joined = adapter.take_mid_turn_input().await;
@@ -651,8 +655,12 @@ mod tests {
     #[tokio::test]
     async fn mid_turn_adapter_excludes_now_and_preserves_it() {
         let queue = Arc::new(MessageQueueManager::new());
-        queue.enqueue(user_cmd("a", QueuePriority::Next, "first")).await;
-        queue.enqueue(user_cmd("urgent", QueuePriority::Now, "do it now")).await;
+        queue
+            .enqueue(user_cmd("a", QueuePriority::Next, "first"))
+            .await;
+        queue
+            .enqueue(user_cmd("urgent", QueuePriority::Now, "do it now"))
+            .await;
         let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
 
         // Only the `Next` prompt is drained mid-turn; the `Now` command is left.
@@ -678,7 +686,9 @@ mod tests {
     #[tokio::test]
     async fn mid_turn_adapter_excludes_slash_commands() {
         let queue = Arc::new(MessageQueueManager::new());
-        queue.enqueue(user_cmd("s", QueuePriority::Next, "/clear")).await;
+        queue
+            .enqueue(user_cmd("s", QueuePriority::Next, "/clear"))
+            .await;
         let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
         assert_eq!(adapter.take_mid_turn_input().await, None);
         // The slash command is left in the queue for the post-turn path.
@@ -723,8 +733,13 @@ mod tests {
         assert_eq!(reason.get(), CancelReason::UserInterrupt);
 
         // A Now enqueue trips the token AND records the reason.
-        queue.enqueue(user_cmd("urgent", QueuePriority::Now, "do it now")).await;
-        assert!(token.is_cancelled(), "Now enqueue must abort the active turn");
+        queue
+            .enqueue(user_cmd("urgent", QueuePriority::Now, "do it now"))
+            .await;
+        assert!(
+            token.is_cancelled(),
+            "Now enqueue must abort the active turn"
+        );
         assert_eq!(
             reason.get(),
             CancelReason::QueueNowCommand,
@@ -855,7 +870,9 @@ mod tests {
     /// loading→idle `useEffect`).
     #[tokio::test]
     async fn keepalive_arms_after_silent_loop_tick() {
-        let _serial = LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         tool_cron::reset_loop_runtime_state();
@@ -883,7 +900,9 @@ mod tests {
     /// scheduler wired and the flags on.
     #[tokio::test]
     async fn keepalive_not_armed_for_user_turn() {
-        let _serial = LOOP_KA_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_dynamic", true);
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         tool_cron::reset_loop_runtime_state(); // no begin_loop_tick → user turn

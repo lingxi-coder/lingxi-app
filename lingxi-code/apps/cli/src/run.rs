@@ -9,11 +9,11 @@
 //!     unchanged M5-08 `select_session_interactive` stdio fallback).
 
 use crate::argv::Argv;
+use crate::control_plane::StdioControlPlane;
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
-use crate::control_plane::StdioControlPlane;
 use crate::stream_json_input::{
     content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack,
     spawn_stdin_router, ControlPlaneWriter, StdinChannels,
@@ -27,7 +27,9 @@ use session::jsonl::loader::{
 use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
-use traits::{FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use traits::{
+    FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
+};
 
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
@@ -180,8 +182,8 @@ pub async fn run_stream_json_print(
         skills,
         plugins,
         "default", // output_style
-        None,   // memory_auto_path
-        "off",  // fast_mode_state
+        None,      // memory_auto_path
+        "off",     // fast_mode_state
     );
 
     // Thread the real params + session_id into the stream.
@@ -485,7 +487,8 @@ fn orphan_decision_from_payload(
         // Any non-allow/deny behaviour is a schema-invalid result; deny safely
         // rather than execute on a malformed recovered decision.
         _ => PermissionOutcome::Deny {
-            reason: "Tool permission request failed: malformed orphaned control_response".to_string(),
+            reason: "Tool permission request failed: malformed orphaned control_response"
+                .to_string(),
         },
     }
 }
@@ -597,8 +600,11 @@ pub async fn run_stream_json_input_loop(
     let (slash_commands, skills) = {
         let reg = runtime.dispatcher.registry();
         let reg_guard = reg.read().await;
-        let mut all_cmds: Vec<String> =
-            reg_guard.list_all().into_iter().map(|c| c.name.clone()).collect();
+        let mut all_cmds: Vec<String> = reg_guard
+            .list_all()
+            .into_iter()
+            .map(|c| c.name.clone())
+            .collect();
         all_cmds.sort();
         let mut skill_names: Vec<String> = reg_guard
             .list_all()
@@ -716,7 +722,10 @@ pub async fn run_stream_json_input_loop(
             .collect();
         // Sort deterministically by name.
         cmds.sort_by(|a, b| {
-            a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
         });
         cmds
     };
@@ -755,13 +764,12 @@ pub async fn run_stream_json_input_loop(
                     "supportsAutoMode": supports_auto_mode,
                 });
                 if !supported_effort_levels.is_empty() {
-                    obj["supportedEffortLevels"] =
-                        serde_json::Value::Array(
-                            supported_effort_levels
-                                .into_iter()
-                                .map(|s| serde_json::Value::String(s.to_string()))
-                                .collect(),
-                        );
+                    obj["supportedEffortLevels"] = serde_json::Value::Array(
+                        supported_effort_levels
+                            .into_iter()
+                            .map(|s| serde_json::Value::String(s.to_string()))
+                            .collect(),
+                    );
                 }
                 obj
             })
@@ -970,9 +978,7 @@ pub async fn run_stream_json_input_loop(
 ///
 /// Known Anthropic models are hard-coded based on the golden capture
 /// (GROUND-TRUTH-init.md). Unknown models get all-false / empty defaults.
-fn model_capabilities(
-    request_model: &str,
-) -> (bool, Vec<&'static str>, bool, bool, bool) {
+fn model_capabilities(request_model: &str) -> (bool, Vec<&'static str>, bool, bool, bool) {
     let rm = request_model.to_lowercase();
     if rm.contains("opus") {
         // claude-opus-4 / opus[1m]: supportsEffort + adaptiveThinking
@@ -1021,8 +1027,11 @@ async fn run_structured_output(
     use crate::structured_output::{
         resolve_max_retries, structured_output_decision, StructuredDecision,
     };
-    let max_retries =
-        resolve_max_retries(std::env::var("MAX_STRUCTURED_OUTPUT_RETRIES").ok().as_deref());
+    let max_retries = resolve_max_retries(
+        std::env::var("MAX_STRUCTURED_OUTPUT_RETRIES")
+            .ok()
+            .as_deref(),
+    );
     let mut turn_prompt = prompt.to_string();
     for _ in 0..max_retries {
         // Clear the slot before each attempt (no await while the lock is held).
@@ -1171,7 +1180,8 @@ pub async fn run_continue(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
     let rows = match load_resume_rows().await {
         Ok(rows) => rows,
         Err(LoaderError::EmptyDirectory) => {
-            sink.error("runtime", "No conversation found to continue").await;
+            sink.error("runtime", "No conversation found to continue")
+                .await;
             return exit_codes::RUNTIME_ERROR;
         }
         Err(e) => {
@@ -1180,7 +1190,8 @@ pub async fn run_continue(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
         }
     };
     let Some(first) = rows.first() else {
-        sink.error("runtime", "No conversation found to continue").await;
+        sink.error("runtime", "No conversation found to continue")
+            .await;
         return exit_codes::RUNTIME_ERROR;
     };
     resume_resolved_session(argv, runtime, sink, first.uuid).await
@@ -1265,7 +1276,11 @@ async fn resume_resolved_session(
 /// acknowledgement UX is skipped when a first-time bypass user resumes straight
 /// into the TUI. `build_runtime_for_tui` still threads the resolved permission
 /// mode, so the mode itself is correct here.
-async fn mount_resumed_tui(argv: &Argv, session_id: uuid::Uuid, messages: Vec<JsonlMessage>) -> i32 {
+async fn mount_resumed_tui(
+    argv: &Argv,
+    session_id: uuid::Uuid,
+    messages: Vec<JsonlMessage>,
+) -> i32 {
     let tui_build = match crate::init::build_runtime_for_tui(argv).await {
         Ok(b) => b,
         Err(e) => {
@@ -1404,9 +1419,7 @@ async fn load_resume_rows_from(
     cwd: &std::path::Path,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
-        cwd.to_path_buf(),
-    ));
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.to_path_buf()));
     list_recent_sessions(lingxi_home, &cwd_str, 5, fs).await
 }
 
@@ -1433,9 +1446,7 @@ async fn load_resume_session_from(
     session_id: uuid::Uuid,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
-        cwd.to_path_buf(),
-    ));
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.to_path_buf()));
     load_session(lingxi_home, &cwd_str, session_id, fs).await
 }
 

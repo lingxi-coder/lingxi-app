@@ -47,7 +47,8 @@ use traits::{CostSnapshot, OutputStream};
 /// Escape U+2028/U+2029 after JSON serialization so streaming line-parsers
 /// can't be split mid-line by these Unicode newline characters.
 fn escape_line_terminators(s: &str) -> String {
-    s.replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029")
+    s.replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 /// Serialize a JSON value to an escaped NDJSON line (compact + LF).
@@ -98,15 +99,25 @@ fn spawn_drain_task(mut rx: mpsc::UnboundedReceiver<String>) {
 #[derive(Debug, Clone)]
 enum AccBlock {
     Text(String),
-    Thinking { thinking: String, signature: Option<String> },
-    ToolUse { id: String, name: String, input: Value },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 impl AccBlock {
     fn to_json(&self) -> Value {
         match self {
             AccBlock::Text(t) => json!({"type": "text", "text": t}),
-            AccBlock::Thinking { thinking, signature } => {
+            AccBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 let mut m = serde_json::Map::new();
                 m.insert("type".into(), json!("thinking"));
                 m.insert("thinking".into(), json!(thinking));
@@ -387,8 +398,10 @@ impl StreamJsonStream {
     /// Uses `AtomicBool` so the method takes `&self` (not `&mut self`),
     /// making it callable on an `Arc<StreamJsonStream>` without unwrapping.
     pub fn set_flags(&self, include_partial_messages: bool, include_hook_events: bool) {
-        self.include_partial_messages.store(include_partial_messages, Ordering::Relaxed);
-        self.include_hook_events.store(include_hook_events, Ordering::Relaxed);
+        self.include_partial_messages
+            .store(include_partial_messages, Ordering::Relaxed);
+        self.include_hook_events
+            .store(include_hook_events, Ordering::Relaxed);
     }
 
     /// Fill in the init parameters after `build_runtime` has given us
@@ -407,7 +420,9 @@ impl StreamJsonStream {
         }
         let uuid = uuid::Uuid::new_v4().to_string();
         let params_guard = self.init_params.lock().await;
-        let p = params_guard.as_ref().expect("set_init_params must be called before emit_init");
+        let p = params_guard
+            .as_ref()
+            .expect("set_init_params must be called before emit_init");
         let session_id = self.session_id.lock().await.clone();
         let frame = json!({
             "type": "system",
@@ -517,7 +532,11 @@ impl StreamJsonStream {
     ) -> Value {
         let uuid = uuid::Uuid::new_v4().to_string();
         let session_id = self.session_id.lock().await.clone();
-        let duration_ms: u64 = cost.session_duration.as_millis().try_into().unwrap_or(u64::MAX);
+        let duration_ms: u64 = cost
+            .session_duration
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
 
         let usage = Self::build_usage_block(cost);
         let model_usage = Self::build_model_usage_block(cost, model_id, betas);
@@ -591,7 +610,11 @@ impl StreamJsonStream {
     ) -> Value {
         let uuid = uuid::Uuid::new_v4().to_string();
         let session_id = self.session_id.lock().await.clone();
-        let duration_ms: u64 = cost.session_duration.as_millis().try_into().unwrap_or(u64::MAX);
+        let duration_ms: u64 = cost
+            .session_duration
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
 
         let terminal_reason = match subtype {
             "error_during_execution" => "error",
@@ -826,9 +849,7 @@ impl OutputStream for StreamJsonStream {
         let effective_status = overage_status.or(status);
         // `isUsingOverage` = overage is active when overage_status is present
         // and NOT "allowed" (i.e. it's "allowed_warning" or "rejected").
-        let is_using_overage = overage_status
-            .map(|s| s != "allowed")
-            .unwrap_or(false);
+        let is_using_overage = overage_status.map(|s| s != "allowed").unwrap_or(false);
         self.emit_rate_limit_event(
             effective_status,
             rate_limit_type,
@@ -845,7 +866,11 @@ impl OutputStream for StreamJsonStream {
             return;
         }
         let mut acc = self.accum.lock().await;
-        if let Some(AccBlock::Thinking { thinking: t, signature: s }) = acc.blocks.last_mut() {
+        if let Some(AccBlock::Thinking {
+            thinking: t,
+            signature: s,
+        }) = acc.blocks.last_mut()
+        {
             t.push_str(thinking);
             if let Some(sig) = signature {
                 *s = Some(sig.to_string());
@@ -889,11 +914,7 @@ impl OutputStream for StreamJsonStream {
         acc.model = model.to_string();
     }
 
-    async fn emit_message_boundary(
-        &self,
-        stop_reason: Option<&str>,
-        request_id: Option<&str>,
-    ) {
+    async fn emit_message_boundary(&self, stop_reason: Option<&str>, request_id: Option<&str>) {
         // Before resetting, capture the last assistant text for the result frame.
         {
             let acc = self.accum.lock().await;
@@ -970,12 +991,7 @@ impl OutputStream for StreamJsonStream {
     ///
     /// SessionStart and Setup hooks ALWAYS emit (gate `pGn`); all others
     /// only emit when `include_hook_events` is true.
-    async fn emit_hook_started(
-        &self,
-        hook_id: &str,
-        hook_name: &str,
-        hook_event: &str,
-    ) {
+    async fn emit_hook_started(&self, hook_id: &str, hook_name: &str, hook_event: &str) {
         if self.suppress_frames {
             return;
         }
@@ -1197,7 +1213,9 @@ mod tests {
     async fn text_accumulation_concatenates() {
         let params = make_params("sess");
         let stream = Arc::new(StreamJsonStream::new(params));
-        stream.emit_message_start("msg_test", "claude-opus-4-8").await;
+        stream
+            .emit_message_start("msg_test", "claude-opus-4-8")
+            .await;
         stream.emit_text("he").await;
         stream.emit_text("llo").await;
         stream.emit_text(" world").await;
@@ -1215,7 +1233,9 @@ mod tests {
     async fn message_boundary_resets_accumulator() {
         let params = make_params("sess");
         let stream = Arc::new(StreamJsonStream::new(params));
-        stream.emit_message_start("msg_001", "claude-opus-4-8").await;
+        stream
+            .emit_message_start("msg_001", "claude-opus-4-8")
+            .await;
         stream.emit_text("pong").await;
         // Boundary flush (output goes to real stdout in tests — that's OK).
         stream
@@ -1223,7 +1243,10 @@ mod tests {
             .await;
         // Accumulator should be reset.
         let acc = stream.accum.lock().await;
-        assert!(acc.blocks.is_empty(), "blocks should be cleared after boundary");
+        assert!(
+            acc.blocks.is_empty(),
+            "blocks should be cleared after boundary"
+        );
         assert!(acc.message_id.is_empty(), "message_id should be cleared");
     }
 
@@ -1242,13 +1265,21 @@ mod tests {
             "bytes": 5, "code": 200, "codeText": "OK",
             "result": "# Page\n\nbody", "durationMs": 3, "url": "https://e/"
         });
-        let frame = stream.build_tool_result_frame(tuid, "# Page\n\nbody", &data).await;
+        let frame = stream
+            .build_tool_result_frame(tuid, "# Page\n\nbody", &data)
+            .await;
         let tr = &frame["message"]["content"][0];
         assert_eq!(tr["type"], "tool_result");
         assert_eq!(tr["tool_use_id"], tuid);
-        assert_eq!(tr["content"], "# Page\n\nbody", "content is the model text, not a JSON dump");
+        assert_eq!(
+            tr["content"], "# Page\n\nbody",
+            "content is the model text, not a JSON dump"
+        );
         assert_eq!(tr["is_error"], false);
-        assert_eq!(frame["toolUseResult"], data, "full structured result on the top-level field");
+        assert_eq!(
+            frame["toolUseResult"], data,
+            "full structured result on the top-level field"
+        );
 
         // Bash-shaped: the model text is whatever the dispatch computed; `data`
         // stays pure metadata on `toolUseResult`.
@@ -1285,7 +1316,9 @@ mod tests {
     async fn message_boundary_stores_last_result_text() {
         let params = make_params("sess");
         let stream = Arc::new(StreamJsonStream::new(params));
-        stream.emit_message_start("msg_001", "claude-opus-4-8").await;
+        stream
+            .emit_message_start("msg_001", "claude-opus-4-8")
+            .await;
         stream.emit_text("pong").await;
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_test"))
@@ -1338,7 +1371,10 @@ mod tests {
             "fast_mode_state",
             "uuid",
         ];
-        assert_eq!(keys, expected_keys, "result/success frame must have exact 20-key order");
+        assert_eq!(
+            keys, expected_keys,
+            "result/success frame must have exact 20-key order"
+        );
         assert_eq!(frame["type"], "result");
         assert_eq!(frame["subtype"], "success");
         assert_eq!(frame["is_error"], false);
@@ -1350,7 +1386,10 @@ mod tests {
         assert!(frame["uuid"].is_string());
         // modelUsage has the model key
         let mu = frame["modelUsage"].as_object().unwrap();
-        assert!(mu.contains_key("claude-opus-4-8"), "modelUsage must be keyed by model_id");
+        assert!(
+            mu.contains_key("claude-opus-4-8"),
+            "modelUsage must be keyed by model_id"
+        );
         // usage block
         let usage = frame["usage"].as_object().unwrap();
         assert_eq!(usage["input_tokens"], 100_u64);
@@ -1380,7 +1419,10 @@ mod tests {
         let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         // errors at index 10 (where result would be in success frame)
         assert_eq!(keys[10], "errors", "errors must be at position 10");
-        assert!(!keys.contains(&"result"), "error frame must not have 'result' key");
+        assert!(
+            !keys.contains(&"result"),
+            "error frame must not have 'result' key"
+        );
         assert_eq!(frame["is_error"], true);
         assert_eq!(frame["terminal_reason"], "error");
         assert_eq!(frame["subtype"], "error_during_execution");
@@ -1400,7 +1442,10 @@ mod tests {
             ("error_during_execution", "error"),
             ("error_max_turns", "maxTurns"),
             ("error_max_budget_usd", "budgetExceeded"),
-            ("error_max_structured_output_retries", "maxStructuredOutputRetries"),
+            (
+                "error_max_structured_output_retries",
+                "maxStructuredOutputRetries",
+            ),
         ];
         for (subtype, expected_terminal_reason) in &cases {
             let frame = stream
@@ -1440,7 +1485,9 @@ mod tests {
         let params = make_params("sess");
         let stream = Arc::new(StreamJsonStream::new(params));
         // Default: include_partial_messages=false. Should be a no-op.
-        stream.emit_stream_event(r#"{"type":"message_start","message":{}}"#, true).await;
+        stream
+            .emit_stream_event(r#"{"type":"message_start","message":{}}"#, true)
+            .await;
         stream.emit_stream_event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#, false).await;
         // No panic = pass. Output goes to stdout which tests don't capture per-assertion.
     }
@@ -1456,7 +1503,9 @@ mod tests {
         // Should emit without panicking. Output goes to stdout.
         stream.emit_stream_event(r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}"#, true).await;
         stream.emit_stream_event(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#, false).await;
-        stream.emit_stream_event(r#"{"type":"message_stop"}"#, false).await;
+        stream
+            .emit_stream_event(r#"{"type":"message_stop"}"#, false)
+            .await;
         // No panic = pass.
     }
 
@@ -1469,7 +1518,9 @@ mod tests {
         stream.set_flags(true, false);
         // suppress_frames=true overrides include_partial_messages.
         // Should be a no-op (no panic).
-        stream.emit_stream_event(r#"{"type":"message_start","message":{}}"#, true).await;
+        stream
+            .emit_stream_event(r#"{"type":"message_start","message":{}}"#, true)
+            .await;
     }
 
     // ── P4: --include-hook-events (hook lifecycle frames) ─────────────────────
@@ -1481,7 +1532,9 @@ mod tests {
         let params = make_params("sess");
         let stream = Arc::new(StreamJsonStream::new(params));
         // Default: include_hook_events=false.
-        stream.emit_hook_started("hook:1234", "my-hook", "PreToolUse").await;
+        stream
+            .emit_hook_started("hook:1234", "my-hook", "PreToolUse")
+            .await;
         // No panic = pass.
     }
 
@@ -1492,7 +1545,9 @@ mod tests {
         let params = make_params("sess-session-start");
         let stream = Arc::new(StreamJsonStream::new(params));
         // Flag OFF, but SessionStart always streams.
-        stream.emit_hook_started("hook:sess", "session-hook", "SessionStart").await;
+        stream
+            .emit_hook_started("hook:sess", "session-hook", "SessionStart")
+            .await;
         // No panic = pass.
     }
 
@@ -1501,7 +1556,9 @@ mod tests {
     async fn hook_started_always_emits_for_setup() {
         let params = make_params("sess-setup");
         let stream = Arc::new(StreamJsonStream::new(params));
-        stream.emit_hook_started("hook:setup", "setup-hook", "Setup").await;
+        stream
+            .emit_hook_started("hook:setup", "setup-hook", "Setup")
+            .await;
         // No panic = pass.
     }
 
@@ -1513,11 +1570,21 @@ mod tests {
         let stream = Arc::new(StreamJsonStream::new(params));
         stream.set_flags(false, true);
         // Should emit without panicking.
-        stream.emit_hook_started("hook:abc", "my-formatter", "PostToolUse").await;
-        stream.emit_hook_response(
-            "hook:abc", "my-formatter", "PostToolUse",
-            "formatted output", "formatted output", "", Some(0), "success",
-        ).await;
+        stream
+            .emit_hook_started("hook:abc", "my-formatter", "PostToolUse")
+            .await;
+        stream
+            .emit_hook_response(
+                "hook:abc",
+                "my-formatter",
+                "PostToolUse",
+                "formatted output",
+                "formatted output",
+                "",
+                Some(0),
+                "success",
+            )
+            .await;
         // No panic = pass.
     }
 
@@ -1528,10 +1595,9 @@ mod tests {
         let stream = Arc::new(StreamJsonStream::new_json_mode(params));
         stream.set_flags(false, true);
         // suppress_frames=true overrides include_hook_events.
-        stream.emit_hook_response(
-            "hook:xyz", "my-hook", "Stop",
-            "", "", "", None, "success",
-        ).await;
+        stream
+            .emit_hook_response("hook:xyz", "my-hook", "Stop", "", "", "", None, "success")
+            .await;
         // No panic = pass.
     }
 
@@ -1542,8 +1608,14 @@ mod tests {
         // the route is distinct from stream-json.
         use crate::argv::Argv;
         let a = Argv::from_iter(["lingxi-cli", "--output-format", "json", "hi"]).unwrap();
-        assert!(a.is_json_output(), "is_json_output must be true for --output-format json");
-        assert!(!a.is_stream_json(), "is_stream_json must be false for --output-format json");
+        assert!(
+            a.is_json_output(),
+            "is_json_output must be true for --output-format json"
+        );
+        assert!(
+            !a.is_stream_json(),
+            "is_stream_json must be false for --output-format json"
+        );
     }
 
     // ── P2b: modelUsage contextWindow/maxOutputTokens from catalog ────────────
@@ -1567,20 +1639,19 @@ mod tests {
             .await;
         let mu = frame["modelUsage"].as_object().unwrap();
         let entry = &mu["claude-opus-4-8"];
-        assert_eq!(entry["contextWindow"], 200_000_u64, "opus-4-8 default contextWindow");
-        assert_eq!(entry["maxOutputTokens"], 64_000_u64, "opus-4-8 maxOutputTokens");
+        assert_eq!(
+            entry["contextWindow"], 200_000_u64,
+            "opus-4-8 default contextWindow"
+        );
+        assert_eq!(
+            entry["maxOutputTokens"], 64_000_u64,
+            "opus-4-8 maxOutputTokens"
+        );
 
         // 1M context model (model id carries [1m] suffix):
         // contextWindow=1_000_000, maxOutputTokens=64_000.
         let frame1m = stream
-            .build_result_success_frame(
-                "hi",
-                "end_turn",
-                &cost,
-                "claude-opus-4-8[1m]",
-                "off",
-                &[],
-            )
+            .build_result_success_frame("hi", "end_turn", &cost, "claude-opus-4-8[1m]", "off", &[])
             .await;
         let mu1m = frame1m["modelUsage"].as_object().unwrap();
         assert!(
@@ -1612,12 +1683,12 @@ mod tests {
         // Should emit to stdout without panicking.
         stream
             .emit_rate_limit_event(
-                None,    // status
-                None,    // rate_limit_type
-                None,    // utilization
-                None,    // resets_at
-                false,   // is_using_overage
-                None,    // surpassed_threshold
+                None,  // status
+                None,  // rate_limit_type
+                None,  // utilization
+                None,  // resets_at
+                false, // is_using_overage
+                None,  // surpassed_threshold
             )
             .await;
     }
@@ -1631,15 +1702,15 @@ mod tests {
         // Called by the orchestrator after each API turn.
         stream
             .emit_rate_limit(
-                Some("allowed"),      // status
-                Some("seven_day"),    // rate_limit_type
-                Some(0.75),           // utilization
-                Some(1_782_360_000),  // resets_at
-                None,                 // claim_resets_at
+                Some("allowed"),         // status
+                Some("seven_day"),       // rate_limit_type
+                Some(0.75),              // utilization
+                Some(1_782_360_000),     // resets_at
+                None,                    // claim_resets_at
                 Some("allowed_warning"), // overage_status
-                None,                 // overage_resets_at
-                None,                 // overage_disabled_reason
-                None,                 // fallback_available
+                None,                    // overage_resets_at
+                None,                    // overage_disabled_reason
+                None,                    // fallback_available
             )
             .await;
     }
@@ -1683,19 +1754,27 @@ mod tests {
             assert_eq!(p.slash_commands, vec!["graphify"]);
             assert_eq!(p.agents, vec!["claude"]);
             assert_eq!(p.skills, vec!["graphify"]);
-            assert!(p.plugins.is_empty(), "plugins: [] (no PluginManager surface from Runtime)");
+            assert!(
+                p.plugins.is_empty(),
+                "plugins: [] (no PluginManager surface from Runtime)"
+            );
             assert_eq!(p.fast_mode_state, "off");
             assert!(p.memory_paths.is_some(), "memory_paths must be set");
         }
 
         // ② system/status + ③ assistant (accumulate then boundary-flush)
-        stream.emit_message_start("msg_golden", "claude-opus-4-8").await;
+        stream
+            .emit_message_start("msg_golden", "claude-opus-4-8")
+            .await;
         stream.emit_text("pong").await;
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_golden"))
             .await;
         let last_text = stream.get_last_result_text().await;
-        assert_eq!(last_text, "pong", "last_result_text propagates from boundary");
+        assert_eq!(
+            last_text, "pong",
+            "last_result_text propagates from boundary"
+        );
 
         // ④ result/success frame
         let cost = CostSnapshot {
@@ -1707,14 +1786,7 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame(
-                "pong",
-                "end_turn",
-                &cost,
-                "claude-opus-4-8",
-                "off",
-                &[],
-            )
+            .build_result_success_frame("pong", "end_turn", &cost, "claude-opus-4-8", "off", &[])
             .await;
 
         // Golden assertions (volatile fields masked by shape, not value).
@@ -1726,11 +1798,17 @@ mod tests {
         assert_eq!(frame["stop_reason"], "end_turn");
         assert_eq!(frame["terminal_reason"], "completed");
         assert_eq!(frame["fast_mode_state"], "off");
-        assert!(frame["session_id"].is_string(), "session_id must be a string");
+        assert!(
+            frame["session_id"].is_string(),
+            "session_id must be a string"
+        );
         assert!(frame["uuid"].is_string(), "uuid must be a string");
         // modelUsage
         let mu = frame["modelUsage"].as_object().unwrap();
-        assert!(mu.contains_key("claude-opus-4-8"), "modelUsage keyed by model_id");
+        assert!(
+            mu.contains_key("claude-opus-4-8"),
+            "modelUsage keyed by model_id"
+        );
         assert_eq!(
             mu["claude-opus-4-8"]["contextWindow"], 200_000_u64,
             "contextWindow from catalog"

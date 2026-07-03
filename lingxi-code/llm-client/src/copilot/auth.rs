@@ -87,7 +87,10 @@ impl Authenticator for CopilotAuthenticator {
             format!("Bearer {}", self.secret.0),
         );
         headers.insert("User-Agent".to_string(), COPILOT_USER_AGENT.to_string());
-        headers.insert("Openai-Intent".to_string(), "conversation-edits".to_string());
+        headers.insert(
+            "Openai-Intent".to_string(),
+            "conversation-edits".to_string(),
+        );
         headers.insert(
             "X-GitHub-Api-Version".to_string(),
             COPILOT_API_VERSION.to_string(),
@@ -146,7 +149,10 @@ mod tests {
             signed.headers.get("User-Agent"),
             Some(&"LingXi-Code".to_string())
         );
-        assert_eq!(signed.headers.get("x-initiator"), Some(&"agent".to_string()));
+        assert_eq!(
+            signed.headers.get("x-initiator"),
+            Some(&"agent".to_string())
+        );
         assert_eq!(
             signed.headers.get("Copilot-Integration-Id"),
             Some(&"vscode-chat".to_string())

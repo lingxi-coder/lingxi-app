@@ -16,9 +16,9 @@ use std::path::PathBuf;
 /// with the byte-identical error message. A non-numeric argument (which JS would
 /// coerce to `NaN`) and a non-positive number both fail the same way here.
 fn parse_positive_budget_usd(value: &str) -> Result<f64, String> {
-    let amount: f64 = value.parse().map_err(|_| {
-        "--max-budget-usd must be a positive number greater than 0".to_string()
-    })?;
+    let amount: f64 = value
+        .parse()
+        .map_err(|_| "--max-budget-usd must be a positive number greater than 0".to_string())?;
     // JS `Number("inf")` is `NaN` (rejected) and `Number("1e400")` is `Infinity`,
     // and claude's guard is `isNaN(amount) || amount <= 0`. Rust's `f64::FromStr`
     // instead parses "inf"/"INF"/"Infinity"/"1e400" all to `f64::INFINITY`, which
@@ -353,8 +353,8 @@ pub struct Argv {
     /// commander `.choices(['acceptEdits','auto','bypassPermissions','default',
     /// 'dontAsk','plan'])` — an out-of-choices value is HARD-REJECTED at parse
     /// time (exit 1 with an allowed-choices message), so the `value_parser`
-    /// below mirrors that. `auto` is a real choice (lingxi maps unknown→Default
-    /// downstream as unreachable defense-in-depth).
+    /// below mirrors that. `auto` is a real choice and resolves to
+    /// `PermissionMode::Auto` downstream.
     #[arg(
         long = "permission-mode",
         // lowercase placeholder so the help line and the commander-style
@@ -370,7 +370,6 @@ pub struct Argv {
     // ones is tracked in task "Wire un-ported flag backing features"; until
     // then they parse-and-carry (accepted, inert) so scripts/SDK callers stop
     // breaking on contact. claude-code source: main.tsx flag registration.
-
     /// Use a specific session ID for the conversation (must be a valid UUID)
     ///
     /// claude-code `--session-id <uuid>`. Overrides the generated session id.
@@ -471,7 +470,10 @@ pub struct Argv {
 /// alone, since it already absorbs the surplus and a second catch-all would
 /// conflict.
 fn with_excess_catchall(mut cmd: clap::Command) -> clap::Command {
-    let sub_names: Vec<String> = cmd.get_subcommands().map(|c| c.get_name().to_string()).collect();
+    let sub_names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
     if sub_names.is_empty() {
         if !has_variadic_positional(&cmd) {
             cmd = cmd.arg(
@@ -493,8 +495,11 @@ fn with_excess_catchall(mut cmd: clap::Command) -> clap::Command {
 /// `Vec`/trailing-var-arg positional), which would conflict with a second
 /// catch-all positional.
 fn has_variadic_positional(cmd: &clap::Command) -> bool {
-    cmd.get_positionals()
-        .any(|a| a.get_num_args().map(|r| r.max_values() > 1).unwrap_or(false))
+    cmd.get_positionals().any(|a| {
+        a.get_num_args()
+            .map(|r| r.max_values() > 1)
+            .unwrap_or(false)
+    })
 }
 
 impl Argv {
@@ -612,7 +617,9 @@ impl Argv {
     pub fn validate_stream_json_input_args(&self) -> Result<(), String> {
         if self.is_stream_json_input() {
             if !self.is_stream_json() {
-                return Err("--input-format=stream-json requires output-format=stream-json.".to_string());
+                return Err(
+                    "--input-format=stream-json requires output-format=stream-json.".to_string(),
+                );
             }
             if !self.print {
                 return Err("--input-format=stream-json requires --print.".to_string());

@@ -38,11 +38,11 @@ pub mod wrap;
 pub use decision::{
     is_binary_hijack_var, should_use_sandbox, should_use_sandbox_for_command, SandboxDecision,
 };
-pub use permission::shell_command::strip_env_and_wrappers_fixedpoint;
 pub use dependency_check::{
     check_dependencies, sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck,
 };
 pub use path_pattern::resolve_path_pattern_for_sandbox;
+pub use permission::shell_command::strip_env_and_wrappers_fixedpoint;
 pub use policy::default_policy;
 pub use policy_convert::{convert_settings_to_runtime_config, linux_glob_pattern_warnings};
 pub use runtime_config::{

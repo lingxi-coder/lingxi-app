@@ -16,7 +16,9 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{stderr, stdin, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin};
+use tokio::io::{
+    stderr, stdin, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use traits::{OrchestratorHandle, OutputStream};
@@ -245,10 +247,8 @@ pub async fn run_repl(argv: &Argv) -> i32 {
         // SAME cfg (mirrors `build_runtime_for_tui`).
         let mut cfg = crate::init::resolve_desktop_config(argv, permission_mode);
         let shared: Arc<Mutex<dyn AsyncBufRead + Send + Unpin>> = stdin_reader.clone();
-        let gate = permission::InteractivePromptingGate::new(
-            shared,
-            Arc::new(Mutex::new(stderr())),
-        );
+        let gate =
+            permission::InteractivePromptingGate::new(shared, Arc::new(Mutex::new(stderr())));
         cfg.injected_permission_gate =
             Some(Arc::new(gate) as Arc<dyn permission::gate::PermissionGate>);
         crate::init::build_runtime_from_config(cfg, adapter).await
@@ -289,7 +289,8 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // `fire_notification` (the `OrchestratorHandle` trait does not expose it),
     // and it is in scope here exactly like the `SessionEnd` fire below.
     let notif_armed = orch.has_notification_hook().await;
-    let idle_notifier = crate::idle_notify::OrchestratorIdleNotifier::new(orch.clone(), notif_armed);
+    let idle_notifier =
+        crate::idle_notify::OrchestratorIdleNotifier::new(orch.clone(), notif_armed);
 
     let ended_via;
     let exit_code;
@@ -365,9 +366,7 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use tokio::io::{
-        duplex, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader,
-    };
+    use tokio::io::{duplex, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
     use tokio::sync::Mutex;
 
     /// Interactive prompting is enabled ONLY for a TTY that is not in `--print`
@@ -482,7 +481,9 @@ mod tests {
         let reader = scripted_reader(b"");
         let outcome = trust_gate(&reader, &null_stderr(), true, false, Some(&cfg), &cwd).await;
         assert_eq!(outcome, TrustOutcome::Decline);
-        assert!(!migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd));
+        assert!(!migrations::global_config::check_has_trust_dialog_accepted(
+            &cfg, &cwd
+        ));
     }
 
     /// Empty line (just Enter) ⇒ decline (deny-default `[y/N]`), no mark.
@@ -492,7 +493,9 @@ mod tests {
         let reader = scripted_reader(b"\n");
         let outcome = trust_gate(&reader, &null_stderr(), true, false, Some(&cfg), &cwd).await;
         assert_eq!(outcome, TrustOutcome::Decline);
-        assert!(!migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd));
+        assert!(!migrations::global_config::check_has_trust_dialog_accepted(
+            &cfg, &cwd
+        ));
     }
 
     /// Already-accepted ⇒ proceed with NO byte consumed (a follow-up line is
@@ -518,7 +521,9 @@ mod tests {
         let reader = scripted_reader(b"keep\n");
         let outcome = trust_gate(&reader, &null_stderr(), false, false, Some(&cfg), &cwd).await;
         assert_eq!(outcome, TrustOutcome::Proceed);
-        assert!(!migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd));
+        assert!(!migrations::global_config::check_has_trust_dialog_accepted(
+            &cfg, &cwd
+        ));
         let mut follow = String::new();
         let mut guard = reader.lock().await;
         let n = guard.read_line(&mut follow).await.unwrap();
@@ -543,8 +548,15 @@ mod tests {
     #[tokio::test]
     async fn no_config_path_proceeds() {
         let reader = scripted_reader(b"keep\n");
-        let outcome =
-            trust_gate(&reader, &null_stderr(), true, false, None, Path::new("/tmp")).await;
+        let outcome = trust_gate(
+            &reader,
+            &null_stderr(),
+            true,
+            false,
+            None,
+            Path::new("/tmp"),
+        )
+        .await;
         assert_eq!(outcome, TrustOutcome::Proceed);
         let mut follow = String::new();
         let mut guard = reader.lock().await;

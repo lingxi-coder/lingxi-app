@@ -18,7 +18,7 @@
 
 use clap::{Args, Subcommand};
 
-use crate::exit_codes::{RUNTIME_ERROR, NOT_IMPLEMENTED, SUCCESS};
+use crate::exit_codes::{NOT_IMPLEMENTED, RUNTIME_ERROR, SUCCESS};
 
 /// `auth` — Manage authentication.
 ///

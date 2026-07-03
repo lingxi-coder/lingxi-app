@@ -9,8 +9,8 @@
 //! [`MARKER`].
 #![allow(clippy::needless_pass_by_value)]
 
-use iocraft::prelude::*;
 use crate::render_iocraft::StyleColorIocraftExt;
+use iocraft::prelude::*;
 
 use crate::theme::Theme;
 

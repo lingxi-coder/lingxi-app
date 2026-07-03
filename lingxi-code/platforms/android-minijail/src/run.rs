@@ -755,7 +755,7 @@ mod tests {
         // as a kill marker.
         assert_eq!(decode_exit(128 + 9), 137); // SIGKILL via minijail encoding
         assert_eq!(decode_exit(128 + 11), 139); // SIGSEGV via minijail encoding
-        // SECCOMP violation (SIGSYS) is reported as MINIJAIL_ERR_SECCOMP_VIOLATION(253).
+                                                // SECCOMP violation (SIGSYS) is reported as MINIJAIL_ERR_SECCOMP_VIOLATION(253).
         assert_eq!(decode_exit(253), 253);
     }
 

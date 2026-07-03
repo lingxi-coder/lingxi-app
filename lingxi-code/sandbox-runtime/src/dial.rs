@@ -55,7 +55,10 @@ mod tests {
             parse_connect_target("example.com:443"),
             Some(("example.com".into(), 443))
         );
-        assert_eq!(parse_connect_target("[::1]:8443"), Some(("::1".into(), 8443)));
+        assert_eq!(
+            parse_connect_target("[::1]:8443"),
+            Some(("::1".into(), 8443))
+        );
         assert_eq!(parse_connect_target("host:1"), Some(("host".into(), 1)));
         // invalid
         assert_eq!(parse_connect_target("noport"), None);

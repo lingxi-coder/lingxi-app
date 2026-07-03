@@ -174,7 +174,11 @@ pub fn load_keybindings(enabled: bool, path: &Path, is_macos: bool) -> Keybindin
 
     // Validation: raw-JSON duplicate keys first, then structural/semantic.
     let mut warnings = check_duplicate_keys_in_json(&content);
-    warnings.extend(validate_bindings(&raw_blocks, Some(&typed_blocks), is_macos));
+    warnings.extend(validate_bindings(
+        &raw_blocks,
+        Some(&typed_blocks),
+        is_macos,
+    ));
 
     KeybindingsLoadResult {
         bindings: merged,

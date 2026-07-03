@@ -12,7 +12,10 @@ pub fn resolve_team_memory_dir(home: &Path, enabled: bool) -> Option<PathBuf> {
     if !enabled {
         return None;
     }
-    Some(home.join(branding::DOT_DIR).join(super::paths::TEAM_MEM_SUBDIR))
+    Some(
+        home.join(branding::DOT_DIR)
+            .join(super::paths::TEAM_MEM_SUBDIR),
+    )
 }
 
 #[cfg(test)]

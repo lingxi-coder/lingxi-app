@@ -302,8 +302,7 @@ impl<T: HttpTransport> crate::Transport for LlmTransportBridge<T> {
     fn open_responses_websocket_session<'a>(
         &'a self,
         request: &'a ProviderRequest,
-    ) -> BoxFuture<'a, Result<Box<dyn crate::ResponsesWebSocketTransportSession>, LlmError>>
-    {
+    ) -> BoxFuture<'a, Result<Box<dyn crate::ResponsesWebSocketTransportSession>, LlmError>> {
         Box::pin(async move {
             let ws_request = to_responses_websocket_handshake_request(request)?;
             match self

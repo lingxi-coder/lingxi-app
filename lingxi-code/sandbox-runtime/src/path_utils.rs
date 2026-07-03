@@ -244,13 +244,12 @@ pub fn is_symlink_outside_boundary(original_path: &str, resolved_path: &str) -> 
     // (`sandbox-utils.js:125-135`)
     // TS branches /tmp/ and /var/ separately (sandbox-utils.js:126-131); both
     // prepend "/private", so they fold into one condition here.
-    let canonical_original = if normalized_original.starts_with("/tmp/")
-        || normalized_original.starts_with("/var/")
-    {
-        format!("/private{normalized_original}")
-    } else {
-        normalized_original.clone()
-    };
+    let canonical_original =
+        if normalized_original.starts_with("/tmp/") || normalized_original.starts_with("/var/") {
+            format!("/private{normalized_original}")
+        } else {
+            normalized_original.clone()
+        };
     if canonical_original != normalized_original
         && canonical_original.starts_with(&format!("{normalized_resolved}/"))
     {
@@ -377,10 +376,8 @@ pub fn normalize_path_for_sandbox(path_pattern: &str) -> String {
     let home_dir = dirs::home_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let cwd = std::env::current_dir().map_or_else(
-        |_| "/".to_string(),
-        |p| p.to_string_lossy().into_owned(),
-    );
+    let cwd = std::env::current_dir()
+        .map_or_else(|_| "/".to_string(), |p| p.to_string_lossy().into_owned());
     normalize_path_for_sandbox_with(path_pattern, &home_dir, &cwd, |p| {
         std::fs::canonicalize(p)
             .ok()
@@ -722,43 +719,29 @@ mod tests {
 
     #[test]
     fn normalize_bare_relative_resolves_against_cwd() {
-        let out = normalize_path_for_sandbox_with(
-            "foo/bar",
-            "/home/me",
-            "/work/dir",
-            identity_realpath,
-        );
+        let out =
+            normalize_path_for_sandbox_with("foo/bar", "/home/me", "/work/dir", identity_realpath);
         assert_eq!(out, "/work/dir/foo/bar");
     }
 
     #[test]
     fn normalize_absolute_with_dotdot_is_collapsed_via_realpath_noop() {
         // Absolute paths are passed through; realpath identity keeps them.
-        let out = normalize_path_for_sandbox_with(
-            "/a/b/c",
-            "/home/me",
-            "/cwd",
-            identity_realpath,
-        );
+        let out = normalize_path_for_sandbox_with("/a/b/c", "/home/me", "/cwd", identity_realpath);
         assert_eq!(out, "/a/b/c");
     }
 
     #[test]
     fn normalize_keeps_path_when_realpath_missing() {
-        let out =
-            normalize_path_for_sandbox_with("/a/b/c", "/home/me", "/cwd", missing_realpath);
+        let out = normalize_path_for_sandbox_with("/a/b/c", "/home/me", "/cwd", missing_realpath);
         assert_eq!(out, "/a/b/c");
     }
 
     #[test]
     fn normalize_glob_pattern_preserves_wildcards() {
         // Glob branch: static prefix /a/b/, base dir /a/b resolves via identity.
-        let out = normalize_path_for_sandbox_with(
-            "/a/b/*.ts",
-            "/home/me",
-            "/cwd",
-            identity_realpath,
-        );
+        let out =
+            normalize_path_for_sandbox_with("/a/b/*.ts", "/home/me", "/cwd", identity_realpath);
         assert_eq!(out, "/a/b/*.ts");
     }
 

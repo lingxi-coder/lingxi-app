@@ -126,10 +126,13 @@ impl TaskOutputManager {
     pub async fn allocate(&self, task_id: &str) -> Result<PathBuf, OutputError> {
         let path = self.path_for(task_id)?;
         let path_str = path.to_str().expect("utf-8 output path");
-        self.fs.create_new_file(path_str).await.map_err(|e| match e {
-            traits::FsError::AlreadyExists(p) => OutputError::AlreadyExists(p),
-            other => OutputError::Io(other.to_string()),
-        })?;
+        self.fs
+            .create_new_file(path_str)
+            .await
+            .map_err(|e| match e {
+                traits::FsError::AlreadyExists(p) => OutputError::AlreadyExists(p),
+                other => OutputError::Io(other.to_string()),
+            })?;
         Ok(path)
     }
 
@@ -154,9 +157,7 @@ impl TaskOutputManager {
                 // Already capped — drop further output (claude `if (capped) return`).
                 None
             } else {
-                state.bytes_written = state
-                    .bytes_written
-                    .saturating_add(content.len() as u64);
+                state.bytes_written = state.bytes_written.saturating_add(content.len() as u64);
                 if state.bytes_written > MAX_TASK_OUTPUT_BYTES {
                     state.capped = true;
                     Some(format!(
@@ -189,7 +190,9 @@ impl TaskOutputManager {
     #[cfg(test)]
     async fn seed_bytes_for_test(&self, output_file: &Path, bytes: u64) {
         let mut caps = self.caps.lock().await;
-        caps.entry(output_file.to_path_buf()).or_default().bytes_written = bytes;
+        caps.entry(output_file.to_path_buf())
+            .or_default()
+            .bytes_written = bytes;
     }
 
     /// Read a window of the task's spool file.

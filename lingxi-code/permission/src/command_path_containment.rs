@@ -298,9 +298,22 @@ fn extract_paths(command: &str, args: &[String], home: Option<&str>) -> Vec<Stri
         // grep: pattern then paths; `-r`/`-R` with no paths → current dir.
         "grep" => {
             let flags = [
-                "-e", "--regexp", "-f", "--file", "--exclude", "--include",
-                "--exclude-dir", "--include-dir", "-m", "--max-count", "-A",
-                "--after-context", "-B", "--before-context", "-C", "--context",
+                "-e",
+                "--regexp",
+                "-f",
+                "--file",
+                "--exclude",
+                "--include",
+                "--exclude-dir",
+                "--include-dir",
+                "-m",
+                "--max-count",
+                "-A",
+                "--after-context",
+                "-B",
+                "--before-context",
+                "-C",
+                "--context",
             ];
             let paths = parse_pattern_command(args, &flags, &[]);
             if paths.is_empty()
@@ -315,10 +328,27 @@ fn extract_paths(command: &str, args: &[String], home: Option<&str>) -> Vec<Stri
         // rg: pattern then paths, default to current dir.
         "rg" => {
             let flags = [
-                "-e", "--regexp", "-f", "--file", "-t", "--type", "-T",
-                "--type-not", "-g", "--glob", "-m", "--max-count", "--max-depth",
-                "-r", "--replace", "-A", "--after-context", "-B",
-                "--before-context", "-C", "--context",
+                "-e",
+                "--regexp",
+                "-f",
+                "--file",
+                "-t",
+                "--type",
+                "-T",
+                "--type-not",
+                "-g",
+                "--glob",
+                "-m",
+                "--max-count",
+                "--max-depth",
+                "-r",
+                "--replace",
+                "-A",
+                "--after-context",
+                "-B",
+                "--before-context",
+                "-C",
+                "--context",
             ];
             parse_pattern_command(args, &flags, &["."])
         }
@@ -336,8 +366,17 @@ fn extract_paths(command: &str, args: &[String], home: Option<&str>) -> Vec<Stri
 /// TS `PATH_EXTRACTORS.find` (`pathValidation.ts:211-269`).
 fn extract_find(args: &[String]) -> Vec<String> {
     const PATH_FLAGS: [&str; 11] = [
-        "-newer", "-anewer", "-cnewer", "-mnewer", "-samefile", "-path",
-        "-wholename", "-ilname", "-lname", "-ipath", "-iwholename",
+        "-newer",
+        "-anewer",
+        "-cnewer",
+        "-mnewer",
+        "-samefile",
+        "-path",
+        "-wholename",
+        "-ilname",
+        "-lname",
+        "-ipath",
+        "-iwholename",
     ];
     let mut paths: Vec<String> = Vec::new();
     let mut found_non_global_flag = false;
@@ -400,9 +439,9 @@ fn is_find_newer_pattern(arg: &str) -> bool {
 /// TS `PATH_EXTRACTORS.tr` (`pathValidation.ts:301-310`): skip SET1 (or
 /// SET1+SET2 when not deleting) operands.
 fn extract_tr(args: &[String]) -> Vec<String> {
-    let has_delete = args.iter().any(|a| {
-        a == "-d" || a == "--delete" || (a.starts_with('-') && a.contains('d'))
-    });
+    let has_delete = args
+        .iter()
+        .any(|a| a == "-d" || a == "--delete" || (a.starts_with('-') && a.contains('d')));
     let non_flags = filter_out_flags(args);
     let skip = if has_delete { 1 } else { 2 };
     if non_flags.len() > skip {
@@ -464,9 +503,20 @@ fn extract_sed(args: &[String]) -> Vec<String> {
 /// TS `PATH_EXTRACTORS.jq` (`pathValidation.ts:433-488`).
 fn extract_jq(args: &[String]) -> Vec<String> {
     const FLAGS_WITH_ARGS: [&str; 14] = [
-        "-e", "--expression", "-f", "--from-file", "--arg", "--argjson",
-        "--slurpfile", "--rawfile", "--args", "--jsonargs", "-L",
-        "--library-path", "--indent", "--tab",
+        "-e",
+        "--expression",
+        "-f",
+        "--from-file",
+        "--arg",
+        "--argjson",
+        "--slurpfile",
+        "--rawfile",
+        "--args",
+        "--jsonargs",
+        "-L",
+        "--library-path",
+        "--indent",
+        "--tab",
     ];
     let mut paths: Vec<String> = Vec::new();
     let mut filter_found = false;
@@ -506,9 +556,7 @@ fn extract_jq(args: &[String]) -> Vec<String> {
 /// `git diff --no-index A B` extracts paths (the first two positional args after
 /// `diff`). Every other git subcommand is git's own security boundary → no paths.
 fn extract_git(args: &[String]) -> Vec<String> {
-    if args.first().map(String::as_str) == Some("diff")
-        && args.iter().any(|a| a == "--no-index")
-    {
+    if args.first().map(String::as_str) == Some("diff") && args.iter().any(|a| a == "--no-index") {
         let file_paths = filter_out_flags(&args[1..]);
         return file_paths.into_iter().take(2).collect();
     }
@@ -588,12 +636,11 @@ fn has_glob_metachar(s: &str) -> bool {
 /// Unlike TS `validatePath`, the deny-rule / allow-rule / sandbox-allowlist
 /// branches of `isPathAllowed` are NOT evaluated here — those outcomes are
 /// produced by [`crate::policy`]'s rule walks (see the module-level scope note).
-fn validate_path(
-    path: &str,
-    operation_type: OperationType,
-    roots: &FsRoots,
-) -> PathGuard {
-    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+fn validate_path(path: &str, operation_type: OperationType, roots: &FsRoots) -> PathGuard {
+    let home = roots
+        .home
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
     let dequoted = strip_surrounding_quotes(path);
     let clean_path = expand_tilde(dequoted, home.as_deref());
 
@@ -602,8 +649,7 @@ fn validate_path(
     //    unexpanded variants still start with `~`.
     if clean_path.starts_with('~') {
         return PathGuard::Ask(
-            "Tilde expansion variants (~user, ~+, ~-) in paths require manual approval"
-                .to_string(),
+            "Tilde expansion variants (~user, ~+, ~-) in paths require manual approval".to_string(),
         );
     }
 
@@ -751,7 +797,10 @@ pub fn check_command_path_containment(
 ) -> Option<PathConstraintAsk> {
     let subs = crate::shell_command::split_command(command);
     let compound_has_cd = compound_has_cd(&subs);
-    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+    let home = roots
+        .home
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
     let work_dirs = working_dir_paths(roots, additional);
 
     for sub in &subs {
@@ -856,7 +905,9 @@ pub fn check_command_path_containment(
 fn compound_has_cd(subs: &[String]) -> bool {
     subs.iter().any(|s| {
         let stripped = crate::shell_command::strip_safe_wrappers(s);
-        split_argv(&stripped).first().is_some_and(|first| first == "cd")
+        split_argv(&stripped)
+            .first()
+            .is_some_and(|first| first == "cd")
     })
 }
 
@@ -974,7 +1025,9 @@ mod tests {
     #[test]
     fn touch_out_of_cwd_asks() {
         let a = check("touch /etc/newfile").expect("ask");
-        assert!(a.message.starts_with("touch in '/etc/newfile' was blocked."));
+        assert!(a
+            .message
+            .starts_with("touch in '/etc/newfile' was blocked."));
         assert!(a.message.contains("create or modify files in"));
     }
 
@@ -1034,7 +1087,9 @@ mod tests {
     #[test]
     fn cp_with_flag_asks_even_in_cwd() {
         let a = check("cp -r src dst").expect("ask");
-        assert!(a.message.starts_with("cp with flags requires manual approval"));
+        assert!(a
+            .message
+            .starts_with("cp with flags requires manual approval"));
         assert_eq!(a.reason, "cp command with flags requires manual approval");
     }
 
@@ -1042,7 +1097,9 @@ mod tests {
     fn cp_target_directory_flag_cannot_bypass() {
         // The exact attack the validator defends: --target-directory=/etc.
         let a = check("cp --target-directory=/etc a.txt").expect("ask");
-        assert!(a.message.starts_with("cp with flags requires manual approval"));
+        assert!(a
+            .message
+            .starts_with("cp with flags requires manual approval"));
     }
 
     // ── D3: git diff --no-index path extraction ────────────────────────────
@@ -1192,7 +1249,9 @@ mod tests {
     #[test]
     fn glob_in_mkdir_path_asks() {
         let a = check("mkdir /proj/work/d?ir").expect("ask");
-        assert!(a.message.starts_with("Glob patterns are not allowed in write operations"));
+        assert!(a
+            .message
+            .starts_with("Glob patterns are not allowed in write operations"));
     }
 
     #[test]
@@ -1262,11 +1321,8 @@ mod tests {
     #[test]
     fn read_into_additional_working_dir_passes() {
         let extra = vec![PathBuf::from("/tmp/scratch")];
-        assert!(
-            check_command_path_containment("cat /tmp/scratch/x", &roots(), &extra).is_none()
-        );
-        let a =
-            check_command_path_containment("cat /etc/passwd", &roots(), &extra).expect("ask");
+        assert!(check_command_path_containment("cat /tmp/scratch/x", &roots(), &extra).is_none());
+        let a = check_command_path_containment("cat /etc/passwd", &roots(), &extra).expect("ask");
         assert!(a.message.contains("'/proj/work', '/tmp/scratch'"));
     }
 

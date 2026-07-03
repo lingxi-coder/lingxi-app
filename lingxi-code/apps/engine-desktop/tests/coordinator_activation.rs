@@ -534,7 +534,9 @@ fn coordinator_session_registers_coordinator_send_message_not_builtin() {
 
     // Behavior marker: the coordinator `SendMessage`'s `to` description names the
     // `uds:` / `bridge:` peer schemes; the `tool_ui` builtin's does not.
-    let send = reg.find_by_name("SendMessage").expect("SendMessage registered");
+    let send = reg
+        .find_by_name("SendMessage")
+        .expect("SendMessage registered");
     let to_desc = send.input_schema()["properties"]["to"]["description"]
         .as_str()
         .unwrap_or_default();

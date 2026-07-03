@@ -197,7 +197,11 @@ impl AdapterPermissionGate {
             // fail the resolve (the session rule above still skips re-prompts).
             // Skip a degenerate empty tool name (a missing request id resolves
             // `tool_name = ""`) so we never persist `allow: [""]`.
-            if let Some(paths) = self.persist_paths.as_ref().filter(|_| !tool_name.is_empty()) {
+            if let Some(paths) = self
+                .persist_paths
+                .as_ref()
+                .filter(|_| !tool_name.is_empty())
+            {
                 let update = PermissionUpdate {
                     rule,
                     destination: PermissionUpdateDestination::LocalSettings,
@@ -411,7 +415,10 @@ mod tests {
             PermissionKindDto::ToolUseConfirm { tool_name, .. } => assert_eq!(tool_name, "Bash"),
             other => panic!("unexpected kind: {other:?}"),
         }
-        assert!(gate.resolve(req.request_id, PermissionResponseDto::AllowOnce, "Bash").await);
+        assert!(
+            gate.resolve(req.request_id, PermissionResponseDto::AllowOnce, "Bash")
+                .await
+        );
 
         let decision = task.await.unwrap();
         assert_eq!(decision, PermissionDecision::Allow);
@@ -445,7 +452,10 @@ mod tests {
 
         wait_for_pending(&gate, 1).await;
         let req = sink.last().await;
-        assert!(gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash").await);
+        assert!(
+            gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash")
+                .await
+        );
 
         let decision = task.await.unwrap();
         assert_eq!(decision, PermissionDecision::Allow);
@@ -470,7 +480,10 @@ mod tests {
 
         wait_for_pending(&gate, 1).await;
         let req = sink.last().await;
-        assert!(gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash").await);
+        assert!(
+            gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash")
+                .await
+        );
         assert_eq!(task.await.unwrap(), PermissionDecision::Allow);
 
         // The stored rule is narrowed to the command prefix, NOT tool-wide.
@@ -478,24 +491,36 @@ mod tests {
             let stored = gate.session_allow_rules();
             let stored = stored.lock().await;
             assert_eq!(stored.len(), 1);
-            assert_eq!(stored[0].value.rule_content.as_deref(), Some("git commit:*"));
-            assert!(!stored[0].matches_tool("Bash"), "narrowed rule is not tool-wide");
+            assert_eq!(
+                stored[0].value.rule_content.as_deref(),
+                Some("git commit:*")
+            );
+            assert!(
+                !stored[0].matches_tool("Bash"),
+                "narrowed rule is not tool-wide"
+            );
         }
 
         // A matching later command short-circuits (no new request emitted)...
         assert_eq!(
-            gate.check("Bash", &json!({ "command": "git commit -m \"y\"" })).await,
+            gate.check("Bash", &json!({ "command": "git commit -m \"y\"" }))
+                .await,
             PermissionDecision::Allow
         );
         // ...but a DIFFERENT command still prompts (would park a new request).
         let g2 = gate.clone();
-        let other = tokio::spawn(async move {
-            g2.check("Bash", &json!({ "command": "rm -rf /" })).await
-        });
+        let other =
+            tokio::spawn(async move { g2.check("Bash", &json!({ "command": "rm -rf /" })).await });
         wait_for_pending(&gate, 1).await;
         let req2 = sink.last().await;
-        assert!(gate.resolve(req2.request_id, PermissionResponseDto::Deny, "Bash").await);
-        assert!(matches!(other.await.unwrap(), PermissionDecision::Deny { .. }));
+        assert!(
+            gate.resolve(req2.request_id, PermissionResponseDto::Deny, "Bash")
+                .await
+        );
+        assert!(matches!(
+            other.await.unwrap(),
+            PermissionDecision::Deny { .. }
+        ));
     }
 
     /// (3c) `gate_persists_allow_always_writes_local_settings` — with a persist
@@ -517,7 +542,10 @@ mod tests {
         let task = tokio::spawn(async move { g.check("Bash", &json!({})).await });
         wait_for_pending(&gate, 1).await;
         let req = sink.last().await;
-        assert!(gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash").await);
+        assert!(
+            gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash")
+                .await
+        );
         assert_eq!(task.await.unwrap(), PermissionDecision::Allow);
 
         // The choice was persisted to settings.local.json.
@@ -540,7 +568,10 @@ mod tests {
 
         wait_for_pending(&gate, 1).await;
         let req = sink.last().await;
-        assert!(gate.resolve(req.request_id, PermissionResponseDto::Deny, "Bash").await);
+        assert!(
+            gate.resolve(req.request_id, PermissionResponseDto::Deny, "Bash")
+                .await
+        );
 
         match task.await.unwrap() {
             PermissionDecision::Deny { reason } => {
@@ -564,7 +595,8 @@ mod tests {
         let g1 = gate.clone();
         let main = tokio::spawn(async move { g1.check("Bash", &json!({"who": "main"})).await });
         let g2 = gate.clone();
-        let worker = tokio::spawn(async move { g2.check("Write", &json!({"who": "worker"})).await });
+        let worker =
+            tokio::spawn(async move { g2.check("Write", &json!({"who": "worker"})).await });
 
         wait_for_pending(&gate, 2).await;
         let reqs = sink.requests().await;
@@ -580,8 +612,14 @@ mod tests {
             matches!(&r.kind, PermissionKindDto::ToolUseConfirm { tool_name, .. } if tool_name == "Write")
         }).unwrap();
 
-        assert!(gate.resolve(bash.request_id, PermissionResponseDto::AllowOnce, "Bash").await);
-        assert!(gate.resolve(write.request_id, PermissionResponseDto::Deny, "Write").await);
+        assert!(
+            gate.resolve(bash.request_id, PermissionResponseDto::AllowOnce, "Bash")
+                .await
+        );
+        assert!(
+            gate.resolve(write.request_id, PermissionResponseDto::Deny, "Write")
+                .await
+        );
 
         assert_eq!(main.await.unwrap(), PermissionDecision::Allow);
         match worker.await.unwrap() {
@@ -617,8 +655,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_resolves_deny() {
         let sink = MockRequestSink::arc();
-        let gate = AdapterPermissionGate::new(sink.clone())
-            .with_timeout(Duration::from_millis(20));
+        let gate = AdapterPermissionGate::new(sink.clone()).with_timeout(Duration::from_millis(20));
 
         let decision = gate.check("Bash", &json!({})).await;
         match decision {
@@ -656,7 +693,14 @@ mod tests {
             }
             other => panic!("unexpected kind: {other:?}"),
         }
-        assert!(gate.resolve(read_req.request_id, PermissionResponseDto::AllowOnce, "Read").await);
+        assert!(
+            gate.resolve(
+                read_req.request_id,
+                PermissionResponseDto::AllowOnce,
+                "Read"
+            )
+            .await
+        );
         t.await.unwrap();
 
         // Bash → DenyByDefault → default_allow: false.
@@ -670,7 +714,10 @@ mod tests {
             }
             other => panic!("unexpected kind: {other:?}"),
         }
-        assert!(gate.resolve(bash_req.request_id, PermissionResponseDto::Deny, "Bash").await);
+        assert!(
+            gate.resolve(bash_req.request_id, PermissionResponseDto::Deny, "Bash")
+                .await
+        );
         t.await.unwrap();
     }
 
@@ -679,6 +726,10 @@ mod tests {
     async fn resolve_unknown_id_is_noop() {
         let sink = MockRequestSink::arc();
         let gate = AdapterPermissionGate::new(sink);
-        assert!(!gate.resolve(999, PermissionResponseDto::AllowOnce, "Bash").await);
+        assert!(
+            !gate
+                .resolve(999, PermissionResponseDto::AllowOnce, "Bash")
+                .await
+        );
     }
 }

@@ -12,8 +12,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// `! ` prefix glyph + space (color `bashBorder` in claude-code).
 pub const PREFIX: &str = "! ";

@@ -326,7 +326,9 @@ mod tests {
     async fn global_config_check_valid_is_pass() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".lingxi.json");
-        tokio::fs::write(&path, br#"{"numStartups":1}"#).await.unwrap();
+        tokio::fs::write(&path, br#"{"numStartups":1}"#)
+            .await
+            .unwrap();
         let c = check_global_config(Some(&path)).await;
         assert!(matches!(c.status, CheckStatus::Pass));
     }

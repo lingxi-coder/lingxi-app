@@ -34,7 +34,11 @@ pub struct TeamFile {
     #[serde(rename = "leadAgentId")]
     pub lead_agent_id: String,
     /// Actual session id of the leader (for team discovery).
-    #[serde(rename = "leadSessionId", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "leadSessionId",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub lead_session_id: Option<String>,
     /// Team members. The coordinator writes exactly one: the lead.
     pub members: Vec<TeamMember>,
@@ -72,7 +76,13 @@ pub struct TeamMember {
 #[must_use]
 pub fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 

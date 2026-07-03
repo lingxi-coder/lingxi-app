@@ -3,7 +3,6 @@
 //! Routes to `ctx.share` (`Arc<dyn SharingService>`). `None` on desktop; mobile
 //! composition roots wire a native Swift / Kotlin impl via `UniFFI` (P12).
 
-
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;

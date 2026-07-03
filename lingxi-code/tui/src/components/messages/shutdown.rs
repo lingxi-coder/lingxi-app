@@ -9,8 +9,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// Locked tail line for rejected shutdowns.
 pub const REJECTED_TAIL: &str =

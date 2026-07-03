@@ -1,7 +1,7 @@
 use crate::{
-    ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest, LlmResponse,
-    MessageDeltaPayload, ProviderRequest, ProviderResponse, RawStreamFrame,
-    StreamDecoder, ToolDeclaration, Usage, WireCodec,
+    ContentBlock, ContentDelta, LlmError, LlmEvent, LlmRequest, LlmResponse, MessageDeltaPayload,
+    ProviderRequest, ProviderResponse, RawStreamFrame, StreamDecoder, ToolDeclaration, Usage,
+    WireCodec,
 };
 
 use base64::Engine;
@@ -49,7 +49,10 @@ impl WireCodec for GeminiCodec {
                 .iter()
                 .map(|block| serde_json::json!({"text": block.text}))
                 .collect();
-            body.insert("systemInstruction".to_string(), serde_json::json!({"parts": parts}));
+            body.insert(
+                "systemInstruction".to_string(),
+                serde_json::json!({"parts": parts}),
+            );
         }
 
         if !request.tools.is_empty() {
@@ -69,7 +72,14 @@ impl WireCodec for GeminiCodec {
         if !request.stop_sequences.is_empty() {
             generation_config.insert(
                 "stopSequences".to_string(),
-                Value::Array(request.stop_sequences.iter().cloned().map(Value::String).collect()),
+                Value::Array(
+                    request
+                        .stop_sequences
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
             );
         }
         if let Some(reasoning) = &request.reasoning {
@@ -86,7 +96,10 @@ impl WireCodec for GeminiCodec {
             );
         }
         if !generation_config.is_empty() {
-            body.insert("generationConfig".to_string(), Value::Object(generation_config));
+            body.insert(
+                "generationConfig".to_string(),
+                Value::Object(generation_config),
+            );
         }
 
         if let Some(tool_choice) = &request.tool_choice {
@@ -197,7 +210,11 @@ mod error_tests {
 
     #[test]
     fn ordinary_invalid_argument_stays_invalid_request() {
-        let e = err(400, "INVALID_ARGUMENT", "Invalid value for field 'temperature'.");
+        let e = err(
+            400,
+            "INVALID_ARGUMENT",
+            "Invalid value for field 'temperature'.",
+        );
         assert!(
             matches!(e, LlmError::InvalidRequest { .. }),
             "expected InvalidRequest, got {e:?}"
@@ -232,9 +249,10 @@ impl StreamDecoder for GeminiStreamDecoder {
             message: "Gemini stream frame is not valid UTF-8".to_string(),
         })?;
 
-        let root: Value = serde_json::from_str(text.trim()).map_err(|_| LlmError::InvalidRequest {
-            message: "Gemini stream frame is not valid JSON".to_string(),
-        })?;
+        let root: Value =
+            serde_json::from_str(text.trim()).map_err(|_| LlmError::InvalidRequest {
+                message: "Gemini stream frame is not valid JSON".to_string(),
+            })?;
 
         let mut out = Vec::new();
         // Usage can arrive on a frame without candidates (e.g. the final
@@ -269,7 +287,13 @@ impl StreamDecoder for GeminiStreamDecoder {
         {
             for part in parts {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
-                    self.handle_text(text, part.get("thought").and_then(Value::as_bool).unwrap_or(false), &mut out);
+                    self.handle_text(
+                        text,
+                        part.get("thought")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        &mut out,
+                    );
                     continue;
                 }
 
@@ -303,7 +327,10 @@ impl StreamDecoder for GeminiStreamDecoder {
         };
 
         out.push(LlmEvent::MessageDelta {
-            delta: MessageDeltaPayload { stop_reason, stop_details: None },
+            delta: MessageDeltaPayload {
+                stop_reason,
+                stop_details: None,
+            },
             usage: self.usage.clone(),
         });
         out.push(LlmEvent::MessageStop);
@@ -326,7 +353,10 @@ fn decode_stream_start(root: &Value) -> LlmResponse {
         content: Vec::new(),
         stop_reason: None,
         stop_details: None,
-        usage: root.get("usageMetadata").map(decode_usage).unwrap_or_default(),
+        usage: root
+            .get("usageMetadata")
+            .map(decode_usage)
+            .unwrap_or_default(),
         cost: None,
         provider_metadata: Value::Null,
     }
@@ -407,7 +437,10 @@ impl GeminiStreamDecoder {
             self.next_index += 1;
             out.push(LlmEvent::ContentBlockStart {
                 index,
-                content_block: ContentBlock::Text { text: String::new(), cache_control: None },
+                content_block: ContentBlock::Text {
+                    text: String::new(),
+                    cache_control: None,
+                },
             });
             index
         });
@@ -420,7 +453,11 @@ impl GeminiStreamDecoder {
         });
     }
 
-    fn handle_function_call(&mut self, function_call: &Value, out: &mut Vec<LlmEvent>) -> Result<(), LlmError> {
+    fn handle_function_call(
+        &mut self,
+        function_call: &Value,
+        out: &mut Vec<LlmEvent>,
+    ) -> Result<(), LlmError> {
         self.saw_function_call = true;
 
         let name = function_call
@@ -428,7 +465,10 @@ impl GeminiStreamDecoder {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let input = function_call.get("args").cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let input = function_call
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
         let index = self.next_index;
         self.next_index += 1;
@@ -445,8 +485,10 @@ impl GeminiStreamDecoder {
         out.push(LlmEvent::ContentBlockDelta {
             index,
             delta: ContentDelta::InputJsonDelta {
-                partial_json: serde_json::to_string(&input).map_err(|_| LlmError::InvalidRequest {
-                    message: "Gemini functionCall args are not serializable".to_string(),
+                partial_json: serde_json::to_string(&input).map_err(|_| {
+                    LlmError::InvalidRequest {
+                        message: "Gemini functionCall args are not serializable".to_string(),
+                    }
                 })?,
             },
         });
@@ -455,13 +497,17 @@ impl GeminiStreamDecoder {
     }
 }
 
-fn build_tool_call_name_map(messages: &[crate::Message]) -> std::collections::BTreeMap<String, String> {
+fn build_tool_call_name_map(
+    messages: &[crate::Message],
+) -> std::collections::BTreeMap<String, String> {
     let mut tool_call_names = std::collections::BTreeMap::new();
 
     for message in messages {
         for block in &message.content {
             if let ContentBlock::ToolCall { id, name, .. } = block {
-                tool_call_names.entry(id.clone()).or_insert_with(|| name.clone());
+                tool_call_names
+                    .entry(id.clone())
+                    .or_insert_with(|| name.clone());
             }
         }
     }
@@ -469,7 +515,10 @@ fn build_tool_call_name_map(messages: &[crate::Message]) -> std::collections::BT
     tool_call_names
 }
 
-fn encode_messages(messages: &[crate::Message], tool_call_names: &std::collections::BTreeMap<String, String>) -> Result<Vec<Value>, LlmError> {
+fn encode_messages(
+    messages: &[crate::Message],
+    tool_call_names: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<Value>, LlmError> {
     let mut out = Vec::new();
 
     for message in messages {
@@ -605,7 +654,8 @@ fn reject_unsupported_request_intent(request: &LlmRequest) -> Result<(), LlmErro
                 | ContentBlock::ConnectorText { .. }
                 | ContentBlock::AdvisorToolResult { .. } => {
                     return Err(LlmError::InvalidRequest {
-                        message: "GeminiCodec does not encode Anthropic server-generated blocks".to_string(),
+                        message: "GeminiCodec does not encode Anthropic server-generated blocks"
+                            .to_string(),
                     });
                 }
                 _ => {}
@@ -689,7 +739,10 @@ fn decode_response_body(body_json: Value) -> Result<LlmResponse, LlmError> {
 
     // Mirror the stream decoder: any function call normalizes the stop reason
     // to tool_use regardless of Gemini's finishReason.
-    let stop_reason = if content.iter().any(|block| matches!(block, ContentBlock::ToolCall { .. })) {
+    let stop_reason = if content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
+    {
         Some("tool_use".to_string())
     } else {
         candidate

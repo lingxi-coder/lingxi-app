@@ -35,7 +35,8 @@ impl OpenAiOAuthCredentialProvider {
 
 impl fmt::Debug for OpenAiOAuthCredentialProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OpenAiOAuthCredentialProvider").finish_non_exhaustive()
+        f.debug_struct("OpenAiOAuthCredentialProvider")
+            .finish_non_exhaustive()
     }
 }
 
@@ -68,7 +69,9 @@ impl CredentialProvider for OpenAiOAuthCredentialProvider {
             }
 
             // Expired → single-flight refresh.
-            let bearer = self.driver.refresh(token_hash)
+            let bearer = self
+                .driver
+                .refresh(token_hash)
                 .await
                 .map_err(|_| LlmError::Authentication)?;
 
@@ -120,7 +123,11 @@ mod credential_provider_tests {
         let scope = CredentialScope::new(crate::ProviderId::OpenAI, "default");
         let cred = provider.load(&scope).await.expect("load ok");
         match cred {
-            Credential::ChatGptOAuth { access_token, account_id, fedramp } => {
+            Credential::ChatGptOAuth {
+                access_token,
+                account_id,
+                fedramp,
+            } => {
                 assert_eq!(access_token, "valid-access");
                 assert_eq!(account_id.as_deref(), Some("acc_XYZ"));
                 assert!(fedramp);
@@ -131,11 +138,13 @@ mod credential_provider_tests {
 
     #[tokio::test]
     async fn refreshes_when_token_is_expired_and_returns_new_credential() {
-        let resp =
-            r#"{"access_token":"REFRESHED_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600}"#;
+        let resp = r#"{"access_token":"REFRESHED_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600}"#;
         let http = MockHttp::new(vec![(
             "oauth/token",
-            Canned { status: 200, body: resp.into() },
+            Canned {
+                status: 200,
+                body: resp.into(),
+            },
         )]);
         let clock = TestClock::new(5_000);
         let cfg = OpenAiOAuthConfig::default();

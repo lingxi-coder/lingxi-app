@@ -793,7 +793,10 @@ mod tests {
 
     #[test]
     fn parse_shorthand_end_plus_2_5m_end_anchored() {
-        assert_eq!(parse_token_budget("do the big refactor +2.5m"), Some(2_500_000));
+        assert_eq!(
+            parse_token_budget("do the big refactor +2.5m"),
+            Some(2_500_000)
+        );
         // trailing punctuation + whitespace allowed by SHORTHAND_END_RE.
         assert_eq!(parse_token_budget("go big +2.5m."), Some(2_500_000));
         assert_eq!(parse_token_budget("go big +2.5m !"), Some(2_500_000));
@@ -801,7 +804,10 @@ mod tests {
 
     #[test]
     fn parse_verbose_use_2m_tokens() {
-        assert_eq!(parse_token_budget("please use 2M tokens for this"), Some(2_000_000));
+        assert_eq!(
+            parse_token_budget("please use 2M tokens for this"),
+            Some(2_000_000)
+        );
         assert_eq!(parse_token_budget("spend 2m tokens"), Some(2_000_000));
         assert_eq!(parse_token_budget("use 1.5k token"), Some(1_500));
     }

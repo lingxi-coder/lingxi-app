@@ -88,10 +88,7 @@ mod session_end_timeout_tests {
         // Below the floor — still returned verbatim (env override is unclamped).
         assert_eq!(session_end_batch_timeout_ms(Some("100"), 30_000), 100);
         // Above the cap — still returned verbatim.
-        assert_eq!(
-            session_end_batch_timeout_ms(Some("999999"), 0),
-            999_999
-        );
+        assert_eq!(session_end_batch_timeout_ms(Some("999999"), 0), 999_999);
     }
 
     #[test]
@@ -560,7 +557,10 @@ mod command_arm_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         // Binary: `[${getHookDisplayText(hook)}]: ${stderr||"No stderr output"}`.
         // The test hook is `hook.sh --check` ⇒ display = command + args joined.
-        assert_eq!(agg.reason.as_deref(), Some("[hook.sh --check]: policy violation"));
+        assert_eq!(
+            agg.reason.as_deref(),
+            Some("[hook.sh --check]: policy violation")
+        );
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert_eq!(r.exit_code, Some(2));
@@ -575,7 +575,10 @@ mod command_arm_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert_eq!(agg.reason.as_deref(), Some("[hook.sh --check]: No stderr output"));
+        assert_eq!(
+            agg.reason.as_deref(),
+            Some("[hook.sh --check]: No stderr output")
+        );
     }
 
     #[tokio::test]
@@ -788,7 +791,9 @@ mod command_arm_tests {
     fn command_hook_with_cmd_args(command: &str, args: &[&str]) -> HookDefinition {
         let mut h = command_hook();
         if let DefHookExecutor::Command {
-            command: c, args: a, ..
+            command: c,
+            args: a,
+            ..
         } = &mut h.executor
         {
             *c = command.to_string();
@@ -811,7 +816,10 @@ mod command_arm_tests {
     fn substitute_project_dir_fast_path_no_template() {
         // `if(!fe.includes("${"))return fe` — a string with no `${` is returned
         // untouched.
-        assert_eq!(substitute_project_dir("./fmt.sh --check", "/root"), "./fmt.sh --check");
+        assert_eq!(
+            substitute_project_dir("./fmt.sh --check", "/root"),
+            "./fmt.sh --check"
+        );
     }
 
     #[test]
@@ -843,10 +851,17 @@ mod command_arm_tests {
 
         let cmd = runner.recorded_command.lock().unwrap().clone().unwrap();
         let args = runner.recorded_args.lock().unwrap().clone().unwrap();
-        assert_eq!(cmd, "/repo/root/.lingxi/fmt.sh", "command token substituted");
+        assert_eq!(
+            cmd, "/repo/root/.lingxi/fmt.sh",
+            "command token substituted"
+        );
         assert_eq!(
             args,
-            vec!["--root".to_string(), "/repo/root".to_string(), "--plain".to_string()],
+            vec![
+                "--root".to_string(),
+                "/repo/root".to_string(),
+                "--plain".to_string()
+            ],
             "each arg token substituted; non-token args untouched",
         );
     }
@@ -1656,11 +1671,8 @@ mod command_arm_tests {
 
         // Stop: both arrays present, spread LAST (after last_assistant_message is
         // null / omitted) and elements in Lic/Mic key order.
-        let (_, stop_body) = build_envelope_body(
-            &HookEvent::Stop { reason: "r".into() },
-            &ctx,
-        )
-        .expect("stop serializes");
+        let (_, stop_body) = build_envelope_body(&HookEvent::Stop { reason: "r".into() }, &ctx)
+            .expect("stop serializes");
         assert!(
             stop_body.contains(
                 r#""background_tasks":[{"id":"b1","type":"shell","status":"running","description":"build","command":"cargo build"}]"#
@@ -1684,18 +1696,28 @@ mod command_arm_tests {
             &ctx,
         )
         .expect("subagentstop serializes");
-        assert!(sa_body.contains(r#""background_tasks":[{"id":"b1""#), "SubagentStop bg: {sa_body}");
-        assert!(sa_body.contains(r#""session_crons":[{"id":"c1""#), "SubagentStop crons: {sa_body}");
+        assert!(
+            sa_body.contains(r#""background_tasks":[{"id":"b1""#),
+            "SubagentStop bg: {sa_body}"
+        );
+        assert!(
+            sa_body.contains(r#""session_crons":[{"id":"c1""#),
+            "SubagentStop crons: {sa_body}"
+        );
 
         // A non-Stop lifecycle event NEVER carries the keys even with a populated
         // context (the fields live only on the Stop / SubagentStop payloads).
-        let (_, ups_body) = build_envelope_body(
-            &HookEvent::UserPromptSubmit { prompt: "p".into() },
-            &ctx,
-        )
-        .expect("ups serializes");
-        assert!(!ups_body.contains("background_tasks"), "UserPromptSubmit must omit bg: {ups_body}");
-        assert!(!ups_body.contains("session_crons"), "UserPromptSubmit must omit crons: {ups_body}");
+        let (_, ups_body) =
+            build_envelope_body(&HookEvent::UserPromptSubmit { prompt: "p".into() }, &ctx)
+                .expect("ups serializes");
+        assert!(
+            !ups_body.contains("background_tasks"),
+            "UserPromptSubmit must omit bg: {ups_body}"
+        );
+        assert!(
+            !ups_body.contains("session_crons"),
+            "UserPromptSubmit must omit crons: {ups_body}"
+        );
 
         // Some(vec![]) emits `[]` (the tool-use-context-present-but-empty case).
         let empty_ctx = HookContext {
@@ -1703,13 +1725,17 @@ mod command_arm_tests {
             session_crons: Some(vec![]),
             ..HookContext::default()
         };
-        let (_, empty_body) = build_envelope_body(
-            &HookEvent::Stop { reason: "r".into() },
-            &empty_ctx,
-        )
-        .expect("empty stop serializes");
-        assert!(empty_body.contains(r#""background_tasks":[]"#), "empty bg → []: {empty_body}");
-        assert!(empty_body.contains(r#""session_crons":[]"#), "empty crons → []: {empty_body}");
+        let (_, empty_body) =
+            build_envelope_body(&HookEvent::Stop { reason: "r".into() }, &empty_ctx)
+                .expect("empty stop serializes");
+        assert!(
+            empty_body.contains(r#""background_tasks":[]"#),
+            "empty bg → []: {empty_body}"
+        );
+        assert!(
+            empty_body.contains(r#""session_crons":[]"#),
+            "empty crons → []: {empty_body}"
+        );
     }
 
     #[test]
@@ -2310,7 +2336,10 @@ mod async_path_tests {
             0,
             "disableAllHooks must skip dispatch entirely",
         );
-        assert_eq!(agg.decision, None, "skipped batch yields the default aggregate");
+        assert_eq!(
+            agg.decision, None,
+            "skipped batch yields the default aggregate"
+        );
         assert!(agg.all_results.is_empty());
     }
 
@@ -2330,7 +2359,11 @@ mod async_path_tests {
 
         let agg = exec.execute(pre_event(), HookContext::default()).await;
 
-        assert_eq!(runner.runs.load(Ordering::SeqCst), 1, "gate off ⇒ hook fires");
+        assert_eq!(
+            runner.runs.load(Ordering::SeqCst),
+            1,
+            "gate off ⇒ hook fires"
+        );
         assert_eq!(agg.decision, Some(HookDecision::Block));
     }
 }

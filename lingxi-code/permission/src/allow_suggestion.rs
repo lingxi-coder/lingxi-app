@@ -40,14 +40,7 @@ use crate::shell_command::{
 use serde_json::Value;
 
 /// File-path tools whose `AllowAlways` narrows to the touched path.
-const FILE_PATH_TOOLS: &[&str] = &[
-    "Edit",
-    "Write",
-    "MultiEdit",
-    "NotebookEdit",
-    "Read",
-    "Glob",
-];
+const FILE_PATH_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob"];
 
 /// Build the [`PermissionRule`] to persist for an `AllowAlways` choice on a call
 /// to `tool_name` with `input`. Returns a Session-sourced `Allow` rule whose
@@ -110,7 +103,9 @@ pub fn call_matches_rule(rule: &PermissionRule, tool_name: &str, input: &Value) 
 /// the call tool-wide.
 fn narrowed_content(tool_name: &str, input: &Value) -> Option<String> {
     if is_shell_tool(tool_name) {
-        return command_from_input(input).and_then(bash_command_root).map(|root| format!("{root}:*"));
+        return command_from_input(input)
+            .and_then(bash_command_root)
+            .map(|root| format!("{root}:*"));
     }
     if FILE_PATH_TOOLS.contains(&tool_name) {
         return file_path_content(input);
@@ -214,7 +209,10 @@ mod tests {
         // claude-code, so it is kept verbatim — only timeout/time/nice/stdbuf/
         // nohup unwrap).
         assert_eq!(
-            content("Bash", json!({ "command": "FOO=1 systemctl restart nginx" })),
+            content(
+                "Bash",
+                json!({ "command": "FOO=1 systemctl restart nginx" })
+            ),
             Some("systemctl restart nginx:*".into())
         );
         // First sub-command only (before the pipe).
@@ -241,8 +239,16 @@ mod tests {
         // And the persisted narrowed `Shell` rule matches only the covered
         // command, not an unrelated one.
         let rule = allow_suggestion("Shell", &json!({ "command": "git status" }));
-        assert!(call_matches_rule(&rule, "Shell", &json!({ "command": "git status -s" })));
-        assert!(!call_matches_rule(&rule, "Shell", &json!({ "command": "rm -rf /tmp/x" })));
+        assert!(call_matches_rule(
+            &rule,
+            "Shell",
+            &json!({ "command": "git status -s" })
+        ));
+        assert!(!call_matches_rule(
+            &rule,
+            "Shell",
+            &json!({ "command": "rm -rf /tmp/x" })
+        ));
     }
 
     #[test]
@@ -269,7 +275,10 @@ mod tests {
     #[test]
     fn webfetch_narrows_to_host() {
         assert_eq!(
-            content("WebFetch", json!({ "url": "https://user@Example.COM:8443/a/b?q=1" })),
+            content(
+                "WebFetch",
+                json!({ "url": "https://user@Example.COM:8443/a/b?q=1" })
+            ),
             Some("domain:example.com".into())
         );
         assert_eq!(

@@ -16,7 +16,8 @@ use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
 use orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use protocol::{HookId, HttpRequest, HttpResponse};
@@ -156,10 +157,7 @@ async fn exec_with(
     Arc::new(exec)
 }
 
-fn orch(
-    api: Arc<MockApiClient>,
-    hooks: Arc<HookExecutorImpl>,
-) -> Arc<ConversationOrchestrator> {
+fn orch(api: Arc<MockApiClient>, hooks: Arc<HookExecutorImpl>) -> Arc<ConversationOrchestrator> {
     Arc::new(ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api,
@@ -174,7 +172,10 @@ fn orch(
 
 fn end_turn(text: &str) -> llm_client::LlmResponse {
     mock_message_response(
-        vec![LlmContentBlock::Text { text: text.into(), cache_control: None }],
+        vec![LlmContentBlock::Text {
+            text: text.into(),
+            cache_control: None,
+        }],
         Some("end_turn"),
     )
 }

@@ -31,7 +31,9 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::config::{current_network_config, shared_network_config, NetworkConfig, SharedNetworkConfig};
+use crate::config::{
+    current_network_config, shared_network_config, NetworkConfig, SharedNetworkConfig,
+};
 use crate::dial::{dial_direct, parse_connect_target, CONNECT_TIMEOUT};
 use crate::matcher::{filter_network_request_with_ask, AskFn};
 use crate::mitm_ca::MitmCa;
@@ -70,8 +72,7 @@ pub struct ProxyOptions {
     /// Extra CA certificate(s) (DER) to trust for the terminator's upstream TLS
     /// leg (the TS `target.upstreamCA`), in addition to the system roots. Only
     /// consulted when [`Self::mitm_ca`] is set.
-    pub tls_terminate_upstream_ca:
-        Option<Arc<Vec<rustls::pki_types::CertificateDer<'static>>>>,
+    pub tls_terminate_upstream_ca: Option<Arc<Vec<rustls::pki_types::CertificateDer<'static>>>>,
     /// Optional interactive ask-callback (the TS `sandboxAskCallback`). Consulted
     /// by [`filter_network_request_with_ask`] ONLY for hosts that no
     /// allow/deny rule decides. `None` ⇒ unmatched hosts are denied (the P3b
@@ -315,19 +316,21 @@ where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     if let Some(url) = parent_url {
-        let mut upstream =
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect_via_parent_proxy(&url, &hostname, port))
-                .await
-            {
-                Ok(Ok(u)) => u,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "parent-proxy CONNECT dial timed out",
-                    ))
-                }
-            };
+        let mut upstream = match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            connect_via_parent_proxy(&url, &hostname, port),
+        )
+        .await
+        {
+            Ok(Ok(u)) => u,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "parent-proxy CONNECT dial timed out",
+                ))
+            }
+        };
         if !head.is_empty() {
             tokio::io::AsyncWriteExt::write_all(&mut upstream, &head).await?;
         }
@@ -349,10 +352,7 @@ where
 /// components; strip hop-by-hop + set Host; run the request-filter; route to
 /// parent-proxy or direct; relay the response (hop-by-hop stripped). Upstream
 /// error → 502.
-async fn handle_plain(
-    req: Request<Incoming>,
-    options: &Arc<ProxyOptions>,
-) -> Response<ProxyBody> {
+async fn handle_plain(req: Request<Incoming>, options: &Arc<ProxyOptions>) -> Response<ProxyBody> {
     let uri = req.uri().clone();
     let scheme = uri.scheme_str().unwrap_or("http").to_string();
     let is_https = scheme == "https";
@@ -474,7 +474,11 @@ async fn forward_via_parent(
     let parent_host = crate::host::strip_brackets(parent_url.host_str().unwrap_or(""));
     let parent_port = parent_url
         .port()
-        .unwrap_or(if parent_url.scheme() == "https" { 443 } else { 80 });
+        .unwrap_or(if parent_url.scheme() == "https" {
+            443
+        } else {
+            80
+        });
     if let Some(auth) = proxy_auth_header(parent_url) {
         fwd_headers.push(("proxy-authorization".to_string(), auth));
     }
@@ -511,7 +515,9 @@ async fn send_upstream(
         }
     });
 
-    let mut builder = Request::builder().method(method.clone()).uri(request_target);
+    let mut builder = Request::builder()
+        .method(method.clone())
+        .uri(request_target);
     for (k, v) in fwd_headers {
         builder = builder.header(k, v);
     }
@@ -538,8 +544,7 @@ async fn send_upstream(
     for (k, v) in stripped {
         out = out.header(k, v);
     }
-    out.body(body.boxed())
-        .unwrap_or_else(|_| bad_gateway())
+    out.body(body.boxed()).unwrap_or_else(|_| bad_gateway())
 }
 
 /// `502 Bad Gateway` with the byte-exact body the TS reference sends
@@ -560,7 +565,9 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     fn opts(cfg: NetworkConfig) -> Arc<ProxyOptions> {
-        Arc::new(ProxyOptions::with_static_config(cfg, None, None, None, None, None))
+        Arc::new(ProxyOptions::with_static_config(
+            cfg, None, None, None, None, None,
+        ))
     }
 
     async fn start_proxy(options: Arc<ProxyOptions>) -> u16 {
@@ -723,7 +730,11 @@ mod tests {
 
     /// Send an absolute-form plain-HTTP request through the proxy, return the
     /// raw response bytes.
-    async fn http_request_via_proxy(proxy_port: u16, abs_url: &str, host_authority: &str) -> Vec<u8> {
+    async fn http_request_via_proxy(
+        proxy_port: u16,
+        abs_url: &str,
+        host_authority: &str,
+    ) -> Vec<u8> {
         let mut s = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
         s.write_all(
             format!(
@@ -759,7 +770,10 @@ mod tests {
         let resp = http_request_via_proxy(pport, &abs, &authority).await;
         let text = String::from_utf8_lossy(&resp);
         assert!(text.contains("200"), "expected 200, got {text:?}");
-        assert!(text.ends_with("ok") || text.contains("\r\nok"), "expected body ok, got {text:?}");
+        assert!(
+            text.ends_with("ok") || text.contains("\r\nok"),
+            "expected body ok, got {text:?}"
+        );
     }
 
     #[tokio::test]
@@ -772,7 +786,9 @@ mod tests {
         assert!(text.contains("403"), "expected 403, got {text:?}");
         assert!(
             text.contains("X-Proxy-Error: blocked-by-allowlist")
-                || text.to_ascii_lowercase().contains("x-proxy-error: blocked-by-allowlist"),
+                || text
+                    .to_ascii_lowercase()
+                    .contains("x-proxy-error: blocked-by-allowlist"),
             "missing X-Proxy-Error header: {text:?}"
         );
         assert!(
@@ -814,7 +830,10 @@ mod tests {
             "Connection-listed X-Drop leaked: {names:?}"
         );
         // X-Keep survives; Host is set to the parsed authority.
-        assert!(names.contains(&"x-keep".to_string()), "X-Keep lost: {names:?}");
+        assert!(
+            names.contains(&"x-keep".to_string()),
+            "X-Keep lost: {names:?}"
+        );
         let host = seen.iter().find(|(k, _)| k.eq_ignore_ascii_case("host"));
         assert_eq!(host.map(|(_, v)| v.as_str()), Some(authority.as_str()));
     }
@@ -897,11 +916,9 @@ mod tests {
     ) -> (u16, String) {
         let mut s = TcpStream::connect(("127.0.0.1", proxy_port)).await.unwrap();
         let target = format!("127.0.0.1:{origin_port}");
-        s.write_all(
-            format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
-        )
-        .await
-        .unwrap();
+        s.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
         // Read the 200 status line (up to the blank line).
         let mut buf = [0u8; 256];
         let n = s.read(&mut buf).await.unwrap();
@@ -1020,7 +1037,10 @@ mod tests {
 
         // Deny-all → 403.
         let (line, _) = connect_via_proxy(pport, &format!("{uhost}:{uport}")).await;
-        assert!(line.contains("403"), "expected 403 before update, got {line}");
+        assert!(
+            line.contains("403"),
+            "expected 403 before update, got {line}"
+        );
 
         // LIVE swap: allow the upstream host. The running proxy reads this on the
         // next request with no rebind.
@@ -1032,7 +1052,10 @@ mod tests {
 
         // A NEW request is now allowed and tunnels end-to-end.
         let (line, mut tun) = connect_via_proxy(pport, &format!("{uhost}:{uport}")).await;
-        assert!(line.contains("200"), "expected 200 after update, got {line}");
+        assert!(
+            line.contains("200"),
+            "expected 200 after update, got {line}"
+        );
         tun.write_all(b"live").await.unwrap();
         let mut buf = [0u8; 4];
         tun.read_exact(&mut buf).await.unwrap();

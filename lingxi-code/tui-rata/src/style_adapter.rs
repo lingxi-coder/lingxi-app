@@ -53,7 +53,10 @@ mod tests {
 
     #[test]
     fn rgb_and_indexed_pass_through() {
-        assert_eq!(to_ratatui(StyleColor::Rgb(10, 20, 30)), Color::Rgb(10, 20, 30));
+        assert_eq!(
+            to_ratatui(StyleColor::Rgb(10, 20, 30)),
+            Color::Rgb(10, 20, 30)
+        );
         assert_eq!(to_ratatui(StyleColor::Indexed(196)), Color::Indexed(196));
     }
 
@@ -63,9 +66,6 @@ mod tests {
             to_ratatui(StyleColor::Named(NamedColor::BrightRed)),
             Color::LightRed
         );
-        assert_eq!(
-            to_ratatui(StyleColor::Named(NamedColor::Red)),
-            Color::Red
-        );
+        assert_eq!(to_ratatui(StyleColor::Named(NamedColor::Red)), Color::Red);
     }
 }

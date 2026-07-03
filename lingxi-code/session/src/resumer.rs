@@ -5,9 +5,9 @@
 //! of plugins, MCP servers, permission state, cost ledger, and output style
 //! is handled by the host wrapper in Plans 15 and 16.
 
+use crate::filestate::{self, FileStateCache};
 use crate::rollout::{InitialHistory, RolloutRecorder};
 use crate::storage::{LoadedSession, SessionStorage};
-use crate::filestate::{self, FileStateCache};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;

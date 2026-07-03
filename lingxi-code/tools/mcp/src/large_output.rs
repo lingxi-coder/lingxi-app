@@ -96,7 +96,11 @@ pub fn process_mcp_result(
 
     // Feature gate: an explicitly-falsy ENABLE_MCP_LARGE_OUTPUT_FILES reverts to
     // the old truncation behavior (client.ts:2741-2748). Unset → persist.
-    if is_env_defined_falsy(std::env::var("ENABLE_MCP_LARGE_OUTPUT_FILES").ok().as_deref()) {
+    if is_env_defined_falsy(
+        std::env::var("ENABLE_MCP_LARGE_OUTPUT_FILES")
+            .ok()
+            .as_deref(),
+    ) {
         return truncate_mcp_content(content);
     }
 
@@ -203,9 +207,9 @@ fn content_size_estimate(content: &Value) -> u64 {
         Value::Array(blocks) => blocks
             .iter()
             .map(|block| match block.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    rough_token_count_estimation(block.get("text").and_then(Value::as_str).unwrap_or(""))
-                }
+                Some("text") => rough_token_count_estimation(
+                    block.get("text").and_then(Value::as_str).unwrap_or(""),
+                ),
                 Some("image") => IMAGE_TOKEN_ESTIMATE,
                 _ => 0,
             })
@@ -219,7 +223,10 @@ fn content_size_estimate(content: &Value) -> u64 {
 /// (TS uses the UTF-16 string length); identical for ASCII, the same convention
 /// the microcompact port uses.
 fn rough_token_count_estimation(content: &str) -> u64 {
-    u64::try_from(content.len()).unwrap_or(u64::MAX).saturating_add(2) / 4
+    u64::try_from(content.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(2)
+        / 4
 }
 
 /// `block.type === 'image'`.
@@ -236,7 +243,10 @@ fn format_description(content: &Value, is_plain_text: bool) -> String {
     if is_plain_text {
         "Plain text".to_string()
     } else {
-        format!("JSON array with schema: {}", infer_compact_schema(content, 2))
+        format!(
+            "JSON array with schema: {}",
+            infer_compact_schema(content, 2)
+        )
     }
 }
 
@@ -310,8 +320,15 @@ fn compute_line_stats(content: &str) -> LineStats {
     if lines.len() > 1 && lines.last() == Some(&"") {
         lines.pop();
     }
-    let max_len = lines.iter().map(|l| l.chars().count() as u64).max().unwrap_or(0);
-    LineStats { count: lines.len() as u64, max_len }
+    let max_len = lines
+        .iter()
+        .map(|l| l.chars().count() as u64)
+        .max()
+        .unwrap_or(0);
+    LineStats {
+        count: lines.len() as u64,
+        max_len,
+    }
 }
 
 /// `R$d` (`mcpOutputStorage`): the default file-read max-output token budget.
@@ -542,8 +559,14 @@ mod tests {
         let over = Value::Array(vec![text_of_len(50_004)]);
         assert_eq!(content_size_estimate(&at), 12_500);
         assert_eq!(content_size_estimate(&over), 12_501);
-        assert!(!mcp_content_needs_truncation(&at), "12500 tokens is at the boundary, not over");
-        assert!(mcp_content_needs_truncation(&over), "12501 tokens exceeds the threshold");
+        assert!(
+            !mcp_content_needs_truncation(&at),
+            "12500 tokens is at the boundary, not over"
+        );
+        assert!(
+            mcp_content_needs_truncation(&over),
+            "12501 tokens exceeds the threshold"
+        );
     }
 
     #[test]
@@ -564,7 +587,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let content = json!([{ "type": "text", "text": "small result" }]);
         let out = process_mcp_result(&content, "srv", "tool", dir.path(), 1700);
-        assert_eq!(out, content, "under-threshold content is forwarded verbatim");
+        assert_eq!(
+            out, content,
+            "under-threshold content is forwarded verbatim"
+        );
         // Nothing persisted.
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     }
@@ -597,10 +623,15 @@ mod tests {
         assert!(text.contains(
             "- If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n"
         ));
-        assert!(text.contains("***If you did not read the entire content, you MUST explicitly state this.***\n"));
+        assert!(text.contains(
+            "***If you did not read the entire content, you MUST explicitly state this.***\n"
+        ));
         // Array shape → no line stats → no "lines too long" note, bare count.
         assert!(text.starts_with("Error: result ("));
-        assert!(!text.contains("characters across"), "array shape has no line count");
+        assert!(
+            !text.contains("characters across"),
+            "array shape has no line count"
+        );
         assert!(!text.contains("- Note: this file's lines are too long"));
         // v2.1.185 final bullet.
         assert!(text.ends_with("- If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n"));
@@ -621,11 +652,17 @@ mod tests {
         let txt_path = dir.path().join("mcp-srv-tool-1700.txt");
         assert!(txt_path.exists(), "unwrapped singleton persisted as .txt");
         assert!(!dir.path().join("mcp-srv-tool-1700.json").exists());
-        assert_eq!(std::fs::read_to_string(&txt_path).unwrap(), "a".repeat(60_000));
+        assert_eq!(
+            std::fs::read_to_string(&txt_path).unwrap(),
+            "a".repeat(60_000)
+        );
         // Plain-text Format + line-count phrase (NOT the JSON-array schema).
         assert!(text.contains("Format: Plain text\n"), "got: {text}");
         assert!(!text.contains("JSON array with schema"));
-        assert!(text.contains("characters across"), "plain text carries line stats");
+        assert!(
+            text.contains("characters across"),
+            "plain text carries line stats"
+        );
     }
 
     #[test]
@@ -636,7 +673,10 @@ mod tests {
         let content = json!([{ "type": "text", "text": "a".repeat(60_000), "annotations": {} }]);
         let out = process_mcp_result(&content, "srv", "tool", dir.path(), 1700);
         let text = out.as_str().expect("persist path returns a string");
-        assert!(dir.path().join("mcp-srv-tool-1700.json").exists(), "stays JSON");
+        assert!(
+            dir.path().join("mcp-srv-tool-1700.json").exists(),
+            "stays JSON"
+        );
         assert!(text.contains("JSON array with schema"), "got: {text}");
     }
 
@@ -659,7 +699,10 @@ mod tests {
             truncation_message()
         );
         // Image preserved (fits the 100k char budget after the text).
-        assert!(blocks.iter().any(is_image_block), "image kept through truncation");
+        assert!(
+            blocks.iter().any(is_image_block),
+            "image kept through truncation"
+        );
         // Nothing was persisted to disk.
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     }
@@ -698,7 +741,10 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
     fn large_output_instructions_byte_layout_multiline_no_note() {
         // Plain-text, multiple lines all within budget (maxLen <= 80000): the
         // "across N lines" count form, but NO "lines too long" note.
-        let ls = LineStats { count: 5, max_len: 40 };
+        let ls = LineStats {
+            count: 5,
+            max_len: 40,
+        };
         let s = get_large_output_instructions(
             "/tmp/out/mcp-srv-tool-1.txt",
             1_234_567,
@@ -720,7 +766,10 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
     fn large_output_instructions_byte_layout_single_line_gets_note() {
         // Plain-text, a single line (count == 1 → c false → lines_too_long): the
         // "across 1 line" singular form AND the shell-slice note.
-        let ls = LineStats { count: 1, max_len: 1_234_567 };
+        let ls = LineStats {
+            count: 1,
+            max_len: 1_234_567,
+        };
         let s = get_large_output_instructions(
             "/tmp/out/mcp-srv-tool-1.txt",
             1_234_567,
@@ -781,7 +830,10 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
         let out = process_mcp_result(&content, "srv", "tool", dir.path(), 1700);
         let text = out.as_str().unwrap();
         let expected_path = dir.path().join("mcp-srv-tool-1700.txt");
-        assert!(expected_path.exists(), "string content persisted with .txt ext");
+        assert!(
+            expected_path.exists(),
+            "string content persisted with .txt ext"
+        );
         assert!(text.contains("Format: Plain text\n"));
     }
 

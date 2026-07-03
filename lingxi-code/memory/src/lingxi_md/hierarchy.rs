@@ -616,7 +616,10 @@ mod tests {
                 .tier
         };
         assert_eq!(tier_of("managed/LINGXI.md"), LingxiMdTier::Managed);
-        assert_eq!(tier_of("managed/.lingxi/rules/mr.md"), LingxiMdTier::Managed);
+        assert_eq!(
+            tier_of("managed/.lingxi/rules/mr.md"),
+            LingxiMdTier::Managed
+        );
         assert_eq!(tier_of("home/.lingxi/LINGXI.md"), LingxiMdTier::User);
         assert_eq!(tier_of("home/.lingxi/rules/ur.md"), LingxiMdTier::User);
         assert_eq!(tier_of("repo/LINGXI.md"), LingxiMdTier::Project);

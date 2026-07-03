@@ -109,69 +109,19 @@ impl ReadOnlyResult {
 /// handled by [`is_external_readonly_prefix`].
 const READONLY_COMMANDS: &[&str] = &[
     // Time and date
-    "cal",
-    "uptime",
-    "date",
-    // File content viewing
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "stat",
-    "strings",
-    "hexdump",
-    "od",
-    "nl",
-    // System info
-    "id",
-    "uname",
-    "free",
-    "df",
-    "du",
-    "locale",
-    "groups",
-    "nproc",
+    "cal", "uptime", "date", // File content viewing
+    "cat", "head", "tail", "wc", "stat", "strings", "hexdump", "od", "nl", // System info
+    "id", "uname", "free", "df", "du", "locale", "groups", "nproc",
     // Path information
-    "basename",
-    "dirname",
-    "realpath",
-    "readlink",
-    // Text processing
-    "cut",
-    "paste",
-    "tr",
-    "column",
-    "tac",
-    "rev",
-    "fold",
-    "expand",
-    "unexpand",
-    "fmt",
-    "comm",
-    "cmp",
-    "numfmt",
-    // File comparison
-    "diff",
-    // true / false
-    "true",
-    "false",
-    // Misc. safe commands
-    "sleep",
-    "which",
-    "type",
-    "expr",
-    "test",
-    "getconf",
-    "seq",
-    "tsort",
-    "pr",
+    "basename", "dirname", "realpath", "readlink", // Text processing
+    "cut", "paste", "tr", "column", "tac", "rev", "fold", "expand", "unexpand", "fmt", "comm",
+    "cmp", "numfmt", // File comparison
+    "diff",   // true / false
+    "true", "false", // Misc. safe commands
+    "sleep", "which", "type", "expr", "test", "getconf", "seq", "tsort", "pr",
     // Read-only search (no dangerous flags in the simple invocation; the
     // dangerous-flag guards below reject the unsafe ones).
-    "grep",
-    "egrep",
-    "fgrep",
-    "rg",
-    "sort",
+    "grep", "egrep", "fgrep", "rg", "sort",
 ];
 
 /// Exact-match read-only commands taking no (or only enumerated) arguments.
@@ -295,9 +245,7 @@ pub fn check_read_only(command: &str, compound_has_cd: bool) -> ReadOnlyResult {
     if all_read_only {
         ReadOnlyResult::allow()
     } else {
-        ReadOnlyResult::passthrough(
-            "Command is not read-only, requires further permission checks",
-        )
+        ReadOnlyResult::passthrough("Command is not read-only, requires further permission checks")
     }
 }
 
@@ -317,7 +265,10 @@ pub fn command_has_any_cd(command: &str) -> bool {
 /// or `popd`.
 fn is_normalized_cd_command(subcommand: &str) -> bool {
     let stripped = strip_leading_env_vars(subcommand.trim());
-    matches!(base_command(stripped).as_deref(), Some("cd" | "pushd" | "popd"))
+    matches!(
+        base_command(stripped).as_deref(),
+        Some("cd" | "pushd" | "popd")
+    )
 }
 
 /// Port of `isCommandReadOnly` (`readOnlyValidation.ts:1678`): is a SINGLE
@@ -453,8 +404,7 @@ fn matches_multiword_prefix(command: &str, prefixes: &[&str]) -> bool {
     let tokens: Vec<&str> = command.split_whitespace().collect();
     for &prefix in prefixes {
         let prefix_tokens: Vec<&str> = prefix.split(' ').collect();
-        if tokens.len() >= prefix_tokens.len()
-            && tokens[..prefix_tokens.len()] == prefix_tokens[..]
+        if tokens.len() >= prefix_tokens.len() && tokens[..prefix_tokens.len()] == prefix_tokens[..]
         {
             return true;
         }

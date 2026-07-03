@@ -213,8 +213,7 @@ fn format_reset_time_at(
     // TS: `hoursUntilReset = (date - now) / 3_600_000ms`, branch on `> 24`.
     // Equivalent integer test `(date_ms - now_ms) > 24h_in_ms` — exact, no float
     // cast, same `>` boundary (a reset exactly 24h out stays time-only).
-    let is_far_future =
-        date.timestamp_millis() - now.timestamp_millis() > TWENTY_FOUR_HOURS_MS;
+    let is_far_future = date.timestamp_millis() - now.timestamp_millis() > TWENTY_FOUR_HOURS_MS;
 
     let tz_suffix = |s: String| -> String {
         if show_timezone {
@@ -353,7 +352,10 @@ fn formatted_reset_times_at(
 /// cannot succeed until the window resets.
 #[must_use]
 pub fn overage_disabled_reason(headers: &[(String, String)]) -> Option<&str> {
-    header_value(headers, "anthropic-ratelimit-unified-overage-disabled-reason")
+    header_value(
+        headers,
+        "anthropic-ratelimit-unified-overage-disabled-reason",
+    )
 }
 
 /// Parsed unified rate-limit state used to render the user-facing 429 message.
@@ -728,18 +730,19 @@ impl RateLimitInfo {
     /// downgraded to `allowed`; `rejected` passes through untouched.
     #[must_use]
     pub fn from_headers_at(headers: &[(String, String)], now: SystemTime) -> Self {
-        let rate_limit_type = header_value(
-            headers,
-            "anthropic-ratelimit-unified-representative-claim",
-        )
-        .map(str::to_string);
+        let rate_limit_type =
+            header_value(headers, "anthropic-ratelimit-unified-representative-claim")
+                .map(str::to_string);
 
         // Per-claim window reads keyed by the representative claim's abbrev
         // (`anthropic-ratelimit-unified-{abbrev}-utilization` / `-reset`,
         // claudeAiLimits.ts:164-179). No abbrev → no per-claim read.
         let abbrev = rate_limit_type.as_deref().and_then(claim_abbrev);
         let utilization = abbrev.and_then(|a| {
-            parse_fraction(headers, &format!("anthropic-ratelimit-unified-{a}-utilization"))
+            parse_fraction(
+                headers,
+                &format!("anthropic-ratelimit-unified-{a}-utilization"),
+            )
         });
         let claim_resets_at = abbrev.and_then(|a| {
             parse_epoch_secs(headers, &format!("anthropic-ratelimit-unified-{a}-reset"))
@@ -836,12 +839,10 @@ impl RateLimitInfo {
     pub fn from_429_error_headers(headers: &[(String, String)]) -> Option<Self> {
         // `headers?.get?.(…)` + TS truthiness: empty string is falsy, so it
         // neither passes the gate nor is assigned onto the limits object.
-        let rate_limit_type = header_value(
-            headers,
-            "anthropic-ratelimit-unified-representative-claim",
-        )
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        let rate_limit_type =
+            header_value(headers, "anthropic-ratelimit-unified-representative-claim")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         let overage_status = header_value(headers, "anthropic-ratelimit-unified-overage-status")
             .filter(|s| !s.is_empty())
             .map(str::to_string);

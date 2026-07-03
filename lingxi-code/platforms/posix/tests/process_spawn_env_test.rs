@@ -48,10 +48,7 @@ async fn run_injects_spawn_env_contract_for_bash_provider() {
                 "echo CC=$LINGXI CS=$LINGXI_CHILD_SESSION GE=$GIT_EDITOR \
                  AA=$AI_AGENT SH=$SHELL SESS=$LINGXI_SESSION_ID",
             ],
-            HashMap::from([(
-                "LINGXI_SESSION_ID".to_string(),
-                "session-abc".to_string(),
-            )]),
+            HashMap::from([("LINGXI_SESSION_ID".to_string(), "session-abc".to_string())]),
         ))
         .await
         .expect("run");
@@ -140,7 +137,9 @@ async fn run_strips_wo_denylist_from_hook_command_env() {
     }
     // A non-denylisted custom var survives.
     assert!(
-        out.stdout.lines().any(|l| l == "LX_HOOK_SURVIVOR=i-survive"),
+        out.stdout
+            .lines()
+            .any(|l| l == "LX_HOOK_SURVIVOR=i-survive"),
         "non-denylisted hook env var was wrongly stripped: {out:?}"
     );
 

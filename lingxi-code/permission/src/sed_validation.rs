@@ -602,7 +602,8 @@ fn regex_step_address(cmd: &str) -> bool {
         while l > 0 && chars[l - 1].is_whitespace() {
             l -= 1;
         }
-        let left_ok = l > 0 && (chars[l - 1].is_ascii_digit() || chars[l - 1] == ',' || chars[l - 1] == '$');
+        let left_ok =
+            l > 0 && (chars[l - 1].is_ascii_digit() || chars[l - 1] == ',' || chars[l - 1] == '$');
         if !left_ok {
             continue;
         }
@@ -1294,7 +1295,10 @@ mod tests {
     fn in_place_inside_cwd_is_safe() {
         assert_eq!(verdict("sed -i 's/a/b/' ./local.txt"), SedVerdict::Safe);
         assert_eq!(verdict("sed -i 's/a/b/' sub/dir/x.txt"), SedVerdict::Safe);
-        assert_eq!(verdict("sed -i 's/a/b/' /proj/inside.txt"), SedVerdict::Safe);
+        assert_eq!(
+            verdict("sed -i 's/a/b/' /proj/inside.txt"),
+            SedVerdict::Safe
+        );
     }
 
     // ── in-place write outside cwd asks ────────────────────────────────────
@@ -1324,12 +1328,18 @@ mod tests {
     #[test]
     fn write_command_is_unsafe() {
         // `w file` write command — denylisted.
-        assert!(matches!(verdict("sed -n 'w /tmp/out' file"), SedVerdict::Unsafe { .. }));
+        assert!(matches!(
+            verdict("sed -n 'w /tmp/out' file"),
+            SedVerdict::Unsafe { .. }
+        ));
     }
 
     #[test]
     fn execute_command_is_unsafe() {
-        assert!(matches!(verdict("sed -n '1e cat /etc/passwd' f"), SedVerdict::Unsafe { .. }));
+        assert!(matches!(
+            verdict("sed -n '1e cat /etc/passwd' f"),
+            SedVerdict::Unsafe { .. }
+        ));
     }
 
     #[test]
@@ -1353,7 +1363,10 @@ mod tests {
 
     #[test]
     fn unknown_flag_is_unsafe() {
-        assert!(matches!(verdict("sed -X 's/a/b/'"), SedVerdict::Unsafe { .. }));
+        assert!(matches!(
+            verdict("sed -X 's/a/b/'"),
+            SedVerdict::Unsafe { .. }
+        ));
     }
 
     #[test]

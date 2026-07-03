@@ -82,7 +82,10 @@ impl TeamMemoryWatcher {
                     );
                 }
             }
-            Err(e) => tracing::warn!("team-memory secret scan skipped for {}: {e}", path.display()),
+            Err(e) => tracing::warn!(
+                "team-memory secret scan skipped for {}: {e}",
+                path.display()
+            ),
         }
     }
 }
@@ -90,7 +93,10 @@ impl TeamMemoryWatcher {
 fn markdown_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        tracing::warn!("team-memory watch read_dir failed for {}, degrading", dir.display());
+        tracing::warn!(
+            "team-memory watch read_dir failed for {}, degrading",
+            dir.display()
+        );
         return out;
     };
     for entry in entries.flatten() {

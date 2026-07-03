@@ -140,9 +140,7 @@ pub fn zero_preserved_usage(message: ConversationMessage) -> ConversationMessage
 /// Apply [`zero_preserved_usage`] across a preserved tail (TS
 /// `messagesToPreserve.map(k4e)` from `Iqn`).
 #[must_use]
-pub fn zero_preserved_tail_usage(
-    tail: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
+pub fn zero_preserved_tail_usage(tail: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
     tail.into_iter().map(zero_preserved_usage).collect()
 }
 
@@ -222,10 +220,10 @@ mod tests {
         let a_id = MessageId::new();
         let b_id = MessageId::new();
         let msgs = vec![
-            user("preamble"),                 // group boundary before assistantA
-            assistant_tool(a_id, "Read"),     // group 2 starts
-            user("tool result for A"),        // same group as A
-            assistant_tool(b_id, "Edit"),     // group 3 starts
+            user("preamble"),             // group boundary before assistantA
+            assistant_tool(a_id, "Read"), // group 2 starts
+            user("tool result for A"),    // same group as A
+            assistant_tool(b_id, "Edit"), // group 3 starts
         ];
         // Groups: [0..1]=preamble(no assistant), [1..3]=A round, [3..4]=B round.
         let split = select_preserved_tail(&msgs).expect("split exists");
@@ -269,7 +267,10 @@ mod tests {
         // reason preserved). This proves the preserved tail is carried verbatim.
         let a = assistant("preserved assistant reply");
         let out = zero_preserved_usage(a.clone());
-        assert_eq!(out, a, "assistant content/id/stop_reason preserved verbatim");
+        assert_eq!(
+            out, a,
+            "assistant content/id/stop_reason preserved verbatim"
+        );
     }
 
     #[test]

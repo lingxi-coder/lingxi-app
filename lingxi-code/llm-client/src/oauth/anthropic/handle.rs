@@ -82,9 +82,7 @@ impl OAuthHandle {
             .map_err(callback_to_auth_err)?;
         let redirect_uri = format!("http://127.0.0.1:{}/callback", listener.port());
 
-        let (url, verifier, state) = self
-            .client
-            .build_authorize_url_with_redirect(&redirect_uri);
+        let (url, verifier, state) = self.client.build_authorize_url_with_redirect(&redirect_uri);
 
         // Start waiting for the callback BEFORE opening the browser.
         let accept_state = state.clone();
@@ -267,7 +265,9 @@ fn real_browser_open(url: &str) -> Result<(), AuthError> {
 mod tests {
     use super::*;
     use crate::oauth::anthropic::config::ClaudeAiOAuthConfig;
-    use crate::oauth::anthropic::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
+    use crate::oauth::anthropic::testsupport::{
+        mem_credential_manager, Canned, MemStorage, MockHttp, TestClock,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -287,9 +287,7 @@ mod tests {
     /// Build a handle whose token endpoint returns `token_body`, over an
     /// in-memory keychain. Returns the handle, the storage (for assertions),
     /// and a flag set when the browser opener fired.
-    fn handle_with_token_body(
-        token_body: &str,
-    ) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
+    fn handle_with_token_body(token_body: &str) -> (OAuthHandle, Arc<MemStorage>, Arc<AtomicBool>) {
         let http = MockHttp::new(vec![
             (
                 "oauth/token",
@@ -360,9 +358,13 @@ mod tests {
         let mut state = String::new();
         for kv in query.split('&') {
             if let Some(v) = kv.strip_prefix("redirect_uri=") {
-                redirect = urlencoding::decode(v).map(std::borrow::Cow::into_owned).unwrap_or_default();
+                redirect = urlencoding::decode(v)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default();
             } else if let Some(v) = kv.strip_prefix("state=") {
-                state = urlencoding::decode(v).map(std::borrow::Cow::into_owned).unwrap_or_default();
+                state = urlencoding::decode(v)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default();
             }
         }
         let port = redirect

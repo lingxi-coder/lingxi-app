@@ -5,7 +5,6 @@
 //! native Swift / Kotlin impl via `UniFFI`. Sibling of `tool-voice` (raw mic
 //! capture) — this is recognition (`transcribe`) and synthesis (`speak`).
 
-
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -108,8 +107,7 @@ impl Tool for SpeechTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Transcribe spoken audio from the microphone, or synthesize speech from text."
-            .into()
+        "Transcribe spoken audio from the microphone, or synthesize speech from text.".into()
     }
 
     async fn validate_input(
@@ -127,7 +125,9 @@ impl Tool for SpeechTool {
                 {
                     Ok(())
                 } else {
-                    Err(ValidationError("`speak` requires a non-empty `text`".into()))
+                    Err(ValidationError(
+                        "`speak` requires a non-empty `text`".into(),
+                    ))
                 }
             }
             _ => Err(ValidationError(

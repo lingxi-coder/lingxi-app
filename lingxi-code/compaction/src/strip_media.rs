@@ -29,7 +29,12 @@ pub fn strip_images_from_messages(messages: Vec<ConversationMessage>) -> Vec<Con
 
 fn strip_one(message: ConversationMessage) -> ConversationMessage {
     // TS strips only `user` messages (`compact.ts:147`); others pass through.
-    let ConversationMessage::User { id, content, is_meta } = message else {
+    let ConversationMessage::User {
+        id,
+        content,
+        is_meta,
+    } = message
+    else {
         return message;
     };
     let new_content = content

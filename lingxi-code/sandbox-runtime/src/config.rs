@@ -599,15 +599,24 @@ mod tests {
         // Round-trip back to JSON and re-parse: structurally stable.
         let back = serde_json::to_string(&cfg).expect("serialize");
         let cfg2: SandboxRuntimeConfig = serde_json::from_str(&back).expect("reparse");
-        assert_eq!(cfg2.network.allowed_domains, vec!["github.com", "*.npmjs.org"]);
+        assert_eq!(
+            cfg2.network.allowed_domains,
+            vec!["github.com", "*.npmjs.org"]
+        );
         assert_eq!(cfg2.network.http_proxy_port, Some(8080));
         assert_eq!(
             cfg2.network.mitm_proxy.as_ref().unwrap().socket_path,
             "/run/mitm.sock"
         );
         assert_eq!(cfg2.mandatory_deny_search_depth, Some(3));
-        assert_eq!(cfg2.windows.as_ref().unwrap().group_sid.as_deref(), Some("S-1-5-32-544"));
-        assert_eq!(cfg2.ignore_violations.unwrap().get("*").unwrap(), &vec!["/var/log".to_string()]);
+        assert_eq!(
+            cfg2.windows.as_ref().unwrap().group_sid.as_deref(),
+            Some("S-1-5-32-544")
+        );
+        assert_eq!(
+            cfg2.ignore_violations.unwrap().get("*").unwrap(),
+            &vec!["/var/log".to_string()]
+        );
     }
 
     #[test]
@@ -656,7 +665,9 @@ mod tests {
 
     #[test]
     fn tls_terminate_validate_together() {
-        TlsTerminateConfig::default().validate().expect("neither ok");
+        TlsTerminateConfig::default()
+            .validate()
+            .expect("neither ok");
         TlsTerminateConfig {
             ca_cert_path: Some("/c".into()),
             ca_key_path: Some("/k".into()),
@@ -759,7 +770,8 @@ mod tests {
         assert!(c.validate().is_err());
         // good mach lookup (trailing * and exact)
         let mut c = base();
-        c.network.allow_mach_lookup = Some(vec!["com.example.*".into(), "exact".into(), "*".into()]);
+        c.network.allow_mach_lookup =
+            Some(vec!["com.example.*".into(), "exact".into(), "*".into()]);
         c.validate().expect("mach ok");
     }
 
@@ -769,7 +781,10 @@ mod tests {
             deny_read: vec![String::new()],
             ..Default::default()
         };
-        assert_eq!(fs.validate().unwrap_err().to_string(), "Path cannot be empty");
+        assert_eq!(
+            fs.validate().unwrap_err().to_string(),
+            "Path cannot be empty"
+        );
         FilesystemConfig {
             deny_read: vec!["/x".into()],
             allow_write: vec!["/y".into()],

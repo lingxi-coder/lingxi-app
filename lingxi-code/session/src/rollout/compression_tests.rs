@@ -21,13 +21,13 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use super::*;
+use crate::rollout::initial_history::InitialHistory;
 use crate::rollout::record::{
     RolloutItem, RolloutLine, SessionMeta, SessionMetaLine, SessionSource, ThreadId,
 };
 use crate::rollout::recorder::{
     append_rollout_item_to_path, RolloutConfig, RolloutRecorder, RolloutRecorderParams,
 };
-use crate::rollout::initial_history::InitialHistory;
 
 #[tokio::test]
 async fn load_rollout_items_reads_compressed_rollout() -> anyhow::Result<()> {
@@ -208,12 +208,11 @@ async fn worker_compresses_old_active_and_archived_rollouts() -> anyhow::Result<
     assert!(!compressed_rollout_path(&fresh_path).exists());
     assert!(!stale_temp.exists());
     assert!(fresh_temp.exists());
-    assert!(
-        home.path()
-            .join(".tmp")
-            .join("rollout-compression.lock")
-            .exists()
-    );
+    assert!(home
+        .path()
+        .join(".tmp")
+        .join("rollout-compression.lock")
+        .exists());
     Ok(())
 }
 

@@ -26,9 +26,10 @@ use std::time::{Duration, SystemTime};
 use traits::http::SseStream;
 use traits::{
     Clock, ElicitRequestDto, ElicitResultDto, HttpError, HttpTransport, McpError,
-    McpNotificationStream, McpOAuthConfigDto, McpPromptDto, McpRawConnection, McpResourceContentDto,
-    McpResourceDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
-    SecureStorage, SecureStorageBackend, SecureStorageError, ServerCapabilitiesDto,
+    McpNotificationStream, McpOAuthConfigDto, McpPromptDto, McpRawConnection,
+    McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto, McpTransport,
+    McpTransportKind, McpTransportSpec, SecureStorage, SecureStorageBackend, SecureStorageError,
+    ServerCapabilitiesDto,
 };
 
 // ---------------------------------------------------------------------------
@@ -388,8 +389,8 @@ async fn drive_browser(auth_url: &str) {
         .to_string();
     // Retry the connect briefly until the listener is bound.
     for _ in 0..50 {
-        if let Ok(mut s) = tokio::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap()))
-            .await
+        if let Ok(mut s) =
+            tokio::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).await
         {
             use tokio::io::AsyncWriteExt;
             let req = format!(
@@ -405,7 +406,10 @@ async fn drive_browser(auth_url: &str) {
 
 /// `on_authorization_url` hook that pushes the surfaced URL onto a channel so
 /// the test can drive the fake browser.
-fn url_capture() -> (OnAuthorizationUrl, tokio::sync::mpsc::UnboundedReceiver<String>) {
+fn url_capture() -> (
+    OnAuthorizationUrl,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let cb: OnAuthorizationUrl = Arc::new(move |url: &str| {
         let _ = tx.send(url.to_string());
@@ -426,15 +430,14 @@ async fn full_flow_attaches_bearer_and_persists_tokens() {
     let clock = TestClock::new(1_000);
     let (on_url, mut url_rx) = url_capture();
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: mock_as.clone() as Arc<dyn HttpTransport>,
             clock: clock.clone() as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
     // No client_id configured → DCR is exercised.
     let config = http_cfg("remote", Some(oauth_block(None)));
@@ -458,7 +461,9 @@ async fn full_flow_attaches_bearer_and_persists_tokens() {
     // Discovery hit oauth-authorization-server; DCR hit /register; token
     // exchange used the authorization_code grant with the PKCE verifier.
     let reqs = mock_as.requests();
-    assert!(reqs.iter().any(|r| r.url.contains("oauth-authorization-server")));
+    assert!(reqs
+        .iter()
+        .any(|r| r.url.contains("oauth-authorization-server")));
     let register = reqs.iter().find(|r| r.url.contains("/register")).unwrap();
     assert_eq!(register.method, HttpMethod::Post);
     // FIX 3: the DCR client metadata carries the per-server client_name
@@ -504,15 +509,14 @@ async fn static_token_server_spec_is_unchanged() {
     let clock = TestClock::new(0);
     let (on_url, _rx) = url_capture();
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: mock_as as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
     let mut headers = traits::McpHeaders::new();
     headers.insert("X-Static".to_string(), "preset".to_string());
@@ -531,7 +535,10 @@ async fn static_token_server_spec_is_unchanged() {
 
     // Spec is passed through verbatim: no Authorization header added.
     let seen = transport.last_spec();
-    assert!(spec_auth_header(&seen).is_none(), "no Bearer for static server");
+    assert!(
+        spec_auth_header(&seen).is_none(),
+        "no Bearer for static server"
+    );
     if let McpTransportSpec::Http { headers: h, .. } = seen {
         assert_eq!(h.get("X-Static").map(String::as_str), Some("preset"));
         assert_eq!(h.len(), 1, "no extra headers injected");
@@ -577,15 +584,14 @@ async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
         .await
         .unwrap();
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: mock_as.clone() as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
     registry.connect(config.clone()).await.expect("connect ok");
 
@@ -656,17 +662,19 @@ async fn connect_401_triggers_refresh_and_retry() {
         .await
         .unwrap();
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: mock_as.clone() as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
-    registry.connect(config).await.expect("connect ok after retry");
+    registry
+        .connect(config)
+        .await
+        .expect("connect ok after retry");
 
     // Two connect attempts: stale Bearer (401), then refreshed Bearer.
     assert_eq!(transport.connect_count(), 2);
@@ -728,15 +736,14 @@ async fn disconnect_revokes_tokens_and_clears_local() {
         .await
         .unwrap();
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: mock_as.clone() as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
     registry.connect(config.clone()).await.expect("connect ok");
     registry.disconnect("revoker").await.expect("disconnect ok");
@@ -838,27 +845,34 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
         .await
         .unwrap();
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: http.clone() as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
     registry.connect(config).await.expect("connect ok");
     registry.disconnect("norev").await.expect("disconnect ok");
 
     assert!(
-        !http.requests.lock().unwrap().iter().any(|r| r.url.contains("/revoke")),
+        !http
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.url.contains("/revoke")),
         "no revoke POST when endpoint absent"
     );
     let reloaded = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
         .await
         .unwrap();
-    assert!(reloaded.is_none(), "tokens cleared even without revocation endpoint");
+    assert!(
+        reloaded.is_none(),
+        "tokens cleared even without revocation endpoint"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -909,15 +923,14 @@ async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
         .await
         .unwrap();
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: mock_as.clone() as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
     // Drive the fake browser once the (step-up) authorize URL is surfaced, and
     // capture that URL so we can assert it carries the elevated scope.
@@ -930,7 +943,10 @@ async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
     });
 
     let registry2 = Arc::new(registry);
-    registry2.connect(config.clone()).await.expect("connect ok after step-up");
+    registry2
+        .connect(config.clone())
+        .await
+        .expect("connect ok after step-up");
     browser.await.unwrap();
 
     // Two connect attempts: narrow token (403), then step-up token.
@@ -941,7 +957,11 @@ async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
     );
 
     // The step-up authorize URL requested the elevated scope (urlencoded).
-    let auth_url = captured.lock().unwrap().clone().expect("authorize url captured");
+    let auth_url = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("authorize url captured");
     assert!(
         auth_url.contains("scope=read%3Aelevated"),
         "step-up authorize URL must request the elevated scope; url={auth_url}"
@@ -953,14 +973,17 @@ async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
         .unwrap()
         .unwrap();
     assert_eq!(reloaded.access_token, "elevated-access");
-    assert_eq!(reloaded.step_up_scope, None, "step_up_scope cleared on fresh grant");
+    assert_eq!(
+        reloaded.step_up_scope, None,
+        "step_up_scope cleared on fresh grant"
+    );
 }
 
 /// Unit: the 403 detector extracts a quoted scope, an unquoted scope, ignores
 /// non-403 / non-insufficient_scope errors.
 #[test]
 fn step_up_scope_extraction() {
-    use mcp::registry::test_support::{error_is_403_insufficient_scope as detect};
+    use mcp::registry::test_support::error_is_403_insufficient_scope as detect;
     assert_eq!(
         detect(&McpError::Connection(
             "HTTP 403: error=\"insufficient_scope\", scope=\"a b\"".into()
@@ -980,7 +1003,9 @@ fn step_up_scope_extraction() {
     );
     // 401 → not step-up.
     assert_eq!(
-        detect(&McpError::Connection("HTTP 401 insufficient_scope scope=x".into())),
+        detect(&McpError::Connection(
+            "HTTP 401 insufficient_scope scope=x".into()
+        )),
         None
     );
 }
@@ -1004,7 +1029,9 @@ static XAA_ENV_LOCK: Mutex<()> = Mutex::new(());
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn xaa_flagged_server_without_enable_flag_hard_fails() {
-    let _guard = XAA_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Ensure the gate env is unset for this test.
     std::env::remove_var("LINGXI_ENABLE_XAA");
 
@@ -1022,17 +1049,19 @@ async fn xaa_flagged_server_without_enable_flag_hard_fails() {
     };
     let config = http_cfg("xaa-srv", Some(oauth));
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: mock_as as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: None,
-        },
-    );
+        });
 
-    let err = registry.connect(config).await.expect_err("xaa gate must fail");
+    let err = registry
+        .connect(config)
+        .await
+        .expect_err("xaa gate must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("LINGXI_ENABLE_XAA"),
@@ -1056,11 +1085,19 @@ impl HttpTransport for XaaHttp {
         } else if url.contains("idp.example.com/token") {
             (200, r#"{"access_token":"id-jag","issued_token_type":"urn:ietf:params:oauth:token-type:id-jag"}"#.to_string())
         } else if url.contains("as.example.com/token") {
-            (200, r#"{"access_token":"xaa-access","token_type":"Bearer","expires_in":3600}"#.to_string())
+            (
+                200,
+                r#"{"access_token":"xaa-access","token_type":"Bearer","expires_in":3600}"#
+                    .to_string(),
+            )
         } else {
             (404, String::new())
         };
-        Ok(HttpResponse { status, headers: vec![], body })
+        Ok(HttpResponse {
+            status,
+            headers: vec![],
+            body,
+        })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
@@ -1093,7 +1130,9 @@ impl XaaConfigProvider for XaaTestProvider {
 #[allow(clippy::await_holding_lock)] // see the sibling test's note
 #[tokio::test]
 async fn xaa_enabled_drives_exchange_and_attaches_bearer() {
-    let _guard = XAA_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("LINGXI_ENABLE_XAA", "1");
 
     let transport = RecordingTransport::new(0);
@@ -1110,15 +1149,14 @@ async fn xaa_enabled_drives_exchange_and_attaches_bearer() {
     let config = http_cfg("xaa-live", Some(oauth));
     let key = oauth::server_key("xaa-live", &config.spec);
 
-    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(
-        OAuthDeps {
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
             http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
             clock: clock as Arc<dyn Clock>,
             storage: storage.clone() as Arc<dyn SecureStorage>,
             on_authorization_url: on_url,
             xaa_config: Some(Arc::new(XaaTestProvider)),
-        },
-    );
+        });
 
     registry.connect(config).await.expect("xaa connect ok");
     std::env::remove_var("LINGXI_ENABLE_XAA");

@@ -316,14 +316,25 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
     let bridge_rx = tui_build.bridge_rx;
     let permission_rx = tui_build.permission_rx;
     let turn_tx = tui_build.turn_tx;
+    // (B4 Task 5 parity) Thread the composition root's shared subscription
+    // slot so the widget's rate-limit composer reads the live snapshot at
+    // compose time — same wiring as the iocraft `with_subscription` path.
+    let subscription = tui_build.runtime.subscription.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
     let switch_handle = handle.clone();
+    let summary_orch = orchestrator.clone();
+    let current_model = session
+        .models
+        .iter()
+        .find(|m| m.is_current)
+        .map_or_else(|| "(default)".to_string(), |m| m.display.clone());
     let welcome = vec![tui_rata::RenderedMessage::SystemText {
-        body: "LingXi — ratatui TUI. Type a message, Enter to send, Esc to quit. \
-               (Set LINGXI_TUI_BACKEND=iocraft for the legacy UI.)"
-            .to_string(),
+        body: format!(
+            "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
+            session.doctor.cli_version, session.doctor.cwd, current_model
+        ),
         timestamp: 0,
         is_error: false,
     }];
@@ -346,13 +357,18 @@ async fn run_ratatui(tui_build: crate::init::TuiBuild) -> i32 {
             session,
             bridge_rx,
             permission_rx,
+            Some(subscription),
             on_submit,
             on_switch_model,
         )
     })
     .await
     {
-        Ok(Ok(())) => exit_codes::SUCCESS,
+        Ok(Ok(())) => {
+            let session_id = summary_orch.current_session_id().await;
+            println!("\nSession {session_id} saved. Resume with: lingxi --resume {session_id}");
+            exit_codes::SUCCESS
+        }
         Ok(Err(e)) => {
             eprintln!("lingxi-cli: tui-rata session failed: {e}");
             exit_codes::RUNTIME_ERROR
@@ -432,13 +448,89 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui_rata::session:
         })
         .collect();
 
+    // Phase 8 (tui-rata command registry): `/skills` + `/memory` snapshots.
+    // Small on-disk walks, captured once at launch like the listings above.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let skills = skills_rows(&cwd, &crate::run::lingxi_home_dir());
+    let memory = dirs::home_dir().map_or_else(Vec::new, |home| memory_rows(&cwd, &home));
+
     SessionInfo {
         doctor: DoctorInfo::capture(mcp_configured, mcp_connected),
         mcp,
         hooks,
         agents,
+        skills,
+        memory,
         models,
     }
+}
+
+/// Flatten the on-disk skill sections (`skill_api::load_file_skill_sections`:
+/// project `.lingxi/skills/` ancestors + user `~/.lingxi/skills/`) into
+/// `/skills` rows: name + `"<section> · <description>"` detail.
+fn skills_rows(
+    cwd: &std::path::Path,
+    lingxi_home: &std::path::Path,
+) -> Vec<tui_rata::session::InfoRow> {
+    skill_api::load_file_skill_sections(cwd, lingxi_home)
+        .into_iter()
+        .flat_map(|section| {
+            let source = section.title;
+            section.rows.into_iter().map(move |row| {
+                let detail = if row.description.trim().is_empty() {
+                    source.clone()
+                } else {
+                    format!("{source} · {}", row.description)
+                };
+                tui_rata::session::InfoRow::new(row.name, Some(detail))
+            })
+        })
+        .collect()
+}
+
+/// The `/memory` tier rows, mirroring the iocraft `screens::memory::memory_tiers`
+/// selector labels (read-only here): the always-offered Project + User tiers
+/// (marked `(new)` when the file does not exist yet) plus any other LINGXI.md
+/// the `memory::lingxi_md::hierarchy::walk` discovers (project parents).
+fn memory_rows(
+    cwd: &std::path::Path,
+    os_home: &std::path::Path,
+) -> Vec<tui_rata::session::InfoRow> {
+    use memory::lingxi_md::hierarchy::{user_config_dir, walk, FILE_NAME};
+    use tui_rata::session::InfoRow;
+
+    let project_path = cwd.join(FILE_NAME);
+    let user_path = user_config_dir(os_home).join(FILE_NAME);
+    let suffix = |exists: bool| if exists { "" } else { " (new)" };
+    let in_git = cwd.ancestors().any(|dir| dir.join(".git").exists());
+    let mut rows = vec![
+        InfoRow::new(
+            "Project memory",
+            Some(format!(
+                "{} at ./{FILE_NAME}{}",
+                if in_git { "Checked in" } else { "Saved" },
+                suffix(project_path.is_file())
+            )),
+        ),
+        InfoRow::new(
+            "User memory",
+            Some(format!(
+                "Saved in {}{}",
+                user_path.display(),
+                suffix(user_path.is_file())
+            )),
+        ),
+    ];
+    for entry in walk(cwd, os_home, None).entries {
+        if entry.path == project_path || entry.path == user_path {
+            continue;
+        }
+        rows.push(InfoRow::new(
+            entry.path.display().to_string(),
+            Some("dynamically loaded".to_string()),
+        ));
+    }
+    rows
 }
 
 /// Whether the ratatui backend is used. It is now the DEFAULT; set
@@ -639,6 +731,48 @@ mod tests {
     fn prompt_routes_to_print() {
         let a = argv(Some("fix it"), false);
         assert_eq!(decide_mode_with(&a, true), Mode::Print("fix it".into()));
+    }
+
+    #[test]
+    fn skills_rows_flatten_sections_and_memory_rows_always_offer_both_tiers() {
+        // Hermetic root: <tmp>/proj (cwd, non-git) + <tmp>/home (os home).
+        let root = std::env::temp_dir().join(format!("cli-session-info-{}", std::process::id()));
+        let proj = root.join("proj");
+        let home = root.join("home");
+        let skill_dir = proj.join(".lingxi").join("skills").join("brainstorm");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: brainstorm\ndescription: explore ideas\n---\nbody\n",
+        )
+        .expect("SKILL.md");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let lingxi_home = home.join(".lingxi");
+
+        let skills = skills_rows(&proj, &lingxi_home);
+        assert_eq!(skills.len(), 1, "{skills:?}");
+        assert_eq!(skills[0].title, "brainstorm");
+        assert!(
+            skills[0]
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("explore ideas")),
+            "{skills:?}"
+        );
+
+        let memory = memory_rows(&proj, &home);
+        std::fs::remove_dir_all(&root).ok();
+        // Project + User tiers are always offered, marked (new) when absent.
+        assert!(memory.len() >= 2, "{memory:?}");
+        assert_eq!(memory[0].title, "Project memory");
+        assert!(
+            memory[0]
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("(new)")),
+            "{memory:?}"
+        );
+        assert_eq!(memory[1].title, "User memory");
     }
 
     #[test]

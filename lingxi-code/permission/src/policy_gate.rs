@@ -38,6 +38,7 @@
 //! is built at boot only behind an OPT-IN toggle; the default remains the
 //! always-allow `NoOpPermissionGate`.
 
+use crate::classifier::{classify_tool_call, reason_allows_classifier, AutoModeClassifierVerdict};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
     PermissionCheckContext, PermissionDecision, PermissionDecisionSource, PermissionGate,
@@ -45,7 +46,9 @@ use crate::gate::{
 };
 use crate::mode::PermissionMode;
 use crate::policy::PermissionPolicy;
-use crate::result::{PermissionDecisionReason, PermissionResult};
+use crate::result::{
+    ClassifierKind, PermissionDecisionReason, PermissionMetadata, PermissionResult,
+};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -80,11 +83,16 @@ impl PolicyPermissionGate {
     /// Authorize under the LIVE mode: the `set_permission_mode` override when
     /// set, else the policy's boot mode. Shared by every non-plan check path so a
     /// runtime mode change takes effect everywhere at once.
-    fn effective_authorize(&self, name: &str, input: &Value) -> PermissionResult {
-        match *self.mode_override.read().unwrap_or_else(|e| e.into_inner()) {
-            Some(mode) => self.policy.authorize_with_mode(name, input, mode),
-            None => self.policy.authorize(name, input),
-        }
+    fn effective_mode(&self) -> PermissionMode {
+        self.mode_override
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or(self.policy.mode)
+    }
+
+    fn effective_authorize(&self, name: &str, input: &Value) -> (PermissionMode, PermissionResult) {
+        let mode = self.effective_mode();
+        (mode, self.policy.authorize_with_mode(name, input, mode))
     }
 
     /// Map a 3-valued [`PermissionResult`] onto the 2-valued
@@ -96,12 +104,14 @@ impl PolicyPermissionGate {
     /// `Ask` is mapped identically regardless of which mode produced it.
     async fn decide(
         &self,
+        mode: PermissionMode,
         result: PermissionResult,
         name: &str,
         input: &Value,
     ) -> PermissionDecision {
         // No worker attribution (main turn loop / plan-mode path).
-        self.decide_with_worker(result, name, input, None).await
+        self.decide_with_worker(mode, result, name, input, None)
+            .await
     }
 
     /// Like [`Self::decide`], but forwards the originating-worker identity to the
@@ -110,13 +120,17 @@ impl PolicyPermissionGate {
     /// [`Self::decide`].
     async fn decide_with_worker(
         &self,
+        mode: PermissionMode,
         result: PermissionResult,
         name: &str,
         input: &Value,
         worker: Option<crate::gate::PromptWorker>,
     ) -> PermissionDecision {
         match result {
-            PermissionResult::Allow { .. } => PermissionDecision::Allow,
+            PermissionResult::Allow { .. } => {
+                self.record_auto_mode_non_deny(mode);
+                PermissionDecision::Allow
+            }
             PermissionResult::Deny {
                 reason,
                 explanation,
@@ -125,6 +139,11 @@ impl PolicyPermissionGate {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
             PermissionResult::Ask { ref reason, .. } => {
+                if let Some(classified) =
+                    self.auto_mode_classifier_result(mode, reason, name, input)
+                {
+                    return self.classified_result_to_decision(classified, name);
+                }
                 if read_only_default_auto_allows(name, reason) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allow rather than ask-storm (phase-2 stand-in for the
@@ -135,7 +154,11 @@ impl PolicyPermissionGate {
                 } else {
                     // Surface the prompt through the host's transport, carrying
                     // the worker identity so it is attributed in the dialog.
-                    self.inner.check_with_worker(name, input, worker).await
+                    let decision = self.inner.check_with_worker(name, input, worker).await;
+                    if matches!(decision, PermissionDecision::Allow) {
+                        self.record_auto_mode_non_deny(mode);
+                    }
+                    decision
                 }
             }
         }
@@ -148,6 +171,7 @@ impl PolicyPermissionGate {
     /// `check_with_context` seam.
     async fn decide_outcome_with_context(
         &self,
+        mode: PermissionMode,
         result: PermissionResult,
         name: &str,
         input: &Value,
@@ -159,10 +183,13 @@ impl PolicyPermissionGate {
             // local policy gate never derives `updatedPermissions` rule updates
             // (those originate from the stdio host's `can_use_tool` response), so
             // `permission_updates` is always empty on this path.
-            PermissionResult::Allow { updated_input, .. } => PermissionOutcome::Allow {
-                updated_input,
-                permission_updates: Vec::new(),
-            },
+            PermissionResult::Allow { updated_input, .. } => {
+                self.record_auto_mode_non_deny(mode);
+                PermissionOutcome::Allow {
+                    updated_input,
+                    permission_updates: Vec::new(),
+                }
+            }
             PermissionResult::Deny {
                 reason,
                 explanation,
@@ -171,7 +198,13 @@ impl PolicyPermissionGate {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
             PermissionResult::Ask { ref reason, .. } => {
+                if let Some(classified) =
+                    self.auto_mode_classifier_result(mode, reason, name, input)
+                {
+                    return self.classified_result_to_outcome(classified, name);
+                }
                 if read_only_default_auto_allows(name, reason) {
+                    self.record_auto_mode_non_deny(mode);
                     PermissionOutcome::Allow {
                         updated_input: None,
                         permission_updates: Vec::new(),
@@ -194,7 +227,11 @@ impl PolicyPermissionGate {
                         decision_reason: serialize_decision_reason(reason),
                         ..ctx.clone()
                     };
-                    self.inner.check_with_context(name, input, &ctx2).await
+                    let outcome = self.inner.check_with_context(name, input, &ctx2).await;
+                    if matches!(outcome, PermissionOutcome::Allow { .. }) {
+                        self.record_auto_mode_non_deny(mode);
+                    }
+                    outcome
                 }
             }
         }
@@ -206,7 +243,13 @@ impl PolicyPermissionGate {
     /// The turn loop uses this to fire the source-gated permission hooks
     /// (`PermissionRequest` on `Ask`, `PermissionDenied` on a classifier `Deny`)
     /// before delegating to the transport. See [`PermissionGate::resolve_detailed`].
-    fn resolve(&self, result: PermissionResult, name: &str) -> PermissionResolution {
+    fn resolve_with_mode(
+        &self,
+        mode: PermissionMode,
+        result: PermissionResult,
+        name: &str,
+        input: &Value,
+    ) -> PermissionResolution {
         match result {
             PermissionResult::Allow { .. } => PermissionResolution::Allow,
             PermissionResult::Deny {
@@ -224,6 +267,11 @@ impl PolicyPermissionGate {
                 content_blocks: Vec::new(),
             },
             PermissionResult::Ask { ref reason, .. } => {
+                if let Some(classified) =
+                    self.auto_mode_classifier_result(mode, reason, name, input)
+                {
+                    return self.resolve_with_mode(mode, classified, name, input);
+                }
                 if read_only_default_auto_allows(name, reason) {
                     // Read-only / agent-local tool with NO explicit `ask` rule —
                     // auto-allowed, no prompt.
@@ -235,6 +283,118 @@ impl PolicyPermissionGate {
                     PermissionResolution::Ask
                 }
             }
+        }
+    }
+
+    fn auto_mode_classifier_result(
+        &self,
+        mode: PermissionMode,
+        reason: &PermissionDecisionReason,
+        name: &str,
+        input: &Value,
+    ) -> Option<PermissionResult> {
+        if mode != PermissionMode::Auto
+            || !crate::classifier::is_classifier_permissions_enabled()
+            || !reason_allows_classifier(reason)
+        {
+            return None;
+        }
+        {
+            let tracking = self
+                .policy
+                .denial_tracking
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if tracking.is_circuit_broken() {
+                return None;
+            }
+        }
+        match classify_tool_call(name, input) {
+            AutoModeClassifierVerdict::Allow { score, .. } => {
+                self.record_auto_mode_non_deny(mode);
+                Some(PermissionResult::Allow {
+                    reason: PermissionDecisionReason::ClassifierApproved {
+                        classifier: ClassifierKind::Transcript,
+                        score,
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: PermissionMetadata::default(),
+                })
+            }
+            AutoModeClassifierVerdict::Deny { score, reason, .. } => {
+                let mut tracking = self
+                    .policy
+                    .denial_tracking
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                tracking.record_auto_deny();
+                if tracking.trip(false).is_some() {
+                    return None;
+                }
+                Some(PermissionResult::Deny {
+                    reason: PermissionDecisionReason::ClassifierRejected {
+                        classifier: ClassifierKind::Transcript,
+                        score,
+                    },
+                    explanation: Some(format!("Auto mode classifier blocked action: {reason}")),
+                    metadata: PermissionMetadata::default(),
+                })
+            }
+            AutoModeClassifierVerdict::Pass { .. } => None,
+        }
+    }
+
+    fn classified_result_to_decision(
+        &self,
+        result: PermissionResult,
+        name: &str,
+    ) -> PermissionDecision {
+        match result {
+            PermissionResult::Allow { .. } => PermissionDecision::Allow,
+            PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            } => PermissionDecision::Deny {
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
+            },
+            PermissionResult::Ask { .. } => PermissionDecision::Deny {
+                reason: format!("Permission to use {name} has been denied."),
+            },
+        }
+    }
+
+    fn classified_result_to_outcome(
+        &self,
+        result: PermissionResult,
+        name: &str,
+    ) -> PermissionOutcome {
+        match result {
+            PermissionResult::Allow { updated_input, .. } => PermissionOutcome::Allow {
+                updated_input,
+                permission_updates: Vec::new(),
+            },
+            PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            } => PermissionOutcome::Deny {
+                reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
+            },
+            PermissionResult::Ask { .. } => PermissionOutcome::Deny {
+                reason: format!("Permission to use {name} has been denied."),
+            },
+        }
+    }
+
+    fn record_auto_mode_non_deny(&self, mode: PermissionMode) {
+        if mode == PermissionMode::Auto {
+            self.policy
+                .denial_tracking
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record_non_deny();
         }
     }
 }
@@ -260,8 +420,8 @@ impl PermissionGate for PolicyPermissionGate {
         // Authorize under the LIVE mode (boot mode or a set_permission_mode
         // override), then map the 3-valued result (an `Ask` auto-allows read-only
         // tools or delegates to the prompt).
-        self.decide(self.effective_authorize(name, input), name, input)
-            .await
+        let (mode, result) = self.effective_authorize(name, input);
+        self.decide(mode, result, name, input).await
     }
 
     /// As [`Self::check`], but forwards the originating subagent/teammate
@@ -274,7 +434,8 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         worker: Option<crate::gate::PromptWorker>,
     ) -> PermissionDecision {
-        self.decide_with_worker(self.effective_authorize(name, input), name, input, worker)
+        let (mode, result) = self.effective_authorize(name, input);
+        self.decide_with_worker(mode, result, name, input, worker)
             .await
     }
 
@@ -287,7 +448,8 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        self.decide_outcome_with_context(self.effective_authorize(name, input), name, input, ctx)
+        let (mode, result) = self.effective_authorize(name, input);
+        self.decide_outcome_with_context(mode, result, name, input, ctx)
             .await
     }
 
@@ -300,8 +462,10 @@ impl PermissionGate for PolicyPermissionGate {
     /// `check`, an `Ask` NEVER delegates to the inner prompt transport here — the
     /// hook already resolved the prompt.
     async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
-        match self.effective_authorize(name, input) {
+        let (mode, result) = self.effective_authorize(name, input);
+        match result {
             PermissionResult::Allow { .. } | PermissionResult::Ask { .. } => {
+                self.record_auto_mode_non_deny(mode);
                 PermissionDecision::Allow
             }
             PermissionResult::Deny {
@@ -325,6 +489,7 @@ impl PermissionGate for PolicyPermissionGate {
     /// [`Self::check`] via [`Self::decide`].
     async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
         self.decide(
+            PermissionMode::Plan,
             self.policy
                 .authorize_with_mode(name, input, PermissionMode::Plan),
             name,
@@ -337,7 +502,8 @@ impl PermissionGate for PolicyPermissionGate {
         // Authorize under the LIVE mode WITHOUT delegating to the inner prompt,
         // so the turn loop can read the decision source (and an about-to-ask) and
         // fire PermissionRequest / PermissionDenied before the prompt resolves.
-        self.resolve(self.effective_authorize(name, input), name)
+        let (mode, result) = self.effective_authorize(name, input);
+        self.resolve_with_mode(mode, result, name, input)
     }
 
     /// Surface the wrapped policy's TOOL-WIDE deny-rule names so the orchestrator
@@ -395,7 +561,10 @@ impl PermissionGate for PolicyPermissionGate {
                 return Err("Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions".to_string());
             }
         }
-        *self.mode_override.write().unwrap_or_else(|e| e.into_inner()) = Some(parsed);
+        *self
+            .mode_override
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(parsed);
         Ok(())
     }
 }

@@ -227,7 +227,14 @@ mod tests {
     fn summary_truncates_at_cap() {
         // Build enough diagnostics to exceed 4000 chars.
         let many: Vec<Diagnostic> = (0..400)
-            .map(|i| diag(i, 0, DiagnosticSeverity::ERROR, "a fairly long diagnostic message here"))
+            .map(|i| {
+                diag(
+                    i,
+                    0,
+                    DiagnosticSeverity::ERROR,
+                    "a fairly long diagnostic message here",
+                )
+            })
             .collect();
         let files = vec![DiagnosticFile {
             uri: "file:///big.ts".to_string(),
@@ -245,6 +252,9 @@ mod tests {
         let c = diag(1, 0, DiagnosticSeverity::ERROR, "x");
         assert_ne!(dedup_key(&a), dedup_key(&b));
         assert_ne!(dedup_key(&a), dedup_key(&c));
-        assert_eq!(dedup_key(&a), dedup_key(&diag(0, 0, DiagnosticSeverity::ERROR, "x")));
+        assert_eq!(
+            dedup_key(&a),
+            dedup_key(&diag(0, 0, DiagnosticSeverity::ERROR, "x"))
+        );
     }
 }

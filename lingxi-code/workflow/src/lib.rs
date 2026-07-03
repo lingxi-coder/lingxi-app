@@ -461,7 +461,9 @@ fn uses_nondeterministic_api(node: tree_sitter::Node, src: &[u8]) -> bool {
 /// The program's first non-comment statement.
 fn first_statement(program: tree_sitter::Node) -> Option<tree_sitter::Node> {
     let mut c = program.walk();
-    let first = program.named_children(&mut c).find(|n| n.kind() != "comment");
+    let first = program
+        .named_children(&mut c)
+        .find(|n| n.kind() != "comment");
     first
 }
 
@@ -534,7 +536,10 @@ fn key_name(key: tree_sitter::Node, src: &[u8]) -> Result<String, String> {
         "property_identifier" => Ok(node_text(key, src).to_string()),
         "string" => Ok(string_inner(key, src)),
         "number" => Ok(node_text(key, src).to_string()),
-        other => Err(format!("unsupported key type in meta: {}", estree_name(other))),
+        other => Err(format!(
+            "unsupported key type in meta: {}",
+            estree_name(other)
+        )),
     }
 }
 
@@ -575,7 +580,10 @@ fn walk_value(v: tree_sitter::Node, src: &[u8]) -> Result<(), String> {
                 Err("only negative-number unary allowed in meta".into())
             }
         }
-        other => Err(format!("non-literal node type in meta: {}", estree_name(other))),
+        other => Err(format!(
+            "non-literal node type in meta: {}",
+            estree_name(other)
+        )),
     }
 }
 
@@ -794,7 +802,15 @@ pub fn run<R>(script: &str, agent_runner: R) -> Result<RunOutcome, WorkflowError
 where
     R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
 {
-    run_with_progress(script, agent_runner, |_: &Progress| {}, None, false, None, None)
+    run_with_progress(
+        script,
+        agent_runner,
+        |_: &Progress| {},
+        None,
+        false,
+        None,
+        None,
+    )
 }
 
 /// Like [`run`], but also fires `on_progress` for each `phase()`/`log()` event
@@ -1104,7 +1120,10 @@ mod meta_validation_tests {
     #[test]
     fn first_statement_must_be_export_const_meta() {
         let m = "`export const meta = { name, description, phases }` must be the FIRST statement in the script";
-        assert_eq!(err("const x = 1; export const meta = { name: 'a', description: 'b' };"), m);
+        assert_eq!(
+            err("const x = 1; export const meta = { name: 'a', description: 'b' };"),
+            m
+        );
         assert_eq!(err("log('hi'); return 1;"), m);
         assert_eq!(err("const meta = { name: 'a', description: 'b' };"), m); // not exported
         assert_eq!(err("export let meta = { name: 'a', description: 'b' };"), m); // let, not const
@@ -1272,8 +1291,12 @@ mod tests {
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log { message: "count=2 first=x".into() },
-                Progress::Log { message: "plain=raw text".into() },
+                Progress::Log {
+                    message: "count=2 first=x".into()
+                },
+                Progress::Log {
+                    message: "plain=raw text".into()
+                },
             ]
         );
     }
@@ -1330,8 +1353,12 @@ mod tests {
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log { message: "isNull=true".into() },
-                Progress::Log { message: "filtered=ok:a".into() },
+                Progress::Log {
+                    message: "isNull=true".into()
+                },
+                Progress::Log {
+                    message: "filtered=ok:a".into()
+                },
             ]
         );
     }
@@ -1340,7 +1367,12 @@ mod tests {
     fn engine_evaluates_js() {
         // (kept as a fast smoke test of the embedded engine)
         let out = run_sync("log(String(1 + 2 * 3))").unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "7".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "7".into()
+            }]
+        );
     }
 
     #[test]
@@ -1351,7 +1383,10 @@ mod tests {
             "const meta = { name: 'x' }\nlog('hi')"
         );
         // Indentation preserved; unrelated `export` lines untouched.
-        assert_eq!(strip_meta_export("  export const meta={}"), "  const meta={}");
+        assert_eq!(
+            strip_meta_export("  export const meta={}"),
+            "  const meta={}"
+        );
         assert_eq!(strip_meta_export("export default 1"), "export default 1");
     }
 
@@ -1373,10 +1408,20 @@ log(`done: ${items.join(',')}`)
         assert_eq!(
             out.progress,
             vec![
-                Progress::Phase { index: 1, title: "Scan".into() },
-                Progress::Log { message: "3 items to scan".into() },
-                Progress::Phase { index: 2, title: "Report".into() },
-                Progress::Log { message: "done: a,b,c".into() },
+                Progress::Phase {
+                    index: 1,
+                    title: "Scan".into()
+                },
+                Progress::Log {
+                    message: "3 items to scan".into()
+                },
+                Progress::Phase {
+                    index: 2,
+                    title: "Report".into()
+                },
+                Progress::Log {
+                    message: "done: a,b,c".into()
+                },
             ]
         );
     }
@@ -1400,22 +1445,32 @@ const b = await agent('second')
 log('got: ' + b)
 "#;
         let mut calls = 0;
-        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
-            prompts
-                .iter()
-                .map(|prompt| {
-                    calls += 1;
-                    format!("[r{calls}:{prompt}]")
-                })
-                .collect()
-        })
+        let out = run(
+            script,
+            move |prompts: &[String], _opts: &[String]| -> Vec<String> {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        calls += 1;
+                        format!("[r{calls}:{prompt}]")
+                    })
+                    .collect()
+            },
+        )
         .unwrap();
         assert_eq!(
             out.progress,
             vec![
-                Progress::Phase { index: 1, title: "Work".into() },
-                Progress::Log { message: "got: [r1:first]".into() },
-                Progress::Log { message: "got: [r2:second]".into() },
+                Progress::Phase {
+                    index: 1,
+                    title: "Work".into()
+                },
+                Progress::Log {
+                    message: "got: [r1:first]".into()
+                },
+                Progress::Log {
+                    message: "got: [r2:second]".into()
+                },
             ]
         );
     }
@@ -1434,9 +1489,15 @@ for (let i = 0; i < n; i++) log('item ' + i)
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log { message: "item 0".into() },
-                Progress::Log { message: "item 1".into() },
-                Progress::Log { message: "item 2".into() },
+                Progress::Log {
+                    message: "item 0".into()
+                },
+                Progress::Log {
+                    message: "item 1".into()
+                },
+                Progress::Log {
+                    message: "item 2".into()
+                },
             ]
         );
     }
@@ -1445,7 +1506,9 @@ for (let i = 0; i < n; i++) log('item ' + i)
     fn async_script_throw_surfaces_after_await() {
         let err = run(
             "await agent('x'); throw new Error('boom')",
-            |prompts: &[String], _opts: &[String]| prompts.iter().map(|_| "ok".to_string()).collect(),
+            |prompts: &[String], _opts: &[String]| {
+                prompts.iter().map(|_| "ok".to_string()).collect()
+            },
         )
         .unwrap_err();
         match err {
@@ -1465,17 +1528,25 @@ const rs = await parallel([
 log(rs.join('|'))
 "#;
         let mut n = 0;
-        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
-            prompts
-                .iter()
-                .map(|p| {
-                    n += 1;
-                    format!("{p}{n}")
-                })
-                .collect()
-        })
+        let out = run(
+            script,
+            move |prompts: &[String], _opts: &[String]| -> Vec<String> {
+                prompts
+                    .iter()
+                    .map(|p| {
+                        n += 1;
+                        format!("{p}{n}")
+                    })
+                    .collect()
+            },
+        )
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "a1|b2|c3".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "a1|b2|c3".into()
+            }]
+        );
     }
 
     #[test]
@@ -1491,7 +1562,12 @@ log(String(rs[0]) + ',' + String(rs[1]))
             prompts.iter().map(|_| "OK".to_string()).collect()
         })
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "OK,null".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "OK,null".into()
+            }]
+        );
     }
 
     #[test]
@@ -1504,12 +1580,20 @@ log(rs.join('|'))
 "#;
         let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         let b = batches.clone();
-        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
-            b.borrow_mut().push(prompts.len());
-            prompts.iter().map(|p| format!("R:{p}")).collect()
-        })
+        let out = run(
+            script,
+            move |prompts: &[String], _opts: &[String]| -> Vec<String> {
+                b.borrow_mut().push(prompts.len());
+                prompts.iter().map(|p| format!("R:{p}")).collect()
+            },
+        )
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "R:a|R:b|R:c".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "R:a|R:b|R:c".into()
+            }]
+        );
         assert_eq!(
             *batches.borrow(),
             vec![3],
@@ -1527,12 +1611,20 @@ log(a + b)
 "#;
         let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         let b = batches.clone();
-        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
-            b.borrow_mut().push(prompts.len());
-            prompts.iter().map(|p| p.to_uppercase()).collect()
-        })
+        let out = run(
+            script,
+            move |prompts: &[String], _opts: &[String]| -> Vec<String> {
+                b.borrow_mut().push(prompts.len());
+                prompts.iter().map(|p| p.to_uppercase()).collect()
+            },
+        )
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "AB".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "AB".into()
+            }]
+        );
         assert_eq!(
             *batches.borrow(),
             vec![1, 1],
@@ -1555,12 +1647,20 @@ log(rs.join('|'))
 "#;
         let batches: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
         let b = batches.clone();
-        let out = run(script, move |prompts: &[String], _opts: &[String]| -> Vec<String> {
-            b.borrow_mut().push(prompts.len());
-            prompts.iter().map(|p| format!("[{p}]")).collect()
-        })
+        let out = run(
+            script,
+            move |prompts: &[String], _opts: &[String]| -> Vec<String> {
+                b.borrow_mut().push(prompts.len());
+                prompts.iter().map(|p| format!("[{p}]")).collect()
+            },
+        )
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "[s2:[s1:x]]|[s2:[s1:y]]".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "[s2:[s1:x]]|[s2:[s1:y]]".into()
+            }]
+        );
         assert_eq!(
             *batches.borrow(),
             vec![2, 2],
@@ -1579,7 +1679,12 @@ const rs = await pipeline(
 log(rs.join(','))
 "#;
         let out = run(script, no_agents).unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "20,30,40".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "20,30,40".into()
+            }]
+        );
     }
 
     #[test]
@@ -1624,11 +1729,21 @@ log('wf=' + (typeof workflow))
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log { message: "total=null".into() },
-                Progress::Log { message: "remaining=Infinity".into() },
-                Progress::Log { message: "spent=0".into() },
-                Progress::Log { message: "args=undefined".into() },
-                Progress::Log { message: "wf=function".into() },
+                Progress::Log {
+                    message: "total=null".into()
+                },
+                Progress::Log {
+                    message: "remaining=Infinity".into()
+                },
+                Progress::Log {
+                    message: "spent=0".into()
+                },
+                Progress::Log {
+                    message: "args=undefined".into()
+                },
+                Progress::Log {
+                    message: "wf=function".into()
+                },
             ]
         );
     }
@@ -1663,11 +1778,7 @@ log('wf=' + (typeof workflow))
     #[test]
     fn parallel_rejects_non_function_items() {
         // Passing a promise (a non-function) in the array should trigger throw 2.
-        let err = run(
-            "await parallel([Promise.resolve('x')])",
-            no_agents,
-        )
-        .unwrap_err();
+        let err = run("await parallel([Promise.resolve('x')])", no_agents).unwrap_err();
         match err {
             WorkflowError::Script(s) => assert!(
                 s.contains("parallel() expects an array of functions, not promises"),
@@ -1688,7 +1799,12 @@ log('wf=' + (typeof workflow))
     fn no_return_leaves_the_result_unset() {
         let out = run("log('side effect only');", no_agents).unwrap();
         assert_eq!(out.result, None);
-        assert_eq!(out.progress, vec![Progress::Log { message: "side effect only".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "side effect only".into()
+            }]
+        );
     }
 
     #[test]
@@ -1722,7 +1838,11 @@ log('wf=' + (typeof workflow))
         .unwrap();
         let got = captured.borrow().clone();
         assert_eq!(got.len(), 2);
-        assert!(got[0].contains(r#""agentType":"reviewer""#), "got: {}", got[0]);
+        assert!(
+            got[0].contains(r#""agentType":"reviewer""#),
+            "got: {}",
+            got[0]
+        );
         assert!(got[0].contains(r#""model":"opus""#));
         assert!(got[0].contains(r#""isolation":"worktree""#));
         assert_eq!(got[1], "{}", "a bare agent(p) carries empty opts");
@@ -1792,9 +1912,15 @@ log('wf=' + (typeof workflow))
         assert_eq!(
             out.progress,
             vec![
-                Progress::Log { message: "total=500000".into() },
-                Progress::Log { message: "spent=120000".into() },
-                Progress::Log { message: "remaining=380000".into() },
+                Progress::Log {
+                    message: "total=500000".into()
+                },
+                Progress::Log {
+                    message: "spent=120000".into()
+                },
+                Progress::Log {
+                    message: "remaining=380000".into()
+                },
             ]
         );
     }
@@ -1813,7 +1939,14 @@ log('wf=' + (typeof workflow))
         .unwrap();
         assert_eq!(
             out.progress,
-            vec![Progress::Log { message: "x=7".into() }, Progress::Log { message: "len=3".into() }]
+            vec![
+                Progress::Log {
+                    message: "x=7".into()
+                },
+                Progress::Log {
+                    message: "len=3".into()
+                }
+            ]
         );
     }
 
@@ -1848,7 +1981,12 @@ log('wf=' + (typeof workflow))
             None,
         )
         .unwrap();
-        assert_eq!(out.progress, vec![Progress::Log { message: "ok=true n=1".into() }]);
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "ok=true n=1".into()
+            }]
+        );
         assert_eq!(out.result.as_deref(), Some(r#"{"ok":true,"n":1}"#));
     }
 }

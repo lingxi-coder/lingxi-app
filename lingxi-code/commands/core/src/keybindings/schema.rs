@@ -53,7 +53,10 @@ pub const KEYBINDING_CONTEXT_DESCRIPTIONS: &[(&str, &str)] = &[
         "When navigating image attachments in a select dialog",
     ),
     ("Footer", "When footer indicators are focused"),
-    ("MessageSelector", "When the message selector (rewind) is open"),
+    (
+        "MessageSelector",
+        "When the message selector (rewind) is open",
+    ),
     ("DiffDialog", "When the diff dialog is open"),
     ("ModelPicker", "When the model picker is open"),
     ("Select", "When a select/list component is focused"),

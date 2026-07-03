@@ -5,15 +5,24 @@ use llm_client::Redactor;
 #[test]
 fn redacts_secret_headers_case_insensitively() {
     let mut headers = BTreeMap::new();
-    headers.insert("Authorization".to_string(), "Bearer secret-token".to_string());
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer secret-token".to_string(),
+    );
     headers.insert("x-api-key".to_string(), "secret-key".to_string());
     headers.insert("content-type".to_string(), "application/json".to_string());
 
     let redacted = Redactor.redact_headers(&headers);
 
-    assert_eq!(redacted.get("Authorization"), Some(&"[REDACTED]".to_string()));
+    assert_eq!(
+        redacted.get("Authorization"),
+        Some(&"[REDACTED]".to_string())
+    );
     assert_eq!(redacted.get("x-api-key"), Some(&"[REDACTED]".to_string()));
-    assert_eq!(redacted.get("content-type"), Some(&"application/json".to_string()));
+    assert_eq!(
+        redacted.get("content-type"),
+        Some(&"application/json".to_string())
+    );
 }
 
 #[test]
@@ -45,15 +54,28 @@ fn unparseable_urls_still_get_query_values_redacted() {
 #[test]
 fn extended_secret_headers_and_query_keys_are_redacted() {
     let mut headers = BTreeMap::new();
-    headers.insert("Proxy-Authorization".to_string(), "Basic secret".to_string());
+    headers.insert(
+        "Proxy-Authorization".to_string(),
+        "Basic secret".to_string(),
+    );
     headers.insert("Cookie".to_string(), "session=secret".to_string());
     headers.insert("Set-Cookie".to_string(), "session=secret".to_string());
     let redacted_headers = Redactor.redact_headers(&headers);
-    assert_eq!(redacted_headers.get("Proxy-Authorization"), Some(&"[REDACTED]".to_string()));
-    assert_eq!(redacted_headers.get("Cookie"), Some(&"[REDACTED]".to_string()));
-    assert_eq!(redacted_headers.get("Set-Cookie"), Some(&"[REDACTED]".to_string()));
+    assert_eq!(
+        redacted_headers.get("Proxy-Authorization"),
+        Some(&"[REDACTED]".to_string())
+    );
+    assert_eq!(
+        redacted_headers.get("Cookie"),
+        Some(&"[REDACTED]".to_string())
+    );
+    assert_eq!(
+        redacted_headers.get("Set-Cookie"),
+        Some(&"[REDACTED]".to_string())
+    );
 
-    let url = "https://example.com/blob?sig=sas-secret&client_secret=oauth-secret&token=plain-secret&x=1";
+    let url =
+        "https://example.com/blob?sig=sas-secret&client_secret=oauth-secret&token=plain-secret&x=1";
     let redacted_url = Redactor.redact_url(url);
     assert!(redacted_url.contains("sig=[REDACTED]"));
     assert!(redacted_url.contains("client_secret=[REDACTED]"));

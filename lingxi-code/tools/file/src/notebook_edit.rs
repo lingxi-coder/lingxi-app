@@ -343,7 +343,10 @@ Usage:\n\
         // mutably below.
         let supports_cell_ids = {
             let nbformat = nb.get("nbformat").and_then(Value::as_i64).unwrap_or(0);
-            let nbformat_minor = nb.get("nbformat_minor").and_then(Value::as_i64).unwrap_or(0);
+            let nbformat_minor = nb
+                .get("nbformat_minor")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             nbformat > 4 || (nbformat == 4 && nbformat_minor >= 5)
         };
 
@@ -481,7 +484,10 @@ Usage:\n\
                 })?;
                 let msg = format!("Updated cell {display_id} with {src}");
                 let target = &mut cells[cell_index];
-                old_source = target.get("source").and_then(Value::as_str).map(str::to_string);
+                old_source = target
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let was_code = target.get("cell_type").and_then(Value::as_str) == Some("code");
                 target["source"] = json!(src);
                 // A modified CODE cell drops its now-stale outputs +
@@ -579,7 +585,10 @@ Usage:\n\
             nb_data.insert("cell_id".to_string(), json!(cid));
         }
         nb_data.insert("error".to_string(), json!(""));
-        nb_data.insert("notebook_path".to_string(), json!(canon.display().to_string()));
+        nb_data.insert(
+            "notebook_path".to_string(),
+            json!(canon.display().to_string()),
+        );
         nb_data.insert("original_file".to_string(), json!(raw));
         nb_data.insert("updated_file".to_string(), json!(serialized));
         Ok(ToolCallResult {
@@ -807,7 +816,10 @@ mod tests {
         assert!(!new_id.is_empty());
         assert_ne!(new_id, "c1");
         // The fresh id also appears in the model-facing message.
-        assert_eq!(content, format!("Inserted cell {new_id} with print('inserted')"));
+        assert_eq!(
+            content,
+            format!("Inserted cell {new_id} with print('inserted')")
+        );
     }
 
     // ───────────────────────── NB.1: replace clears code outputs ────────────

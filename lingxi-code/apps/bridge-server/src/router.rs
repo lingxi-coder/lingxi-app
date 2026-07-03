@@ -340,8 +340,15 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
                 let (model_id, profile) = traits::parse_model_ref(&model, &listings);
-                match self.handle.switch_model(&model_id, profile.as_deref()).await {
-                    Ok(()) => sink.emit(ClientEvent::ModelChanged { model: model_id }).await,
+                match self
+                    .handle
+                    .switch_model(&model_id, profile.as_deref())
+                    .await
+                {
+                    Ok(()) => {
+                        sink.emit(ClientEvent::ModelChanged { model: model_id })
+                            .await
+                    }
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
                             kind: ErrorKindDto::Internal,
@@ -515,7 +522,10 @@ impl CommandRouter for EngineCommandRouter {
             // (`Sessions`) are HOST-driven swaps the binary owns (decision §0.5).
             // The `#[non_exhaustive]` enum also requires a catch-all.
             other => {
-                tracing::debug!(?other, "bridge-server: command not routed by EngineCommandRouter");
+                tracing::debug!(
+                    ?other,
+                    "bridge-server: command not routed by EngineCommandRouter"
+                );
             }
         }
     }

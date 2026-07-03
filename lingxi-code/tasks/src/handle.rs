@@ -584,11 +584,7 @@ mod tests {
         let chunk = {
             // Allocate a spool slot under a real LocalAgent id.
             let task_id = crate::id::generate_task_id(crate::id::TaskType::LocalAgent);
-            let spool = registry
-                .output_manager
-                .allocate(&task_id)
-                .await
-                .unwrap();
+            let spool = registry.output_manager.allocate(&task_id).await.unwrap();
             let base = crate::state::TaskStateBase {
                 id: task_id.clone(),
                 task_type: crate::id::TaskType::LocalAgent,
@@ -842,7 +838,9 @@ mod tests {
             })
             .await
             .unwrap();
-        registry.force_bash_terminal_for_test(&rec.task_id, TaskStatus::Running, None).await;
+        registry
+            .force_bash_terminal_for_test(&rec.task_id, TaskStatus::Running, None)
+            .await;
 
         let chunk = h.output(&rec.task_id, None).await.unwrap();
         assert_eq!(chunk.status.as_deref(), Some("running"));
@@ -861,7 +859,9 @@ mod tests {
             })
             .await
             .unwrap();
-        registry.force_bash_terminal_for_test(&rec.task_id, TaskStatus::Completed, Some(0)).await;
+        registry
+            .force_bash_terminal_for_test(&rec.task_id, TaskStatus::Completed, Some(0))
+            .await;
 
         let chunk = h.output(&rec.task_id, None).await.unwrap();
         assert_eq!(chunk.status.as_deref(), Some("completed"));
@@ -880,7 +880,9 @@ mod tests {
             })
             .await
             .unwrap();
-        registry.force_bash_terminal_for_test(&rec.task_id, TaskStatus::Failed, Some(1)).await;
+        registry
+            .force_bash_terminal_for_test(&rec.task_id, TaskStatus::Failed, Some(1))
+            .await;
 
         let chunk = h.output(&rec.task_id, None).await.unwrap();
         assert_eq!(chunk.status.as_deref(), Some("failed"));

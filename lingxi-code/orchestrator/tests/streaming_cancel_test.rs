@@ -163,17 +163,15 @@ impl Tool for CancelBlockingTool {
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
-            reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
             updated_input: None,
             update_destination: None,
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(
-        &self,
-        _input: &serde_json::Value,
-        _opts: &DescriptionOptions,
-    ) -> String {
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "cancel-tool".into()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {
@@ -289,13 +287,12 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
     let s = session.lock().await;
     let reject = s.history.iter().find_map(|m| match m {
         ConversationMessage::User { content, .. }
-            if content.len() == 1
-                && matches!(&content[0], ContentBlock::ToolResult { .. }) =>
+            if content.len() == 1 && matches!(&content[0], ContentBlock::ToolResult { .. }) =>
         {
             match &content[0] {
-                ContentBlock::ToolResult { content, is_error, .. } => {
-                    Some((content.clone(), *is_error))
-                }
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => Some((content.clone(), *is_error)),
                 _ => None,
             }
         }

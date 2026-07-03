@@ -3,7 +3,6 @@
 //! `pending` / `in_progress` / `completed`. The aliases `done` and `todo`
 //! are NOT accepted.
 
-
 use async_trait::async_trait;
 use engine::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
@@ -329,7 +328,6 @@ impl TodoWriteTool {
     pub fn new(ctx: BuiltinToolContext) -> Self {
         Self { ctx }
     }
-
 }
 
 #[async_trait]
@@ -732,8 +730,14 @@ mod tests {
         // full 3-item list the model sent.
         assert_eq!(res.data["oldTodos"].as_array().unwrap().len(), 0);
         assert_eq!(res.data["newTodos"].as_array().unwrap().len(), 3);
-        assert!(res.data.get("content").is_none(), "content moved to model_content");
-        assert!(res.data.get("summary").is_none(), "summary dropped (not in binary)");
+        assert!(
+            res.data.get("content").is_none(),
+            "content moved to model_content"
+        );
+        assert!(
+            res.data.get("summary").is_none(),
+            "summary dropped (not in binary)"
+        );
         // Model text is the fixed base string carried as model_content.
         assert_eq!(
             res.model_content.as_deref(),
@@ -861,7 +865,10 @@ mod tests {
         let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
         {
             let s = session.lock().await;
-            assert!(s.todos.is_empty(), "all-completed write clears the stored todos");
+            assert!(
+                s.todos.is_empty(),
+                "all-completed write clears the stored todos"
+            );
         }
         // The result still reports the full 2-item list as `newTodos` (the
         // model-sent `e`, not the cleared `i`).
@@ -881,7 +888,11 @@ mod tests {
         });
         tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
         let s = session.lock().await;
-        assert_eq!(s.todos.len(), 2, "a not-all-completed write is stored verbatim");
+        assert_eq!(
+            s.todos.len(),
+            2,
+            "a not-all-completed write is stored verbatim"
+        );
     }
 
     // ── oldTodos captures the PRE-WRITE snapshot (binary `o=n.todos[r]??[]`) ──
@@ -919,7 +930,9 @@ mod tests {
         let res2 = {
             let mut c = fresh_ctx();
             c.session = Some(_session.clone());
-            tool.call(second, c, fresh_tx()).await.expect("second write")
+            tool.call(second, c, fresh_tx())
+                .await
+                .expect("second write")
         };
         let old = res2.data["oldTodos"].as_array().expect("oldTodos array");
         assert_eq!(old.len(), 1, "oldTodos is the pre-write stored list");
@@ -963,7 +976,11 @@ mod tests {
         // The base string is now the model text (`ToolCallResult.model_content`,
         // the binary's `mapToolResultToToolResultBlockParam` content), NOT a
         // `data` field. `data` is the pure `{oldTodos, newTodos}` metadata.
-        assert_eq!(res.model_content.as_deref(), Some(TODO_BASE), "bare base string only");
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some(TODO_BASE),
+            "bare base string only"
+        );
         assert!(
             !res.model_content.as_deref().unwrap().contains(NUDGE_MARKER),
             "no verification-nudge suffix"
@@ -1037,10 +1054,12 @@ mod tests {
         let opts = PromptOptions {
             include_examples: false,
             model: None,
+            model_profile: None,
         };
         let with_model = |m: &str| PromptOptions {
             include_examples: false,
             model: Some(m.to_string()),
+            model_profile: None,
         };
 
         // Default (var unset): no model threaded ⇒ `Dh(undefined)` is false ⇒

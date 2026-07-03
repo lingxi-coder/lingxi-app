@@ -202,9 +202,8 @@ fn coord(input: &Value, key: &str) -> Option<(u32, u32)> {
 
 /// Coordinate or an `InvalidInput` error naming the expected fields.
 fn require_coord(input: &Value, key: &str) -> Result<(u32, u32), ToolError> {
-    coord(input, key).ok_or_else(|| {
-        ToolError::InvalidInput(format!("this action requires `{key}` as `[x, y]`"))
-    })
+    coord(input, key)
+        .ok_or_else(|| ToolError::InvalidInput(format!("this action requires `{key}` as `[x, y]`")))
 }
 
 /// Translate a scroll `direction` + `amount` into `(dx, dy)` ticks, matching the
@@ -228,7 +227,6 @@ fn scroll_delta(input: &Value) -> (i32, i32) {
     let dy = input.get("dy").and_then(Value::as_i64).unwrap_or(0) as i32;
     (dx, dy)
 }
-
 
 #[async_trait]
 impl Tool for ComputerTool {
@@ -528,7 +526,10 @@ mod tests {
 
     #[test]
     fn scroll_direction_translates_to_delta() {
-        assert_eq!(scroll_delta(&json!({ "direction": "up", "amount": 5 })), (0, -5));
+        assert_eq!(
+            scroll_delta(&json!({ "direction": "up", "amount": 5 })),
+            (0, -5)
+        );
         assert_eq!(
             scroll_delta(&json!({ "direction": "down", "amount": 2 })),
             (0, 2)
@@ -584,7 +585,10 @@ mod tests {
 
     #[test]
     fn notification_strings_are_byte_faithful() {
-        assert_eq!(NOTIFY_ENTER_ESC, "Claude is using your computer · press Esc to stop");
+        assert_eq!(
+            NOTIFY_ENTER_ESC,
+            "Claude is using your computer · press Esc to stop"
+        );
         assert_eq!(
             NOTIFY_ENTER_CTRL_C,
             "Claude is using your computer · press Ctrl+C to stop"

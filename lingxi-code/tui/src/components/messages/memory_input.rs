@@ -17,8 +17,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Pinned saving-acknowledgement line (first of claude-code's sample set
 /// `['Got it.', 'Good to know.', 'Noted.']`; pinned for snapshot determinism).

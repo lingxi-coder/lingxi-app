@@ -150,9 +150,15 @@ impl RolloutRecorderParams {
 
 enum RolloutCmd {
     AddItems(Vec<RolloutItem>),
-    Persist { ack: oneshot::Sender<std::io::Result<()>> },
-    Flush { ack: oneshot::Sender<std::io::Result<()>> },
-    Shutdown { ack: oneshot::Sender<std::io::Result<()>> },
+    Persist {
+        ack: oneshot::Sender<std::io::Result<()>>,
+    },
+    Flush {
+        ack: oneshot::Sender<std::io::Result<()>>,
+    },
+    Shutdown {
+        ack: oneshot::Sender<std::io::Result<()>>,
+    },
 }
 
 /// Observable state for the background rollout writer task.
@@ -221,9 +227,8 @@ impl RolloutRecorder {
 
                 let timestamp = started_at.to_rfc3339_opts(SecondsFormat::Millis, true);
 
-                let context_window = initial_window_id.map(|window_id| {
-                    serde_json::json!({ "window_id": window_id })
-                });
+                let context_window = initial_window_id
+                    .map(|window_id| serde_json::json!({ "window_id": window_id }));
 
                 let session_meta = SessionMeta {
                     session_id,
@@ -238,8 +243,7 @@ impl RolloutRecorder {
                     agent_role: None,
                     agent_path: None,
                     model_provider: Some(config.model_provider_id().to_string()),
-                    memory_mode: (!config.generate_memories())
-                        .then(|| "disabled".to_string()),
+                    memory_mode: (!config.generate_memories()).then(|| "disabled".to_string()),
                     context_window,
                     source,
                     extra: serde_json::Map::new(),
@@ -350,9 +354,9 @@ impl RolloutRecorder {
                 })
             })?;
         rx.await.map_err(|e| {
-            self.writer_task.terminal_failure().unwrap_or_else(|| {
-                IoError::other(format!("failed waiting for rollout flush: {e}"))
-            })
+            self.writer_task
+                .terminal_failure()
+                .unwrap_or_else(|| IoError::other(format!("failed waiting for rollout flush: {e}")))
         })?
     }
 
@@ -452,7 +456,9 @@ impl RolloutRecorder {
             })??,
             Err(e) => {
                 if let Some(err) = self.writer_task.terminal_failure() {
-                    warn!("failed to send rollout shutdown command because writer task failed: {err}");
+                    warn!(
+                        "failed to send rollout shutdown command because writer task failed: {err}"
+                    );
                     return Err(err);
                 }
                 warn!("failed to send rollout shutdown command: {e}");
@@ -476,8 +482,7 @@ fn strip_legacy_ghost_snapshot_rollout_line(value: &mut Value) -> bool {
                 .and_then(|payload| payload.get_mut("replacement_history"))
                 .and_then(Value::as_array_mut)
             {
-                replacement_history
-                    .retain(|item| !is_legacy_ghost_snapshot_response_item(item));
+                replacement_history.retain(|item| !is_legacy_ghost_snapshot_response_item(item));
             }
             false
         }

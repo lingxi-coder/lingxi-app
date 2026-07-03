@@ -24,10 +24,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig, OrchestratorErr
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
-fn build_orch(
-    api: Arc<MockApiClient>,
-    output: Arc<MockOutputStream>,
-) -> ConversationOrchestrator {
+fn build_orch(api: Arc<MockApiClient>, output: Arc<MockOutputStream>) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api,
@@ -56,7 +53,10 @@ async fn terminal_429_with_limits_context_surfaces_composed_copy() {
     let output = Arc::new(MockOutputStream::new());
     let orch = build_orch(api, output);
 
-    let err = orch.run_turn("hello").await.expect_err("turn must die on 429");
+    let err = orch
+        .run_turn("hello")
+        .await
+        .expect_err("turn must die on 429");
     assert!(
         matches!(err, OrchestratorError::RateLimitRejected { .. }),
         "terminal 429 with limits context must map to RateLimitRejected, got {err:?}"
@@ -82,7 +82,10 @@ async fn terminal_429_without_limits_context_keeps_generic_copy() {
     let output = Arc::new(MockOutputStream::new());
     let orch = build_orch(api, output);
 
-    let err = orch.run_turn("hello").await.expect_err("turn must die on 429");
+    let err = orch
+        .run_turn("hello")
+        .await
+        .expect_err("turn must die on 429");
     assert!(
         matches!(
             err,

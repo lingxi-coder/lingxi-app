@@ -76,10 +76,12 @@ impl InitialHistory {
     pub fn forked_from_id(&self) -> Option<ThreadId> {
         match self {
             InitialHistory::New | InitialHistory::Cleared => None,
-            InitialHistory::Resumed(resumed) => resumed.history.iter().find_map(|item| match item {
-                RolloutItem::SessionMeta(meta_line) => meta_line.meta.forked_from_id,
-                _ => None,
-            }),
+            InitialHistory::Resumed(resumed) => {
+                resumed.history.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta_line) => meta_line.meta.forked_from_id,
+                    _ => None,
+                })
+            }
             InitialHistory::Forked(items) => items.iter().find_map(|item| match item {
                 RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.id),
                 _ => None,
@@ -141,7 +143,8 @@ impl InitialHistory {
 
     /// Session source, only for a resumed history (codex parity).
     pub fn get_resumed_session_source(&self) -> Option<SessionSource> {
-        self.get_resumed_session_meta().map(|meta| meta.source.clone())
+        self.get_resumed_session_meta()
+            .map(|meta| meta.source.clone())
     }
 
     fn get_session_meta(&self) -> Option<&SessionMeta> {

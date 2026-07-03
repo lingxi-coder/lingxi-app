@@ -9,8 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use iocraft::prelude::*;
 use crate::render_iocraft::StyleColorIocraftExt;
+use iocraft::prelude::*;
 use protocol::ToolUseId;
 
 use crate::theme::TuiTheme;
@@ -356,7 +356,13 @@ mod tests {
         // (ma-02) claude-code `ToolUseLoader`: dim unresolved / green success /
         // red error. The three states map to three distinct theme colors.
         assert_eq!(resolution_dot_color(None), TuiTheme::DIM.to_iocraft());
-        assert_eq!(resolution_dot_color(Some(false)), TuiTheme::SUCCESS.to_iocraft());
-        assert_eq!(resolution_dot_color(Some(true)), TuiTheme::ERROR.to_iocraft());
+        assert_eq!(
+            resolution_dot_color(Some(false)),
+            TuiTheme::SUCCESS.to_iocraft()
+        );
+        assert_eq!(
+            resolution_dot_color(Some(true)),
+            TuiTheme::ERROR.to_iocraft()
+        );
     }
 }

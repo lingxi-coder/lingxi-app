@@ -94,9 +94,7 @@ pub fn mint_leaf_cert(ca: &MitmCa, hostname: &str) -> Result<Leaf, LeafError> {
     params.serial_number = Some(SerialNumber::from(random_serial()));
     params.not_before = not_before;
     params.not_after = clamp_validity(ca, not_before);
-    params
-        .distinguished_name
-        .push(DnType::CommonName, hostname);
+    params.distinguished_name.push(DnType::CommonName, hostname);
     // Explicit `cA:false` (critical) — matches the TS `basicConstraints cA:false`.
     // (rcgen's ExplicitNoCa also emits a leaf SKI; harmless and does not affect
     // chain verification — see module note / report.)
@@ -172,7 +170,9 @@ pub fn server_config_for(
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
-        .map_err(|err| LeafError::Config(format!("[mitm-leaf] ServerConfig build failed: {err}")))?;
+        .map_err(|err| {
+            LeafError::Config(format!("[mitm-leaf] ServerConfig build failed: {err}"))
+        })?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let arc = Arc::new(config);
@@ -212,7 +212,9 @@ pub fn certified_key_for(ca: &MitmCa, hostname: &str) -> Result<Arc<CertifiedKey
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| LeafError::Config(format!("[mitm-leaf] cert parse failed: {err}")))?;
     if cert_chain.is_empty() {
-        return Err(LeafError::Config("[mitm-leaf] empty cert chain".to_string()));
+        return Err(LeafError::Config(
+            "[mitm-leaf] empty cert chain".to_string(),
+        ));
     }
 
     let mut key_reader = std::io::BufReader::new(leaf.key_pem.as_bytes());
@@ -325,10 +327,8 @@ fn random_serial() -> Vec<u8> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        let seed = now
-            .as_nanos()
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ u128::from(std::process::id());
+        let seed =
+            now.as_nanos().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u128::from(std::process::id());
         bytes.copy_from_slice(&seed.to_be_bytes());
     }
     bytes[0] &= 0x7f;
@@ -382,9 +382,10 @@ mod tests {
         let san = cert.subject_alternative_name().unwrap().unwrap();
         let names: Vec<_> = san.value.general_names.iter().collect();
         assert!(
-            names
-                .iter()
-                .any(|gn| matches!(gn, x509_parser::extensions::GeneralName::DNSName("example.com"))),
+            names.iter().any(|gn| matches!(
+                gn,
+                x509_parser::extensions::GeneralName::DNSName("example.com")
+            )),
             "SAN must be DNS:example.com, got {names:?}"
         );
 
@@ -405,7 +406,10 @@ mod tests {
         let plus_99d = now + 99 * 24 * 3600 + 60; // +60s slack
         assert!(not_after <= plus_99d, "leaf notAfter must be <= now+99d");
         let ca_not_after = ca_cert.validity().not_after.timestamp();
-        assert!(not_after <= ca_not_after, "leaf notAfter must be <= CA notAfter");
+        assert!(
+            not_after <= ca_not_after,
+            "leaf notAfter must be <= CA notAfter"
+        );
 
         // No authorityKeyIdentifier.
         assert!(
@@ -473,9 +477,8 @@ mod tests {
 
         // Split the chain: end-entity + intermediates (here: the CA, sent in chain).
         let mut rd = std::io::BufReader::new(leaf.cert_pem.as_bytes());
-        let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut rd)
-            .map(|c| c.unwrap())
-            .collect();
+        let chain: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut rd).map(|c| c.unwrap()).collect();
         let (end_entity, intermediates) = chain.split_first().unwrap();
 
         let server_name = ServerName::try_from("secure.example").unwrap();
@@ -484,19 +487,19 @@ mod tests {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap(),
         );
-        let result = verifier.verify_server_cert(
-            end_entity,
-            intermediates,
-            &server_name,
-            &[],
-            now,
+        let result = verifier.verify_server_cert(end_entity, intermediates, &server_name, &[], now);
+        assert!(
+            result.is_ok(),
+            "CA-trusting verifier must accept the leaf: {result:?}"
         );
-        assert!(result.is_ok(), "CA-trusting verifier must accept the leaf: {result:?}");
 
         // Negative control: the same leaf for a DIFFERENT hostname is rejected.
         let wrong_name = ServerName::try_from("not-the-host.example").unwrap();
         let bad = verifier.verify_server_cert(end_entity, intermediates, &wrong_name, &[], now);
-        assert!(bad.is_err(), "verifier must reject the leaf for a non-matching host");
+        assert!(
+            bad.is_err(),
+            "verifier must reject the leaf for a non-matching host"
+        );
 
         dispose_mitm_ca(&ca);
     }
@@ -522,7 +525,10 @@ mod tests {
         );
         // Cached: identical Arc on the second call.
         let ck2 = certified_key_for(&ca, "resolve.example").unwrap();
-        assert!(Arc::ptr_eq(&ck, &ck2), "CertifiedKey must be cached per host");
+        assert!(
+            Arc::ptr_eq(&ck, &ck2),
+            "CertifiedKey must be cached per host"
+        );
         dispose_mitm_ca(&ca);
     }
 

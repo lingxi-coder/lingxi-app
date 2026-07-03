@@ -98,7 +98,9 @@ fn validate_at(value: &Value, schema: &Value, path: &str, errors: &mut Vec<Strin
     // `enum`
     if let Some(Value::Array(allowed)) = obj.get("enum") {
         if !allowed.iter().any(|a| a == value) {
-            errors.push(format!("{path}: value is not one of the allowed enum values"));
+            errors.push(format!(
+                "{path}: value is not one of the allowed enum values"
+            ));
         }
     }
 
@@ -118,7 +120,9 @@ fn validate_at(value: &Value, schema: &Value, path: &str, errors: &mut Vec<Strin
                 match props.and_then(|p| p.get(k)) {
                     Some(subschema) => validate_at(v, subschema, &format!("{path}.{k}"), errors),
                     None if no_additional => {
-                        errors.push(format!("{path}: additional property \"{k}\" is not allowed"));
+                        errors.push(format!(
+                            "{path}: additional property \"{k}\" is not allowed"
+                        ));
                     }
                     None => {}
                 }
@@ -216,7 +220,10 @@ mod tests {
         let schema = json!({ "type": "object", "required": ["name"] });
         let errs = validate(&json!({}), &schema);
         assert_eq!(errs.len(), 1);
-        assert!(errs[0].contains("missing required property \"name\""), "{errs:?}");
+        assert!(
+            errs[0].contains("missing required property \"name\""),
+            "{errs:?}"
+        );
     }
 
     #[test]
@@ -227,7 +234,10 @@ mod tests {
         });
         let errs = validate(&json!({"age": "old"}), &schema);
         assert_eq!(errs.len(), 1);
-        assert!(errs[0].contains("$.age: expected type integer, got string"), "{errs:?}");
+        assert!(
+            errs[0].contains("$.age: expected type integer, got string"),
+            "{errs:?}"
+        );
     }
 
     #[test]
@@ -253,7 +263,10 @@ mod tests {
         assert!(validate(&json!([{"id": 1}, {"id": 2}]), &schema).is_empty());
         let errs = validate(&json!([{"id": 1}, {"name": "x"}]), &schema);
         assert_eq!(errs.len(), 1);
-        assert!(errs[0].contains("$[1]: missing required property \"id\""), "{errs:?}");
+        assert!(
+            errs[0].contains("$[1]: missing required property \"id\""),
+            "{errs:?}"
+        );
     }
 
     #[test]

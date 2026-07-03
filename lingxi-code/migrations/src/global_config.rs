@@ -100,8 +100,7 @@ pub fn global_config_path() -> Option<PathBuf> {
     if legacy.exists() {
         return Some(legacy);
     }
-    let base =
-        lingxi_config_dir_env().or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
+    let base = lingxi_config_dir_env().or_else(|| std::env::var_os("HOME").map(PathBuf::from))?;
     Some(base.join(branding::GLOBAL_CONFIG_FILE))
 }
 
@@ -206,11 +205,17 @@ fn write_atomic(path: &Path, map: &JsonMap) -> Result<(), GlobalConfigError> {
         Ok(link) => dir.join(link),
         Err(_) => path.to_path_buf(),
     };
-    let tmp = target.parent().unwrap_or_else(|| Path::new(".")).join(format!(
-        ".{}.tmp-{}",
-        target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-        std::process::id()
-    ));
+    let tmp = target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{}.tmp-{}",
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default(),
+            std::process::id()
+        ));
     write_tmp_and_rename(&tmp, &target, &serialized).map_err(|e| {
         // Best-effort tmp cleanup on ANY failure (`file.ts:445-451`): the
         // tmp may or may not have been created — a failed remove is ignored,
@@ -320,7 +325,9 @@ pub fn project_path_for_config(dir: &Path) -> String {
     let mut cur: Option<&Path> = Some(&resolved);
     while let Some(p) = cur {
         if p.join(".git").exists() {
-            return resolve_canonical_root(p).to_string_lossy().replace('\\', "/");
+            return resolve_canonical_root(p)
+                .to_string_lossy()
+                .replace('\\', "/");
         }
         cur = p.parent();
     }
@@ -378,7 +385,11 @@ fn resolve_worktree_main_root(git_root: &Path) -> Option<PathBuf> {
 /// `base` is always absolute: the canonicalized git root or a path resolved
 /// from it.)
 fn lexical_resolve(base: &Path, p: &Path) -> PathBuf {
-    let joined = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
     let mut out = PathBuf::new();
     for comp in joined.components() {
         match comp {
@@ -564,15 +575,24 @@ mod tests {
         // `randomBytes(32).toString('hex')` → 64 lowercase hex chars.
         assert_eq!(first.len(), 64, "device id is 64 hex chars");
         assert!(
-            first.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            first
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "device id is lowercase hex: {first}"
         );
         // Persisted under top-level `userID` and reused on the next call.
         assert_eq!(
-            read_map(&path).unwrap().get("userID").and_then(Value::as_str),
+            read_map(&path)
+                .unwrap()
+                .get("userID")
+                .and_then(Value::as_str),
             Some(first.as_str())
         );
-        assert_eq!(get_or_create_user_id_at(&path), first, "stable across calls");
+        assert_eq!(
+            get_or_create_user_id_at(&path),
+            first,
+            "stable across calls"
+        );
     }
 
     #[test]
@@ -687,8 +707,10 @@ mod tests {
         assert_eq!(back["migrationVersion"], serde_json::json!(11));
         // preserve_order: original keys keep their relative order.
         let keys: Vec<&String> = back.keys().collect();
-        assert!(keys.iter().position(|k| *k == "zeta").unwrap()
-            < keys.iter().position(|k| *k == "alpha").unwrap());
+        assert!(
+            keys.iter().position(|k| *k == "zeta").unwrap()
+                < keys.iter().position(|k| *k == "alpha").unwrap()
+        );
     }
 
     #[test]
@@ -768,7 +790,13 @@ mod tests {
         let bare = t.project.join("loose");
         std::fs::create_dir_all(&bare).unwrap();
         let key2 = project_path_for_config(&bare);
-        assert_eq!(key2, bare.canonicalize().unwrap().to_string_lossy().replace('\\', "/"));
+        assert_eq!(
+            key2,
+            bare.canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
     }
 
     /// Simulated `git worktree add` layout: the worktree's key must be the
@@ -814,7 +842,10 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(
             sub.join(".git"),
-            format!("gitdir: {}\n", root.join("parent/.git/modules/sub").display()),
+            format!(
+                "gitdir: {}\n",
+                root.join("parent/.git/modules/sub").display()
+            ),
         )
         .unwrap();
         let key = project_path_for_config(&sub);
@@ -943,7 +974,10 @@ mod tests {
         .unwrap();
 
         // Link is still a symlink to the same target…
-        assert!(std::fs::symlink_metadata(&t.global).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&t.global)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_link(&t.global).unwrap(), real);
         // …and the TARGET file got the update (unknown keys preserved).
         let back = read_map(&real).unwrap();
@@ -1039,7 +1073,10 @@ mod tests {
             serde_json::json!(["Bash"])
         );
         // …a sibling PROJECT survives…
-        assert_eq!(back["projects"]["/other/project"]["x"], serde_json::json!(1));
+        assert_eq!(
+            back["projects"]["/other/project"]["x"],
+            serde_json::json!(1)
+        );
         // …and a top-level unknown key survives.
         assert_eq!(back["numStartups"], serde_json::json!(7));
     }
@@ -1082,7 +1119,9 @@ mod tests {
         let t = temp_config();
         let key = project_path_for_config(&t.project);
         seed_external_approved(&t.global, &key, true);
-        assert!(check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
+        assert!(check_has_lingxi_md_external_includes_approved(
+            &t.global, &t.project
+        ));
     }
 
     #[test]
@@ -1091,7 +1130,9 @@ mod tests {
         let key = project_path_for_config(&t.project);
         // Stored `false` must read as not-approved (matches only boolean `true`).
         seed_external_approved(&t.global, &key, false);
-        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(
+            &t.global, &t.project
+        ));
     }
 
     #[test]
@@ -1103,7 +1144,9 @@ mod tests {
         std::fs::create_dir_all(&child).unwrap();
         let parent_key = project_path_for_config(&t.project);
         seed_external_approved(&t.global, &parent_key, true);
-        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &child));
+        assert!(!check_has_lingxi_md_external_includes_approved(
+            &t.global, &child
+        ));
     }
 
     #[test]
@@ -1114,17 +1157,23 @@ mod tests {
             r#"{"projects":{"/some/other/proj":{"hasLingxiMdExternalIncludesApproved":true}}}"#,
         )
         .unwrap();
-        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(
+            &t.global, &t.project
+        ));
     }
 
     #[test]
     fn external_includes_check_corrupt_or_missing_is_false() {
         let t = temp_config();
         // Missing file → false (fail-safe to local-only).
-        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(
+            &t.global, &t.project
+        ));
         // Corrupt file → false, no panic.
         std::fs::write(&t.global, "{ broken").unwrap();
-        assert!(!check_has_lingxi_md_external_includes_approved(&t.global, &t.project));
+        assert!(!check_has_lingxi_md_external_includes_approved(
+            &t.global, &t.project
+        ));
     }
 
     /// Session-level (in-memory) trust short-circuits the disk check —
@@ -1193,7 +1242,10 @@ mod tests {
             !check_has_trust_dialog_accepted(&t.global, &t.project),
             "home-dir accept must NOT persist trust to disk"
         );
-        assert!(!t.global.exists(), "no global config file should be written");
+        assert!(
+            !t.global.exists(),
+            "no global config file should be written"
+        );
 
         // Reset so the process-global does not leak.
         set_session_trust_accepted(false);
@@ -1220,6 +1272,9 @@ mod tests {
             check_has_trust_dialog_accepted(&t.global, &t.project),
             "non-home accept must persist trust to disk"
         );
-        assert!(t.global.exists(), "non-home accept must write the config file");
+        assert!(
+            t.global.exists(),
+            "non-home accept must write the config file"
+        );
     }
 }

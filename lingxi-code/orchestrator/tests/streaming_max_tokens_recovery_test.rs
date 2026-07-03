@@ -37,7 +37,11 @@ fn turn_ending_with(idx: u32, stop_reason: &str) -> Vec<llm_client::LlmEvent> {
 
 fn build_orch(
     turns: Vec<Vec<llm_client::LlmEvent>>,
-) -> (Arc<MockStreamingApiClient>, Arc<MockOutputStream>, ConversationOrchestrator) {
+) -> (
+    Arc<MockStreamingApiClient>,
+    Arc<MockOutputStream>,
+    ConversationOrchestrator,
+) {
     let api = Arc::new(MockStreamingApiClient::with_turns(turns));
     let output = Arc::new(MockOutputStream::new());
     let orch = ConversationOrchestrator::new_with_streaming(
@@ -67,13 +71,12 @@ fn count_nudges(msgs: &[ConversationMessage]) -> usize {
 #[tokio::test]
 async fn streaming_max_tokens_then_end_turn_injects_one_nudge() {
     // Turn 1: max_tokens (→ nudge + continue). Turn 2: end_turn.
-    let (api, output, orch) =
-        build_orch(vec![turn_ending_with(1, "max_tokens"), turn_ending_with(2, "end_turn")]);
+    let (api, output, orch) = build_orch(vec![
+        turn_ending_with(1, "max_tokens"),
+        turn_ending_with(2, "end_turn"),
+    ]);
 
-    let outcome = orch
-        .run_turn_streaming("write a lot")
-        .await
-        .expect("ok");
+    let outcome = orch.run_turn_streaming("write a lot").await.expect("ok");
     match outcome {
         ConversationOutcome::EndTurn { turn_count, .. } => assert_eq!(turn_count, 2),
         _ => panic!("unexpected outcome"),
@@ -83,7 +86,11 @@ async fn streaming_max_tokens_then_end_turn_injects_one_nudge() {
     // already contain exactly one nudge (injected after turn 1's max_tokens).
     let calls = api.captured_calls().await;
     assert_eq!(calls.len(), 2, "two streaming turns");
-    assert_eq!(count_nudges(&calls[0].messages), 0, "turn 1 sees no nudge yet");
+    assert_eq!(
+        count_nudges(&calls[0].messages),
+        0,
+        "turn 1 sees no nudge yet"
+    );
     assert_eq!(count_nudges(&calls[1].messages), 1, "turn 2 sees the nudge");
 
     // The final emitted EndTurn carries `end_turn`, NOT `max_tokens`.

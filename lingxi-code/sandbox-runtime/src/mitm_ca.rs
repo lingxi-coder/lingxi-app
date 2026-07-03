@@ -126,9 +126,9 @@ pub enum MitmCaError {
 impl std::fmt::Display for MitmCaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OnlyOnePath => f.write_str(
-                "tlsTerminate: caCertPath and caKeyPath must be provided together",
-            ),
+            Self::OnlyOnePath => {
+                f.write_str("tlsTerminate: caCertPath and caKeyPath must be provided together")
+            }
             Self::Load(msg) | Self::Generate(msg) => f.write_str(msg),
         }
     }
@@ -219,14 +219,14 @@ fn load_ca(cert_path: &Path, key_path: &Path) -> Result<MitmCa, MitmCaError> {
     })?;
     // Re-encode to canonical PKCS#8 PEM so rcgen's KeyPair accepts it (the
     // on-disk form may be PKCS#1 "RSA PRIVATE KEY").
-    let pkcs8_pem = rsa_key
-        .to_pkcs8_pem(LineEnding::LF)
-        .map_err(|err| MitmCaError::Load(format!(
+    let pkcs8_pem = rsa_key.to_pkcs8_pem(LineEnding::LF).map_err(|err| {
+        MitmCaError::Load(format!(
             "tlsTerminate: failed to parse CA from {}: {err}",
             cert_path.display()
-        )))?;
-    let signing_key = KeyPair::from_pkcs8_pem_and_sign_algo(&pkcs8_pem, &PKCS_RSA_SHA256)
-        .map_err(|err| {
+        ))
+    })?;
+    let signing_key =
+        KeyPair::from_pkcs8_pem_and_sign_algo(&pkcs8_pem, &PKCS_RSA_SHA256).map_err(|err| {
             MitmCaError::Load(format!(
                 "tlsTerminate: failed to parse CA from {}: {err}",
                 cert_path.display()
@@ -338,10 +338,8 @@ fn random_serial() -> Vec<u8> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        let seed = now
-            .as_nanos()
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ u128::from(std::process::id());
+        let seed =
+            now.as_nanos().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u128::from(std::process::id());
         bytes.copy_from_slice(&seed.to_be_bytes());
     }
     bytes[0] &= 0x7f;
@@ -398,15 +396,19 @@ fn write_with_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<(), MitmCaErr
         .create_new(true)
         .mode(mode)
         .open(path)
-        .map_err(|err| MitmCaError::Generate(format!("[mitm-ca] write {} failed: {err}", path.display())))?;
-    f.write_all(bytes)
-        .map_err(|err| MitmCaError::Generate(format!("[mitm-ca] write {} failed: {err}", path.display())))
+        .map_err(|err| {
+            MitmCaError::Generate(format!("[mitm-ca] write {} failed: {err}", path.display()))
+        })?;
+    f.write_all(bytes).map_err(|err| {
+        MitmCaError::Generate(format!("[mitm-ca] write {} failed: {err}", path.display()))
+    })
 }
 
 #[cfg(not(unix))]
 fn write_with_mode(path: &Path, bytes: &[u8], _mode: u32) -> Result<(), MitmCaError> {
-    std::fs::write(path, bytes)
-        .map_err(|err| MitmCaError::Generate(format!("[mitm-ca] write {} failed: {err}", path.display())))
+    std::fs::write(path, bytes).map_err(|err| {
+        MitmCaError::Generate(format!("[mitm-ca] write {} failed: {err}", path.display()))
+    })
 }
 
 #[cfg(test)]
@@ -426,8 +428,16 @@ mod tests {
         assert!(ca.key_path.ends_with("ca.key"));
 
         // Files exist with the right modes.
-        let cert_mode = std::fs::metadata(&ca.cert_path).unwrap().permissions().mode() & 0o777;
-        let key_mode = std::fs::metadata(&ca.key_path).unwrap().permissions().mode() & 0o777;
+        let cert_mode = std::fs::metadata(&ca.cert_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let key_mode = std::fs::metadata(&ca.key_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(cert_mode, 0o644, "ca.crt must be 0644");
         assert_eq!(key_mode, 0o600, "ca.key must be 0600");
         let dir_mode = std::fs::metadata(ca.cert_path.parent().unwrap())
@@ -555,7 +565,10 @@ mod tests {
             ca_key_path: Some(key),
         })
         .unwrap_err();
-        assert!(err.to_string().contains("is not a PEM CERTIFICATE"), "got: {err}");
+        assert!(
+            err.to_string().contains("is not a PEM CERTIFICATE"),
+            "got: {err}"
+        );
     }
 
     /// A non-RSA (EC) CA key is rejected with the "must be RSA" message.

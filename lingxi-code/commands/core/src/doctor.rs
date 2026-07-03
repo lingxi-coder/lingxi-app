@@ -171,6 +171,9 @@ Doctor:
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = DoctorHandler::new(mock);
         assert_eq!(h.name(), "doctor");
-        assert_eq!(h.description(), "Diagnose and verify your LingXi installation and settings");
+        assert_eq!(
+            h.description(),
+            "Diagnose and verify your LingXi installation and settings"
+        );
     }
 }

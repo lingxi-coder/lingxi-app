@@ -251,12 +251,7 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// both surfaced as the optional `<result>` / `<usage>` notification sections
     /// (the binary `enqueueAgentNotification` always passes them when a result
     /// exists). Default no-op so existing mock handles compile unchanged.
-    async fn mark_rested(
-        &self,
-        _id: &str,
-        _result: Option<String>,
-        _usage: Option<AgentRunUsage>,
-    ) {
+    async fn mark_rested(&self, _id: &str, _result: Option<String>, _usage: Option<AgentRunUsage>) {
     }
 
     /// Drain the terminal tasks that have NOT yet been surfaced to the model,

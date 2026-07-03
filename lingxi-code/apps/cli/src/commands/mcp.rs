@@ -177,13 +177,23 @@ pub struct AddArgs {
     // claude's full accepted set (local/user/project/dynamic/enterprise/claudeai/
     // managed/agent) is recognized before the writable-scope check. Validated in
     // `run_add` via [`parse_add_scope`].
-    #[arg(short = 's', long = "scope", value_name = "scope", default_value = "local")]
+    #[arg(
+        short = 's',
+        long = "scope",
+        value_name = "scope",
+        default_value = "local"
+    )]
     pub scope: String,
     /// Transport type (stdio, sse, http). Defaults to stdio if not specified.
     // Raw string (not a `ValueEnum`) so `streamable-http` is accepted as an
     // `http` alias and an invalid value yields claude's exact `Invalid transport
     // type: …` message. Validated in `run_add` via [`parse_add_transport`].
-    #[arg(short = 't', long = "transport", value_name = "transport", default_value = "stdio")]
+    #[arg(
+        short = 't',
+        long = "transport",
+        value_name = "transport",
+        default_value = "stdio"
+    )]
     pub transport: String,
 }
 
@@ -191,7 +201,12 @@ pub struct AddArgs {
 #[derive(Debug, Clone, Args)]
 pub struct AddFromClaudeDesktopArgs {
     /// Configuration scope (local, user, or project)
-    #[arg(short = 's', long = "scope", value_name = "scope", default_value = "local")]
+    #[arg(
+        short = 's',
+        long = "scope",
+        value_name = "scope",
+        default_value = "local"
+    )]
     pub scope: Scope,
 }
 
@@ -211,7 +226,12 @@ pub struct AddJsonArgs {
     #[arg(long = "client-secret")]
     pub client_secret: bool,
     /// Configuration scope (local, user, or project)
-    #[arg(short = 's', long = "scope", value_name = "scope", default_value = "local")]
+    #[arg(
+        short = 's',
+        long = "scope",
+        value_name = "scope",
+        default_value = "local"
+    )]
     pub scope: Scope,
 }
 
@@ -367,19 +387,29 @@ fn build_add_entry(a: &AddArgs, transport: Transport) -> Result<serde_json::Valu
             obj.insert(
                 "args".into(),
                 serde_json::Value::Array(
-                    a.args.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                    a.args
+                        .iter()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .collect(),
                 ),
             );
             obj.insert(
                 "env".into(),
                 serde_json::Value::Object(
-                    env_map.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect(),
+                    env_map
+                        .into_iter()
+                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                        .collect(),
                 ),
             );
             Ok(serde_json::Value::Object(obj))
         }
         Transport::Sse | Transport::Http => {
-            let ty = if matches!(transport, Transport::Sse) { "sse" } else { "http" };
+            let ty = if matches!(transport, Transport::Sse) {
+                "sse"
+            } else {
+                "http"
+            };
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), ty.into());
             obj.insert("url".into(), a.command_or_url.clone().into());
@@ -405,8 +435,16 @@ fn build_add_entry(a: &AddArgs, transport: Transport) -> Result<serde_json::Valu
 /// managed/agent) are rejected with `Cannot add MCP server to scope: …`; an
 /// unrecognized value with `Invalid scope: …. Must be one of: …`.
 fn parse_add_scope(s: &str) -> Result<Scope, String> {
-    const RECOGNIZED: [&str; 8] =
-        ["local", "user", "project", "dynamic", "enterprise", "claudeai", "managed", "agent"];
+    const RECOGNIZED: [&str; 8] = [
+        "local",
+        "user",
+        "project",
+        "dynamic",
+        "enterprise",
+        "claudeai",
+        "managed",
+        "agent",
+    ];
     match s {
         "local" => Ok(Scope::Local),
         "user" => Ok(Scope::User),
@@ -503,7 +541,11 @@ fn run_add(a: &AddArgs) -> i32 {
                     );
                 }
                 Transport::Sse | Transport::Http => {
-                    let kind = if matches!(transport, Transport::Sse) { "SSE" } else { "HTTP" };
+                    let kind = if matches!(transport, Transport::Sse) {
+                        "SSE"
+                    } else {
+                        "HTTP"
+                    };
                     // claude displays the URL through `kme()`: clear userinfo/query/
                     // fragment then strip a trailing slash. This redacts any
                     // `user:secret@` credentials and normalizes the byte output;
@@ -527,7 +569,11 @@ fn run_add(a: &AddArgs) -> i32 {
         }
         Ok(WriteOutcome::AlreadyExists) => {
             // claude routes the duplicate as an error: stderr + exit 1.
-            eprintln!("MCP server {} already exists in {}", a.name, scope.exists_suffix());
+            eprintln!(
+                "MCP server {} already exists in {}",
+                a.name,
+                scope.exists_suffix()
+            );
             RUNTIME_ERROR
         }
         Err(msg) => {
@@ -607,11 +653,20 @@ fn run_add_json(a: &AddJsonArgs) -> i32 {
 
     match write_server(&a.name, &entry, a.scope) {
         Ok(WriteOutcome::Added(_path)) => {
-            println!("Added {} MCP server {} to {} config", ty, a.name, a.scope.label());
+            println!(
+                "Added {} MCP server {} to {} config",
+                ty,
+                a.name,
+                a.scope.label()
+            );
             SUCCESS
         }
         Ok(WriteOutcome::AlreadyExists) => {
-            eprintln!("MCP server {} already exists in {}", a.name, a.scope.exists_suffix());
+            eprintln!(
+                "MCP server {} already exists in {}",
+                a.name,
+                a.scope.exists_suffix()
+            );
             RUNTIME_ERROR
         }
         Err(msg) => {
@@ -631,7 +686,11 @@ enum WriteOutcome {
 
 /// Write a server entry into the chosen scope's config file, returning whether
 /// it was newly added or already present.
-fn write_server(name: &str, entry: &serde_json::Value, scope: Scope) -> Result<WriteOutcome, String> {
+fn write_server(
+    name: &str,
+    entry: &serde_json::Value,
+    scope: Scope,
+) -> Result<WriteOutcome, String> {
     match scope {
         Scope::User => write_user_server(name, entry),
         Scope::Local => write_local_server(name, entry),
@@ -641,7 +700,8 @@ fn write_server(name: &str, entry: &serde_json::Value, scope: Scope) -> Result<W
 
 /// User scope: `~/.lingxi.json` top-level `mcpServers.<name>`.
 fn write_user_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutcome, String> {
-    let path = global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
+    let path =
+        global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
     let map = migrations::global_config::read_map(&path).map_err(|e| e.to_string())?;
     if map
         .get("mcpServers")
@@ -667,9 +727,11 @@ fn write_user_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutco
 
 /// Local scope: `~/.lingxi.json` `projects.<key>.mcpServers.<name>`.
 fn write_local_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutcome, String> {
-    let path = global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
+    let path =
+        global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
     let key = project_key().ok_or_else(|| "Could not resolve project directory".to_string())?;
-    let existing = migrations::global_config::get_project_config(&path, &key).map_err(|e| e.to_string())?;
+    let existing =
+        migrations::global_config::get_project_config(&path, &key).map_err(|e| e.to_string())?;
     if existing
         .get("mcpServers")
         .and_then(serde_json::Value::as_object)
@@ -694,7 +756,8 @@ fn write_local_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutc
 
 /// Project scope: `<cwd>/.mcp.json` `mcpServers.<name>`.
 fn write_project_server(name: &str, entry: &serde_json::Value) -> Result<WriteOutcome, String> {
-    let path = project_mcp_json_path().ok_or_else(|| "Could not resolve project directory".to_string())?;
+    let path =
+        project_mcp_json_path().ok_or_else(|| "Could not resolve project directory".to_string())?;
     let mut root = read_json_object(&path)?;
     let already = root
         .get("mcpServers")
@@ -724,12 +787,20 @@ fn run_remove(a: &RemoveArgs) -> i32 {
     if let Some(scope) = a.scope {
         return match remove_server(&a.name, scope) {
             Ok(Some(path)) => {
-                println!("Removed MCP server {} from {} config", a.name, scope.label());
+                println!(
+                    "Removed MCP server {} from {} config",
+                    a.name,
+                    scope.label()
+                );
                 print_file_modified(scope, &path);
                 SUCCESS
             }
             Ok(None) => {
-                eprintln!("No MCP server named \"{}\" {}", a.name, scope.not_found_suffix());
+                eprintln!(
+                    "No MCP server named \"{}\" {}",
+                    a.name,
+                    scope.not_found_suffix()
+                );
                 RUNTIME_ERROR
             }
             Err(msg) => {
@@ -754,7 +825,11 @@ fn run_remove(a: &RemoveArgs) -> i32 {
             let scope = *scope;
             match remove_server(&a.name, scope) {
                 Ok(Some(path)) => {
-                    println!("Removed MCP server \"{}\" from {} config", a.name, scope.label());
+                    println!(
+                        "Removed MCP server \"{}\" from {} config",
+                        a.name,
+                        scope.label()
+                    );
                     print_file_modified(scope, &path);
                     SUCCESS
                 }
@@ -773,7 +848,11 @@ fn run_remove(a: &RemoveArgs) -> i32 {
         scopes => {
             eprintln!("MCP server \"{}\" exists in multiple scopes:", a.name);
             for &scope in scopes {
-                eprintln!("  - {} ({})", scope_remove_label(scope), scope_config_path_desc(scope));
+                eprintln!(
+                    "  - {} ({})",
+                    scope_remove_label(scope),
+                    scope_config_path_desc(scope)
+                );
             }
             eprintln!();
             eprintln!("To remove from a specific scope, use:");
@@ -801,8 +880,12 @@ fn scope_remove_label(scope: Scope) -> &'static str {
 /// Config-file path description for the multi-scope disambiguation list
 /// (matches claude's `describeMcpConfigFilePath`).
 fn scope_config_path_desc(scope: Scope) -> String {
-    let cwd = std::env::current_dir().map(|c| c.display().to_string()).unwrap_or_default();
-    let global = global_config_path().map(|p| p.display().to_string()).unwrap_or_default();
+    let cwd = std::env::current_dir()
+        .map(|c| c.display().to_string())
+        .unwrap_or_default();
+    let global = global_config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     match scope {
         Scope::User => global,
         Scope::Project => format!("{cwd}/.mcp.json"),
@@ -815,8 +898,8 @@ fn scope_config_path_desc(scope: Scope) -> String {
 fn remove_server(name: &str, scope: Scope) -> Result<Option<PathBuf>, String> {
     match scope {
         Scope::User => {
-            let path =
-                global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
+            let path = global_config_path()
+                .ok_or_else(|| "Could not resolve home directory".to_string())?;
             let map = migrations::global_config::read_map(&path).map_err(|e| e.to_string())?;
             let present = map
                 .get("mcpServers")
@@ -836,11 +919,12 @@ fn remove_server(name: &str, scope: Scope) -> Result<Option<PathBuf>, String> {
             Ok(Some(path))
         }
         Scope::Local => {
-            let path =
-                global_config_path().ok_or_else(|| "Could not resolve home directory".to_string())?;
-            let key = project_key().ok_or_else(|| "Could not resolve project directory".to_string())?;
-            let existing =
-                migrations::global_config::get_project_config(&path, &key).map_err(|e| e.to_string())?;
+            let path = global_config_path()
+                .ok_or_else(|| "Could not resolve home directory".to_string())?;
+            let key =
+                project_key().ok_or_else(|| "Could not resolve project directory".to_string())?;
+            let existing = migrations::global_config::get_project_config(&path, &key)
+                .map_err(|e| e.to_string())?;
             let present = existing
                 .get("mcpServers")
                 .and_then(serde_json::Value::as_object)
@@ -859,8 +943,8 @@ fn remove_server(name: &str, scope: Scope) -> Result<Option<PathBuf>, String> {
             Ok(Some(path))
         }
         Scope::Project => {
-            let path =
-                project_mcp_json_path().ok_or_else(|| "Could not resolve project directory".to_string())?;
+            let path = project_mcp_json_path()
+                .ok_or_else(|| "Could not resolve project directory".to_string())?;
             if !path.exists() {
                 return Ok(None);
             }
@@ -945,7 +1029,10 @@ fn run_get(a: &GetArgs) -> i32 {
     }
     println!();
     let scope_flag = scope_flag_label(cfg.scope);
-    println!("To remove this server, run: claude mcp remove {} -s {scope_flag}", cfg.name);
+    println!(
+        "To remove this server, run: claude mcp remove {} -s {scope_flag}",
+        cfg.name
+    );
     SUCCESS
 }
 
@@ -958,7 +1045,11 @@ fn load_all_servers() -> Vec<mcp::connection::McpServerConfig> {
     let project_mcp = cwd.join(".mcp.json");
     let Some(global) = global_config_path() else {
         // No home: only a project .mcp.json could exist.
-        return mcp::json_config::load_mcp_servers(&project_mcp, &PathBuf::from("/nonexistent"), &cwd);
+        return mcp::json_config::load_mcp_servers(
+            &project_mcp,
+            &PathBuf::from("/nonexistent"),
+            &cwd,
+        );
     };
     mcp::json_config::load_mcp_servers(&project_mcp, &global, &cwd)
 }
@@ -981,7 +1072,10 @@ fn not_found_message(name: &str) -> String {
     const CAP: usize = 8;
     let shown = names[..names.len().min(CAP)].join(", ");
     let suffix = if names.len() > CAP {
-        format!(" (and {} more — run `claude mcp list` to see all)", names.len() - CAP)
+        format!(
+            " (and {} more — run `claude mcp list` to see all)",
+            names.len() - CAP
+        )
     } else {
         String::new()
     };
@@ -1027,7 +1121,11 @@ fn project_server_approval() -> (Vec<String>, Vec<String>) {
     let str_array = |cfg: &serde_json::Map<String, serde_json::Value>, key: &str| -> Vec<String> {
         cfg.get(key)
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let (enable_all, enabled, disabled) = global_config_path()
@@ -1035,7 +1133,9 @@ fn project_server_approval() -> (Vec<String>, Vec<String>) {
         .and_then(|(p, k)| migrations::global_config::get_project_config(&p, &k).ok())
         .map(|cfg| {
             (
-                cfg.get("enableAllProjectMcpServers").and_then(|v| v.as_bool()).unwrap_or(false),
+                cfg.get("enableAllProjectMcpServers")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 str_array(&cfg, "enabledMcpjsonServers"),
                 str_array(&cfg, "disabledMcpjsonServers"),
             )
@@ -1078,7 +1178,10 @@ fn not_found_message_get(name: &str) -> String {
     const CAP: usize = 8;
     let shown = names[..names.len().min(CAP)].join(", ");
     let suffix = if names.len() > CAP {
-        format!(" (and {} more — run `claude mcp list` to see all)", names.len() - CAP)
+        format!(
+            " (and {} more — run `claude mcp list` to see all)",
+            names.len() - CAP
+        )
     } else {
         String::new()
     };
@@ -1101,28 +1204,48 @@ fn scopes_containing(name: &str) -> Vec<Scope> {
 fn scope_contains_server(name: &str, scope: Scope) -> bool {
     match scope {
         Scope::User => {
-            let Some(path) = global_config_path() else { return false };
+            let Some(path) = global_config_path() else {
+                return false;
+            };
             migrations::global_config::read_map(&path)
                 .ok()
-                .and_then(|m| m.get("mcpServers").and_then(serde_json::Value::as_object).cloned())
+                .and_then(|m| {
+                    m.get("mcpServers")
+                        .and_then(serde_json::Value::as_object)
+                        .cloned()
+                })
                 .is_some_and(|m| m.contains_key(name))
         }
         Scope::Local => {
-            let Some(path) = global_config_path() else { return false };
-            let Some(key) = project_key() else { return false };
+            let Some(path) = global_config_path() else {
+                return false;
+            };
+            let Some(key) = project_key() else {
+                return false;
+            };
             migrations::global_config::get_project_config(&path, &key)
                 .ok()
-                .and_then(|m| m.get("mcpServers").and_then(serde_json::Value::as_object).cloned())
+                .and_then(|m| {
+                    m.get("mcpServers")
+                        .and_then(serde_json::Value::as_object)
+                        .cloned()
+                })
                 .is_some_and(|m| m.contains_key(name))
         }
         Scope::Project => {
-            let Some(path) = project_mcp_json_path() else { return false };
+            let Some(path) = project_mcp_json_path() else {
+                return false;
+            };
             if !path.exists() {
                 return false;
             }
             read_json_object(&path)
                 .ok()
-                .and_then(|m| m.get("mcpServers").and_then(serde_json::Value::as_object).cloned())
+                .and_then(|m| {
+                    m.get("mcpServers")
+                        .and_then(serde_json::Value::as_object)
+                        .cloned()
+                })
                 .is_some_and(|m| m.contains_key(name))
         }
     }
@@ -1194,7 +1317,10 @@ fn run_reset_project_choices() -> i32 {
     let result = migrations::global_config::save_project_config(&path, &key, |mut proj| {
         proj.insert("enabledMcpjsonServers".into(), serde_json::json!([]));
         proj.insert("disabledMcpjsonServers".into(), serde_json::json!([]));
-        proj.insert("enableAllProjectMcpServers".into(), serde_json::json!(false));
+        proj.insert(
+            "enableAllProjectMcpServers".into(),
+            serde_json::json!(false),
+        );
         proj
     });
     match result {
@@ -1314,11 +1440,13 @@ fn redact_url_for_display(raw: &str) -> String {
 
 /// Read a JSON object from `path`; missing file ⇒ empty object. Errors on
 /// malformed JSON or a non-object root.
-fn read_json_object(path: &std::path::Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+fn read_json_object(
+    path: &std::path::Path,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     match std::fs::read(path) {
         Ok(bytes) => {
-            let value: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON in {}: {e}", path.display()))?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("invalid JSON in {}: {e}", path.display()))?;
             match value {
                 serde_json::Value::Object(m) => Ok(m),
                 _ => Err(format!("{} is not a JSON object", path.display())),
@@ -1397,7 +1525,10 @@ mod url_redaction_tests {
         assert_eq!(redact_url_for_display("https://host/"), "https://host");
         assert_eq!(redact_url_for_display("https://host"), "https://host");
         // Query/fragment alone are dropped; a non-trailing-slash path is kept.
-        assert_eq!(redact_url_for_display("http://h:8080/a/b?x=1"), "http://h:8080/a/b");
+        assert_eq!(
+            redact_url_for_display("http://h:8080/a/b?x=1"),
+            "http://h:8080/a/b"
+        );
         // userinfo with no path normalizes to just the host.
         assert_eq!(redact_url_for_display("https://u:p@host"), "https://host");
     }

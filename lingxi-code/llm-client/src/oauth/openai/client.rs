@@ -180,7 +180,8 @@ impl OpenAiOAuthClient {
         port: u16,
     ) -> Result<ExchangedTokens, OAuthError> {
         let redirect_uri = self.config.redirect_uri(port);
-        self.exchange_code_with_redirect(code, verifier, &redirect_uri).await
+        self.exchange_code_with_redirect(code, verifier, &redirect_uri)
+            .await
     }
 
     /// Exchange a code with an explicit `redirect_uri`.
@@ -202,7 +203,10 @@ impl OpenAiOAuthClient {
             method: HttpMethod::Post,
             url: self.config.token_url.clone(),
             headers: vec![
-                ("content-type".into(), "application/x-www-form-urlencoded".into()),
+                (
+                    "content-type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ),
                 ("accept".into(), "application/json".into()),
             ],
             body: Some(body),
@@ -278,7 +282,10 @@ impl OpenAiOAuthClient {
             method: HttpMethod::Post,
             url: self.config.token_url.clone(),
             headers: vec![
-                ("content-type".into(), "application/x-www-form-urlencoded".into()),
+                (
+                    "content-type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ),
                 ("accept".into(), "application/json".into()),
             ],
             body: Some(body),
@@ -371,13 +378,20 @@ mod exchange_tests {
         let client = client_with(http.clone(), 1_000);
 
         let tokens = client
-            .exchange_code_with_redirect("the-code", "the-verifier", "http://localhost:1455/auth/callback")
+            .exchange_code_with_redirect(
+                "the-code",
+                "the-verifier",
+                "http://localhost:1455/auth/callback",
+            )
             .await
             .expect("exchange ok");
 
         assert_eq!(tokens.access_token.expose_secret(), "acc-1");
         assert_eq!(
-            tokens.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
+            tokens
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().clone()),
             Some("ref-1".to_string())
         );
         // expires_at = clock.now() (1000s) + 3600s
@@ -429,7 +443,8 @@ mod exchange_tests {
         let http = MockHttp::new(vec![]);
         let cfg = OpenAiOAuthConfig::default();
         let client = OpenAiOAuthClient::new(cfg, http as Arc<dyn HttpTransport>);
-        let (url, _verifier, state) = client.build_authorize_url_with_redirect("http://localhost:1455/auth/callback");
+        let (url, _verifier, state) =
+            client.build_authorize_url_with_redirect("http://localhost:1455/auth/callback");
 
         assert!(url.contains("response_type=code"));
         assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
@@ -462,11 +477,15 @@ mod exchange_tests {
 
         let req = http.last_request().expect("request was made");
         let sent = req.body.as_deref().unwrap();
-        assert!(sent.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"));
+        assert!(
+            sent.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange")
+        );
         assert!(sent.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
         assert!(sent.contains("requested_token=openai-api-key"));
         assert!(sent.contains("subject_token=fake-id-token"));
-        assert!(sent.contains("subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token"));
+        assert!(
+            sent.contains("subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token")
+        );
     }
 
     #[tokio::test]

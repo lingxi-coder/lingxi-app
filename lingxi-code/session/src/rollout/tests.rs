@@ -5,8 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::metadata::{
-    builder_from_items, parse_timestamp_uuid_from_filename, plain_rollout_path,
-    rollout_date_parts,
+    builder_from_items, parse_timestamp_uuid_from_filename, plain_rollout_path, rollout_date_parts,
 };
 use super::policy::{is_persisted_rollout_item, persisted_rollout_items};
 use super::record::{
@@ -102,7 +101,10 @@ fn parse_timestamp_uuid_from_filename_basic() {
     let name = format!("rollout-2025-01-03T12-34-56-{uuid}.jsonl");
     let (ts, parsed_uuid) = parse_timestamp_uuid_from_filename(&name).expect("parse");
     assert_eq!(parsed_uuid, uuid);
-    assert_eq!(ts.format("%Y-%m-%dT%H:%M:%S").to_string(), "2025-01-03T12:34:56");
+    assert_eq!(
+        ts.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "2025-01-03T12:34:56"
+    );
 }
 
 #[test]

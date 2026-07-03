@@ -190,7 +190,10 @@ mod tests {
 
     #[test]
     fn profile_scope_detection() {
-        assert!(has_profile_scope(&scopes(&["user:inference", "user:profile"])));
+        assert!(has_profile_scope(&scopes(&[
+            "user:inference",
+            "user:profile"
+        ])));
         assert!(!has_profile_scope(&scopes(&["user:inference"])));
     }
 
@@ -235,7 +238,10 @@ mod tests {
                 subscription_type: Some(tier),
                 ..Default::default()
             };
-            assert!(!is_subscriber_tier(&state), "{tier:?} must not be a subscriber");
+            assert!(
+                !is_subscriber_tier(&state),
+                "{tier:?} must not be a subscriber"
+            );
         }
         for tier in [
             SubscriptionType::Pro,
@@ -294,8 +300,13 @@ mod tests {
         let body = r#"{"organization":{"organization_type":"claude_pro","uuid":"o1",
             "rate_limit_tier":"default_claude_pro","billing_type":"stripe_subscription",
             "has_extra_usage_enabled":true}}"#;
-        let transport: Arc<dyn HttpTransport> =
-            MockHttp::new(vec![("anthropic.com", Canned { status: 200, body: body.into() })]);
+        let transport: Arc<dyn HttpTransport> = MockHttp::new(vec![(
+            "anthropic.com",
+            Canned {
+                status: 200,
+                body: body.into(),
+            },
+        )]);
         let scopes = vec!["user:inference".to_string(), "user:profile".to_string()];
 
         let snap = resolve_subscription_snapshot("tok", &scopes, &transport)
@@ -321,8 +332,13 @@ mod tests {
     async fn resolve_skips_without_profile_scope() {
         use crate::oauth::anthropic::testsupport::{Canned, MockHttp};
         let body = r#"{"organization":{"organization_type":"claude_pro"}}"#;
-        let transport: Arc<dyn HttpTransport> =
-            MockHttp::new(vec![("anthropic.com", Canned { status: 200, body: body.into() })]);
+        let transport: Arc<dyn HttpTransport> = MockHttp::new(vec![(
+            "anthropic.com",
+            Canned {
+                status: 200,
+                body: body.into(),
+            },
+        )]);
         // No `user:profile` scope ⇒ `hasProfileScope` gate skips the fetch ⇒ None.
         let scopes = vec!["user:inference".to_string()];
         assert!(resolve_subscription_snapshot("tok", &scopes, &transport)

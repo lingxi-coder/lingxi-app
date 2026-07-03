@@ -7,12 +7,10 @@
 //! passed in, so the priority logic is exhaustively testable without env or
 //! IO. The caller (the CLI) reads the merged settings and process env.
 //!
-//! Documented omissions vs TS (ant-only / no-substrate in the external build):
+//! Documented omissions vs TS (no GrowthBook/Statsig substrate in this build):
 //! - Statsig `tengu_disable_bypass_permissions_mode` gate (and its
 //!   `"…disabled by your organization policy"` notice) — no Statsig substrate;
 //!   only the settings-disable notice is reachable.
-//! - `auto` / `TRANSCRIPT_CLASSIFIER` mode — classifier is ant-only; an
-//!   `"auto"` CLI value falls to `Default` exactly like TS in a non-ant build.
 //! - `LINGXI_REMOTE` filtering of settings `defaultMode` (CCR) — `LingXi`
 //!   has no CCR remote entrypoint; the `tengu_ccr_unsupported_default_mode_ignored`
 //!   event is not reproduced. The caller passes `default_mode` straight through.
@@ -33,20 +31,19 @@ pub struct CliModeSettings {
 }
 
 /// `permissionModeFromString` (`PermissionMode.ts:117-121`): the valid set is
-/// the five external modes; anything else (incl. ant-only `auto`/`bubble`) →
-/// `Default`.
+/// the five external modes plus `auto`; anything else (incl. internal `bubble`)
+/// → `Default`.
 #[must_use]
 pub fn permission_mode_from_cli_string(s: &str) -> PermissionMode {
-    let mode = match s {
+    match s {
         "default" => PermissionMode::Default,
         "plan" => PermissionMode::Plan,
         "acceptEdits" => PermissionMode::AcceptEdits,
         "bypassPermissions" => PermissionMode::BypassPermissions,
         "dontAsk" => PermissionMode::DontAsk,
+        "auto" => PermissionMode::Auto,
         _ => return PermissionMode::Default,
-    };
-    debug_assert!(mode.is_external());
-    mode
+    }
 }
 
 /// `initialPermissionModeFromCLI` (`permissionSetup.ts:689-812`): resolve the
@@ -89,25 +86,54 @@ mod tests {
     use crate::mode::PermissionMode;
 
     fn no_settings() -> CliModeSettings {
-        CliModeSettings { default_mode: None, bypass_disabled: false }
+        CliModeSettings {
+            default_mode: None,
+            bypass_disabled: false,
+        }
     }
 
     #[test]
     fn from_string_accepts_the_five_external_modes() {
-        assert_eq!(permission_mode_from_cli_string("default"), PermissionMode::Default);
-        assert_eq!(permission_mode_from_cli_string("plan"), PermissionMode::Plan);
-        assert_eq!(permission_mode_from_cli_string("acceptEdits"), PermissionMode::AcceptEdits);
-        assert_eq!(permission_mode_from_cli_string("bypassPermissions"), PermissionMode::BypassPermissions);
-        assert_eq!(permission_mode_from_cli_string("dontAsk"), PermissionMode::DontAsk);
+        assert_eq!(
+            permission_mode_from_cli_string("default"),
+            PermissionMode::Default
+        );
+        assert_eq!(
+            permission_mode_from_cli_string("plan"),
+            PermissionMode::Plan
+        );
+        assert_eq!(
+            permission_mode_from_cli_string("acceptEdits"),
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            permission_mode_from_cli_string("bypassPermissions"),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            permission_mode_from_cli_string("dontAsk"),
+            PermissionMode::DontAsk
+        );
     }
 
     #[test]
     fn from_string_unknown_falls_to_default() {
-        // TS permissionModeFromString: not in PERMISSION_MODES → 'default'.
-        // 'auto' is ant-only (TRANSCRIPT_CLASSIFIER) → not external here → default.
-        assert_eq!(permission_mode_from_cli_string("auto"), PermissionMode::Default);
-        assert_eq!(permission_mode_from_cli_string("bubble"), PermissionMode::Default);
-        assert_eq!(permission_mode_from_cli_string("garbage"), PermissionMode::Default);
+        assert_eq!(
+            permission_mode_from_cli_string("bubble"),
+            PermissionMode::Default
+        );
+        assert_eq!(
+            permission_mode_from_cli_string("garbage"),
+            PermissionMode::Default
+        );
+    }
+
+    #[test]
+    fn from_string_accepts_auto() {
+        assert_eq!(
+            permission_mode_from_cli_string("auto"),
+            PermissionMode::Auto
+        );
     }
 
     #[test]
@@ -132,27 +158,42 @@ mod tests {
 
     #[test]
     fn settings_default_mode_used_as_lowest_priority() {
-        let s = CliModeSettings { default_mode: Some(PermissionMode::AcceptEdits), bypass_disabled: false };
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::AcceptEdits),
+            bypass_disabled: false,
+        };
         let (mode, _) = initial_permission_mode_from_cli(None, false, &s);
         assert_eq!(mode, PermissionMode::AcceptEdits);
     }
 
     #[test]
     fn killswitch_skips_bypass_and_sets_notice() {
-        let s = CliModeSettings { default_mode: None, bypass_disabled: true };
+        let s = CliModeSettings {
+            default_mode: None,
+            bypass_disabled: true,
+        };
         let (mode, notice) = initial_permission_mode_from_cli(None, true, &s);
         assert_eq!(mode, PermissionMode::Default);
-        assert_eq!(notice.as_deref(), Some("Bypass permissions mode was disabled by settings"));
+        assert_eq!(
+            notice.as_deref(),
+            Some("Bypass permissions mode was disabled by settings")
+        );
     }
 
     #[test]
     fn killswitch_falls_through_to_next_valid_mode() {
         // skip → bypass (disabled, skipped+notice) then cli plan is valid → plan,
         // but notice is carried (TS keeps `notification` across the loop).
-        let s = CliModeSettings { default_mode: None, bypass_disabled: true };
+        let s = CliModeSettings {
+            default_mode: None,
+            bypass_disabled: true,
+        };
         let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, &s);
         assert_eq!(mode, PermissionMode::Plan);
-        assert_eq!(notice.as_deref(), Some("Bypass permissions mode was disabled by settings"));
+        assert_eq!(
+            notice.as_deref(),
+            Some("Bypass permissions mode was disabled by settings")
+        );
     }
 
     #[test]

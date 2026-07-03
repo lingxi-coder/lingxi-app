@@ -54,7 +54,9 @@ impl MockXaa {
         // IdP token-exchange (RFC 8693): returns an ID-JAG.
         if url.contains("idp.example.com/token") {
             assert!(
-                body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"),
+                body.contains(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"
+                ),
                 "IdP leg must use the token-exchange grant; body={body}"
             );
             assert!(body.contains("subject_token=the-id-token"));

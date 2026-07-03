@@ -36,11 +36,10 @@ pub use jsonl::{
 // into the `session` crate). Re-exported under the `rollout` module name to
 // avoid colliding with the byte-locked claude-code transcript surface above.
 pub use rollout::{
-    append_rollout_item_to_path, append_thread_name, builder_from_items,
-    find_thread_name_by_id, find_thread_names_by_ids, is_persisted_rollout_item,
-    parse_timestamp_uuid_from_filename, persisted_rollout_items, plain_rollout_path,
-    remove_thread_name_entries, rollout_date_parts, GitInfo, InitialHistory, ResumedHistory,
-    RolloutItem, RolloutLine, RolloutRecorder, RolloutRecorderParams,
-    SessionMeta as RolloutSessionMeta, SessionMetaLine, SessionSource, ThreadMetadataBuilder,
-    ARCHIVED_SESSIONS_SUBDIR, SESSIONS_SUBDIR,
+    append_rollout_item_to_path, append_thread_name, builder_from_items, find_thread_name_by_id,
+    find_thread_names_by_ids, is_persisted_rollout_item, parse_timestamp_uuid_from_filename,
+    persisted_rollout_items, plain_rollout_path, remove_thread_name_entries, rollout_date_parts,
+    GitInfo, InitialHistory, ResumedHistory, RolloutItem, RolloutLine, RolloutRecorder,
+    RolloutRecorderParams, SessionMeta as RolloutSessionMeta, SessionMetaLine, SessionSource,
+    ThreadMetadataBuilder, ARCHIVED_SESSIONS_SUBDIR, SESSIONS_SUBDIR,
 };

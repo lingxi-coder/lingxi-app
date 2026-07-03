@@ -57,12 +57,8 @@ mod tests {
 
     #[test]
     fn resume_short_alias_with_value() {
-        let a = Argv::from_iter([
-            "lingxi-cli",
-            "-r",
-            "00000000-0000-0000-0000-000000000001",
-        ])
-        .unwrap();
+        let a =
+            Argv::from_iter(["lingxi-cli", "-r", "00000000-0000-0000-0000-000000000001"]).unwrap();
         assert_eq!(
             a.resume.as_deref(),
             Some("00000000-0000-0000-0000-000000000001")
@@ -146,8 +142,8 @@ mod tests {
     fn fallback_model_accepted_without_print() {
         // Soft restriction (parity with claude-code): the flag PARSES regardless
         // of --print; honoring is deferred to the print/non-interactive consumer.
-        let a = Argv::from_iter(["lingxi-cli", "--fallback-model", "claude-sonnet-4-6", "hi"])
-            .unwrap();
+        let a =
+            Argv::from_iter(["lingxi-cli", "--fallback-model", "claude-sonnet-4-6", "hi"]).unwrap();
         assert_eq!(a.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
     }
 
@@ -244,7 +240,10 @@ mod tests {
         // user copying `claude --debug api,hooks` gets the same parse here.
         let a = Argv::from_iter(["lingxi-cli", "--debug", "api,hooks"]).unwrap();
         assert_eq!(a.debug_filter(), Some("api,hooks"));
-        assert_eq!(a.prompt, None, "--debug consumes the next token as the filter, not the prompt");
+        assert_eq!(
+            a.prompt, None,
+            "--debug consumes the next token as the filter, not the prompt"
+        );
         // The `=` form still binds the value too.
         let b = Argv::from_iter(["lingxi-cli", "--debug=api,hooks"]).unwrap();
         assert_eq!(b.debug.as_deref(), Some("api,hooks"));
@@ -326,25 +325,40 @@ mod tests {
 
     #[test]
     fn output_format_text_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--print", "--output-format", "text", "hi"]).unwrap();
+        let a =
+            Argv::from_iter(["lingxi-cli", "--print", "--output-format", "text", "hi"]).unwrap();
         assert_eq!(a.output_format.as_deref(), Some("text"));
         assert!(!a.is_json_output());
     }
 
     #[test]
     fn output_format_json_parses_and_activates_json_output() {
-        let a = Argv::from_iter(["lingxi-cli", "--print", "--output-format", "json", "hi"]).unwrap();
+        let a =
+            Argv::from_iter(["lingxi-cli", "--print", "--output-format", "json", "hi"]).unwrap();
         assert_eq!(a.output_format.as_deref(), Some("json"));
         assert!(a.is_json_output());
     }
 
     #[test]
     fn output_format_stream_json_parses_and_activates_stream_json() {
-        let a = Argv::from_iter(["lingxi-cli", "--print", "--output-format", "stream-json", "hi"]).unwrap();
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "hi",
+        ])
+        .unwrap();
         assert_eq!(a.output_format.as_deref(), Some("stream-json"));
         // stream-json routes through StreamJsonStream, NOT the SinkAdapter/JsonSink path.
-        assert!(a.is_stream_json(), "is_stream_json() must be true for stream-json");
-        assert!(!a.is_json_output(), "is_json_output() must be false for stream-json (it has its own path)");
+        assert!(
+            a.is_stream_json(),
+            "is_stream_json() must be true for stream-json"
+        );
+        assert!(
+            !a.is_json_output(),
+            "is_json_output() must be false for stream-json (it has its own path)"
+        );
     }
 
     #[test]
@@ -373,38 +387,75 @@ mod tests {
 
     #[test]
     fn input_format_stream_json_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--print", "--input-format", "stream-json", "hi"]).unwrap();
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--input-format",
+            "stream-json",
+            "hi",
+        ])
+        .unwrap();
         assert_eq!(a.input_format.as_deref(), Some("stream-json"));
     }
 
     #[test]
     fn system_prompt_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--print", "--system-prompt", "You are helpful.", "hi"]).unwrap();
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--system-prompt",
+            "You are helpful.",
+            "hi",
+        ])
+        .unwrap();
         assert_eq!(a.system_prompt.as_deref(), Some("You are helpful."));
     }
 
     #[test]
     fn append_system_prompt_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--print", "--append-system-prompt", "Also be concise.", "hi"]).unwrap();
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--append-system-prompt",
+            "Also be concise.",
+            "hi",
+        ])
+        .unwrap();
         assert_eq!(a.append_system_prompt.as_deref(), Some("Also be concise."));
     }
 
     #[test]
     fn system_prompt_file_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--system-prompt-file", "/tmp/prompt.txt", "hi"]).unwrap();
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--system-prompt-file",
+            "/tmp/prompt.txt",
+            "hi",
+        ])
+        .unwrap();
         assert_eq!(a.system_prompt_file, Some(PathBuf::from("/tmp/prompt.txt")));
     }
 
     #[test]
     fn append_system_prompt_file_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--append-system-prompt-file", "/tmp/append.txt", "hi"]).unwrap();
-        assert_eq!(a.append_system_prompt_file, Some(PathBuf::from("/tmp/append.txt")));
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--append-system-prompt-file",
+            "/tmp/append.txt",
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.append_system_prompt_file,
+            Some(PathBuf::from("/tmp/append.txt"))
+        );
     }
 
     #[test]
     fn allowed_tools_parses() {
         // Positional prompt before multi-value flag to avoid greedy consumption.
-        let a = Argv::from_iter(["lingxi-cli", "fix it", "--allowed-tools", "Bash", "Edit"]).unwrap();
+        let a =
+            Argv::from_iter(["lingxi-cli", "fix it", "--allowed-tools", "Bash", "Edit"]).unwrap();
         let tools = a.allowed_tools.unwrap();
         assert_eq!(tools, &["Bash", "Edit"]);
     }
@@ -459,7 +510,8 @@ mod tests {
 
     #[test]
     fn mcp_config_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "fix it", "--mcp-config", "/path/mcp.json"]).unwrap();
+        let a =
+            Argv::from_iter(["lingxi-cli", "fix it", "--mcp-config", "/path/mcp.json"]).unwrap();
         let cfg = a.mcp_config.unwrap();
         assert_eq!(cfg, &["/path/mcp.json"]);
     }
@@ -502,8 +554,17 @@ mod tests {
 
     #[test]
     fn session_id_parses() {
-        let a = Argv::from_iter(["lingxi-cli", "--session-id", "00000000-0000-0000-0000-000000000001", "hi"]).unwrap();
-        assert_eq!(a.session_id.as_deref(), Some("00000000-0000-0000-0000-000000000001"));
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--session-id",
+            "00000000-0000-0000-0000-000000000001",
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.session_id.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
     }
 
     #[test]
@@ -517,9 +578,14 @@ mod tests {
     #[test]
     fn setting_sources_strict_mcp_exclude_dynamic_parse() {
         let a = Argv::from_iter([
-            "lingxi-cli", "--setting-sources", "user,project",
-            "--strict-mcp-config", "--exclude-dynamic-system-prompt-sections", "hi",
-        ]).unwrap();
+            "lingxi-cli",
+            "--setting-sources",
+            "user,project",
+            "--strict-mcp-config",
+            "--exclude-dynamic-system-prompt-sections",
+            "hi",
+        ])
+        .unwrap();
         assert_eq!(a.setting_sources.as_deref(), Some("user,project"));
         assert!(a.strict_mcp_config);
         assert!(a.exclude_dynamic_system_prompt_sections);
@@ -531,16 +597,28 @@ mod tests {
         // Positional prompt FIRST so the greedy multi-value `--file` (num_args
         // 1..) doesn't swallow it (same convention as allowed_tools_parses).
         let a = Argv::from_iter([
-            "lingxi-cli", "hi",
-            "--mcp-debug", "--ide", "--allow-dangerously-skip-permissions",
-            "--disable-slash-commands", "--chrome", "--ax-screen-reader",
-            "--permission-prompt-tool", "mcp__perm__prompt",
-            "--file", "file_abc:doc.txt", "file_def:img.png",
-        ]).unwrap();
+            "lingxi-cli",
+            "hi",
+            "--mcp-debug",
+            "--ide",
+            "--allow-dangerously-skip-permissions",
+            "--disable-slash-commands",
+            "--chrome",
+            "--ax-screen-reader",
+            "--permission-prompt-tool",
+            "mcp__perm__prompt",
+            "--file",
+            "file_abc:doc.txt",
+            "file_def:img.png",
+        ])
+        .unwrap();
         assert_eq!(a.prompt.as_deref(), Some("hi"));
         assert!(a.mcp_debug && a.ide && a.allow_dangerously_skip_permissions);
         assert!(a.disable_slash_commands && a.chrome && a.ax_screen_reader);
-        assert_eq!(a.permission_prompt_tool.as_deref(), Some("mcp__perm__prompt"));
+        assert_eq!(
+            a.permission_prompt_tool.as_deref(),
+            Some("mcp__perm__prompt")
+        );
         assert_eq!(a.file.as_deref().map(<[String]>::len), Some(2));
     }
 
@@ -588,10 +666,16 @@ mod tests {
         // "Input must be provided", not a billable turn). So here too the next
         // token binds as the value and `command` stays None.
         let dbg = Argv::from_iter(["lingxi-cli", "--debug", "auth"]).unwrap();
-        assert!(dbg.command.is_none(), "--debug consumes `auth` as the filter, like commander");
+        assert!(
+            dbg.command.is_none(),
+            "--debug consumes `auth` as the filter, like commander"
+        );
         assert_eq!(dbg.debug_filter(), Some("auth"));
         let fp = Argv::from_iter(["lingxi-cli", "--from-pr", "auth"]).unwrap();
-        assert!(fp.command.is_none(), "--from-pr consumes `auth` as its value, like commander");
+        assert!(
+            fp.command.is_none(),
+            "--from-pr consumes `auth` as its value, like commander"
+        );
         assert_eq!(fp.from_pr.as_deref(), Some("auth"));
         // `-r mcp` is likewise "resume, search 'mcp'" → the resume PICKER (never a
         // billable chat turn). command stays None; resume is set.
@@ -599,11 +683,20 @@ mod tests {
         assert!(r.command.is_none() && r.resume.as_deref() == Some("mcp"));
         // A subcommand-name token as the FIRST argument still routes to the
         // subcommand (no optional-value flag precedes it to eat it).
-        assert!(Argv::from_iter(["lingxi-cli", "auth", "status"]).unwrap().command.is_some());
+        assert!(Argv::from_iter(["lingxi-cli", "auth", "status"])
+            .unwrap()
+            .command
+            .is_some());
         // Controls: a normal prompt stays command=None; the `=` filter works.
-        assert!(Argv::from_iter(["lingxi-cli", "fix the bug"]).unwrap().command.is_none());
+        assert!(Argv::from_iter(["lingxi-cli", "fix the bug"])
+            .unwrap()
+            .command
+            .is_none());
         assert_eq!(
-            Argv::from_iter(["lingxi-cli", "--debug=api,hooks"]).unwrap().debug.as_deref(),
+            Argv::from_iter(["lingxi-cli", "--debug=api,hooks"])
+                .unwrap()
+                .debug
+                .as_deref(),
             Some("api,hooks"),
             "--debug=<filter> still binds the value"
         );
@@ -623,11 +716,17 @@ mod tests {
         assert!(Argv::from_iter(["lingxi-cli", "--prompt-suggestions", "banana", "hi"]).is_err());
         // Valid choices + bare preset still work.
         assert_eq!(
-            Argv::from_iter(["lingxi-cli", "--prompt-suggestions", "off", "hi"]).unwrap().prompt_suggestions.as_deref(),
+            Argv::from_iter(["lingxi-cli", "--prompt-suggestions", "off", "hi"])
+                .unwrap()
+                .prompt_suggestions
+                .as_deref(),
             Some("off")
         );
         assert_eq!(
-            Argv::from_iter(["lingxi-cli", "--prompt-suggestions"]).unwrap().prompt_suggestions.as_deref(),
+            Argv::from_iter(["lingxi-cli", "--prompt-suggestions"])
+                .unwrap()
+                .prompt_suggestions
+                .as_deref(),
             Some("true")
         );
     }
@@ -651,7 +750,10 @@ mod tests {
         // and `lingxi-cli --from-pr 123` parse identically.
         let a = Argv::from_iter(["lingxi-cli", "--from-pr", "123"]).unwrap();
         assert_eq!(a.from_pr.as_deref(), Some("123"));
-        assert_eq!(a.prompt, None, "--from-pr consumes the next token as the value, not the prompt");
+        assert_eq!(
+            a.prompt, None,
+            "--from-pr consumes the next token as the value, not the prompt"
+        );
         // The `=` form still binds the value too.
         let b = Argv::from_iter(["lingxi-cli", "--from-pr=123"]).unwrap();
         assert_eq!(b.from_pr.as_deref(), Some("123"));
@@ -768,8 +870,12 @@ mod tests {
 
     #[test]
     fn resolve_append_system_prompt_from_flag() {
-        let a = Argv::from_iter(["lingxi-cli", "--append-system-prompt", "Be concise.", "hi"]).unwrap();
-        assert_eq!(a.resolve_append_system_prompt().as_deref(), Some("Be concise."));
+        let a =
+            Argv::from_iter(["lingxi-cli", "--append-system-prompt", "Be concise.", "hi"]).unwrap();
+        assert_eq!(
+            a.resolve_append_system_prompt().as_deref(),
+            Some("Be concise.")
+        );
     }
 
     #[test]
@@ -783,23 +889,35 @@ mod tests {
     #[test]
     fn input_format_stream_json_without_output_format_stream_json_errors() {
         let a = Argv::from_iter([
-            "lingxi-cli", "--print", "--verbose",
-            "--input-format", "stream-json",
-            "--output-format", "json",
+            "lingxi-cli",
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "json",
             "hi",
-        ]).unwrap();
+        ])
+        .unwrap();
         let err = a.validate_stream_json_input_args().unwrap_err();
-        assert_eq!(err, "--input-format=stream-json requires output-format=stream-json.");
+        assert_eq!(
+            err,
+            "--input-format=stream-json requires output-format=stream-json."
+        );
     }
 
     #[test]
     fn input_format_stream_json_without_print_errors() {
         let a = Argv::from_iter([
-            "lingxi-cli", "--verbose",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
+            "lingxi-cli",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
             "hi",
-        ]).unwrap();
+        ])
+        .unwrap();
         let err = a.validate_stream_json_input_args().unwrap_err();
         assert_eq!(err, "--input-format=stream-json requires --print.");
     }
@@ -807,11 +925,15 @@ mod tests {
     #[test]
     fn replay_user_messages_without_stream_json_input_errors() {
         let a = Argv::from_iter([
-            "lingxi-cli", "--print", "--verbose",
-            "--output-format", "stream-json",
+            "lingxi-cli",
+            "--print",
+            "--verbose",
+            "--output-format",
+            "stream-json",
             "--replay-user-messages",
             "hi",
-        ]).unwrap();
+        ])
+        .unwrap();
         let err = a.validate_stream_json_input_args().unwrap_err();
         assert_eq!(
             err,
@@ -822,37 +944,55 @@ mod tests {
     #[test]
     fn replay_user_messages_without_output_format_stream_json_errors() {
         let a = Argv::from_iter([
-            "lingxi-cli", "--print", "--verbose",
-            "--input-format", "stream-json",
-            "--output-format", "json",
+            "lingxi-cli",
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "json",
             "--replay-user-messages",
             "hi",
-        ]).unwrap();
+        ])
+        .unwrap();
         // The input-format validation fires first (before replay check).
         let err = a.validate_stream_json_input_args().unwrap_err();
-        assert_eq!(err, "--input-format=stream-json requires output-format=stream-json.");
+        assert_eq!(
+            err,
+            "--input-format=stream-json requires output-format=stream-json."
+        );
     }
 
     #[test]
     fn valid_stream_json_input_flags_pass_validation() {
         let a = Argv::from_iter([
-            "lingxi-cli", "--print", "--verbose",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
+            "lingxi-cli",
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
             "hi",
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(a.validate_stream_json_input_args().is_ok());
     }
 
     #[test]
     fn valid_stream_json_input_with_replay_passes_validation() {
         let a = Argv::from_iter([
-            "lingxi-cli", "--print", "--verbose",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
+            "lingxi-cli",
+            "--print",
+            "--verbose",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
             "--replay-user-messages",
             "hi",
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(a.validate_stream_json_input_args().is_ok());
     }
 
@@ -864,18 +1004,13 @@ mod tests {
 
     #[test]
     fn is_stream_json_input_detects_flag() {
-        let a = Argv::from_iter([
-            "lingxi-cli", "--input-format", "stream-json", "hi",
-        ]).unwrap();
+        let a = Argv::from_iter(["lingxi-cli", "--input-format", "stream-json", "hi"]).unwrap();
         assert!(a.is_stream_json_input());
     }
 
     #[test]
     fn is_stream_json_input_false_for_text() {
-        let a = Argv::from_iter([
-            "lingxi-cli", "--input-format", "text", "hi",
-        ]).unwrap();
+        let a = Argv::from_iter(["lingxi-cli", "--input-format", "text", "hi"]).unwrap();
         assert!(!a.is_stream_json_input());
     }
-
 }

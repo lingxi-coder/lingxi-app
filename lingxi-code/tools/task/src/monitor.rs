@@ -264,17 +264,26 @@ impl Tool for MonitorTool {
     ) -> Result<(), ValidationError> {
         let command = input.get("command").and_then(Value::as_str).unwrap_or("");
         // Binary `fVp` refine (`mVp`): reject control chars hidden in the approval dialog.
-        if command.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+        if command
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
             return Err(ValidationError(
-                "command contains control characters that would be hidden in the approval dialog".to_string(),
+                "command contains control characters that would be hidden in the approval dialog"
+                    .to_string(),
             ));
         }
         // Binary `_Vp` refine (`gVp`): `persistent || timeout_ms <= 3_600_000`.
-        let persistent = input.get("persistent").and_then(Value::as_bool).unwrap_or(false);
+        let persistent = input
+            .get("persistent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if !persistent {
             if let Some(t) = input.get("timeout_ms").and_then(Value::as_u64) {
                 if t > MAX_TIMEOUT_MS {
-                    return Err(ValidationError("timeout_ms must be \u{2264} 3600000".to_string()));
+                    return Err(ValidationError(
+                        "timeout_ms must be \u{2264} 3600000".to_string(),
+                    ));
                 }
             }
         }
@@ -327,7 +336,8 @@ impl Tool for MonitorTool {
             .unwrap_or(false);
 
         // PARITY: `Mnl(t)` — CCR timeout cap.
-        let (timeout_ms, persistent) = apply_ccr_timeout_cap(requested_timeout, requested_persistent);
+        let (timeout_ms, persistent) =
+            apply_ccr_timeout_cap(requested_timeout, requested_persistent);
 
         // PHASE A: the per-line streaming spawn + registry arming (binary `SVp`
         // step 4-7) is the deferred Phase B; produce a faithful taskId + the
@@ -377,7 +387,12 @@ mod tests {
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
-        ProcessOutput { stdout: String::new(), stderr: String::new(), exit_code: 0, timed_out: false }
+        ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }
     }
     fn guard() -> std::sync::MutexGuard<'static, ()> {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -410,7 +425,12 @@ mod tests {
     fn description_starts_with_cjr_no_push_splice_by_default() {
         let _g = guard();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let d = rt.block_on(tool().description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }));
+        let d = rt.block_on(tool().description(
+            &json!({}),
+            &DescriptionOptions {
+                is_non_interactive_session: false,
+            },
+        ));
         assert!(d.starts_with("Start a background monitor that streams events"));
         assert!(d.trim_end().ends_with("Use TaskStop to cancel early."));
         // Yke() off by default → no lJr splice.
@@ -424,9 +444,17 @@ mod tests {
         // backend (always false), so even with the flag on Yke() is false — the
         // splice stays absent, matching the binary default. Assert the gate wiring:
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
-        assert!(!tool_cron::is_push_notif_enabled(), "Yke needs the setting too");
+        assert!(
+            !tool_cron::is_push_notif_enabled(),
+            "Yke needs the setting too"
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let d = rt.block_on(tool().description(&json!({}), &DescriptionOptions { is_non_interactive_session: false }));
+        let d = rt.block_on(tool().description(
+            &json!({}),
+            &DescriptionOptions {
+                is_non_interactive_session: false,
+            },
+        ));
         assert!(!d.contains("send a PushNotification"));
         // The lJr() helper itself produces the byte-exact splice when Yke() holds.
         // (Directly exercise the format to lock the string.)
@@ -439,7 +467,11 @@ mod tests {
     async fn call_returns_result_shape_with_ccr_cap() {
         let _g = guard();
         let out = tool()
-            .call(json!({"description": "ci", "command": "tail -f log", "persistent": true}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"description": "ci", "command": "tail -f log", "persistent": true}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         assert!(out.data["taskId"].as_str().unwrap().starts_with("monitor_"));
@@ -452,9 +484,27 @@ mod tests {
     async fn validate_rejects_control_chars_and_huge_timeout() {
         let _g = guard();
         let t = tool();
-        assert!(t.validate_input(&json!({"description":"d","command":"echo \u{7}hi"}), &fresh_ctx()).await.is_err());
-        assert!(t.validate_input(&json!({"description":"d","command":"echo ok","timeout_ms": 9_000_000}), &fresh_ctx()).await.is_err());
+        assert!(t
+            .validate_input(
+                &json!({"description":"d","command":"echo \u{7}hi"}),
+                &fresh_ctx()
+            )
+            .await
+            .is_err());
+        assert!(t
+            .validate_input(
+                &json!({"description":"d","command":"echo ok","timeout_ms": 9_000_000}),
+                &fresh_ctx()
+            )
+            .await
+            .is_err());
         assert!(t.validate_input(&json!({"description":"d","command":"echo ok","timeout_ms": 9_000_000, "persistent": true}), &fresh_ctx()).await.is_ok());
-        assert!(t.validate_input(&json!({"description":"d","command":"tail -f x"}), &fresh_ctx()).await.is_ok());
+        assert!(t
+            .validate_input(
+                &json!({"description":"d","command":"tail -f x"}),
+                &fresh_ctx()
+            )
+            .await
+            .is_ok());
     }
 }

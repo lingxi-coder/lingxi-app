@@ -76,13 +76,12 @@ mod linux {
         // comparison is the correct width.
         // On x86_64/aarch64 `libc::SYS_*` is a `c_long` (== i64), which is the
         // `SeccompFilter` rule-map key type — no cast/truncation.
-        let unix_domain =
-            |syscall: libc::c_long| -> Result<(i64, Vec<SeccompRule>), BackendError> {
-                let cond =
-                    SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, AF_UNIX)?;
-                let rule = SeccompRule::new(vec![cond])?;
-                Ok((syscall, vec![rule]))
-            };
+        let unix_domain = |syscall: libc::c_long| -> Result<(i64, Vec<SeccompRule>), BackendError> {
+            let cond =
+                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, AF_UNIX)?;
+            let rule = SeccompRule::new(vec![cond])?;
+            Ok((syscall, vec![rule]))
+        };
 
         let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
         let (sock_nr, sock_rules) = unix_domain(libc::SYS_socket)?;

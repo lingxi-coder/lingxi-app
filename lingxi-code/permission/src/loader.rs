@@ -147,7 +147,12 @@ pub fn additional_directories_from_settings_json(raw: &str) -> Vec<std::path::Pa
     serde_json::from_str::<SettingsTop>(raw)
         .ok()
         .and_then(|t| t.permissions)
-        .map(|p| p.additional_directories.into_iter().map(std::path::PathBuf::from).collect())
+        .map(|p| {
+            p.additional_directories
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -157,9 +162,11 @@ mod tests {
 
     #[test]
     fn no_permissions_block_is_empty() {
-        assert!(permission_rules_from_settings_json("{}", PermissionRuleSource::UserSettings)
-            .unwrap()
-            .is_empty());
+        assert!(
+            permission_rules_from_settings_json("{}", PermissionRuleSource::UserSettings)
+                .unwrap()
+                .is_empty()
+        );
         // Other settings keys present, but no permissions → still empty.
         let raw = r#"{ "model": "claude-opus-4-7" }"#;
         assert!(
@@ -171,8 +178,11 @@ mod tests {
 
     #[test]
     fn invalid_json_is_err() {
-        assert!(permission_rules_from_settings_json("{not json", PermissionRuleSource::UserSettings)
-            .is_err());
+        assert!(permission_rules_from_settings_json(
+            "{not json",
+            PermissionRuleSource::UserSettings
+        )
+        .is_err());
     }
 
     #[test]
@@ -184,8 +194,8 @@ mod tests {
                 "ask": ["WebFetch"]
             }
         }"#;
-        let rules =
-            permission_rules_from_settings_json(raw, PermissionRuleSource::ProjectSettings).unwrap();
+        let rules = permission_rules_from_settings_json(raw, PermissionRuleSource::ProjectSettings)
+            .unwrap();
         assert_eq!(rules.len(), 4);
         // Every rule carries the caller's source.
         assert!(rules
@@ -193,9 +203,9 @@ mod tests {
             .all(|r| r.source == PermissionRuleSource::ProjectSettings));
 
         let find = |tool: &str, content: Option<&str>| {
-            rules.iter().find(|r| {
-                r.value.tool_name == tool && r.value.rule_content.as_deref() == content
-            })
+            rules
+                .iter()
+                .find(|r| r.value.tool_name == tool && r.value.rule_content.as_deref() == content)
         };
         // allow → parsed rule_content.
         let bash = find("Bash", Some("npm run *")).expect("Bash(npm run *)");
@@ -207,7 +217,9 @@ mod tests {
         ));
         // deny.
         assert!(matches!(
-            find("Read", Some("./secrets/**")).expect("deny Read").behavior,
+            find("Read", Some("./secrets/**"))
+                .expect("deny Read")
+                .behavior,
             PermissionBehavior::Deny
         ));
         // ask.
@@ -230,8 +242,12 @@ mod tests {
     #[test]
     fn bypass_killswitch_parses() {
         let f = bypass_permissions_disabled_from_settings_json;
-        assert!(f(r#"{ "permissions": { "disableBypassPermissionsMode": "disable" } }"#));
-        assert!(!f(r#"{ "permissions": { "disableBypassPermissionsMode": "enable" } }"#));
+        assert!(f(
+            r#"{ "permissions": { "disableBypassPermissionsMode": "disable" } }"#
+        ));
+        assert!(!f(
+            r#"{ "permissions": { "disableBypassPermissionsMode": "enable" } }"#
+        ));
         assert!(!f(r#"{ "permissions": {} }"#));
         assert!(!f("{}"));
         assert!(!f("not json"));
@@ -269,7 +285,9 @@ mod tests {
         let f = additional_directories_from_settings_json;
         // Present → returned as raw PathBufs (relative / ~ / absolute preserved).
         assert_eq!(
-            f(r#"{ "permissions": { "additionalDirectories": ["../sibling", "~/work", "/abs/dir"] } }"#),
+            f(
+                r#"{ "permissions": { "additionalDirectories": ["../sibling", "~/work", "/abs/dir"] } }"#
+            ),
             vec![
                 PathBuf::from("../sibling"),
                 PathBuf::from("~/work"),
@@ -292,8 +310,7 @@ mod tests {
     fn missing_arrays_default_empty() {
         // Only `allow` present; `deny`/`ask` default to [].
         let raw = r#"{ "permissions": { "allow": ["Bash"] } }"#;
-        let rules =
-            permission_rules_from_settings_json(raw, PermissionRuleSource::CliArg).unwrap();
+        let rules = permission_rules_from_settings_json(raw, PermissionRuleSource::CliArg).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].value.tool_name, "Bash");
     }

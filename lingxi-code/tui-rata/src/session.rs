@@ -73,10 +73,8 @@ impl DoctorInfo {
         Self {
             cli_version: concat!("lingxi-cli v", env!("CARGO_PKG_VERSION")).to_string(),
             lingxi_home: lingxi_home_dir(),
-            cwd: std::env::current_dir().map_or_else(
-                |_| "unknown".to_string(),
-                |p| p.display().to_string(),
-            ),
+            cwd: std::env::current_dir()
+                .map_or_else(|_| "unknown".to_string(), |p| p.display().to_string()),
             mcp_configured,
             mcp_connected,
             truecolor: matches!(
@@ -114,6 +112,11 @@ pub struct SessionInfo {
     pub hooks: Vec<InfoRow>,
     /// `/agents` rows.
     pub agents: Vec<InfoRow>,
+    /// `/skills` rows (on-disk `.lingxi/skills/` discovery, captured at
+    /// launch like the other listings).
+    pub skills: Vec<InfoRow>,
+    /// `/memory` rows (the LINGXI.md memory-file tiers, captured at launch).
+    pub memory: Vec<InfoRow>,
     /// `/model` picker rows.
     pub models: Vec<ModelRow>,
 }

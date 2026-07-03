@@ -145,9 +145,7 @@ pub fn evaluate_time_based_trigger(
 /// [`compactable_tools`], in encounter order. Keys on **assistant** `ToolUse`
 /// blocks (TS `collectCompactableToolIds`, `microCompact.ts:226-241`).
 #[must_use]
-pub fn collect_compactable_tool_ids(
-    messages: &[ConversationMessage],
-) -> Vec<protocol::ToolUseId> {
+pub fn collect_compactable_tool_ids(messages: &[ConversationMessage]) -> Vec<protocol::ToolUseId> {
     let compactable = compactable_tools();
     let mut ids = Vec::new();
     for message in messages {
@@ -248,8 +246,8 @@ impl Microcompactor {
                             && content != TIME_BASED_MC_CLEARED_MESSAGE
                         {
                             cleared_count += 1;
-                            tokens_saved = tokens_saved
-                                .saturating_add(rough_token_count_estimation(content));
+                            tokens_saved =
+                                tokens_saved.saturating_add(rough_token_count_estimation(content));
                         }
                     }
                 }
@@ -269,7 +267,12 @@ impl Microcompactor {
         let out: Vec<ConversationMessage> = messages
             .into_iter()
             .map(|m| {
-                if let ConversationMessage::User { id, content, is_meta } = m {
+                if let ConversationMessage::User {
+                    id,
+                    content,
+                    is_meta,
+                } = m
+                {
                     let new_content: Vec<ContentBlock> = content
                         .into_iter()
                         .map(|b| {
@@ -381,7 +384,10 @@ mod tests {
             msgs.push(assistant_tool_use("Read", id.clone()));
             // Large content (~10k tokens each) so the 3 oldest cleared together
             // clear well above the 20,000-token floor and the compact fires.
-            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40_000))));
+            msgs.push(user_tool_result(
+                id,
+                &format!("body-{i} {}", "x".repeat(40_000)),
+            ));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {
@@ -401,9 +407,17 @@ mod tests {
             .collect();
         for (i, res) in results.iter().enumerate() {
             if i < 3 {
-                assert_eq!(result_content(res), TIME_BASED_MC_CLEARED_MESSAGE, "msg {i}");
+                assert_eq!(
+                    result_content(res),
+                    TIME_BASED_MC_CLEARED_MESSAGE,
+                    "msg {i}"
+                );
             } else {
-                assert_ne!(result_content(res), TIME_BASED_MC_CLEARED_MESSAGE, "msg {i}");
+                assert_ne!(
+                    result_content(res),
+                    TIME_BASED_MC_CLEARED_MESSAGE,
+                    "msg {i}"
+                );
             }
         }
     }
@@ -421,7 +435,10 @@ mod tests {
             let id = ToolUseId::new();
             ids.push(id.clone());
             msgs.push(assistant_tool_use("Read", id.clone()));
-            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40))));
+            msgs.push(user_tool_result(
+                id,
+                &format!("body-{i} {}", "x".repeat(40)),
+            ));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {
@@ -511,7 +528,10 @@ mod tests {
             let id = ToolUseId::new();
             ids.push(id.clone());
             msgs.push(assistant_tool_use("TodoWrite", id.clone()));
-            msgs.push(user_tool_result(id, &format!("todo-{i} {}", "z".repeat(40))));
+            msgs.push(user_tool_result(
+                id,
+                &format!("todo-{i} {}", "z".repeat(40)),
+            ));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {
@@ -571,7 +591,10 @@ mod tests {
             ids.push(id.clone());
             msgs.push(assistant_tool_use("Bash", id.clone()));
             // Large bodies so the 2 cleared exceed the 20,000-token floor.
-            msgs.push(user_tool_result(id, &format!("out-{i} {}", "q".repeat(50_000))));
+            msgs.push(user_tool_result(
+                id,
+                &format!("out-{i} {}", "q".repeat(50_000)),
+            ));
         }
         let mc = Microcompactor {
             config: TimeBasedMCConfig {
@@ -604,8 +627,7 @@ mod tests {
         };
         let now = SystemTime::now();
         let two_hours_ago = now - Duration::from_secs(2 * 60 * 60);
-        let t = evaluate_time_based_trigger(&cfg, Some(two_hours_ago), now)
-            .expect("should fire");
+        let t = evaluate_time_based_trigger(&cfg, Some(two_hours_ago), now).expect("should fire");
         assert!(t.gap_minutes >= 60.0);
         // Below threshold does not fire.
         let recent = now - Duration::from_secs(5 * 60);

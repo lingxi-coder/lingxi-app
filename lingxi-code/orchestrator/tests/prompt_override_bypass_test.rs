@@ -10,7 +10,10 @@ use tool_api::registry::ToolRegistry;
 
 fn end_turn() -> llm_client::LlmResponse {
     mock_message_response(
-        vec![LlmContentBlock::Text { text: "ok".into(), cache_control: None }],
+        vec![LlmContentBlock::Text {
+            text: "ok".into(),
+            cache_control: None,
+        }],
         Some("end_turn"),
     )
 }

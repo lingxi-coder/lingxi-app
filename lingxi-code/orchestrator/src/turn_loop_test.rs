@@ -10,12 +10,12 @@
 // ============================================================================
 #[cfg(test)]
 mod terminal_sequence_tests {
-    use crate::turn_loop::apply_terminal_sequence;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
         noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
         StaticMemoryProvider,
     };
+    use crate::turn_loop::apply_terminal_sequence;
     use crate::OrchestratorConfig;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -72,7 +72,9 @@ mod terminal_sequence_tests {
 }
 #[cfg(test)]
 mod terminal_api_error_tests {
-    use crate::turn_loop::{refusal_exemption_url, refusal_explanation_clause, terminal_api_error_text};
+    use crate::turn_loop::{
+        refusal_exemption_url, refusal_explanation_clause, terminal_api_error_text,
+    };
     use llm_client::StopDetails;
 
     fn details(category: &str, explanation: Option<&str>) -> StopDetails {
@@ -90,16 +92,18 @@ mod terminal_api_error_tests {
         let with =
             terminal_api_error_text("claude-opus-4-8", true, "refusal", Some("req_011abc"), None)
                 .expect("refusal text");
-        assert!(with.ends_with("\n\nRequest ID: req_011abc"), "double newline; got: {with}");
+        assert!(
+            with.ends_with("\n\nRequest ID: req_011abc"),
+            "double newline; got: {with}"
+        );
 
         let without = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, None)
             .expect("refusal text");
         assert!(!without.contains("Request ID:"), "got: {without}");
 
         // Empty id is treated as absent.
-        let empty =
-            terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""), None)
-                .expect("refusal text");
+        let empty = terminal_api_error_text("claude-opus-4-8", true, "refusal", Some(""), None)
+            .expect("refusal text");
         assert!(!empty.contains("Request ID:"), "got: {empty}");
     }
 
@@ -132,14 +136,8 @@ mod terminal_api_error_tests {
     fn refusal_label_cyber_or_bio_variant() {
         for cat in ["cyber", "bio"] {
             let sd = details(cat, None);
-            let t = terminal_api_error_text(
-                "claude-opus-4-8",
-                true,
-                "refusal",
-                None,
-                Some(&sd),
-            )
-            .expect("refusal");
+            let t = terminal_api_error_text("claude-opus-4-8", true, "refusal", None, Some(&sd))
+                .expect("refusal");
             assert!(
                 t.contains("'s safeguards flagged this message (https://www.anthropic.com/legal/aup). They may flag safe, normal content as well."),
                 "{cat}: {t}"
@@ -148,7 +146,10 @@ mod terminal_api_error_tests {
                 t.contains("These measures let us bring you Mythos-level capabilities sooner, and we're working to refine them."),
                 "{cat}: {t}"
             );
-            assert!(t.contains("LingXi can't respond to this request with"), "{cat}: {t}");
+            assert!(
+                t.contains("LingXi can't respond to this request with"),
+                "{cat}: {t}"
+            );
         }
     }
 
@@ -158,10 +159,7 @@ mod terminal_api_error_tests {
     fn refusal_nolabel_cyber_exemption_url() {
         // A model with NO marketing name → the no-label branch. Use a bare id
         // that `marketing_name_for_model` does not resolve.
-        let sd = details(
-            "cyber",
-            Some("see https://claude.com/form/abc123, thanks"),
-        );
+        let sd = details("cyber", Some("see https://claude.com/form/abc123, thanks"));
         let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
             .expect("refusal");
         assert!(
@@ -169,8 +167,14 @@ mod terminal_api_error_tests {
             "got: {t}"
         );
         // Extracted URL (trailing comma stripped) — DOUBLE newline separator.
-        assert!(t.contains("exemption: https://claude.com/form/abc123\n\n"), "double newline; got: {t}");
-        assert!(!t.contains("abc123,"), "trailing punct must be stripped; got: {t}");
+        assert!(
+            t.contains("exemption: https://claude.com/form/abc123\n\n"),
+            "double newline; got: {t}"
+        );
+        assert!(
+            !t.contains("abc123,"),
+            "trailing punct must be stripped; got: {t}"
+        );
     }
 
     /// NO-LABEL branch + `military_weapons` category → the weapons-safeguards
@@ -187,7 +191,9 @@ mod terminal_api_error_tests {
             "got: {ti}"
         );
         assert!(
-            ti.contains("\n\nIf you believe this was flagged in error, send feedback with /feedback."),
+            ti.contains(
+                "\n\nIf you believe this was flagged in error, send feedback with /feedback."
+            ),
             "interactive feedback clause (double newline); got: {ti}"
         );
         // Non-interactive → NO "send feedback" clause.
@@ -229,7 +235,10 @@ mod terminal_api_error_tests {
     fn refusal_explanation_clause_formats() {
         assert_eq!(refusal_explanation_clause(None), "");
         assert_eq!(refusal_explanation_clause(Some("")), "");
-        assert_eq!(refusal_explanation_clause(Some("see policy X")), " see policy X.");
+        assert_eq!(
+            refusal_explanation_clause(Some("see policy X")),
+            " see policy X."
+        );
         assert_eq!(refusal_explanation_clause(Some("denied.")), " denied.");
         assert_eq!(refusal_explanation_clause(Some("why?")), " why?");
         assert_eq!(refusal_explanation_clause(Some("stop!")), " stop!");
@@ -254,7 +263,10 @@ mod terminal_api_error_tests {
         let sd2 = details("other", None);
         let t2 = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd2))
             .expect("refusal");
-        assert!(t2.contains("Usage Policy (https://www.anthropic.com/legal/aup). "), "got: {t2}");
+        assert!(
+            t2.contains("Usage Policy (https://www.anthropic.com/legal/aup). "),
+            "got: {t2}"
+        );
         assert!(!t2.contains("section 2"), "got: {t2}");
     }
 }
@@ -307,12 +319,12 @@ mod model_text_tests {
 }
 #[cfg(test)]
 mod read_file_state_tests {
-    use crate::turn_loop::{absolutize, dispatch_tool_uses, execute_one_turn};
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
     };
+    use crate::turn_loop::{absolutize, dispatch_tool_uses, execute_one_turn};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use protocol::ToolUseId;
@@ -530,9 +542,15 @@ mod read_file_state_tests {
             .iter()
             .filter(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }))
             .count();
-        assert_eq!(assistants, 1, "assistant must not be re-pushed (alreadyPresent)");
+        assert_eq!(
+            assistants, 1,
+            "assistant must not be re-pushed (alreadyPresent)"
+        );
         let (content, is_error) = last_tool_result(&s.history);
-        assert!(!is_error, "updatedInput should make the tool read the real file");
+        assert!(
+            !is_error,
+            "updatedInput should make the tool read the real file"
+        );
         assert!(
             content.contains("RECOVERED"),
             "tool ran with the rewritten input: {content}"
@@ -597,8 +615,11 @@ mod read_file_state_tests {
         {
             let sess = orch.session();
             let mut s = sess.lock().await;
-            s.history
-                .push(assistant_with_tool_use(&tuid, "Read", json!({"file_path":"x.txt"})));
+            s.history.push(assistant_with_tool_use(
+                &tuid,
+                "Read",
+                json!({"file_path":"x.txt"}),
+            ));
             // A matching tool_result already exists ⇒ resolved.
             s.history.push(protocol::ConversationMessage::User {
                 id: protocol::MessageId::new(),
@@ -697,8 +718,12 @@ mod read_file_state_tests {
         // (no spurious single-orphan cap). Per-id idempotency lives in the
         // history found-check; the run-loop gate is a per-id Set on top.
         let dir = tempfile::tempdir().expect("tempdir");
-        tokio::fs::write(dir.path().join("a.txt"), "AAA").await.unwrap();
-        tokio::fs::write(dir.path().join("b.txt"), "BBB").await.unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), "AAA")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), "BBB")
+            .await
+            .unwrap();
         let tool = Arc::new(StubFileTool {
             name: "Read",
             cwd: dir.path().to_path_buf(),
@@ -709,10 +734,16 @@ mod read_file_state_tests {
         {
             let sess = orch.session();
             let mut s = sess.lock().await;
-            s.history
-                .push(assistant_with_tool_use(&id1, "Read", json!({"file_path":"a.txt"})));
-            s.history
-                .push(assistant_with_tool_use(&id2, "Read", json!({"file_path":"b.txt"})));
+            s.history.push(assistant_with_tool_use(
+                &id1,
+                "Read",
+                json!({"file_path":"a.txt"}),
+            ));
+            s.history.push(assistant_with_tool_use(
+                &id2,
+                "Read",
+                json!({"file_path":"b.txt"}),
+            ));
         }
         let allow = || traits::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
@@ -729,7 +760,9 @@ mod read_file_state_tests {
             .filter_map(|m| match m {
                 protocol::ConversationMessage::User { content, .. } => {
                     content.iter().find_map(|b| match b {
-                        protocol::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                        protocol::ContentBlock::ToolResult { content, .. } => {
+                            Some(content.as_str())
+                        }
                         _ => None,
                     })
                 }
@@ -746,7 +779,9 @@ mod read_file_state_tests {
         // call resolved (findUnresolvedToolUse → null) and no-ops — the real
         // same-id dedup, independent of the run-loop gate.
         let dir = tempfile::tempdir().expect("tempdir");
-        tokio::fs::write(dir.path().join("real.txt"), "ONCE").await.unwrap();
+        tokio::fs::write(dir.path().join("real.txt"), "ONCE")
+            .await
+            .unwrap();
         let tool = Arc::new(StubFileTool {
             name: "Read",
             cwd: dir.path().to_path_buf(),
@@ -757,8 +792,11 @@ mod read_file_state_tests {
         {
             let sess = orch.session();
             let mut s = sess.lock().await;
-            s.history
-                .push(assistant_with_tool_use(&tuid, "Read", json!({"file_path":"real.txt"})));
+            s.history.push(assistant_with_tool_use(
+                &tuid,
+                "Read",
+                json!({"file_path":"real.txt"}),
+            ));
         }
         let allow = || traits::permission_gate::PermissionOutcome::Allow {
             updated_input: None,
@@ -857,8 +895,7 @@ mod read_file_state_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            self.called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(ToolCallResult {
                 data: json!({ "ok": true }),
                 model_content: None,
@@ -1152,12 +1189,18 @@ mod read_file_state_tests {
     #[test]
     fn absolutize_helper_resolves_lexically() {
         let cwd = PathBuf::from("/repo");
-        assert_eq!(absolutize(&cwd, "src/main.rs"), PathBuf::from("/repo/src/main.rs"));
+        assert_eq!(
+            absolutize(&cwd, "src/main.rs"),
+            PathBuf::from("/repo/src/main.rs")
+        );
         assert_eq!(absolutize(&cwd, "/abs/x.rs"), PathBuf::from("/abs/x.rs"));
         // `.` dropped, `..` popped — purely lexical.
         assert_eq!(absolutize(&cwd, "./a/../b.rs"), PathBuf::from("/repo/b.rs"));
         // Surrounding whitespace is trimmed (mirrors expandPath).
-        assert_eq!(absolutize(&cwd, "  src/a.rs  "), PathBuf::from("/repo/src/a.rs"));
+        assert_eq!(
+            absolutize(&cwd, "  src/a.rs  "),
+            PathBuf::from("/repo/src/a.rs")
+        );
     }
 
     #[test]
@@ -1166,7 +1209,10 @@ mod read_file_state_tests {
         // (expandPath is lexical, not realpath — no fs canonicalization).
         let cwd = PathBuf::from("/nonexistent-root-xyz");
         let got = absolutize(&cwd, "does/not/exist.rs");
-        assert_eq!(got, PathBuf::from("/nonexistent-root-xyz/does/not/exist.rs"));
+        assert_eq!(
+            got,
+            PathBuf::from("/nonexistent-root-xyz/does/not/exist.rs")
+        );
     }
 
     #[test]
@@ -1190,7 +1236,10 @@ mod read_file_state_tests {
         let cwd = dir.path().to_path_buf();
         let orch = orch_with_tools(
             cwd.clone(),
-            vec![Arc::new(StubFileTool { name: "Read", cwd: cwd.clone() }) as Arc<dyn Tool>],
+            vec![Arc::new(StubFileTool {
+                name: "Read",
+                cwd: cwd.clone(),
+            }) as Arc<dyn Tool>],
         );
         dispatch_one(&orch, "Read", json!({ "file_path": "src/a.rs" })).await;
 
@@ -1239,9 +1288,11 @@ mod read_file_state_tests {
                 from_read: true,
             },
         );
-        let entry =
-            tool_api::read_file_state::get(&orch.read_state_map, std::path::Path::new("/tmp/a.txt"))
-                .expect("orchestrator registry sees the shared-Arc set");
+        let entry = tool_api::read_file_state::get(
+            &orch.read_state_map,
+            std::path::Path::new("/tmp/a.txt"),
+        )
+        .expect("orchestrator registry sees the shared-Arc set");
         assert_eq!(entry.content, "line2\n");
         assert_eq!(entry.offset, Some(2));
         assert_eq!(entry.limit, Some(1));
@@ -1269,7 +1320,9 @@ mod read_file_state_tests {
             for i in 0..20 {
                 s.history.push(ConversationMessage::user(
                     MessageId::new(),
-                    format!("turn-{i} padded body text to push the token estimate over the threshold"),
+                    format!(
+                        "turn-{i} padded body text to push the token estimate over the threshold"
+                    ),
                 ));
             }
         }
@@ -1313,16 +1366,18 @@ mod read_file_state_tests {
             .history
             .iter()
             .filter_map(|m| match m {
-                ConversationMessage::User { content, is_meta: true, .. } => {
-                    content.iter().find_map(|b| match b {
-                        protocol::ContentBlock::Text { text }
-                            if text.contains("restored after compaction") =>
-                        {
-                            Some(text)
-                        }
-                        _ => None,
-                    })
-                }
+                ConversationMessage::User {
+                    content,
+                    is_meta: true,
+                    ..
+                } => content.iter().find_map(|b| match b {
+                    protocol::ContentBlock::Text { text }
+                        if text.contains("restored after compaction") =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                }),
                 _ => None,
             })
             .collect();
@@ -1364,7 +1419,10 @@ mod read_file_state_tests {
         let cwd = dir.path().to_path_buf();
         let orch = orch_with_tools(
             cwd.clone(),
-            vec![Arc::new(StubFileTool { name: "Read", cwd: cwd.clone() }) as Arc<dyn Tool>],
+            vec![Arc::new(StubFileTool {
+                name: "Read",
+                cwd: cwd.clone(),
+            }) as Arc<dyn Tool>],
         );
         // a, b, then a again — first-insertion order [a, b], a not duplicated.
         // This 2-file re-read case coincides with TS's MRU LRU (also [a, b]);
@@ -1387,7 +1445,10 @@ mod read_file_state_tests {
         let cwd = dir.path().to_path_buf();
         let orch = orch_with_tools(
             cwd.clone(),
-            vec![Arc::new(StubFileTool { name: "Read", cwd: cwd.clone() }) as Arc<dyn Tool>],
+            vec![Arc::new(StubFileTool {
+                name: "Read",
+                cwd: cwd.clone(),
+            }) as Arc<dyn Tool>],
         );
         // read a, b, c, then a again. This `Vec` keeps first-insertion order
         // [a, b, c]; TS's MRU-promoting LRU would diverge to [a, c, b]. Locking
@@ -1397,7 +1458,10 @@ mod read_file_state_tests {
             dispatch_one(&orch, "Read", json!({ "file_path": f })).await;
         }
         let files = orch.files_in_context().await;
-        assert_eq!(files, vec![cwd.join("a.rs"), cwd.join("b.rs"), cwd.join("c.rs")]);
+        assert_eq!(
+            files,
+            vec![cwd.join("a.rs"), cwd.join("b.rs"), cwd.join("c.rs")]
+        );
     }
 
     #[tokio::test]
@@ -1407,7 +1471,10 @@ mod read_file_state_tests {
         let cwd = dir.path().to_path_buf();
         let orch = orch_with_tools(
             cwd.clone(),
-            vec![Arc::new(StubFileTool { name: "NotebookEdit", cwd: cwd.clone() }) as Arc<dyn Tool>],
+            vec![Arc::new(StubFileTool {
+                name: "NotebookEdit",
+                cwd: cwd.clone(),
+            }) as Arc<dyn Tool>],
         );
         // `NotebookEdit` keys the cache on `notebook_path`; the stub reads
         // `file_path` to confirm the file exists, so pass both (same path).
@@ -1431,8 +1498,14 @@ mod read_file_state_tests {
         let orch = orch_with_tools(
             cwd.clone(),
             vec![
-                Arc::new(StubFileTool { name: "Edit", cwd: cwd.clone() }) as Arc<dyn Tool>,
-                Arc::new(StubFileTool { name: "Write", cwd: cwd.clone() }) as Arc<dyn Tool>,
+                Arc::new(StubFileTool {
+                    name: "Edit",
+                    cwd: cwd.clone(),
+                }) as Arc<dyn Tool>,
+                Arc::new(StubFileTool {
+                    name: "Write",
+                    cwd: cwd.clone(),
+                }) as Arc<dyn Tool>,
             ],
         );
         dispatch_one(&orch, "Edit", json!({ "file_path": "e.rs" })).await;
@@ -1450,14 +1523,14 @@ mod read_file_state_tests {
 // ============================================================================
 #[cfg(test)]
 mod max_output_tokens_recovery_tests {
-    use crate::turn_loop::{
-        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome, ESCALATED_MAX_TOKENS,
-        MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
-    };
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use crate::turn_loop::{
+        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome, ESCALATED_MAX_TOKENS,
+        MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
     };
     use crate::OrchestratorConfig;
     use llm_client::LlmResponse;
@@ -1469,9 +1542,7 @@ mod max_output_tokens_recovery_tests {
     /// Build an orchestrator whose batched API returns the given scripted
     /// `LlmResponse`s in order. No tools registered (recovery never needs
     /// them).
-    fn orch_with_responses(
-        responses: Vec<LlmResponse>,
-    ) -> ConversationOrchestrator {
+    fn orch_with_responses(responses: Vec<LlmResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(responses)),
@@ -1618,7 +1689,10 @@ mod max_output_tokens_recovery_tests {
         // appended on exhaustion. The step appends the response assistant message
         // AND the surfaced terminal `API Error: …` assistant message (#24 batched
         // parity with the streaming terminal arm) → +2.
-        assert_eq!(state.max_output_tokens_recovery_count, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT);
+        assert_eq!(
+            state.max_output_tokens_recovery_count,
+            MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
+        );
         let h = history(&orch).await;
         assert_eq!(
             h.len(),
@@ -1670,15 +1744,30 @@ mod max_output_tokens_recovery_tests {
             TurnStepOutcome::Continue => panic!("expected Ended, not a bare re-call"),
         }
         let h = history(&orch).await;
-        assert_eq!(h.len(), len_before + 2, "response asst + surfaced API-error asst");
-        let Some(ConversationMessage::Assistant { content, stop_reason, .. }) = h.last() else {
+        assert_eq!(
+            h.len(),
+            len_before + 2,
+            "response asst + surfaced API-error asst"
+        );
+        let Some(ConversationMessage::Assistant {
+            content,
+            stop_reason,
+            ..
+        }) = h.last()
+        else {
             panic!("expected the surfaced Assistant API-error");
         };
-        assert_eq!(stop_reason.as_deref(), Some("model_context_window_exceeded"));
+        assert_eq!(
+            stop_reason.as_deref(),
+            Some("model_context_window_exceeded")
+        );
         let ContentBlock::Text { text } = &content[0] else {
             panic!("expected a text block");
         };
-        assert_eq!(text, "API Error: The model has reached its context window limit.");
+        assert_eq!(
+            text,
+            "API Error: The model has reached its context window limit."
+        );
     }
 
     /// #24 batched parity: a terminal `refusal` with NO `refusalFallbackModel`
@@ -1705,8 +1794,17 @@ mod max_output_tokens_recovery_tests {
             TurnStepOutcome::Continue => panic!("expected Ended, not a bare re-call"),
         }
         let h = history(&orch).await;
-        assert_eq!(h.len(), len_before + 2, "response asst + surfaced API-error asst");
-        let Some(ConversationMessage::Assistant { content, stop_reason, .. }) = h.last() else {
+        assert_eq!(
+            h.len(),
+            len_before + 2,
+            "response asst + surfaced API-error asst"
+        );
+        let Some(ConversationMessage::Assistant {
+            content,
+            stop_reason,
+            ..
+        }) = h.last()
+        else {
             panic!("expected the surfaced Assistant API-error");
         };
         assert_eq!(stop_reason.as_deref(), Some("refusal"));
@@ -1728,7 +1826,10 @@ mod max_output_tokens_recovery_tests {
     #[tokio::test]
     async fn normal_end_turn_unaffected_by_recovery() {
         let orch = orch_with_responses(vec![mock_message_response(
-            vec![llm_client::ContentBlock::Text { text: "done".into(), cache_control: None }],
+            vec![llm_client::ContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+            }],
             Some("end_turn"),
         )]);
         let mut state = RecoveryState::default();
@@ -1743,7 +1844,10 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(state.max_output_tokens_recovery_count, 0);
         let h = history(&orch).await;
         // [assistant] only — no nudge.
-        assert!(matches!(h.last(), Some(ConversationMessage::Assistant { .. })));
+        assert!(matches!(
+            h.last(),
+            Some(ConversationMessage::Assistant { .. })
+        ));
         assert!(!h.iter().any(|m| matches!(
             m,
             ConversationMessage::User { content, .. }
@@ -1753,9 +1857,7 @@ mod max_output_tokens_recovery_tests {
     }
 
     /// As [`orch_with_responses`] but with the REC.A1 8k→64k escalation enabled.
-    fn orch_with_responses_escalating(
-        responses: Vec<LlmResponse>,
-    ) -> ConversationOrchestrator {
+    fn orch_with_responses_escalating(responses: Vec<LlmResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig {
                 escalate_max_output_tokens: true,
@@ -1821,7 +1923,10 @@ mod max_output_tokens_recovery_tests {
         );
         assert_eq!(state.max_output_tokens_recovery_count, 1);
         assert!(
-            matches!(history(&orch).await.last(), Some(ConversationMessage::User { .. })),
+            matches!(
+                history(&orch).await.last(),
+                Some(ConversationMessage::User { .. })
+            ),
             "nudge appended after the escalation was exhausted"
         );
     }
@@ -1832,7 +1937,9 @@ mod max_output_tokens_recovery_tests {
     #[tokio::test]
     async fn legacy_shim_does_not_recover_on_max_tokens() {
         let orch = orch_with_responses(vec![max_tokens_response()]);
-        let step = crate::turn_loop::execute_one_turn(&orch, None).await.expect("step");
+        let step = crate::turn_loop::execute_one_turn(&orch, None)
+            .await
+            .expect("step");
         assert!(matches!(step, TurnStepOutcome::Continue));
         let h = history(&orch).await;
         // Only the assistant message; no nudge appended by the shim.
@@ -1852,15 +1959,15 @@ mod max_output_tokens_recovery_tests {
 // ============================================================================
 #[cfg(test)]
 mod malformed_and_thinking_only_tests {
-    use crate::turn_loop::{
-        execute_one_turn, execute_one_turn_with_recovery, prior_assistant_used_structured_output,
-        RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
-        MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
-    };
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use crate::turn_loop::{
+        execute_one_turn, execute_one_turn_with_recovery, prior_assistant_used_structured_output,
+        RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
+        MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
     use crate::OrchestratorConfig;
     use llm_client::LlmResponse;
@@ -2124,7 +2231,11 @@ mod malformed_and_thinking_only_tests {
     fn pt_false_when_real_user_precedes_any_structured_output() {
         // No StructuredOutput before the most recent real user turn ⇒ false (the
         // `Sn.type==="user" && !isMeta && !Jde ⇒ return!1` short-circuit).
-        let h = vec![so_tool_use_assistant(), real_user("new question"), empty_assistant()];
+        let h = vec![
+            so_tool_use_assistant(),
+            real_user("new question"),
+            empty_assistant(),
+        ];
         assert!(!prior_assistant_used_structured_output(&h));
     }
 
@@ -2142,7 +2253,12 @@ mod malformed_and_thinking_only_tests {
             }],
             stop_reason: None,
         };
-        let h = vec![real_user("read it"), other, tool_result_user(), empty_assistant()];
+        let h = vec![
+            real_user("read it"),
+            other,
+            tool_result_user(),
+            empty_assistant(),
+        ];
         assert!(!prior_assistant_used_structured_output(&h));
     }
 
@@ -2278,12 +2394,12 @@ mod malformed_and_thinking_only_tests {
 /// + `toolHooks.ts` + `query.ts:1518-1521`).
 #[cfg(test)]
 mod pre_tool_hook_tests {
-    use crate::turn_loop::{dispatch_tool_uses_tracked, execute_one_turn, TurnStepOutcome};
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
         mock_message_response, MockApiClient, MockOutputStream, PermissionDecision,
         PermissionDecisionSource, PermissionGate, PermissionResolution, StaticMemoryProvider,
     };
+    use crate::turn_loop::{dispatch_tool_uses_tracked, execute_one_turn, TurnStepOutcome};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
@@ -2523,8 +2639,9 @@ mod pre_tool_hook_tests {
         // context, dispatch a tool, and assert the fields are populated.
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> =
-            Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()));
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             session_path.clone(),
             fs,
@@ -2619,7 +2736,8 @@ mod pre_tool_hook_tests {
         // Correctly shaped: under <config_home>/projects and a `.jsonl` leaf named
         // by the BARE uuid (no `sess:` prefix), matching the on-disk filename.
         assert!(
-            ctx.transcript_path.starts_with(config_home.join("projects")),
+            ctx.transcript_path
+                .starts_with(config_home.join("projects")),
             "computed path must live under <config_home>/projects"
         );
         assert_eq!(
@@ -2736,11 +2854,7 @@ mod pre_tool_hook_tests {
                 reason: "via-hook-allow".into(),
             }
         }
-        async fn check_in_plan_mode(
-            &self,
-            _t: &str,
-            _i: &serde_json::Value,
-        ) -> PermissionDecision {
+        async fn check_in_plan_mode(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "via-plan-mode".into(),
             }
@@ -2767,11 +2881,7 @@ mod pre_tool_hook_tests {
         ) -> PermissionDecision {
             PermissionDecision::Allow
         }
-        async fn resolve_detailed(
-            &self,
-            _t: &str,
-            _i: &serde_json::Value,
-        ) -> PermissionResolution {
+        async fn resolve_detailed(&self, _t: &str, _i: &serde_json::Value) -> PermissionResolution {
             PermissionResolution::Ask
         }
     }
@@ -2787,11 +2897,7 @@ mod pre_tool_hook_tests {
                 reason: "sourced-deny".into(),
             }
         }
-        async fn resolve_detailed(
-            &self,
-            _t: &str,
-            _i: &serde_json::Value,
-        ) -> PermissionResolution {
+        async fn resolve_detailed(&self, _t: &str, _i: &serde_json::Value) -> PermissionResolution {
             PermissionResolution::Deny {
                 reason: "sourced-deny".into(),
                 source: self.0,
@@ -2974,10 +3080,13 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let parent_bytes = "PARENT RENDERED SYSTEM PROMPT";
-        orch.save_current_turn_system_prompt(Some(parent_bytes)).await;
+        orch.save_current_turn_system_prompt(Some(parent_bytes))
+            .await;
 
         let uses = vec![(ToolUseId::new(), "Capture".to_string(), json!({}), None)];
-        let _ = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
 
         let got = captured.lock().unwrap().clone();
         assert_eq!(
@@ -3009,10 +3118,16 @@ mod pre_tool_hook_tests {
         );
 
         let uses = vec![(ToolUseId::new(), "Capture".to_string(), json!({}), None)];
-        let _ = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
 
         let got = captured.lock().unwrap().clone();
-        assert_eq!(got, Some(None), "tool ctx must carry None with no recorded prompt");
+        assert_eq!(
+            got,
+            Some(None),
+            "tool ctx must carry None with no recorded prompt"
+        );
     }
 
     /// SKILLEXEC.3 (Part A): a tool that succeeds AND injects a follow-up
@@ -3151,8 +3266,9 @@ mod pre_tool_hook_tests {
         );
         let skill_tu = ToolUseId::new();
         let uses = vec![(skill_tu.clone(), "Inject".to_string(), json!({}), None)];
-        let (results, _prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         // The tool_result block still rides the first tuple element.
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error);
@@ -3320,7 +3436,9 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let (_results, _prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .unwrap();
         assert!(
             injected.is_empty(),
             "Echo injects no messages → history is byte-identical to before"
@@ -3350,8 +3468,9 @@ mod pre_tool_hook_tests {
         );
         let uses = uses();
         let tool_use_id = uses[0].0.clone();
-        let (results, prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let (results, prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         assert!(!prevent);
 
         // (a) the tool_result is the tool's ORIGINAL output, NO appended context.
@@ -3405,8 +3524,9 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let uses = uses();
-        let (results, prevent, injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let (results, prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         assert!(!prevent);
 
         // (a) the tool_result is the tool's ORIGINAL output, untouched.
@@ -3439,8 +3559,13 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let (_results, prevent, _injected, _mods) =
-            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
-        assert!(prevent, "continue:false must surface as prevent_continuation");
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .unwrap();
+        assert!(
+            prevent,
+            "continue:false must surface as prevent_continuation"
+        );
     }
 
     #[tokio::test]
@@ -3510,7 +3635,9 @@ mod pre_tool_hook_tests {
             ..HookResponse::default()
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyAllGate), vec![]);
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error, "hook allow skipped the prompt; tool ran");
         assert!(content.contains("ECHOED-OUTPUT"));
@@ -3528,7 +3655,9 @@ mod pre_tool_hook_tests {
             ..HookResponse::default()
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyRuleGate), vec![]);
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a deny rule must override a hook 'allow'");
         // The deny reason reaches the model VERBATIM (no "Permission denied: "
@@ -3552,7 +3681,9 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(content.contains("Hook blocked: nope"));
@@ -3567,9 +3698,14 @@ mod pre_tool_hook_tests {
             Arc::new(DenyAllGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
-        assert!(is_error, "gate denial applies when the hook makes no decision");
+        assert!(
+            is_error,
+            "gate denial applies when the hook makes no decision"
+        );
         // Verbatim deny reason (no "Permission denied: " wrapper).
         assert!(content.contains("denied-by-gate"));
         assert!(!content.contains("Permission denied: denied-by-gate"));
@@ -3589,13 +3725,14 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let uses = vec![(ToolUseId::new(), "NoSuchTool".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "unknown tool must set is_error=true");
         assert_eq!(
-            content,
-            "<tool_use_error>Error: No such tool available: NoSuchTool</tool_use_error>",
+            content, "<tool_use_error>Error: No such tool available: NoSuchTool</tool_use_error>",
             "content must match claude-code format byte-for-byte"
         );
     }
@@ -3699,7 +3836,9 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let uses = vec![(ToolUseId::new(), "AlwaysFail".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "a failing tool must set is_error=true");
@@ -3710,8 +3849,7 @@ mod pre_tool_hook_tests {
         // `internal: `/`invalid input: ` prefix (that prefix is `Display`-only,
         // for logging). Only unknown-tool and schema-validation paths wrap.
         assert_eq!(
-            content,
-            "Error: kaboom",
+            content, "Error: kaboom",
             "tool-execution errors must be BARE (no <tool_use_error> wrapper, no variant prefix)"
         );
         assert!(
@@ -3858,8 +3996,15 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let uses = vec![(ToolUseId::new(), "ValidatingFail".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let uses = vec![(
+            ToolUseId::new(),
+            "ValidatingFail".to_string(),
+            json!({}),
+            None,
+        )];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "validate_input failure must set is_error=true");
@@ -3888,8 +4033,15 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let uses = vec![(ToolUseId::new(), "ValidatingFail".to_string(), json!({}), None)];
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None).await.unwrap();
+        let uses = vec![(
+            ToolUseId::new(),
+            "ValidatingFail".to_string(),
+            json!({}),
+            None,
+        )];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert_eq!(content, "<tool_use_error>bad path</tool_use_error>");
@@ -3912,7 +4064,9 @@ mod pre_tool_hook_tests {
             vec![],
         );
         orch.session.lock().await.plan_mode = true;
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -3933,7 +4087,9 @@ mod pre_tool_hook_tests {
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(RouteProbeGate), vec![]);
         orch.session.lock().await.plan_mode = true;
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "plan mode binds over the hook 'allow'");
         assert!(
@@ -3951,7 +4107,9 @@ mod pre_tool_hook_tests {
             vec![],
         );
         // plan_mode defaults to false.
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -3976,7 +4134,9 @@ mod pre_tool_hook_tests {
             Arc::new(AskGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(
             !is_error,
@@ -3998,7 +4158,9 @@ mod pre_tool_hook_tests {
             Arc::new(AskGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -4028,8 +4190,9 @@ mod pre_tool_hook_tests {
             Arc::new(AllowAllGate),
             vec![],
         );
-        let (results, prevent, injected, _) =
-            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, prevent, injected, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         assert!(
             results.is_empty(),
             "the deferred tool produces NO tool_result: {results:?}"
@@ -4083,8 +4246,9 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let (results, prevent, _, _) =
-            dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, prevent, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         assert!(!prevent, "ignored defer does NOT terminate the turn");
         assert_eq!(results.len(), 1, "the tool ran and produced a tool_result");
         let (_, is_error) = tool_result(&results[0]);
@@ -4110,8 +4274,7 @@ mod pre_tool_hook_tests {
             (ToolUseId::new(), "Echo".to_string(), json!({}), None),
             (ToolUseId::new(), "Echo".to_string(), json!({}), None),
         ];
-        let (results, prevent, _, _) =
-            dispatch_tool_uses_tracked(&orch, &two, None).await.unwrap();
+        let (results, prevent, _, _) = dispatch_tool_uses_tracked(&orch, &two, None).await.unwrap();
         assert!(!prevent, "multi-tool defer does NOT terminate the turn");
         assert_eq!(results.len(), 2, "both tools ran (defer ignored)");
     }
@@ -4188,8 +4351,14 @@ mod pre_tool_hook_tests {
             Arc::new(AllowAllGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
-        assert_eq!(results.len(), 1, "the tool still ran (no PostToolBatch hook)");
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "the tool still ran (no PostToolBatch hook)"
+        );
     }
 
     #[tokio::test]
@@ -4201,7 +4370,9 @@ mod pre_tool_hook_tests {
             Arc::new(AskGate),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(
@@ -4224,8 +4395,13 @@ mod pre_tool_hook_tests {
             Arc::new(SourcedDenyGate(PermissionDecisionSource::Rule)),
             vec![],
         );
-        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None).await.unwrap();
-        assert!(tool_result(&results[0]).1, "rule deny still denies the tool");
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        assert!(
+            tool_result(&results[0]).1,
+            "rule deny still denies the tool"
+        );
         assert_eq!(
             fired_rule.load(Ordering::SeqCst),
             0,
@@ -4239,8 +4415,13 @@ mod pre_tool_hook_tests {
             Arc::new(SourcedDenyGate(PermissionDecisionSource::Classifier)),
             vec![],
         );
-        let (results2, _, _, _) = dispatch_tool_uses_tracked(&orch2, &uses(), None).await.unwrap();
-        assert!(tool_result(&results2[0]).1, "classifier deny denies the tool");
+        let (results2, _, _, _) = dispatch_tool_uses_tracked(&orch2, &uses(), None)
+            .await
+            .unwrap();
+        assert!(
+            tool_result(&results2[0]).1,
+            "classifier deny denies the tool"
+        );
         assert_eq!(
             fired_cls.load(Ordering::SeqCst),
             1,
@@ -4254,15 +4435,19 @@ mod pre_tool_hook_tests {
 /// and content = `CANCEL_MESSAGE` for every pending tool.
 #[cfg(test)]
 mod pre_cancel_tests {
-    use crate::turn_loop::{dispatch_tool_uses_tracked, CANCEL_MESSAGE};
     use crate::conversation::ConversationOrchestrator;
-    use crate::test_support::{noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider};
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::turn_loop::{dispatch_tool_uses_tracked, CANCEL_MESSAGE};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use protocol::{ContentBlock, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;
     use tool_api::registry::ToolRegistry;
@@ -4270,36 +4455,68 @@ mod pre_cancel_tests {
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
         ValidationError,
     };
-    use tokio_util::sync::CancellationToken;
 
     /// A tool that always succeeds — if the pre-cancel guard lets it run, the
     /// test will get a success result instead of the CANCEL_MESSAGE error.
     struct NeverShouldRunTool;
     #[async_trait]
     impl Tool for NeverShouldRunTool {
-        fn name(&self) -> &str { "NeverRun" }
+        fn name(&self) -> &str {
+            "NeverRun"
+        }
         fn input_schema(&self) -> &serde_json::Value {
             static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
                 once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
             &SCHEMA
         }
-        fn is_enabled(&self, _: &ToolStaticContext) -> bool { true }
-        fn max_result_size_chars(&self) -> usize { 1024 * 1024 }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool { true }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool { true }
-        async fn validate_input(&self, _: &serde_json::Value, _: &ToolUseContext) -> Result<(), ValidationError> { Ok(()) }
-        async fn check_permissions(&self, _: &serde_json::Value, _: &ToolUseContext) -> permission::PermissionResult {
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
-                reason: permission::PermissionDecisionReason::Other { reason: "test".into() },
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
                 updated_input: None,
                 update_destination: None,
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String { "never-run".into() }
-        async fn prompt(&self, _: &PromptOptions) -> String { String::new() }
-        async fn call(&self, _: serde_json::Value, _: ToolUseContext, _: ToolProgressSender) -> Result<ToolCallResult, ToolError> {
-            panic!("NeverShouldRunTool::call must not be reached when cancel fires before dispatch");
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "never-run".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            panic!(
+                "NeverShouldRunTool::call must not be reached when cancel fires before dispatch"
+            );
         }
     }
 
@@ -4335,7 +4552,9 @@ mod pre_cancel_tests {
 
         assert_eq!(results.len(), 1, "must return one result per tool");
         match &results[0] {
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 assert!(
                     *is_error,
                     "pre-cancel tool_result must have is_error=true, got content={content:?}"

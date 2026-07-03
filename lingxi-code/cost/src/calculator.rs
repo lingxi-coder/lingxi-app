@@ -381,7 +381,10 @@ mod tests {
             ..Usage::default()
         };
         // 1M input × $30/Mtok = $30 = 30e9 nano-USD.
-        assert_eq!(CostCalculator::calculate_nano_usd(&usage, &p), 30_000_000_000);
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&usage, &p),
+            30_000_000_000
+        );
     }
 
     #[test]
@@ -400,7 +403,10 @@ mod tests {
             ..Usage::default()
         };
         // 1M input × $5/Mtok = $5 = 5e9 nano-USD.
-        assert_eq!(CostCalculator::calculate_nano_usd(&usage, &p), 5_000_000_000);
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&usage, &p),
+            5_000_000_000
+        );
     }
 
     #[test]
@@ -421,7 +427,10 @@ mod tests {
             ..Usage::default()
         };
         // 1M input × $10/Mtok = $10 = 10e9 nano-USD.
-        assert_eq!(CostCalculator::calculate_nano_usd(&usage, &p), 10_000_000_000);
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&usage, &p),
+            10_000_000_000
+        );
     }
 
     #[test]
@@ -440,7 +449,10 @@ mod tests {
             },
             ..Usage::default()
         };
-        assert_eq!(CostCalculator::calculate_nano_usd(&usage, &p), 5_000_000_000);
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&usage, &p),
+            5_000_000_000
+        );
     }
 
     #[test]
@@ -459,7 +471,10 @@ mod tests {
             },
             ..Usage::default()
         };
-        assert_eq!(CostCalculator::calculate_nano_usd(&usage, &p), 10_000_000_000);
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&usage, &p),
+            10_000_000_000
+        );
     }
 
     #[test]
@@ -480,7 +495,10 @@ mod tests {
             ..Usage::default()
         };
         // Still $10/Mtok = 10e9.
-        assert_eq!(CostCalculator::calculate_nano_usd(&usage, &p), 10_000_000_000);
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&usage, &p),
+            10_000_000_000
+        );
     }
 
     #[test]
@@ -499,6 +517,9 @@ mod tests {
             ..Usage::default()
         };
         // 1M output × $50/Mtok = $50 = 50e9 nano-USD.
-        assert_eq!(CostCalculator::calculate_nano_usd(&usage, &p), 50_000_000_000);
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&usage, &p),
+            50_000_000_000
+        );
     }
 }

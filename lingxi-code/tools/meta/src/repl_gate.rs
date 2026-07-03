@@ -102,7 +102,16 @@ mod tests {
     fn repl_only_tools_has_expected_eight_names() {
         assert_eq!(
             REPL_ONLY_TOOLS,
-            &["Read", "Write", "Edit", "Glob", "Grep", "Bash", "NotebookEdit", "Agent"]
+            &[
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "Bash",
+                "NotebookEdit",
+                "Agent"
+            ]
         );
         assert_eq!(REPL_ONLY_TOOLS.len(), 8);
     }

@@ -262,9 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn unmatched_no_ask_is_false() {
-        assert!(
-            !filter_network_request_with_ask(443, "unknown.com", &allow_example(), None).await
-        );
+        assert!(!filter_network_request_with_ask(443, "unknown.com", &allow_example(), None).await);
     }
 
     #[tokio::test]

@@ -11,8 +11,8 @@
 use iocraft::prelude::*;
 
 use crate::components::messages::user_tool_result::MARKER;
-use crate::theme::Theme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::Theme;
 
 /// Props for [`HookProgressMessage`].
 #[derive(Debug, Clone, Default, Props)]

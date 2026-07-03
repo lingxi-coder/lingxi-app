@@ -26,11 +26,18 @@ pub async fn run(env: &MigrationEnv) {
             return;
         }
     };
-    if cfg.get("sonnet1m45MigrationComplete").is_some_and(js_truthy) {
+    if cfg
+        .get("sonnet1m45MigrationComplete")
+        .is_some_and(js_truthy)
+    {
         return;
     }
 
-    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
+    let sp = settings_path(
+        SettingsSource::User,
+        &env.lingxi_config_home,
+        &env.project_dir,
+    );
     let model = read_settings_map(&sp)
         .ok()
         .and_then(|m| m.get("model").and_then(Value::as_str).map(String::from));
@@ -67,7 +74,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }
@@ -131,7 +141,10 @@ mod tests {
         run(&test_env(&t)).await;
         std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o644)).unwrap();
         // write failed → model unchanged…
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("sonnet[1m]"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            json!("sonnet[1m]")
+        );
         // …but the flag is STILL set.
         let m = crate::global_config::read_map(&t.global).unwrap();
         assert_eq!(m["sonnet1m45MigrationComplete"], json!(true));
@@ -145,6 +158,9 @@ mod tests {
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "sonnet[1m]"}"#).unwrap();
         run(&test_env(&t)).await;
-        assert_eq!(read_settings_map(&sp).unwrap()["model"], json!("sonnet[1m]"));
+        assert_eq!(
+            read_settings_map(&sp).unwrap()["model"],
+            json!("sonnet[1m]")
+        );
     }
 }

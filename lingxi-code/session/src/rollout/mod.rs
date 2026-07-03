@@ -43,16 +43,12 @@ pub use compression::{
 };
 pub use initial_history::{InitialHistory, ResumedHistory};
 pub use metadata::{
-    builder_from_items, parse_timestamp_uuid_from_filename, plain_rollout_path,
-    rollout_date_parts, ThreadMetadataBuilder,
+    builder_from_items, parse_timestamp_uuid_from_filename, plain_rollout_path, rollout_date_parts,
+    ThreadMetadataBuilder,
 };
 pub use policy::{is_persisted_rollout_item, persisted_rollout_items};
-pub use record::{
-    GitInfo, RolloutItem, RolloutLine, SessionMeta, SessionMetaLine, SessionSource,
-};
-pub use recorder::{
-    append_rollout_item_to_path, RolloutRecorder, RolloutRecorderParams,
-};
+pub use record::{GitInfo, RolloutItem, RolloutLine, SessionMeta, SessionMetaLine, SessionSource};
+pub use recorder::{append_rollout_item_to_path, RolloutRecorder, RolloutRecorderParams};
 pub use session_index::{
     append_thread_name, find_thread_name_by_id, find_thread_names_by_ids,
     remove_thread_name_entries, SessionIndexEntry,

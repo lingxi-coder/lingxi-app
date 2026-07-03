@@ -68,13 +68,11 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     // emits in reaction to the `notifications/initialized` that `initialize`
     // sends). Broadcast receivers only observe messages from their
     // subscription point onward, so ordering matters here.
-    let mut notifications = tokio::time::timeout(
-        Duration::from_secs(5),
-        transport.notifications(&conn),
-    )
-    .await
-    .expect("notifications timed out")
-    .expect("notifications failed");
+    let mut notifications =
+        tokio::time::timeout(Duration::from_secs(5), transport.notifications(&conn))
+            .await
+            .expect("notifications timed out")
+            .expect("notifications failed");
 
     // --- initialize ----------------------------------------------------
     let caps = tokio::time::timeout(Duration::from_secs(5), transport.initialize(&conn))
@@ -88,7 +86,9 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert!(caps.prompts, "expected prompts capability from fixture");
     assert!(caps.logging, "expected logging capability from fixture");
     assert_eq!(
-        caps.experimental.get("foo").and_then(serde_json::Value::as_bool),
+        caps.experimental
+            .get("foo")
+            .and_then(serde_json::Value::as_bool),
         Some(true),
         "experimental map must decode the fixture's `foo: true` entry"
     );
@@ -119,7 +119,10 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert_eq!(tools[0].tool_name, "echo");
     assert_eq!(tools[0].description, "Echo the provided text back.");
     assert_eq!(
-        tools[0].input_schema.pointer("/type").and_then(|v| v.as_str()),
+        tools[0]
+            .input_schema
+            .pointer("/type")
+            .and_then(|v| v.as_str()),
         Some("object"),
         "inputSchema must decode into the input_schema field"
     );
@@ -197,7 +200,9 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert_eq!(rich[0].blob_saved_to, None, "text block persists nothing");
     // Nothing written to disk for a pure text resource.
     assert!(
-        std::fs::read_dir(out_dir.path()).map(|mut d| d.next().is_none()).unwrap_or(true),
+        std::fs::read_dir(out_dir.path())
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true),
         "no blob files for a text resource"
     );
 
@@ -208,7 +213,10 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         .expect("list_prompts failed");
     assert_eq!(prompts.len(), 1, "fixture exposes one prompt");
     assert_eq!(prompts[0].name, "greet");
-    assert_eq!(prompts[0].description.as_deref(), Some("Greet someone by name."));
+    assert_eq!(
+        prompts[0].description.as_deref(),
+        Some("Greet someone by name.")
+    );
 
     // --- ping ----------------------------------------------------------
     tokio::time::timeout(Duration::from_secs(5), transport.ping(conn.connection_id))
@@ -217,10 +225,13 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         .expect("ping failed");
 
     // --- disconnect ----------------------------------------------------
-    tokio::time::timeout(Duration::from_secs(5), transport.disconnect(conn.connection_id))
-        .await
-        .expect("disconnect timed out")
-        .expect("disconnect failed");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        transport.disconnect(conn.connection_id),
+    )
+    .await
+    .expect("disconnect timed out")
+    .expect("disconnect failed");
 
     // After disconnect the connection id is removed from the map: a follow-up
     // ping must fail with a connection error rather than hang.

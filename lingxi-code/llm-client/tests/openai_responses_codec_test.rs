@@ -1491,7 +1491,7 @@ fn stream_completed_closes_open_blocks_then_message_delta_and_stop() {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("end_turn".to_string()),
-        stop_details: None,
+                    stop_details: None,
                 },
                 usage: Some(Usage {
                     billable_tokens: TokenUsage {
@@ -1561,7 +1561,7 @@ fn stream_incomplete_max_output_tokens_maps_max_tokens() {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("max_tokens".to_string()),
-        stop_details: None,
+                    stop_details: None,
                 },
                 usage: None,
             },
@@ -1925,7 +1925,10 @@ fn stream_finish_without_completed_closes_blocks_and_stops() {
         &[
             LlmEvent::ContentBlockStop { index: 0 },
             LlmEvent::MessageDelta {
-                delta: MessageDeltaPayload { stop_reason: None, stop_details: None },
+                delta: MessageDeltaPayload {
+                    stop_reason: None,
+                    stop_details: None
+                },
                 usage: None,
             },
             LlmEvent::MessageStop,
@@ -2083,7 +2086,7 @@ fn stream_happy_path_exact_event_sequence() {
             LlmEvent::MessageDelta {
                 delta: MessageDeltaPayload {
                     stop_reason: Some("tool_use".to_string()),
-        stop_details: None,
+                    stop_details: None,
                 },
                 usage: Some(Usage {
                     billable_tokens: TokenUsage {

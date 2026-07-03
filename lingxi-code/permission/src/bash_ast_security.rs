@@ -162,8 +162,7 @@ pub(crate) const DANGEROUS_TYPES: &[&str] = &[
 /// Redirect operator tokens, kind == canonical op (TS `REDIRECT_OPS`, ast.ts:224).
 /// `<<` is NOT a member (heredocs go via the heredoc walker).
 #[allow(dead_code)]
-pub(crate) const REDIRECT_OPS: &[&str] =
-    &[">", ">>", "<", ">&", "<&", ">|", "&>", "&>>", "<<<"];
+pub(crate) const REDIRECT_OPS: &[&str] = &[">", ">>", "<", ">&", "<&", ">|", "&>", "&>>", "<<<"];
 
 // ── Variable-resolution sets (ast.ts:125,167) ──
 
@@ -204,8 +203,8 @@ pub(crate) const SPECIAL_VAR_NAMES: &[&str] = &["?", "$", "!", "#", "0", "-"];
 /// ast.ts:2060).
 pub(crate) const ZSH_DANGEROUS_BUILTINS: &[&str] = &[
     "zmodload", "emulate", "sysopen", "sysread", "syswrite", "sysseek", "zpty", "ztcp", "zsocket",
-    "zf_rm", "zf_mv", "zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir", "zf_chgrp", "repeat",
-    "foreach", "zcompile", "setopt", "unsetopt", "disable", "shopt",
+    "zf_rm", "zf_mv", "zf_ln", "zf_chmod", "zf_chown", "zf_mkdir", "zf_rmdir", "zf_chgrp",
+    "repeat", "foreach", "zcompile", "setopt", "unsetopt", "disable", "shopt",
 ];
 
 /// Builtins that evaluate their arguments as shell code (TS `EVAL_LIKE_BUILTINS`,
@@ -214,8 +213,23 @@ pub(crate) const ZSH_DANGEROUS_BUILTINS: &[&str] = &[
 /// [`check_semantics`] wrapper loop), so by the time the name battery runs they
 /// have already been unwrapped to the real command.
 pub(crate) const EVAL_LIKE_BUILTINS: &[&str] = &[
-    "eval", "source", ".", "exec", "nocorrect", "fc", "coproc", "trap", "enable", "mapfile",
-    "readarray", "hash", "bind", "complete", "compgen", "alias", "let",
+    "eval",
+    "source",
+    ".",
+    "exec",
+    "nocorrect",
+    "fc",
+    "coproc",
+    "trap",
+    "enable",
+    "mapfile",
+    "readarray",
+    "hash",
+    "bind",
+    "complete",
+    "compgen",
+    "alias",
+    "let",
 ];
 
 /// Builtins whose argument IS run as a command — `watch rm -rf`, `flock f rm`,
@@ -229,9 +243,31 @@ pub(crate) const RUNS_ARG_COMMANDS: &[&str] = &[
 /// flags/subscripts that change assignment-eval semantics (TS checkSemantics
 /// `w$t`).
 pub(crate) const DECLARE_FAMILY: &[&str] = &[
-    "declare", "typeset", "local", "export", "readonly", "print", "getopts", "set", "zparseopts",
-    "zformat", "zstyle", "autoload", "shift", "exit", "return", "break", "continue", "bye",
-    "logout", "vared", "private", "getln", "zregexparse", "float", "integer",
+    "declare",
+    "typeset",
+    "local",
+    "export",
+    "readonly",
+    "print",
+    "getopts",
+    "set",
+    "zparseopts",
+    "zformat",
+    "zstyle",
+    "autoload",
+    "shift",
+    "exit",
+    "return",
+    "break",
+    "continue",
+    "bye",
+    "logout",
+    "vared",
+    "private",
+    "getln",
+    "zregexparse",
+    "float",
+    "integer",
 ];
 
 /// zsh `typeset`-family subset whose flags trigger matheval of the RHS (TS
@@ -243,8 +279,22 @@ pub(crate) const ZSH_TYPESET_FAMILY: &[&str] = &[
 /// `set -o <name>` option names that are statically safe (TS checkSemantics
 /// `poo`). Compared after lowercasing and stripping `_`/`-`.
 pub(crate) const SET_O_SAFE: &[&str] = &[
-    "pipefail", "errexit", "nounset", "xtrace", "noglob", "noclobber", "verbose", "monitor",
-    "notify", "vi", "emacs", "errtrace", "functrace", "hashall", "physical", "ignoreeof",
+    "pipefail",
+    "errexit",
+    "nounset",
+    "xtrace",
+    "noglob",
+    "noclobber",
+    "verbose",
+    "monitor",
+    "notify",
+    "vi",
+    "emacs",
+    "errtrace",
+    "functrace",
+    "hashall",
+    "physical",
+    "ignoreeof",
 ];
 
 /// `set -<letter>` single-letter options that are statically safe (TS
@@ -256,18 +306,66 @@ pub(crate) const SET_SAFE_LETTERS: &[&str] = &[
 /// `find` primaries that execute commands or modify files (TS checkSemantics
 /// `coo`). Auto-allow via a `Bash(find:*)` prefix rule is unsafe with any of these.
 pub(crate) const FIND_ACTION_FLAGS: &[&str] = &[
-    "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-delete",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-fls",
     "-files0-from",
 ];
 
 /// `find` primaries that take a value operand (skip the operand; TS checkSemantics
 /// `R$t`). `-newerXY` is matched by [`find_newer_re`] instead.
 pub(crate) const FIND_VALUE_FLAGS: &[&str] = &[
-    "-name", "-iname", "-path", "-ipath", "-lname", "-ilname", "-regex", "-iregex", "-wholename",
-    "-iwholename", "-samefile", "-newer", "-anewer", "-cnewer", "-mnewer", "-perm", "-user",
-    "-group", "-uid", "-gid", "-size", "-type", "-xtype", "-fstype", "-inum", "-links", "-used",
-    "-context", "-amin", "-cmin", "-mmin", "-atime", "-ctime", "-mtime", "-mindepth", "-maxdepth",
-    "-printf", "-regextype", "-D", "-f", "-flags", "-Bnewer", "-Btime", "-Bmin", "-files0-from",
+    "-name",
+    "-iname",
+    "-path",
+    "-ipath",
+    "-lname",
+    "-ilname",
+    "-regex",
+    "-iregex",
+    "-wholename",
+    "-iwholename",
+    "-samefile",
+    "-newer",
+    "-anewer",
+    "-cnewer",
+    "-mnewer",
+    "-perm",
+    "-user",
+    "-group",
+    "-uid",
+    "-gid",
+    "-size",
+    "-type",
+    "-xtype",
+    "-fstype",
+    "-inum",
+    "-links",
+    "-used",
+    "-context",
+    "-amin",
+    "-cmin",
+    "-mmin",
+    "-atime",
+    "-ctime",
+    "-mtime",
+    "-mindepth",
+    "-maxdepth",
+    "-printf",
+    "-regextype",
+    "-D",
+    "-f",
+    "-flags",
+    "-Bnewer",
+    "-Btime",
+    "-Bmin",
+    "-files0-from",
     "-xattrname",
 ];
 
@@ -327,7 +425,10 @@ lazy_re!(stdbuf_short_fused_re, r"^-[ioe].");
 // STDBUF_LONG_RE (ast.ts:115): `--output=MODE` long form.
 lazy_re!(stdbuf_long_re, r"^--(input|output|error)=");
 // timeout long flag with fused value (ast.ts:2243): `--kill-after=N`/`--signal=SIG`.
-lazy_re!(timeout_long_value_re, r"^--(?:kill-after|signal)=[A-Za-z0-9_.+-]+$");
+lazy_re!(
+    timeout_long_value_re,
+    r"^--(?:kill-after|signal)=[A-Za-z0-9_.+-]+$"
+);
 // timeout signal/duration value charset (ast.ts:2248,2263): allowlisted value.
 lazy_re!(timeout_value_re, r"^[A-Za-z0-9_.+-]+$");
 // timeout fused short flag with value (ast.ts:2266): `-k5`/`-sTERM`.
@@ -356,7 +457,10 @@ lazy_re!(compgen_exec_re, r"^[+-].*[CFW]");
 
 // ── checkSemantics superset regexes (2.1.195 binary `checkSemantics`/`Mra`) ──
 // Nqe — bash arithmetic-context numeric literal (hex / base#n / decimal).
-lazy_re!(numeric_arith_re, r"^-?(0[xX][0-9a-fA-F]+|[0-9]+#[0-9a-zA-Z]+|[0-9]+)$");
+lazy_re!(
+    numeric_arith_re,
+    r"^-?(0[xX][0-9a-fA-F]+|[0-9]+#[0-9a-zA-Z]+|[0-9]+)$"
+);
 // Tra — `read` numeric value operand (decimal / float).
 lazy_re!(read_numeric_re, r"^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$");
 // Wrp — argv element that is a subscripted NAME (`arr[…`).
@@ -673,13 +777,19 @@ pub(crate) fn collect_commands(
                 }
             }
         }
-        let snapshot: Option<HashMap<String, String>> =
-            if needs_snapshot { Some(var_scope.clone()) } else { None };
+        let snapshot: Option<HashMap<String, String>> = if needs_snapshot {
+            Some(var_scope.clone())
+        } else {
+            None
+        };
         // For `pipeline`, ALL stages run in subshells → start with a COPY so
         // nothing mutates the caller's scope. For `list`/`program`, the `&&`/`;`
         // chain mutates the caller's scope; fork only on `||`/`&`.
-        let mut owned_scope: Option<HashMap<String, String>> =
-            if is_pipeline { Some(var_scope.clone()) } else { None };
+        let mut owned_scope: Option<HashMap<String, String>> = if is_pipeline {
+            Some(var_scope.clone())
+        } else {
+            None
+        };
         for child in children(node) {
             let ck = child.kind();
             if SEPARATOR_TYPES.contains(&ck) {
@@ -690,8 +800,7 @@ pub(crate) fn collect_commands(
                 }
                 continue;
             }
-            let scope: &mut HashMap<String, String> =
-                owned_scope.as_mut().unwrap_or(var_scope);
+            let scope: &mut HashMap<String, String> = owned_scope.as_mut().unwrap_or(var_scope);
             if let Some(err) = collect_commands(child, commands, scope, src) {
                 return Some(err);
             }
@@ -799,8 +908,7 @@ pub(crate) fn collect_commands(
                 "do_group" => do_group = Some(child),
                 "for" | "in" | "select" | ";" => {}
                 "command_substitution" => {
-                    if let Some(err) =
-                        collect_command_substitution(child, commands, var_scope, src)
+                    if let Some(err) = collect_command_substitution(child, commands, var_scope, src)
                     {
                         return Some(err);
                     }
@@ -897,9 +1005,7 @@ pub(crate) fn collect_commands(
                     }
                     let names: Vec<String> = c.argv[1..]
                         .iter()
-                        .filter(|a| {
-                            !a.starts_with('-') && valid_var_name_re().is_match(a)
-                        })
+                        .filter(|a| !a.starts_with('-') && valid_var_name_re().is_match(a))
                         .cloned()
                         .collect();
                     for a in names {
@@ -1015,7 +1121,11 @@ pub(crate) fn walk_redirected_statement(
                     return Some(r);
                 }
             }
-            "command" | "pipeline" | "list" | "negated_command" | "declaration_command"
+            "command"
+            | "pipeline"
+            | "list"
+            | "negated_command"
+            | "declaration_command"
             | "unset_command" => {
                 inner_command = Some(child);
             }
@@ -1138,7 +1248,11 @@ pub(crate) fn walk_command(
                     Err(e) => return e,
                 }
             }
-            "word" | "number" | "raw_string" | "string" | "concatenation"
+            "word"
+            | "number"
+            | "raw_string"
+            | "string"
+            | "concatenation"
             | "arithmetic_expansion" => {
                 match walk_argument(Some(child), src, inner_commands, var_scope) {
                     Ok(s) => argv.push(s),
@@ -1147,20 +1261,16 @@ pub(crate) fn walk_command(
             }
             // NOTE: bare command_substitution at arg position is INTENTIONALLY
             // unhandled → default → too_complex (the $() output IS the argument).
-            "simple_expansion" => {
-                match resolve_simple_expansion(child, src, var_scope, false) {
-                    Ok(s) => argv.push(s),
-                    Err(e) => return e,
-                }
-            }
+            "simple_expansion" => match resolve_simple_expansion(child, src, var_scope, false) {
+                Ok(s) => argv.push(s),
+                Err(e) => return e,
+            },
             "file_redirect" => match walk_file_redirect(child, src, inner_commands, var_scope) {
                 Ok(r) => redirects.push(r),
                 Err(e) => return e,
             },
             "herestring_redirect" => {
-                if let Some(e) =
-                    walk_herestring_redirect(child, src, inner_commands, var_scope)
-                {
+                if let Some(e) = walk_herestring_redirect(child, src, inner_commands, var_scope) {
                     return e;
                 }
             }
@@ -1318,9 +1428,7 @@ fn unescape_string_content(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '\\'
-            && i + 1 < chars.len()
-            && matches!(chars[i + 1], '$' | '`' | '"' | '\\')
+        if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '$' | '`' | '"' | '\\')
         {
             out.push(chars[i + 1]);
             i += 2;
@@ -1443,7 +1551,9 @@ pub(crate) fn walk_arithmetic(node: Node, src: &[u8]) -> Option<ParseForSecurity
             continue;
         }
         match child.kind() {
-            "binary_expression" | "unary_expression" | "ternary_expression"
+            "binary_expression"
+            | "unary_expression"
+            | "ternary_expression"
             | "parenthesized_expression" => {
                 if let Some(err) = walk_arithmetic(child, src) {
                     return Some(err);
@@ -1689,7 +1799,9 @@ pub(crate) fn walk_test_expr(
     var_scope: &mut HashMap<String, String>,
 ) -> Option<ParseForSecurityResult> {
     match node.kind() {
-        "unary_expression" | "binary_expression" | "negated_expression"
+        "unary_expression"
+        | "binary_expression"
+        | "negated_expression"
         | "parenthesized_expression" => {
             for c in children(node) {
                 if let Some(err) = walk_test_expr(c, src, argv, inner_commands, var_scope) {
@@ -1698,8 +1810,8 @@ pub(crate) fn walk_test_expr(
             }
             None
         }
-        "test_operator" | "!" | "(" | ")" | "&&" | "||" | "==" | "=" | "!=" | "<" | ">"
-        | "=~" | "regex" | "extglob_pattern" => {
+        "test_operator" | "!" | "(" | ")" | "&&" | "||" | "==" | "=" | "!=" | "<" | ">" | "=~"
+        | "regex" | "extglob_pattern" => {
             argv.push(node_text(node, src).to_string());
             None
         }
@@ -1804,7 +1916,9 @@ pub fn pre_check_too_complex(cmd: &str) -> Option<&'static str> {
 pub fn parse_for_security(cmd: &str) -> ParseForSecurityResult {
     // TS: `if (cmd === '') return { kind: 'simple', commands: [] }`.
     if cmd.is_empty() {
-        return ParseForSecurityResult::Simple { commands: Vec::new() };
+        return ParseForSecurityResult::Simple {
+            commands: Vec::new(),
+        };
     }
     // Pre-checks run before trusting tree-sitter (the known differentials).
     if let Some(reason) = pre_check_too_complex(cmd) {
@@ -1821,7 +1935,9 @@ pub fn parse_for_security(cmd: &str) -> ParseForSecurityResult {
     };
     // TS: `const trimmed = cmd.trim(); if (trimmed === '') return simple[]`.
     if cmd.trim().is_empty() {
-        return ParseForSecurityResult::Simple { commands: Vec::new() };
+        return ParseForSecurityResult::Simple {
+            commands: Vec::new(),
+        };
     }
     // DEFER (PARSE_ABORTED): TS fail-CLOSES (`TooComplex`, nodeType `PARSE_ABORT`,
     // reason "Parser aborted (timeout or resource limit) — possible adversarial
@@ -2016,24 +2132,30 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         } else if timeout_long_value_re().is_match(u) {
                             c += 1;
                         } else if (u == "--kill-after" || u == "--signal")
-                            && a.get(c + 1).map_or(false, |v| timeout_value_re().is_match(v))
+                            && a.get(c + 1)
+                                .map_or(false, |v| timeout_value_re().is_match(v))
                         {
                             c += 2;
                         } else if u.starts_with("--") {
                             return SemanticCheckResult::Deny {
-                                reason: format!("timeout with {u} flag cannot be statically analyzed"),
+                                reason: format!(
+                                    "timeout with {u} flag cannot be statically analyzed"
+                                ),
                             };
                         } else if u == "-v" {
                             c += 1;
                         } else if (u == "-k" || u == "-s")
-                            && a.get(c + 1).map_or(false, |v| timeout_value_re().is_match(v))
+                            && a.get(c + 1)
+                                .map_or(false, |v| timeout_value_re().is_match(v))
                         {
                             c += 2;
                         } else if timeout_ks_fused_re().is_match(u) {
                             c += 1;
                         } else if u.starts_with('-') {
                             return SemanticCheckResult::Deny {
-                                reason: format!("timeout with {u} flag cannot be statically analyzed"),
+                                reason: format!(
+                                    "timeout with {u} flag cannot be statically analyzed"
+                                ),
                             };
                         } else {
                             break;
@@ -2045,7 +2167,9 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         }
                         Some(dur) => {
                             return SemanticCheckResult::Deny {
-                                reason: format!("timeout duration '{dur}' cannot be statically analyzed"),
+                                reason: format!(
+                                    "timeout duration '{dur}' cannot be statically analyzed"
+                                ),
                             };
                         }
                         None => break,
@@ -2058,10 +2182,9 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         a = &a[3..];
                     } else if a.get(1).map_or(false, |v| nice_legacy_re().is_match(v)) {
                         a = &a[2..];
-                    } else if a
-                        .get(1)
-                        .map_or(false, |v| nice_expansion_re().is_match(v) || contains_any_placeholder(v))
-                    {
+                    } else if a.get(1).map_or(false, |v| {
+                        nice_expansion_re().is_match(v) || contains_any_placeholder(v)
+                    }) {
                         return SemanticCheckResult::Deny {
                             reason: format!(
                                 "nice argument '{}' contains expansion \u{2014} cannot statically determine wrapped command",
@@ -2113,7 +2236,9 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                             c += 1;
                         } else if u.starts_with('-') {
                             return SemanticCheckResult::Deny {
-                                reason: format!("stdbuf with {u} flag cannot be statically analyzed"),
+                                reason: format!(
+                                    "stdbuf with {u} flag cannot be statically analyzed"
+                                ),
                             };
                         } else {
                             break;
@@ -2132,7 +2257,9 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         let d = a[c].as_str();
                         if !command_pvv_re().is_match(d) {
                             return SemanticCheckResult::Deny {
-                                reason: format!("command with {d} flag cannot be statically analyzed"),
+                                reason: format!(
+                                    "command with {d} flag cannot be statically analyzed"
+                                ),
                             };
                         }
                         if d.contains('v') || d.contains('V') {
@@ -2174,7 +2301,8 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
         };
         if o.is_empty() {
             return SemanticCheckResult::Deny {
-                reason: "Empty command name \u{2014} argv[0] may not reflect what bash runs".to_string(),
+                reason: "Empty command name \u{2014} argv[0] may not reflect what bash runs"
+                    .to_string(),
             };
         }
         if contains_any_placeholder(o) {
@@ -2222,8 +2350,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                 if l.len() > 2 && lb[0] == b'-' && lb[1] != b'-' && !l.contains('[') {
                     for u in flags {
                         if u.len() == 2 && l.contains(&u[1..2]) {
-                            if a
-                                .get(ai + 1)
+                            if a.get(ai + 1)
                                 .map_or(false, |d| d.contains('[') || contains_any_placeholder(d))
                             {
                                 return SemanticCheckResult::Deny {
@@ -2486,9 +2613,8 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         };
                         if let Some(d) = d.as_deref() {
                             if !d.is_empty()
-                                && !SET_O_SAFE.contains(
-                                    &d.to_lowercase().replace(['_', '-'], "").as_str(),
-                                )
+                                && !SET_O_SAFE
+                                    .contains(&d.to_lowercase().replace(['_', '-'], "").as_str())
                             {
                                 return SemanticCheckResult::Deny {
                                     reason: format!(
@@ -2545,7 +2671,9 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
         // ── shell reserved keyword as command name: tree-sitter mis-parse. ──
         if SHELL_KEYWORDS.contains(&o) {
             return SemanticCheckResult::Deny {
-                reason: format!("Shell keyword '{o}' as command name \u{2014} tree-sitter mis-parse"),
+                reason: format!(
+                    "Shell keyword '{o}' as command name \u{2014} tree-sitter mis-parse"
+                ),
             };
         }
 
@@ -2630,7 +2758,9 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
         // ── commands that run their argument as a command (watch/flock/…). ──
         if RUNS_ARG_COMMANDS.contains(&o) && a.len() > 1 {
             return SemanticCheckResult::Deny {
-                reason: format!("'{o}' runs its argument as a command \u{2014} cannot be statically analyzed"),
+                reason: format!(
+                    "'{o}' runs its argument as a command \u{2014} cannot be statically analyzed"
+                ),
             };
         }
 
@@ -2965,7 +3095,10 @@ mod tests {
         // quote removal). Use the full-command argv so the resolved arg word is
         // unambiguous (find_kind's DFS would otherwise return the command_name's
         // own word first).
-        assert_eq!(cmd_argvs(r"echo \eval").expect("simple")[0], vec!["echo", "eval"]);
+        assert_eq!(
+            cmd_argvs(r"echo \eval").expect("simple")[0],
+            vec!["echo", "eval"]
+        );
         assert_eq!(cmd_argvs(r"echo \;").expect("simple")[0], vec!["echo", ";"]);
         // GRAMMAR DIVERGENCE (tree-sitter-bash 0.25.1 vs the TS oracle's node
         // model): the TS runs BRACE_EXPANSION_RE on a `word` node's text, but
@@ -2984,7 +3117,10 @@ mod tests {
 
     #[test]
     fn walk_argument_raw_string_and_number() {
-        assert_eq!(arg("echo '/etc/passwd'", "raw_string"), Ok("/etc/passwd".to_string()));
+        assert_eq!(
+            arg("echo '/etc/passwd'", "raw_string"),
+            Ok("/etc/passwd".to_string())
+        );
         // Plain number → its text.
         assert_eq!(arg("sleep 10", "number"), Ok("10".to_string()));
         // `10#$(cmd)` arithmetic-base smuggling: number node WITH a child → reject.
@@ -3042,7 +3178,10 @@ mod tests {
     fn walk_string_whitespace_only_quirk_rejects() {
         // tree-sitter attributes a whitespace-only `" "` to the closing quote →
         // no content children. Guard B (text len > 2) → reject.
-        assert_eq!(cmd_argvs(r#"echo " ""#), Err("Unhandled node type: string".to_string()));
+        assert_eq!(
+            cmd_argvs(r#"echo " ""#),
+            Err("Unhandled node type: string".to_string())
+        );
         // Genuine empty `""` (len == 2) is fine → argv element "".
         let argvs = cmd_argvs(r#"echo """#).expect("simple");
         assert_eq!(argvs[0], vec!["echo".to_string(), String::new()]);
@@ -3070,7 +3209,10 @@ mod tests {
         let mut scope = HashMap::new();
         match walk_variable_assignment(node, &mut inner, &mut scope, src) {
             Err(ParseForSecurityResult::TooComplex { reason }) => {
-                assert_eq!(reason, "IFS assignment changes word-splitting — cannot model statically");
+                assert_eq!(
+                    reason,
+                    "IFS assignment changes word-splitting — cannot model statically"
+                );
             }
             other => panic!("expected IFS reject, got {other:?}"),
         }
@@ -3148,20 +3290,23 @@ mod tests {
             extract_safe_cat_heredoc(node, src)
         }
         // Safe cat-heredoc → body returned.
-        match cat_h(r#"echo "$(cat <<'EOF'
+        match cat_h(
+            r#"echo "$(cat <<'EOF'
 /etc/passwd
 EOF
-)""#)
-        {
+)""#,
+        ) {
             CatHeredoc::Body(b) => assert!(b.contains("/etc/passwd")),
             o => panic!("expected body, got {o:?}"),
         }
         // jq system() in the body → DANGEROUS.
         assert_eq!(
-            cat_h(r#"echo "$(cat <<'EOF'
+            cat_h(
+                r#"echo "$(cat <<'EOF'
 system("id")
 EOF
-)""#),
+)""#
+            ),
             CatHeredoc::Dangerous
         );
     }
@@ -3310,15 +3455,9 @@ EOF
         // ⚠️ GRAMMAR DIVERGENCE: tsb-0.25.1 tokenizes `{a,b}` into a
         // `concatenation` whose text is `{a,b}` — the word-level check is dead, so
         // this is caught by walk_argument's concatenation brace check.
-        assert_eq!(
-            pfs("echo {a,b}"),
-            Err("Brace expansion".to_string())
-        );
+        assert_eq!(pfs("echo {a,b}"), Err("Brace expansion".to_string()));
         // `{a..c}` range form.
-        assert_eq!(
-            pfs("echo {a..c}"),
-            Err("Brace expansion".to_string())
-        );
+        assert_eq!(pfs("echo {a..c}"), Err("Brace expansion".to_string()));
         // Brace expansion as a redirect target is also rejected.
         let r = pfs("echo x > {a,b}");
         assert!(r.is_err(), "brace redirect target must reject: {r:?}");
@@ -3331,9 +3470,18 @@ EOF
         // EVAL_LIKE_BUILTINS rejection lives in the LATER `checkSemantics` stage
         // (ast.ts:2626), which is NOT part of parse_for_security. We assert the
         // faithful parse-stage behavior (Simple), not a stage we don't own.
-        assert_eq!(pfs_argvs("eval \"rm -rf /\"").expect("simple")[0], vec!["eval", "rm -rf /"]);
-        assert_eq!(pfs_argvs("source ./x.sh").expect("simple")[0], vec!["source", "./x.sh"]);
-        assert_eq!(pfs_argvs(". ./x.sh").expect("simple")[0], vec![".", "./x.sh"]);
+        assert_eq!(
+            pfs_argvs("eval \"rm -rf /\"").expect("simple")[0],
+            vec!["eval", "rm -rf /"]
+        );
+        assert_eq!(
+            pfs_argvs("source ./x.sh").expect("simple")[0],
+            vec!["source", "./x.sh"]
+        );
+        assert_eq!(
+            pfs_argvs(". ./x.sh").expect("simple")[0],
+            vec![".", "./x.sh"]
+        );
         assert_eq!(pfs_argvs("exec ls").expect("simple")[0], vec!["exec", "ls"]);
         // But `eval $(cmd)` — bare cmdsub arg → reject.
         assert_eq!(
@@ -3390,7 +3538,9 @@ EOF
         // if/then with safe body → Simple, both condition and body extracted.
         let argvs = pfs_argvs("if true; then echo ok; fi").expect("simple");
         assert!(argvs.iter().any(|a| a == &vec!["true".to_string()]));
-        assert!(argvs.iter().any(|a| a == &vec!["echo".to_string(), "ok".to_string()]));
+        assert!(argvs
+            .iter()
+            .any(|a| a == &vec!["echo".to_string(), "ok".to_string()]));
     }
 
     #[test]
@@ -3398,7 +3548,10 @@ EOF
         // `SUB=status && git $SUB` — argv resolves $SUB; .text is rebuilt from
         // argv so deny-rule matching sees `git status`, not `git $SUB`.
         let cs = pfs("SUB=status && git $SUB").expect("simple");
-        let git = cs.iter().find(|c| c.argv.first().map(String::as_str) == Some("git")).expect("git cmd");
+        let git = cs
+            .iter()
+            .find(|c| c.argv.first().map(String::as_str) == Some("git"))
+            .expect("git cmd");
         assert_eq!(git.argv, vec!["git", "status"]);
         assert_eq!(git.text, "git status");
     }
@@ -3576,7 +3729,10 @@ EOF
     fn fc_and_compgen_list_safe_exec_unsafe() {
         assert_ok(&["fc", "-l"]);
         assert_ok(&["fc", "-ln"]);
-        assert_deny(&["fc", "-e", "ed"], "'fc' evaluates arguments as shell code");
+        assert_deny(
+            &["fc", "-e", "ed"],
+            "'fc' evaluates arguments as shell code",
+        );
         assert_deny(&["fc", "-s"], "'fc' evaluates arguments as shell code");
         assert_ok(&["compgen", "-c"]);
         assert_ok(&["compgen", "-f"]);
@@ -3796,8 +3952,16 @@ EOF
     #[test]
     fn find_action_flags_and_globs_denied() {
         for f in [
-            "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf",
-            "-fls", "-files0-from",
+            "-exec",
+            "-execdir",
+            "-ok",
+            "-okdir",
+            "-delete",
+            "-fprint",
+            "-fprint0",
+            "-fprintf",
+            "-fls",
+            "-files0-from",
         ] {
             assert_deny(
                 &["find", ".", f, "rm", "{}", ";"],
@@ -3914,7 +4078,9 @@ EOF
 
     #[test]
     fn zsh_dangerous_additions_denied() {
-        for b in ["setopt", "unsetopt", "shopt", "disable", "repeat", "foreach", "zcompile"] {
+        for b in [
+            "setopt", "unsetopt", "shopt", "disable", "repeat", "foreach", "zcompile",
+        ] {
             assert_deny(
                 &[b, "x"],
                 &format!("Zsh builtin '{b}' can bypass security checks"),

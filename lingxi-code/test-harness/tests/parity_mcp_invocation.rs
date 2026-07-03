@@ -206,7 +206,9 @@ async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn() {
     ]));
     let output = Arc::new(MockOutputStream::new());
     let orch = build_orchestrator(api.clone(), tools, output.clone(), mcp_registry);
-    orch.run_turn("call the dotted tool").await.expect("turn ok");
+    orch.run_turn("call the dotted tool")
+        .await
+        .expect("turn ok");
 
     // The server's `call_tool` must observe the RAW wire name `a.b`, NOT the
     // normalized FQN segment `a_b` — the divergence the fix closes.

@@ -95,12 +95,7 @@ fn validate_keystroke(keystroke: &str) -> Option<KeybindingWarning> {
     }
 
     let parsed = parse_keystroke(keystroke);
-    if parsed.key.is_empty()
-        && !parsed.ctrl
-        && !parsed.alt
-        && !parsed.shift
-        && !parsed.meta
-    {
+    if parsed.key.is_empty() && !parsed.ctrl && !parsed.alt && !parsed.shift && !parsed.meta {
         // NOTE: the TS checks `!parsed.key && !ctrl && !alt && !shift && !meta`
         // (super deliberately NOT included — match validate.ts:109-114).
         let mut w = KeybindingWarning::new(
@@ -252,14 +247,12 @@ fn validate_block(block: &RawBlock, block_index: usize) -> Vec<KeybindingWarning
                 // Bare-letter push-to-talk warning (validate.ts:220-242).
                 if let Some(ks) = parse_chord(&rb.key).into_iter().next() {
                     let bare_letter = ks.key.len() == 1
-                        && ks.key.chars().next().is_some_and(|c| c.is_ascii_lowercase());
-                    if !ks.ctrl
-                        && !ks.alt
-                        && !ks.shift
-                        && !ks.meta
-                        && !ks.super_
-                        && bare_letter
-                    {
+                        && ks
+                            .key
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_lowercase());
+                    if !ks.ctrl && !ks.alt && !ks.shift && !ks.meta && !ks.super_ && bare_letter {
                         let mut w = KeybindingWarning::new(
                             KeybindingWarningType::InvalidAction,
                             Severity::Warning,
@@ -361,9 +354,7 @@ pub fn check_duplicates(blocks: &[KeybindingBlock]) -> Vec<KeybindingWarning> {
     let mut seen_by_context: HashMap<String, HashMap<String, String>> = HashMap::new();
 
     for block in blocks {
-        let context_map = seen_by_context
-            .entry(block.context.clone())
-            .or_default();
+        let context_map = seen_by_context.entry(block.context.clone()).or_default();
 
         for (key, action) in &block.bindings {
             let normalized = normalize_key_for_comparison(key);

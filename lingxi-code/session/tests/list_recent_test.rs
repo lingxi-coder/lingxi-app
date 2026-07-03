@@ -315,5 +315,8 @@ async fn branched_fixture_surfaces_ai_title() {
         .await
         .expect("list");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].title, "Parser work", "ai-title wins over the summary");
+    assert_eq!(
+        rows[0].title, "Parser work",
+        "ai-title wins over the summary"
+    );
 }

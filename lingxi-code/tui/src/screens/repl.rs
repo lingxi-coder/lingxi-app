@@ -20,8 +20,8 @@ use crate::components::prompt_input::{
 use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
 use crate::components::virtual_message_list::{HeightCache, VirtualMessageList};
-use crate::state::{AppState, RenderedMessage, StatusSnapshot};
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::state::{AppState, RenderedMessage, StatusSnapshot};
 
 /// Predicate exposed for tests + the renderer's conditional mount.
 /// Returns `true` iff the spinner should be visible (a turn is streaming).

@@ -24,9 +24,7 @@ struct MockSubagentApiClient {
 }
 
 impl MockSubagentApiClient {
-    fn new(
-        responses: Vec<Result<llm_client::LlmResponse, llm_client::LlmError>>,
-    ) -> Arc<Self> {
+    fn new(responses: Vec<Result<llm_client::LlmResponse, llm_client::LlmError>>) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             calls: AtomicUsize::new(0),
@@ -47,11 +45,15 @@ impl crate::api::SubagentApiClient for MockSubagentApiClient {
         _tools: Vec<serde_json::Value>,
     ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.responses.lock().unwrap().pop_front().unwrap_or_else(|| {
-            // Out of scripted responses: a non-terminal, no-tool turn keeps
-            // the loop honest (it terminates on empty tool_uses).
-            Ok(text_response("(exhausted)", Some("end_turn")))
-        })
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                // Out of scripted responses: a non-terminal, no-tool turn keeps
+                // the loop honest (it terminates on empty tool_uses).
+                Ok(text_response("(exhausted)", Some("end_turn")))
+            })
     }
 }
 
@@ -104,10 +106,7 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
         tools: Vec<serde_json::Value>,
         _effort: Option<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_client::LlmEvent, llm_client::LlmError>,
-        >,
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
         llm_client::LlmError,
     > {
         use futures::StreamExt;
@@ -154,7 +153,7 @@ fn streamed_text_turn(text: &str, stop: &str) -> Vec<llm_client::LlmEvent> {
         LlmEvent::MessageDelta {
             delta: MessageDeltaPayload {
                 stop_reason: Some(stop.into()),
-            stop_details: None,
+                stop_details: None,
             },
             usage: None,
         },
@@ -185,7 +184,7 @@ fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_client::LlmEvent> {
         LlmEvent::MessageDelta {
             delta: MessageDeltaPayload {
                 stop_reason: Some(stop.into()),
-            stop_details: None,
+                stop_details: None,
             },
             usage: None,
         },
@@ -679,8 +678,7 @@ async fn loop_single_end_turn_completes_with_aggregated_text() {
 async fn loop_completed_result_carries_claude_content_array() {
     // #3: the terminal result carries claude's `content` array of text
     // blocks (one per text block), not only the joined `text` string.
-    let api =
-        MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
     let ctx = loop_ctx(api.clone(), None, 4);
     let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -692,7 +690,10 @@ async fn loop_completed_result_carries_claude_content_array() {
         serde_json::json!([{ "type": "text", "text": "final answer" }]),
         "result carries claude content[] array"
     );
-    assert_eq!(result["text"], "final answer", "legacy `text` still present");
+    assert_eq!(
+        result["text"], "final answer",
+        "legacy `text` still present"
+    );
 }
 
 #[tokio::test]
@@ -762,7 +763,7 @@ async fn schema_invalid_output_retried_then_captured() {
     let valid = serde_json::json!({ "answer": 42 });
     let api = MockSubagentApiClient::new(vec![
         Ok(so(serde_json::json!({ "answer": "not-an-int" }))), // fails: wrong type
-        Ok(so(valid.clone())),                                  // passes
+        Ok(so(valid.clone())),                                 // passes
     ]);
     let invoker = CountingInvoker::new();
     let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 6);
@@ -775,7 +776,11 @@ async fn schema_invalid_output_retried_then_captured() {
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
     assert_eq!(one_completed(&evs), valid, "the valid retry is captured");
-    assert_eq!(api.call_count(), 2, "the model retried once after the failure");
+    assert_eq!(
+        api.call_count(),
+        2,
+        "the model retried once after the failure"
+    );
 }
 
 /// Repeated schema-invalid StructuredOutput calls exhaust the retry cap (5)
@@ -794,9 +799,8 @@ async fn schema_retry_cap_exceeded_aborts() {
     let api = MockSubagentApiClient::new((0..5).map(|_| Ok(bad_so())).collect());
     let invoker = CountingInvoker::new();
     let mut ctx = loop_ctx(api, Some(invoker), 10);
-    ctx.schema = Some(
-        r#"{"type":"object","properties":{"answer":{"type":"integer"}}}"#.to_string(),
-    );
+    ctx.schema =
+        Some(r#"{"type":"object","properties":{"answer":{"type":"integer"}}}"#.to_string());
     let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
@@ -887,7 +891,11 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
         ..Default::default()
     };
     let api = MockSubagentApiClient::new(vec![
-        Ok(tool_use_response_with_usage("Read", Some("tool_use"), usage_a)),
+        Ok(tool_use_response_with_usage(
+            "Read",
+            Some("tool_use"),
+            usage_a,
+        )),
         Ok(llm_client::LlmResponse {
             usage: usage_b.clone(),
             ..text_response("done", Some("end_turn"))
@@ -911,7 +919,10 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
         })
         .expect("one Completed");
     // The carried usage is the FINAL turn's (B), NOT a sum with A.
-    assert_eq!(usage.billable_tokens.input, 10, "final-turn input, not summed");
+    assert_eq!(
+        usage.billable_tokens.input, 10,
+        "final-turn input, not summed"
+    );
     assert_eq!(usage.billable_tokens.output, 5);
     assert_eq!(usage.billable_tokens.cache_write, 3);
     assert_eq!(usage.billable_tokens.cache_read, 2);
@@ -1255,7 +1266,8 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
         "byte-locked M3-05 denial string; got events: {evs:?}"
     );
     assert!(
-        !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Completed { .. })),
         "no Completed when stopped on budget; got events: {evs:?}"
     );
 }
@@ -1298,7 +1310,11 @@ async fn loop_tool_use_then_end_turn_invokes_tool_and_runs_two_turns() {
     let evs = drain(out_rx).await;
 
     assert_eq!(api.call_count(), 2, "two model round-trips");
-    assert_eq!(invoker.call_count(), 1, "tool invoked once (1:1 with tool_use)");
+    assert_eq!(
+        invoker.call_count(),
+        1,
+        "tool invoked once (1:1 with tool_use)"
+    );
     let result = one_completed(&evs);
     assert_eq!(result["text"], "done");
     assert_eq!(result["stop_reason"], "end_turn");
@@ -1310,8 +1326,7 @@ async fn loop_end_turn_with_tool_use_still_dispatches_then_completes() {
     // tool_use must NOT silently drop the tool. The reference dispatches
     // tools whenever present, then terminates on end_turn. Assert the tool
     // was invoked AND the run completed in a single turn (no continuation).
-    let api =
-        MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("end_turn")))]);
+    let api = MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("end_turn")))]);
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
 
@@ -1320,7 +1335,11 @@ async fn loop_end_turn_with_tool_use_still_dispatches_then_completes() {
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
 
-    assert_eq!(api.call_count(), 1, "end_turn terminates after one round-trip");
+    assert_eq!(
+        api.call_count(),
+        1,
+        "end_turn terminates after one round-trip"
+    );
     assert_eq!(
         invoker.call_count(),
         1,
@@ -1336,8 +1355,7 @@ async fn loop_truncated_tool_use_terminates_instead_of_looping() {
     // also carried a tool_use must dispatch the tool then TERMINATE — not
     // continue looping until max_turns. With max_turns=4 the loop would
     // make 4 calls if it (incorrectly) continued; the fix caps it at 1.
-    let api =
-        MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("max_tokens")))]);
+    let api = MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("max_tokens")))]);
     let invoker = CountingInvoker::new();
     let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
 
@@ -1351,7 +1369,11 @@ async fn loop_truncated_tool_use_terminates_instead_of_looping() {
         1,
         "max_tokens terminates after one round-trip (no loop-to-max_turns)"
     );
-    assert_eq!(invoker.call_count(), 1, "the truncated turn's tool is still dispatched");
+    assert_eq!(
+        invoker.call_count(),
+        1,
+        "the truncated turn's tool is still dispatched"
+    );
     let result = one_completed(&evs);
     assert_eq!(result["stop_reason"], "max_tokens");
 }
@@ -1379,8 +1401,7 @@ async fn loop_api_error_surfaces_failed() {
 #[tokio::test]
 async fn loop_tool_use_without_invoker_fails() {
     // A tool_use with tool_invoker = None surfaces Failed.
-    let api =
-        MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("tool_use")))]);
+    let api = MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("tool_use")))]);
     let ctx = loop_ctx(api.clone(), None, 4);
 
     let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
@@ -1441,11 +1462,13 @@ async fn loop_user_interrupt_mid_flight_surfaces_killed() {
     let evs = drain(out_rx).await;
 
     assert!(
-        evs.iter().any(|e| matches!(e, SubagentEvent::Killed { .. })),
+        evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Killed { .. })),
         "expected Killed on UserInterrupt; got: {evs:?}"
     );
     assert!(
-        !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Completed { .. })),
         "no Completed when killed mid-flight; got: {evs:?}"
     );
 }
@@ -1543,7 +1566,8 @@ async fn persist_mode_terminates_on_channel_close_after_turn_set() {
         .count();
     assert_eq!(completed, 1, "one Completed; got: {evs:?}");
     assert!(
-        !evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Failed { .. })),
         "no Failed on graceful EOF; got: {evs:?}"
     );
 }
@@ -1598,7 +1622,11 @@ impl CapturingApiClient {
         })
     }
     fn captured(&self) -> Vec<ConversationMessage> {
-        self.first_messages.lock().unwrap().clone().unwrap_or_default()
+        self.first_messages
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default()
     }
 }
 #[async_trait]
@@ -2136,7 +2164,11 @@ async fn missing_skill_is_skipped_no_message() {
     let _ = drain(out_rx).await;
 
     let msgs = api.captured();
-    assert_eq!(msgs.len(), 1, "only the prompt seed (missing skill skipped): {msgs:?}");
+    assert_eq!(
+        msgs.len(),
+        1,
+        "only the prompt seed (missing skill skipped): {msgs:?}"
+    );
 }
 
 #[tokio::test]

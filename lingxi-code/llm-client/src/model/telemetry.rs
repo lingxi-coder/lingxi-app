@@ -144,11 +144,7 @@ pub async fn emit_failed(
     clippy::cast_possible_wrap,
     reason = "retry_after_ms fits in i64 for all realistic deployments"
 )]
-pub async fn emit_rate_limited(
-    bus: &Option<Arc<AnalyticsBus>>,
-    model: &str,
-    retry_after_ms: u64,
-) {
+pub async fn emit_rate_limited(bus: &Option<Arc<AnalyticsBus>>, model: &str, retry_after_ms: u64) {
     let Some(bus) = bus else { return };
     let mut m = LogEventMetadata::new();
     m.insert(
@@ -236,10 +232,11 @@ mod tests {
         assert!(
             matches!(&ev.metadata["model"], AnalyticsValue::String(s) if s == "claude-sonnet-4-6")
         );
-        assert!(
-            matches!(&ev.metadata["request_id"], AnalyticsValue::String(s) if s == "req-abc")
-        );
-        assert!(matches!(&ev.metadata["stream"], AnalyticsValue::Bool(false)));
+        assert!(matches!(&ev.metadata["request_id"], AnalyticsValue::String(s) if s == "req-abc"));
+        assert!(matches!(
+            &ev.metadata["stream"],
+            AnalyticsValue::Bool(false)
+        ));
     }
 
     #[tokio::test]
@@ -261,10 +258,11 @@ mod tests {
         assert!(
             matches!(&ev.metadata["model"], AnalyticsValue::String(s) if s == "claude-opus-4-6")
         );
-        assert!(
-            matches!(&ev.metadata["request_id"], AnalyticsValue::String(s) if s == "req-xyz")
-        );
-        assert!(matches!(&ev.metadata["duration_ms"], AnalyticsValue::Int(1234)));
+        assert!(matches!(&ev.metadata["request_id"], AnalyticsValue::String(s) if s == "req-xyz"));
+        assert!(matches!(
+            &ev.metadata["duration_ms"],
+            AnalyticsValue::Int(1234)
+        ));
         assert!(matches!(&ev.metadata["status"], AnalyticsValue::Int(200)));
     }
 
@@ -277,7 +275,14 @@ mod tests {
     async fn emit_failed_fires_correct_event_name_and_keys_with_status() {
         let (bus, sink) = bus_with_sink().await;
         let opt = Some(bus);
-        emit_failed(&opt, "claude-haiku-4-5", "req-123", "rate_limited", Some(429)).await;
+        emit_failed(
+            &opt,
+            "claude-haiku-4-5",
+            "req-123",
+            "rate_limited",
+            Some(429),
+        )
+        .await;
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
@@ -289,7 +294,10 @@ mod tests {
         assert!(
             matches!(&ev.metadata["error_kind"], AnalyticsValue::String(s) if s == "rate_limited")
         );
-        assert!(matches!(&ev.metadata["status_code"], AnalyticsValue::Int(429)));
+        assert!(matches!(
+            &ev.metadata["status_code"],
+            AnalyticsValue::Int(429)
+        ));
     }
 
     #[tokio::test]
@@ -300,7 +308,10 @@ mod tests {
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0].metadata["status_code"], AnalyticsValue::None));
+        assert!(matches!(
+            events[0].metadata["status_code"],
+            AnalyticsValue::None
+        ));
     }
 
     #[tokio::test]
@@ -321,7 +332,10 @@ mod tests {
         assert!(
             matches!(&ev.metadata["model"], AnalyticsValue::String(s) if s == "claude-sonnet-4-6")
         );
-        assert!(matches!(&ev.metadata["retry_after_ms"], AnalyticsValue::Int(5000)));
+        assert!(matches!(
+            &ev.metadata["retry_after_ms"],
+            AnalyticsValue::Int(5000)
+        ));
     }
 
     #[tokio::test]
@@ -339,16 +353,22 @@ mod tests {
         let events = sink.events().await;
         assert_eq!(events.len(), 1);
         let ev = &events[0];
-        assert_eq!(
-            ev.name,
-            "tengu_max_tokens_context_overflow_adjustment"
-        );
+        assert_eq!(ev.name, "tengu_max_tokens_context_overflow_adjustment");
         assert!(
             matches!(&ev.metadata["model"], AnalyticsValue::String(s) if s == "claude-opus-4-6")
         );
-        assert!(matches!(&ev.metadata["inputTokens"], AnalyticsValue::Int(200_000)));
-        assert!(matches!(&ev.metadata["contextLimit"], AnalyticsValue::Int(190_000)));
-        assert!(matches!(&ev.metadata["adjustedMaxTokens"], AnalyticsValue::Int(3000)));
+        assert!(matches!(
+            &ev.metadata["inputTokens"],
+            AnalyticsValue::Int(200_000)
+        ));
+        assert!(matches!(
+            &ev.metadata["contextLimit"],
+            AnalyticsValue::Int(190_000)
+        ));
+        assert!(matches!(
+            &ev.metadata["adjustedMaxTokens"],
+            AnalyticsValue::Int(3000)
+        ));
         assert!(matches!(&ev.metadata["attempt"], AnalyticsValue::Int(1)));
     }
 

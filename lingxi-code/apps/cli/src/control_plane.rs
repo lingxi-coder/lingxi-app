@@ -227,8 +227,10 @@ impl StdioControlPlane {
             // (print.ts:5291). Without a sink, keep the legacy warn+drop.
             let orphan_tx = self.orphan_tx.lock().await.clone();
             if let (Some(tx), Some(tuid)) = (orphan_tx, tool_use_id) {
-                let permission_decision_json =
-                    response.get("response").cloned().unwrap_or_else(|| json!({}));
+                let permission_decision_json = response
+                    .get("response")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 let cmd = msgqueue::QueuedCommand {
                     uuid: Uuid::new_v4().to_string(),
                     content: msgqueue::QueuedCommandContent::OrphanedPermission {
@@ -264,7 +266,10 @@ impl StdioControlPlane {
         if let Some(tuid) = entry.tool_use_id.clone() {
             self.track_resolved(tuid).await;
         }
-        let subtype = response.get("subtype").and_then(Value::as_str).unwrap_or("");
+        let subtype = response
+            .get("subtype")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let result = if subtype == "error" {
             Err(response
                 .get("error")
@@ -274,7 +279,10 @@ impl StdioControlPlane {
         } else {
             // SUCCESS: payload at `response.response`; absent ⇒ `{}` (the
             // `rn(gt)` no-payload case omits the key, parsed as empty).
-            Ok(response.get("response").cloned().unwrap_or_else(|| json!({})))
+            Ok(response
+                .get("response")
+                .cloned()
+                .unwrap_or_else(|| json!({})))
         };
         let _ = entry.responder.send(result);
     }
@@ -842,7 +850,10 @@ mod tests {
         // response (orphan, same toolUseID) is dropped without re-resolving.
         let (plane, _rx) = plane_with_channel();
         let (req_id, fut) = plane
-            .send_request(json!({"subtype": "can_use_tool"}), Some("tu-dup".to_string()))
+            .send_request(
+                json!({"subtype": "can_use_tool"}),
+                Some("tu-dup".to_string()),
+            )
             .await;
         plane
             .resolve_response(&success_response(
@@ -951,7 +962,10 @@ mod tests {
             } => {
                 assert_eq!(tool_use_id.as_str(), "toolu_orphan_1");
                 assert_eq!(permission_decision_json["behavior"], "allow");
-                assert_eq!(permission_decision_json["updatedInput"]["command"], "ls -la");
+                assert_eq!(
+                    permission_decision_json["updatedInput"]["command"],
+                    "ls -la"
+                );
             }
             other => panic!("expected OrphanedPermission, got {other:?}"),
         }
@@ -972,7 +986,10 @@ mod tests {
         let line = rx.recv().await.unwrap();
         let frame: Value = serde_json::from_str(&line).unwrap();
         let req_id = frame["request_id"].as_str().unwrap().to_string();
-        let tuid = frame["request"]["tool_use_id"].as_str().unwrap().to_string();
+        let tuid = frame["request"]["tool_use_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         plane
             .resolve_response(&success_response(
                 &req_id,
@@ -1142,7 +1159,10 @@ mod tests {
 
         let line = rx.recv().await.unwrap();
         let frame: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(frame["request"]["tool_use_id"], "toolu_real_42", "real id used");
+        assert_eq!(
+            frame["request"]["tool_use_id"], "toolu_real_42",
+            "real id used"
+        );
         assert_eq!(frame["request"]["decision_reason"], "needs review");
         let req_id = frame["request_id"].as_str().unwrap().to_string();
 
@@ -1264,9 +1284,18 @@ mod tests {
         // the "Tool permission request failed: …" family (NOT "Permission denied"
         // / "returned an unknown behavior").
         for (payload, needle) in [
-            (json!({"behavior": "deny"}), "Tool permission request failed: malformed deny result"),
-            (json!({"behavior": "banana"}), "Tool permission request failed: invalid permission result"),
-            (json!({"nonsense": true}), "Tool permission request failed: invalid permission result"),
+            (
+                json!({"behavior": "deny"}),
+                "Tool permission request failed: malformed deny result",
+            ),
+            (
+                json!({"behavior": "banana"}),
+                "Tool permission request failed: invalid permission result",
+            ),
+            (
+                json!({"nonsense": true}),
+                "Tool permission request failed: invalid permission result",
+            ),
         ] {
             let (plane, mut rx) = plane_with_channel();
             let gate = StdioControlPermissionGate::new(plane.clone());
@@ -1277,10 +1306,15 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_string();
-            plane.resolve_response(&success_response(&req_id, payload)).await;
+            plane
+                .resolve_response(&success_response(&req_id, payload))
+                .await;
             match check.await.unwrap() {
                 PermissionDecision::Deny { reason } => {
-                    assert!(reason.starts_with("Tool permission request failed: "), "got {reason}");
+                    assert!(
+                        reason.starts_with("Tool permission request failed: "),
+                        "got {reason}"
+                    );
                     assert!(reason.contains(needle), "got {reason}");
                 }
                 other => panic!("expected Deny, got {other:?}"),
@@ -1306,9 +1340,15 @@ mod tests {
         let updates = parse_add_rules_update(&raw);
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].rule.value.tool_name, "Bash");
-        assert_eq!(updates[0].rule.value.rule_content.as_deref(), Some("npm install"));
+        assert_eq!(
+            updates[0].rule.value.rule_content.as_deref(),
+            Some("npm install")
+        );
         assert_eq!(updates[0].rule.behavior, PermissionBehavior::Allow);
-        assert_eq!(updates[0].destination, PermissionUpdateDestination::LocalSettings);
+        assert_eq!(
+            updates[0].destination,
+            PermissionUpdateDestination::LocalSettings
+        );
         assert_eq!(updates[0].rule.source, PermissionRuleSource::LocalSettings);
         // Tool-wide rule keeps ruleContent None.
         assert_eq!(updates[1].rule.value.tool_name, "Read");
@@ -1369,7 +1409,10 @@ mod tests {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({});
-        let check = tokio::spawn(async move { gate.check_with_context("Bash", &input, &PermissionCheckContext::default()).await });
+        let check = tokio::spawn(async move {
+            gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
+                .await
+        });
         let line = rx.recv().await.unwrap();
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()

@@ -64,7 +64,9 @@ pub fn truncate_head_for_ptl_retry(
     // its content: a `User` message whose text is exactly `PTL_RETRY_MARKER`
     // (TS `compact.ts:250-255`).
     let input: &[ConversationMessage] = match messages.first() {
-        Some(ConversationMessage::User { .. }) if messages[0].text_content() == PTL_RETRY_MARKER => {
+        Some(ConversationMessage::User { .. })
+            if messages[0].text_content() == PTL_RETRY_MARKER =>
+        {
             &messages[1..]
         }
         _ => &messages[..],
@@ -209,7 +211,7 @@ mod tests {
             assistant("Read"),
             user_result(),
             assistant("Bash"),
-            user_chars(200),   // ~50 tokens inside this round's group
+            user_chars(200), // ~50 tokens inside this round's group
             assistant("Edit"),
             user_result(),
         ];
@@ -241,7 +243,7 @@ mod tests {
     #[test]
     fn unknown_gap_twenty_percent_of_ten_groups_drops_two() {
         let mut msgs = vec![user_chars(4)]; // small preamble head of group 0
-        // 9 more distinct assistant ids → 10 groups total.
+                                            // 9 more distinct assistant ids → 10 groups total.
         for _ in 0..9 {
             msgs.push(assistant("Read"));
             msgs.push(user_result());
@@ -271,10 +273,16 @@ mod tests {
     fn assistant_first_head_gets_marker() {
         let msgs = three_round_history();
         let out = truncate_head_for_ptl_retry(msgs, 0).expect("some");
-        assert!(matches!(out.first(), Some(ConversationMessage::User { .. })));
+        assert!(matches!(
+            out.first(),
+            Some(ConversationMessage::User { .. })
+        ));
         assert_eq!(out.first().unwrap().text_content(), PTL_RETRY_MARKER);
         // The message right after the marker is the assistant that began group 1.
-        assert!(matches!(out.get(1), Some(ConversationMessage::Assistant { .. })));
+        assert!(matches!(
+            out.get(1),
+            Some(ConversationMessage::Assistant { .. })
+        ));
     }
 
     /// A second call on an already-marked history strips the prior marker before

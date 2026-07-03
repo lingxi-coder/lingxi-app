@@ -1,8 +1,9 @@
 //! `PermissionMode` — top-level authorization mode that gates unmatched tool calls.
 //!
 //! Five modes are external (settable from `settings.json` and CLI flags) and
-//! two are internal-only (rejected by configuration validation but used by
-//! the engine for bubbled prompts and auto-fallback flows).
+//! one is internal-only (`Bubble`) and one is CLI-settable but still rejected
+//! from persistent settings until the settings schema grows auto-mode metadata
+//! (`Auto`).
 
 use serde::{Deserialize, Serialize};
 
@@ -25,10 +26,11 @@ pub enum PermissionMode {
     BypassPermissions,
     /// Deny everything that lacks an explicit allow rule.
     DontAsk,
-    // Internal-only (rejected by settings/CLI validation).
+    // Internal engine modes.
     /// Internal: bubble the decision to a parent agent.
     Bubble,
-    /// Internal: classifier-driven auto-accept with denial-tracking fallback.
+    /// Classifier-driven auto-accept with denial-tracking fallback. CLI-settable;
+    /// persistent settings still reject it as non-external.
     Auto,
 }
 
@@ -132,15 +134,27 @@ mod tests {
         assert_eq!(next_permission_mode(Default, false, false), AcceptEdits);
         assert_eq!(next_permission_mode(AcceptEdits, false, false), Plan);
         assert_eq!(next_permission_mode(Plan, false, false), Default);
-        assert_eq!(next_permission_mode(BypassPermissions, false, false), Default);
+        assert_eq!(
+            next_permission_mode(BypassPermissions, false, false),
+            Default
+        );
         assert_eq!(next_permission_mode(DontAsk, false, false), Default);
         // bypass available → Plan advances to BypassPermissions
         assert_eq!(next_permission_mode(Plan, true, false), BypassPermissions);
         assert_eq!(next_permission_mode(Default, true, false), AcceptEdits); // unchanged
-        assert_eq!(next_permission_mode(BypassPermissions, true, false), Default);
+        assert_eq!(
+            next_permission_mode(BypassPermissions, true, false),
+            Default
+        );
         // internal modes fall back to Default
-        assert_eq!(next_permission_mode(PermissionMode::Bubble, true, false), Default);
-        assert_eq!(next_permission_mode(PermissionMode::Auto, true, false), Default);
+        assert_eq!(
+            next_permission_mode(PermissionMode::Bubble, true, false),
+            Default
+        );
+        assert_eq!(
+            next_permission_mode(PermissionMode::Auto, true, false),
+            Default
+        );
     }
 
     #[test]
@@ -159,7 +173,10 @@ mod tests {
         assert_eq!(next_permission_mode(AcceptEdits, false, true), Plan);
         // `dontAsk` and internal modes still go to Default even with the gate on.
         assert_eq!(next_permission_mode(DontAsk, false, true), Default);
-        assert_eq!(next_permission_mode(PermissionMode::Bubble, false, true), Default);
+        assert_eq!(
+            next_permission_mode(PermissionMode::Bubble, false, true),
+            Default
+        );
         assert_eq!(next_permission_mode(Auto, false, true), Default);
     }
 }

@@ -128,8 +128,7 @@ impl EventStreamSplitter {
             // Validated BEFORE waiting for `total_len` bytes: a fabricated
             // length field fails here immediately instead of making the
             // splitter buffer gigabytes waiting for a frame that never ends.
-            let expected_prelude_crc =
-                u32::from_be_bytes(self.buf[8..12].try_into().unwrap());
+            let expected_prelude_crc = u32::from_be_bytes(self.buf[8..12].try_into().unwrap());
             let actual_prelude_crc = crc32(&self.buf[0..8]);
             if actual_prelude_crc != expected_prelude_crc {
                 return Err(LlmError::StreamInterrupted {
@@ -253,11 +252,10 @@ fn decode_headers(mut data: &[u8]) -> Result<Vec<(String, String)>, LlmError> {
         // ── Name ────────────────────────────────────────────────────────────
         let name_len = read_u8(&mut data)?;
         let name_bytes = read_exact(&mut data, name_len as usize, "header name")?;
-        let name = String::from_utf8(name_bytes.to_vec()).map_err(|e| {
-            LlmError::StreamInterrupted {
+        let name =
+            String::from_utf8(name_bytes.to_vec()).map_err(|e| LlmError::StreamInterrupted {
                 message: format!("event-stream header name is not UTF-8: {e}"),
-            }
-        })?;
+            })?;
 
         // ── Value type ───────────────────────────────────────────────────────
         let value_type = read_u8(&mut data)?;
@@ -467,12 +465,18 @@ mod tests {
         // Prelude CRC
         let stored_prelude_crc = u32::from_be_bytes(frame[8..12].try_into().unwrap());
         let computed_prelude_crc = crc32(&frame[0..8]);
-        assert_eq!(stored_prelude_crc, computed_prelude_crc, "prelude CRC mismatch in hand fixture");
+        assert_eq!(
+            stored_prelude_crc, computed_prelude_crc,
+            "prelude CRC mismatch in hand fixture"
+        );
 
         // Message CRC
         let stored_message_crc = u32::from_be_bytes(frame[16..20].try_into().unwrap());
         let computed_message_crc = crc32(&frame[0..16]);
-        assert_eq!(stored_message_crc, computed_message_crc, "message CRC mismatch in hand fixture");
+        assert_eq!(
+            stored_message_crc, computed_message_crc,
+            "message CRC mismatch in hand fixture"
+        );
 
         // Parser must decode it correctly.
         let mut splitter = EventStreamSplitter::default();
@@ -507,7 +511,10 @@ mod tests {
         let mut splitter = EventStreamSplitter::default();
         let msgs = splitter.feed(&frame).unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].headers, vec![(":message-type".to_string(), "event".to_string())]);
+        assert_eq!(
+            msgs[0].headers,
+            vec![(":message-type".to_string(), "event".to_string())]
+        );
         assert_eq!(msgs[0].payload, payload);
     }
 
@@ -516,7 +523,10 @@ mod tests {
     #[test]
     fn two_frames_one_chunk() {
         let frame1 = build_frame(&[], b"first");
-        let frame2 = build_frame(&encode_string_header(":event-type", "content_block_delta"), b"second");
+        let frame2 = build_frame(
+            &encode_string_header(":event-type", "content_block_delta"),
+            b"second",
+        );
 
         let mut both = frame1.clone();
         both.extend_from_slice(&frame2);
@@ -681,6 +691,9 @@ mod tests {
         let msgs = splitter.feed(&frame).unwrap();
         assert_eq!(msgs.len(), 1);
         // Only the string header is retained.
-        assert_eq!(msgs[0].headers, vec![(":message-type".to_string(), "event".to_string())]);
+        assert_eq!(
+            msgs[0].headers,
+            vec![(":message-type".to_string(), "event".to_string())]
+        );
     }
 }

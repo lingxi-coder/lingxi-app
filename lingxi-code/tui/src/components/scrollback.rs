@@ -43,9 +43,9 @@ use crate::components::messages::{
     user_text::UserTextMessage,
     user_tool_result::UserToolResultMessage,
 };
+use crate::render_iocraft::StyleColorIocraftExt;
 use crate::state::RenderedMessage;
 use crate::theme::{Theme, ThemeName};
-use crate::render_iocraft::StyleColorIocraftExt;
 
 /// Dispatch one [`RenderedMessage`] to its per-variant renderer, threading
 /// the per-id `expanded` flags and `focused_tool_id` into the tool blocks
@@ -248,7 +248,9 @@ pub fn render_message(
             UserResourceUpdateMessage(updates: updates)
         }
         .into_any(),
-        RenderedMessage::UserImage { image_id, metadata, .. } => element! {
+        RenderedMessage::UserImage {
+            image_id, metadata, ..
+        } => element! {
             UserImageMessage(image_id: image_id, metadata: metadata)
         }
         .into_any(),

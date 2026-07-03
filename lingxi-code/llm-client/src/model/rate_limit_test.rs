@@ -49,10 +49,7 @@ mod tests {
     fn unified_reset_clamps_to_six_hours() {
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         // reset a year out → capped at 6h
-        let r = parse_unified_reset(
-            &h("anthropic-ratelimit-unified-reset", "1031536000"),
-            now,
-        );
+        let r = parse_unified_reset(&h("anthropic-ratelimit-unified-reset", "1031536000"), now);
         assert_eq!(r, Some(Duration::from_millis(PERSISTENT_RESET_CAP_MS)));
     }
 
@@ -200,9 +197,18 @@ mod tests {
 
     #[test]
     fn retry_secs_from_non_rate_limit_error_is_none() {
-        assert_eq!(retry_secs_from_error(&crate::LlmError::ProviderInternal), None);
-        assert_eq!(retry_secs_from_error(&crate::LlmError::Authentication), None);
-        assert_eq!(retry_secs_from_error(&crate::LlmError::Overloaded { repeated: false }), None);
+        assert_eq!(
+            retry_secs_from_error(&crate::LlmError::ProviderInternal),
+            None
+        );
+        assert_eq!(
+            retry_secs_from_error(&crate::LlmError::Authentication),
+            None
+        );
+        assert_eq!(
+            retry_secs_from_error(&crate::LlmError::Overloaded { repeated: false }),
+            None
+        );
     }
 
     #[test]
@@ -283,7 +289,10 @@ mod format_reset_time_tests {
         // Reset Jun 7 3:30pm, now Jun 5 → >24h, same year → "Jun 7, 3:30pm".
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2026, 6, 7, 15, 30);
-        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("Jun 7, 3:30pm"));
+        assert_eq!(
+            fmt(reset, now, false, true).as_deref(),
+            Some("Jun 7, 3:30pm")
+        );
     }
 
     #[test]
@@ -317,7 +326,10 @@ mod format_reset_time_tests {
     fn over_24h_different_year_show_time_false_keeps_year() {
         let now = local(2026, 6, 5, 10, 0);
         let reset = local(2027, 6, 7, 15, 30);
-        assert_eq!(fmt(reset, now, false, false).as_deref(), Some("Jun 7, 2027"));
+        assert_eq!(
+            fmt(reset, now, false, false).as_deref(),
+            Some("Jun 7, 2027")
+        );
     }
 
     #[test]
@@ -412,12 +424,9 @@ mod format_reset_time_tests {
             overage_disabled_reason: None,
             ..RateLimitInfo::default()
         };
-        let msg = rate_limit_error_message(
-            &info,
-            &f.as_reset_times(),
-            SubscriptionContext::default(),
-        )
-        .unwrap();
+        let msg =
+            rate_limit_error_message(&info, &f.as_reset_times(), SubscriptionContext::default())
+                .unwrap();
         assert!(
             msg.starts_with("You've hit your session limit · resets 1pm ("),
             "got {msg}"
@@ -515,7 +524,10 @@ mod rate_limit_message {
             },
             SubscriptionContext::default(),
         );
-        assert_eq!(msg.as_deref(), Some("You've hit your session limit · resets 3pm"));
+        assert_eq!(
+            msg.as_deref(),
+            Some("You've hit your session limit · resets 3pm")
+        );
     }
 
     #[test]
@@ -642,7 +654,10 @@ mod rate_limit_message {
             },
             SubscriptionContext::default(),
         );
-        assert_eq!(earlier_primary.as_deref(), Some("You've hit your limit · resets 3pm"));
+        assert_eq!(
+            earlier_primary.as_deref(),
+            Some("You've hit your limit · resets 3pm")
+        );
 
         // overageResetsAt is the earlier window → use the overage string.
         let earlier_overage = rate_limit_error_message(
@@ -654,7 +669,10 @@ mod rate_limit_message {
             },
             SubscriptionContext::default(),
         );
-        assert_eq!(earlier_overage.as_deref(), Some("You've hit your limit · resets 3pm"));
+        assert_eq!(
+            earlier_overage.as_deref(),
+            Some("You've hit your limit · resets 3pm")
+        );
     }
 }
 
@@ -1215,7 +1233,10 @@ mod from_429_error_headers {
     #[test]
     fn full_headers_map_with_forced_rejected_status() {
         let headers = h(&[
-            ("anthropic-ratelimit-unified-representative-claim", "seven_day"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "seven_day",
+            ),
             ("anthropic-ratelimit-unified-overage-status", "rejected"),
             ("anthropic-ratelimit-unified-status", "allowed"),
             ("anthropic-ratelimit-unified-reset", "1760000000"),
@@ -1226,12 +1247,19 @@ mod from_429_error_headers {
             ),
         ]);
         let info = RateLimitInfo::from_429_error_headers(&headers).expect("gate passes");
-        assert_eq!(info.status.as_deref(), Some("rejected"), "forced (errors.ts:483)");
+        assert_eq!(
+            info.status.as_deref(),
+            Some("rejected"),
+            "forced (errors.ts:483)"
+        );
         assert_eq!(info.rate_limit_type.as_deref(), Some("seven_day"));
         assert_eq!(info.overage_status.as_deref(), Some("rejected"));
         assert_eq!(info.resets_at, Some(1_760_000_000));
         assert_eq!(info.overage_resets_at, Some(1_760_000_200));
-        assert_eq!(info.overage_disabled_reason.as_deref(), Some("out_of_credits"));
+        assert_eq!(
+            info.overage_disabled_reason.as_deref(),
+            Some("out_of_credits")
+        );
         // Fields the TS error path never sets stay at their defaults.
         assert_eq!(info.utilization, None);
         assert_eq!(info.claim_resets_at, None);
@@ -1245,13 +1273,19 @@ mod from_429_error_headers {
     #[test]
     fn claim_only_passes_gate_and_skips_early_warning() {
         let headers = h(&[
-            ("anthropic-ratelimit-unified-representative-claim", "five_hour"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
             ("anthropic-ratelimit-unified-5h-surpassed-threshold", "0.9"),
         ]);
         let info = RateLimitInfo::from_429_error_headers(&headers).expect("gate passes");
         assert_eq!(info.status.as_deref(), Some("rejected"));
         assert_eq!(info.rate_limit_type.as_deref(), Some("five_hour"));
-        assert_eq!(info.surpassed_threshold, None, "no early-warning on the error path");
+        assert_eq!(
+            info.surpassed_threshold, None,
+            "no early-warning on the error path"
+        );
     }
 
     /// The constructed info composes the byte-locked rejected copy through
@@ -1271,6 +1305,9 @@ mod from_429_error_headers {
             },
             SubscriptionContext::default(),
         );
-        assert_eq!(msg.as_deref(), Some("You've hit your weekly limit · resets 3pm"));
+        assert_eq!(
+            msg.as_deref(),
+            Some("You've hit your weekly limit · resets 3pm")
+        );
     }
 }

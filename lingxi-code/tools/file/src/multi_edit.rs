@@ -142,7 +142,9 @@ impl Tool for MultiEditTool {
     async fn prompt(&self, opts: &PromptOptions) -> String {
         // Same prompt as FileEditTool — the binary routes through the same `PE`
         // registration for both names.
-        crate::FileEditTool::new(self.ctx.clone()).prompt(opts).await
+        crate::FileEditTool::new(self.ctx.clone())
+            .prompt(opts)
+            .await
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
@@ -208,12 +210,12 @@ impl Tool for MultiEditTool {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tempfile::TempDir;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
-    use tool_api::BuiltinToolContext;
-    use tool_api::read_file_state::{set, ReadFileEntry};
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
+    use tempfile::TempDir;
+    use tool_api::read_file_state::{set, ReadFileEntry};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
+    use tool_api::BuiltinToolContext;
 
     fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());
@@ -257,13 +259,11 @@ mod tests {
 
     #[test]
     fn schema_has_file_path_and_edits_array() {
-        let schema = MultiEditTool::new(
-            tool_api::test_support::ctx_for_file_tools(
-                make_dummy_fs(),
-                Arc::new(AnalyticsBus::new()),
-                vec![],
-            ),
-        );
+        let schema = MultiEditTool::new(tool_api::test_support::ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![],
+        ));
         let s = schema.input_schema();
         assert_eq!(s["type"], "object");
         assert!(s["properties"]["file_path"].is_object());

@@ -237,11 +237,7 @@ fn using_your_tools(tool_names: &[String]) -> Option<String> {
     let has = |n: &str| tool_names.iter().any(|t| t == n);
 
     // Shell tool: Bash preferred, else PowerShell (claude-code `o=r?ns:Js`).
-    let shell = if has("Bash") {
-        "Bash"
-    } else {
-        "PowerShell"
-    };
+    let shell = if has("Bash") { "Bash" } else { "PowerShell" };
 
     // Dedicated-tool list (claude-code `s`).
     // rv()=true for posix (always in LingXi); r=has("Bash").
@@ -356,9 +352,13 @@ mod tests {
         assert!(p.starts_with("You are an interactive agent that helps users with software engineering tasks. Use the instructions below"));
         // Defensive-security guidance (zHo) is present in the body.
         assert!(p.contains("IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges"));
-        assert!(p.contains("Dual-use security tools (C2 frameworks, credential testing, exploit development)"));
+        assert!(p.contains(
+            "Dual-use security tools (C2 frameworks, credential testing, exploit development)"
+        ));
         // NEVER-generate-URLs line closes the paragraph.
-        assert!(p.ends_with("You may use URLs provided by the user in their messages or local files."));
+        assert!(
+            p.ends_with("You may use URLs provided by the user in their messages or local files.")
+        );
         assert!(p.contains("NEVER generate or guess URLs"));
     }
 
@@ -371,21 +371,31 @@ mod tests {
     #[test]
     fn system_section_has_all_six_bullets_and_hooks() {
         assert!(SYSTEM_SECTION.starts_with("# System\n - All text you output outside of tool use"));
-        assert!(SYSTEM_SECTION.contains("\n - Tools are executed in a user-selected permission mode."));
-        assert!(SYSTEM_SECTION.contains("\n - Tool results and user messages may include <system-reminder>"));
-        assert!(SYSTEM_SECTION.contains("\n - Tool results may include data from external sources."));
-        assert!(SYSTEM_SECTION.contains("\n - Users may configure 'hooks', shell commands that execute"));
-        assert!(SYSTEM_SECTION.contains("\n - The system will automatically compress prior messages"));
+        assert!(
+            SYSTEM_SECTION.contains("\n - Tools are executed in a user-selected permission mode.")
+        );
+        assert!(SYSTEM_SECTION
+            .contains("\n - Tool results and user messages may include <system-reminder>"));
+        assert!(
+            SYSTEM_SECTION.contains("\n - Tool results may include data from external sources.")
+        );
+        assert!(SYSTEM_SECTION
+            .contains("\n - Users may configure 'hooks', shell commands that execute"));
+        assert!(
+            SYSTEM_SECTION.contains("\n - The system will automatically compress prior messages")
+        );
     }
 
     #[test]
     fn doing_tasks_section_shape() {
         assert!(DOING_TASKS_SECTION.starts_with("# Doing tasks\n - The user will primarily request you to perform software engineering tasks."));
         // Flag-gated verified-vs-assumed bullet is omitted (default false).
-        assert!(!DOING_TASKS_SECTION.contains("be accurate about what you verified vs. what you assumed"));
+        assert!(!DOING_TASKS_SECTION
+            .contains("be accurate about what you verified vs. what you assumed"));
         // Nested /help + feedback items use the two-space prefix.
         assert!(DOING_TASKS_SECTION.contains("\n  - /help: Get help with using LingXi"));
-        assert!(DOING_TASKS_SECTION.ends_with("report the issue at https://github.com/anthropics/claude-code/issues"));
+        assert!(DOING_TASKS_SECTION
+            .ends_with("report the issue at https://github.com/anthropics/claude-code/issues"));
     }
 
     #[test]
@@ -408,15 +418,21 @@ mod tests {
     #[test]
     fn executing_actions_section_shape() {
         assert!(EXECUTING_ACTIONS_SECTION.starts_with("# Executing actions with care\n\nCarefully consider the reversibility and blast radius of actions."));
-        assert!(EXECUTING_ACTIONS_SECTION.contains("Examples of the kind of risky actions that warrant user confirmation:"));
-        assert!(EXECUTING_ACTIONS_SECTION.ends_with("Follow both the spirit and letter of these instructions - measure twice, cut once."));
+        assert!(EXECUTING_ACTIONS_SECTION
+            .contains("Examples of the kind of risky actions that warrant user confirmation:"));
+        assert!(EXECUTING_ACTIONS_SECTION.ends_with(
+            "Follow both the spirit and letter of these instructions - measure twice, cut once."
+        ));
     }
 
     #[test]
     fn tone_and_style_section_shape() {
-        assert!(TONE_AND_STYLE_SECTION.starts_with("# Tone and style\n - Only use emojis if the user explicitly requests it."));
+        assert!(TONE_AND_STYLE_SECTION.starts_with(
+            "# Tone and style\n - Only use emojis if the user explicitly requests it."
+        ));
         assert!(TONE_AND_STYLE_SECTION.contains("\n - Your responses should be short and concise."));
-        assert!(TONE_AND_STYLE_SECTION.ends_with("should just be \"Let me read the file.\" with a period."));
+        assert!(TONE_AND_STYLE_SECTION
+            .ends_with("should just be \"Let me read the file.\" with a period."));
     }
 
     #[test]
@@ -483,17 +499,28 @@ mod tests {
         let i_tools = body.find("# Using your tools").expect("tools");
         let i_tone = body.find("# Tone and style").expect("tone");
         let i_text_output = body.find("# Text output").expect("text output");
-        let i_session = body.find("# Session-specific guidance").expect("session guidance");
+        let i_session = body
+            .find("# Session-specific guidance")
+            .expect("session guidance");
         assert!(i_open < i_system);
         assert!(i_system < i_doing);
         assert!(i_doing < i_exec);
         assert!(i_exec < i_tools);
         assert!(i_tools < i_tone);
-        assert!(i_tone < i_text_output, "# Tone and style must precede # Text output");
-        assert!(i_text_output < i_session, "# Text output must precede # Session-specific guidance");
+        assert!(
+            i_tone < i_text_output,
+            "# Tone and style must precede # Text output"
+        );
+        assert!(
+            i_text_output < i_session,
+            "# Text output must precede # Session-specific guidance"
+        );
         // NOTE: `# Context management` is assembled AFTER the env block in
         // `mod.rs`, not in this body block — so it is absent from the body string.
-        assert!(!body.contains("# Context management"), "context management must NOT be in the pre-env body block");
+        assert!(
+            !body.contains("# Context management"),
+            "context management must NOT be in the pre-env body block"
+        );
         // No leading/trailing newline; blank-line joins between sections.
         assert!(!body.starts_with('\n'));
         assert!(!body.ends_with('\n'));
@@ -512,7 +539,8 @@ mod tests {
         assert!(TEXT_OUTPUT_SECTION.contains("Brief is good \u{2014} silent is not."));
         assert!(TEXT_OUTPUT_SECTION.contains("End-of-turn summary: one or two sentences."));
         assert!(TEXT_OUTPUT_SECTION.contains("Match responses to the task:"));
-        assert!(TEXT_OUTPUT_SECTION.ends_with("work from conversation context, not intermediate files."));
+        assert!(TEXT_OUTPUT_SECTION
+            .ends_with("work from conversation context, not intermediate files."));
     }
 
     #[test]
@@ -528,8 +556,11 @@ mod tests {
     fn context_management_section_byte_lock() {
         // GAP-2: binary `iIm`, offset 206681385.
         assert!(CONTEXT_MANAGEMENT_SECTION.starts_with("# Context management\n"));
-        assert!(CONTEXT_MANAGEMENT_SECTION.contains("some or all of the current context is summarized"));
-        assert!(CONTEXT_MANAGEMENT_SECTION.contains("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(
+            CONTEXT_MANAGEMENT_SECTION.contains("some or all of the current context is summarized")
+        );
+        assert!(CONTEXT_MANAGEMENT_SECTION
+            .contains("you don\u{2019}t need to wrap up early or hand off mid-task."));
     }
 
     #[test]
@@ -538,8 +569,10 @@ mod tests {
         // NOT inside the pre-env body block returned by `format()`.
         let tools: Vec<String> = Vec::new();
         let body = format(false, true, &tools, false, false, false);
-        assert!(!body.contains("# Context management"),
-            "context management must not be in pre-env body block");
+        assert!(
+            !body.contains("# Context management"),
+            "context management must not be in pre-env body block"
+        );
     }
 
     // ---- GAP-3: # Session-specific guidance ----

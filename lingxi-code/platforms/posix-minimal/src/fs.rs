@@ -97,7 +97,9 @@ impl FileSystem for PosixFileSystem {
         let opts = {
             use std::os::unix::fs::OpenOptionsExt;
             let mut o = std::fs::OpenOptions::new();
-            o.write(true).create_new(true).custom_flags(libc::O_NOFOLLOW); // O_CREAT | O_EXCL
+            o.write(true)
+                .create_new(true)
+                .custom_flags(libc::O_NOFOLLOW); // O_CREAT | O_EXCL
             o
         };
         // Non-unix has no O_NOFOLLOW; `create_new` still gives the O_EXCL
@@ -274,7 +276,9 @@ mod tests {
 
         fs.create_new_file(ps).await.unwrap();
         // Simulate a worker appending output between the two allocations.
-        fs.append_file_no_follow(ps, "worker output\n").await.unwrap();
+        fs.append_file_no_follow(ps, "worker output\n")
+            .await
+            .unwrap();
 
         let err = fs
             .create_new_file(ps)

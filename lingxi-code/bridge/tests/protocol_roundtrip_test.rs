@@ -143,7 +143,10 @@ fn frame_event_round_trips() {
     let json = serde_json::to_string(&f).unwrap();
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["type"], "event");
-    assert!(v.get("id").is_none(), "events must not carry a correlation id");
+    assert!(
+        v.get("id").is_none(),
+        "events must not carry a correlation id"
+    );
 }
 
 #[test]

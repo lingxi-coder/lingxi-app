@@ -63,7 +63,11 @@ fn disable_compact_env() -> bool {
 /// Pure builder for the "Context low" line (binary @206545348 3-way ternary):
 /// an upgrade CTA wins; else a set `DISABLE_COMPACT` drops the CTA; else the
 /// `· Run /compact` CTA. Separated for env-race-free testing.
-fn context_low_text(percent_left: u8, upgrade_message: Option<&str>, disable_compact: bool) -> String {
+fn context_low_text(
+    percent_left: u8,
+    upgrade_message: Option<&str>,
+    disable_compact: bool,
+) -> String {
     match upgrade_message {
         Some(upgrade) => format!("Context low ({percent_left}% remaining) \u{00b7} {upgrade}"),
         None if disable_compact => format!("Context low ({percent_left}% remaining)"),
@@ -213,14 +217,18 @@ mod tests {
     fn upgrade_message_appended_with_middle_dot_on_both_branches() {
         // `:169` `${autocompactLabel} · ${upgradeMessage}` and
         // `Context low (...) · ${upgradeMessage}`.
-        let auto = token_warning_banner(&state(15, true, false), true, false, Some("Upgrade for 1M"))
-            .expect("renders");
+        let auto =
+            token_warning_banner(&state(15, true, false), true, false, Some("Upgrade for 1M"))
+                .expect("renders");
         assert_eq!(auto.text, "15% until auto-compact \u{00b7} Upgrade for 1M");
         assert_eq!(auto.color, TokenWarningColor::Dim);
 
         let low = token_warning_banner(&state(5, true, true), false, false, Some("Upgrade for 1M"))
             .expect("renders");
-        assert_eq!(low.text, "Context low (5% remaining) \u{00b7} Upgrade for 1M");
+        assert_eq!(
+            low.text,
+            "Context low (5% remaining) \u{00b7} Upgrade for 1M"
+        );
         assert_eq!(low.color, TokenWarningColor::Error);
     }
 }

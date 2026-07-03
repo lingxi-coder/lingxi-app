@@ -86,8 +86,8 @@ impl AsyncHookRegistry {
         async_timeout: Option<Duration>,
         work: HookWork,
     ) -> Result<BackgroundTaskHandle, RuntimeError> {
-        let timeout = async_timeout
-            .unwrap_or_else(|| Duration::from_millis(DEFAULT_ASYNC_HOOK_TIMEOUT_MS));
+        let timeout =
+            async_timeout.unwrap_or_else(|| Duration::from_millis(DEFAULT_ASYNC_HOOK_TIMEOUT_MS));
         // One clone races the timeout inside the task; a second drives the
         // spawn below (the first is moved into the `async move` block).
         let timeout_runtime = self.runtime.clone();

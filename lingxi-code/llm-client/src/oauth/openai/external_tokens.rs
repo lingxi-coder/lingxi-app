@@ -23,7 +23,11 @@ impl ExternalTokensCredentialProvider {
         let access_token = access_token.into();
         let fedramp = crate::oauth::openai::token_data::parse_id_token(&access_token)
             .is_some_and(|c| c.fedramp);
-        Self { access_token, account_id, fedramp }
+        Self {
+            access_token,
+            account_id,
+            fedramp,
+        }
     }
 }
 
@@ -57,13 +61,20 @@ mod tests {
 
     #[tokio::test]
     async fn returns_chatgpt_oauth_with_supplied_account() {
-        let p = ExternalTokensCredentialProvider::from_supplied("plain-token", Some("acc_2".into()));
+        let p =
+            ExternalTokensCredentialProvider::from_supplied("plain-token", Some("acc_2".into()));
         let scope = CredentialScope::new(
-            crate::ProviderId::OpenAICompatible { name: "openai-chatgpt".into() },
+            crate::ProviderId::OpenAICompatible {
+                name: "openai-chatgpt".into(),
+            },
             "openai-chatgpt",
         );
         match p.load(&scope).await.expect("load") {
-            Credential::ChatGptOAuth { access_token, account_id, fedramp } => {
+            Credential::ChatGptOAuth {
+                access_token,
+                account_id,
+                fedramp,
+            } => {
                 assert_eq!(access_token, "plain-token");
                 assert_eq!(account_id.as_deref(), Some("acc_2"));
                 assert!(!fedramp);

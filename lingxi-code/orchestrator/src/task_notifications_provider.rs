@@ -80,10 +80,7 @@ mod tests {
         async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
             unreachable!()
         }
-        async fn list(
-            &self,
-            _f: TaskListFilter,
-        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+        async fn list(&self, _f: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
             unreachable!()
         }
         async fn update(
@@ -93,11 +90,7 @@ mod tests {
         ) -> Result<TaskRecord, TaskRegistryError> {
             unreachable!()
         }
-        async fn set_status(
-            &self,
-            _id: &str,
-            _s: &str,
-        ) -> Result<TaskRecord, TaskRegistryError> {
+        async fn set_status(&self, _id: &str, _s: &str) -> Result<TaskRecord, TaskRegistryError> {
             unreachable!()
         }
         async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {

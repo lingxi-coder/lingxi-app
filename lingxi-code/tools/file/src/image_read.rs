@@ -75,15 +75,24 @@ pub fn process_image(bytes: Vec<u8>) -> Result<ProcessedImage, String> {
     }
     let fmt = image::guess_format(&bytes).ok();
     let media_type = format_to_media_type(fmt);
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("failed to decode image: {e}"))?;
+    let img =
+        image::load_from_memory(&bytes).map_err(|e| format!("failed to decode image: {e}"))?;
     let (w, h) = img.dimensions();
 
     if bytes.len() <= IMAGE_TARGET_RAW_SIZE && w <= IMAGE_MAX_DIM && h <= IMAGE_MAX_DIM {
-        return Ok(ProcessedImage { base64: b64(&bytes), media_type, resized: None });
+        return Ok(ProcessedImage {
+            base64: b64(&bytes),
+            media_type,
+            resized: None,
+        });
     }
 
     let working = if w > IMAGE_MAX_DIM || h > IMAGE_MAX_DIM {
-        img.resize(IMAGE_MAX_DIM, IMAGE_MAX_DIM, image::imageops::FilterType::Triangle)
+        img.resize(
+            IMAGE_MAX_DIM,
+            IMAGE_MAX_DIM,
+            image::imageops::FilterType::Triangle,
+        )
     } else {
         img
     };
@@ -145,7 +154,12 @@ mod tests {
         let p = process_image(bytes.clone()).unwrap();
         assert_eq!(p.media_type, "image/png");
         assert!(p.resized.is_none(), "small image not resized");
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(&p.base64).unwrap(), bytes);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&p.base64)
+                .unwrap(),
+            bytes
+        );
     }
 
     #[test]
@@ -154,9 +168,15 @@ mod tests {
         let p = process_image(bytes).unwrap();
         let (ow, oh, dw, dh) = p.resized.expect("resized");
         assert_eq!((ow, oh), (3000, 1500));
-        assert!(dw <= IMAGE_MAX_DIM && dh <= IMAGE_MAX_DIM, "fits cap: {dw}x{dh}");
+        assert!(
+            dw <= IMAGE_MAX_DIM && dh <= IMAGE_MAX_DIM,
+            "fits cap: {dw}x{dh}"
+        );
         assert_eq!(dw, 2000, "long side clamped to 2000");
-        assert_eq!(p.media_type, "image/jpeg", "resized images re-encode as jpeg");
+        assert_eq!(
+            p.media_type, "image/jpeg",
+            "resized images re-encode as jpeg"
+        );
     }
 
     #[test]

@@ -41,10 +41,13 @@ struct CachedEntry {
 
 /// macOS Keychain backend.
 ///
-/// Construct via [`MacOsKeychainStorage::new`]. The `user` field is the
-/// `security -a <account>` argument (typically `$USER`); the `config_dir`
-/// drives the per-config-directory dir-hash service-name suffix.
+/// Construct via [`MacOsKeychainStorage::new`]. The `user` field is retained for
+/// backend identity/diagnostics; individual [`SecureStorage`] calls use their
+/// logical `account` argument as the `security -a <account>` lookup key so the
+/// `(service, account)` contract is preserved. The `config_dir` drives the
+/// per-config-directory dir-hash service-name suffix.
 pub struct MacOsKeychainStorage {
+    #[allow(dead_code)]
     user: String,
     config_dir: PathBuf,
     default_config_dir: PathBuf,
@@ -159,9 +162,7 @@ impl SecureStorage for MacOsKeychainStorage {
         // monitors only see `security -i`.
         let stdin_command = format!(
             "add-generic-password -U -a \"{}\" -s \"{}\" -X \"{}\"\n",
-            self.user.as_str(),
-            full_service,
-            hex_value,
+            account, full_service, hex_value,
         );
 
         let (exit_status, stderr) = if stdin_command.len() <= SECURITY_STDIN_LINE_LIMIT {
@@ -179,7 +180,7 @@ impl SecureStorage for MacOsKeychainStorage {
                 "add-generic-password",
                 "-U",
                 "-a",
-                self.user.as_str(),
+                account,
                 "-s",
                 full_service.as_str(),
                 "-X",
@@ -248,7 +249,7 @@ impl SecureStorage for MacOsKeychainStorage {
 
         // We are the responsible spawner.
         let full_service = self.keychain_service_name(service);
-        let result = run_security_find(&self.user, &full_service).await;
+        let result = run_security_find(account, &full_service).await;
 
         // Notify waiters regardless of outcome and remove our inflight entry.
         {
@@ -292,7 +293,7 @@ impl SecureStorage for MacOsKeychainStorage {
             .args([
                 "delete-generic-password",
                 "-a",
-                self.user.as_str(),
+                account,
                 "-s",
                 full_service.as_str(),
             ])
@@ -377,21 +378,21 @@ async fn run_security_argv(
     Ok((output.status, stderr))
 }
 
-/// `security find-generic-password -a <user> -w -s <service>`.
+/// `security find-generic-password -a <account> -w -s <service>`.
 ///
 /// Returns `Ok(None)` for `errSecItemNotFound` (exit 44) and `Ok(Some(_))`
 /// on success. The password is read as the JSON-encoded
 /// [`SecureStorageData`] (claude-code writes the JSON bytes via `-X <hex>`;
 /// `security -w` prints the decoded bytes back as a UTF-8 string).
 async fn run_security_find(
-    user: &str,
+    account: &str,
     full_service: &str,
 ) -> Result<Option<SecureStorageData>, SecureStorageError> {
     let output = Command::new("security")
         .args([
             "find-generic-password",
             "-a",
-            user,
+            account,
             "-w",
             "-s",
             full_service,

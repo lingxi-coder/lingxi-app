@@ -141,8 +141,10 @@ pub fn resolve_api_base() -> String {
 /// default routing. Mirrors `apps/cli/src/init.rs`'s `load_provider_profiles`
 /// + `load_routing`.
 #[must_use]
-fn load_settings_blocks() -> (Option<BTreeMap<String, serde_json::Value>>, Option<serde_json::Value>)
-{
+fn load_settings_blocks() -> (
+    Option<BTreeMap<String, serde_json::Value>>,
+    Option<serde_json::Value>,
+) {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let inputs = engine::settings::LoadInputs {
@@ -332,7 +334,9 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
         .set_mid_turn_input(Arc::new(crate::driver::MsgQueueMidTurnInput::new(
             queue.clone(),
         )));
-    runtime.orchestrator.set_cancel_reason(cancel_reason.clone());
+    runtime
+        .orchestrator
+        .set_cancel_reason(cancel_reason.clone());
     {
         let reason = cancel_reason.clone();
         queue
@@ -350,11 +354,9 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
     // threaded out of `engine_desktop::build` on `DesktopRuntime` precisely because
     // the tool is constructed before this seam. Setting it more than once is a no-op
     // (`OnceLock`); a fresh per-connection `assemble` builds a fresh runtime + cell.
-    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> =
-        Arc::new(crate::driver::MsgQueueWakeupScheduler::new(
-            queue.clone(),
-            runtime.runtime_spawner.clone(),
-        ));
+    let wakeup_scheduler: Arc<dyn tool_cron::WakeupScheduler> = Arc::new(
+        crate::driver::MsgQueueWakeupScheduler::new(queue.clone(), runtime.runtime_spawner.clone()),
+    );
     // The driver re-uses the SAME scheduler at its turn-completion edge to arm the
     // `/loop` keepalive fallback (binary `lKi`); clone before the cell consumes it.
     let driver_wakeup_scheduler = wakeup_scheduler.clone();
@@ -485,8 +487,8 @@ mod tests {
 
     #[test]
     fn parse_cwd_and_model() {
-        let args = BridgeArgs::parse(["--cwd", "/tmp/p", "--model", "claude-x"])
-            .expect("flags parse");
+        let args =
+            BridgeArgs::parse(["--cwd", "/tmp/p", "--model", "claude-x"]).expect("flags parse");
         assert_eq!(args.cwd, Some(PathBuf::from("/tmp/p")));
         assert_eq!(args.model.as_deref(), Some("claude-x"));
     }
@@ -506,7 +508,13 @@ mod tests {
     #[test]
     fn parse_unknown_flag_is_error() {
         let err = BridgeArgs::parse(["--frobnicate"]).unwrap_err();
-        assert!(err.contains("--frobnicate") || err.contains("frobnicate") || err.contains("frobni") || err.contains("unknown"), "got: {err}");
+        assert!(
+            err.contains("--frobnicate")
+                || err.contains("frobnicate")
+                || err.contains("frobni")
+                || err.contains("unknown"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -543,7 +551,10 @@ mod tests {
 
         cfg.api_key = String::new();
         cfg.provider_profiles = Some(BTreeMap::new());
-        assert!(has_no_credential_source(&cfg), "empty profiles map is still no source");
+        assert!(
+            has_no_credential_source(&cfg),
+            "empty profiles map is still no source"
+        );
 
         let mut profiles = BTreeMap::new();
         profiles.insert("p".to_string(), serde_json::json!({}));
@@ -591,7 +602,11 @@ mod tests {
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.
         let gate = bound.connection.gate_handle();
-        assert_eq!(gate.pending_count().await, 0, "fresh gate has no parked requests");
+        assert_eq!(
+            gate.pending_count().await,
+            0,
+            "fresh gate has no parked requests"
+        );
         // Phase-2 /loop wiring: assemble fills the ScheduleWakeup cell with the
         // msgqueue-backed scheduler (so the tool is no longer a no-op on the bridge).
         assert!(

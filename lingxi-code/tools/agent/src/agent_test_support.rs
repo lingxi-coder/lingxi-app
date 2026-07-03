@@ -266,10 +266,10 @@ impl SubagentSpawner for MockSubagentSpawner {
                 "async subagent spawn (run_in_background) is not wired in this build".to_string(),
             ));
         }
-        self.invocations.lock().unwrap().push(MockSpawnInvocation {
-            request,
-            inherit,
-        });
+        self.invocations
+            .lock()
+            .unwrap()
+            .push(MockSpawnInvocation { request, inherit });
         Ok(traits::subagent_spawn::AsyncLaunch {
             agent_id: protocol::AgentId::new(),
             output_file: "/tmp/mock-agent.output".to_string(),

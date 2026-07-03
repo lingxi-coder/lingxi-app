@@ -81,8 +81,6 @@ pub enum ElicitationHookOutcome {
 pub trait HookDispatcher: Send + Sync {
     /// Fire the `Elicitation` hook for an incoming `elicitation/create`
     /// request and report how the hook resolved it.
-    async fn dispatch_elicitation(
-        &self,
-        request: ElicitationHookRequest,
-    ) -> ElicitationHookOutcome;
+    async fn dispatch_elicitation(&self, request: ElicitationHookRequest)
+        -> ElicitationHookOutcome;
 }

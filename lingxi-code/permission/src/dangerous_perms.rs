@@ -209,10 +209,7 @@ pub fn find_dangerous_classifier_permissions(
 
     for rule in rules {
         if rule.behavior == PermissionBehavior::Allow
-            && is_dangerous_classifier_permission(
-                &rule.value.tool_name,
-                &rule.value.rule_content,
-            )
+            && is_dangerous_classifier_permission(&rule.value.tool_name, &rule.value.rule_content)
         {
             // `Bash(python:*)` when content is set, else `Bash(*)` for tool-wide.
             let rule_string = match &rule.value.rule_content {
@@ -248,16 +245,34 @@ mod tests {
 
     #[test]
     fn bash_interpreter_prefix_is_dangerous() {
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("python:*")));
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("node:*")));
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("npm run:*")));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python:*")
+        ));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("node:*")
+        ));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("npm run:*")
+        ));
     }
 
     #[test]
     fn bash_safe_command_is_not_dangerous() {
-        assert!(!is_dangerous_bash_permission(BASH_TOOL_NAME, &content("ls:*")));
-        assert!(!is_dangerous_bash_permission(BASH_TOOL_NAME, &content("git status")));
-        assert!(!is_dangerous_bash_permission(BASH_TOOL_NAME, &content("cat foo")));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("ls:*")
+        ));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("git status")
+        ));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("cat foo")
+        ));
     }
 
     #[test]
@@ -274,16 +289,34 @@ mod tests {
 
     #[test]
     fn bash_shape_variants_match() {
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("python")));
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("python*")));
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("python *")));
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("python -c*")));
-        assert!(is_dangerous_bash_permission(BASH_TOOL_NAME, &content("PYTHON:*"))); // case-insensitive
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python")
+        ));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python*")
+        ));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python *")
+        ));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python -c*")
+        ));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("PYTHON:*")
+        )); // case-insensitive
     }
 
     #[test]
     fn bash_predicate_ignores_non_bash_tools() {
-        assert!(!is_dangerous_bash_permission("PowerShell", &content("python:*")));
+        assert!(!is_dangerous_bash_permission(
+            "PowerShell",
+            &content("python:*")
+        ));
         assert!(!is_dangerous_bash_permission("Read", &None));
     }
 
@@ -295,22 +328,42 @@ mod tests {
         // mksh/sh-compatible commands, so a dangerous `Shell` allow rule must be
         // flagged exactly like the same `Bash` rule — otherwise an auto-mode
         // classifier bypass is never stripped.
-        assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("python:*")));
-        assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("node:*")));
+        assert!(is_dangerous_bash_permission(
+            SHELL_TOOL_NAME,
+            &content("python:*")
+        ));
+        assert!(is_dangerous_bash_permission(
+            SHELL_TOOL_NAME,
+            &content("node:*")
+        ));
         // Tool-wide `Shell` allow lets the model run ALL commands.
         assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &None));
         assert!(is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("*")));
         // A safe `Shell` command root is not dangerous.
-        assert!(!is_dangerous_bash_permission(SHELL_TOOL_NAME, &content("ls:*")));
+        assert!(!is_dangerous_bash_permission(
+            SHELL_TOOL_NAME,
+            &content("ls:*")
+        ));
         // The OR classifier predicate also flags it.
-        assert!(is_dangerous_classifier_permission(SHELL_TOOL_NAME, &content("python:*")));
+        assert!(is_dangerous_classifier_permission(
+            SHELL_TOOL_NAME,
+            &content("python:*")
+        ));
     }
 
     #[test]
     fn find_collects_dangerous_mobile_shell_allow_rules() {
         let rules = vec![
-            allow(SHELL_TOOL_NAME, Some("python:*"), PermissionRuleSource::UserSettings),
-            allow(SHELL_TOOL_NAME, Some("ls:*"), PermissionRuleSource::UserSettings),
+            allow(
+                SHELL_TOOL_NAME,
+                Some("python:*"),
+                PermissionRuleSource::UserSettings,
+            ),
+            allow(
+                SHELL_TOOL_NAME,
+                Some("ls:*"),
+                PermissionRuleSource::UserSettings,
+            ),
         ];
         let found = find_dangerous_classifier_permissions(&rules);
         assert_eq!(found.len(), 1);
@@ -321,17 +374,32 @@ mod tests {
     fn bash_ant_only_tail_is_omitted() {
         // The ant-only tail (`gh`, `curl`, `git`, `aws`, …) is NOT dangerous in
         // the external build.
-        assert!(!is_dangerous_bash_permission(BASH_TOOL_NAME, &content("gh:*")));
-        assert!(!is_dangerous_bash_permission(BASH_TOOL_NAME, &content("curl:*")));
-        assert!(!is_dangerous_bash_permission(BASH_TOOL_NAME, &content("git:*")));
-        assert!(!is_dangerous_bash_permission(BASH_TOOL_NAME, &content("aws:*")));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("gh:*")
+        ));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("curl:*")
+        ));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("git:*")
+        ));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("aws:*")
+        ));
     }
 
     // ── isDangerousPowerShellPermission ──
 
     #[test]
     fn powershell_iex_is_dangerous() {
-        assert!(is_dangerous_powershell_permission(POWERSHELL_TOOL_NAME, &content("iex:*")));
+        assert!(is_dangerous_powershell_permission(
+            POWERSHELL_TOOL_NAME,
+            &content("iex:*")
+        ));
         assert!(is_dangerous_powershell_permission(
             POWERSHELL_TOOL_NAME,
             &content("invoke-expression:*")
@@ -357,8 +425,14 @@ mod tests {
 
     #[test]
     fn powershell_tool_wide_and_wildcard_are_dangerous() {
-        assert!(is_dangerous_powershell_permission(POWERSHELL_TOOL_NAME, &None));
-        assert!(is_dangerous_powershell_permission(POWERSHELL_TOOL_NAME, &content("*")));
+        assert!(is_dangerous_powershell_permission(
+            POWERSHELL_TOOL_NAME,
+            &None
+        ));
+        assert!(is_dangerous_powershell_permission(
+            POWERSHELL_TOOL_NAME,
+            &content("*")
+        ));
     }
 
     #[test]
@@ -371,7 +445,10 @@ mod tests {
 
     #[test]
     fn powershell_predicate_ignores_non_ps_tools() {
-        assert!(!is_dangerous_powershell_permission("Bash", &content("iex:*")));
+        assert!(!is_dangerous_powershell_permission(
+            "Bash",
+            &content("iex:*")
+        ));
     }
 
     // ── isDangerousTaskPermission ──
@@ -379,7 +456,10 @@ mod tests {
     #[test]
     fn agent_any_rule_is_dangerous() {
         assert!(is_dangerous_task_permission(AGENT_TOOL_NAME, &None));
-        assert!(is_dangerous_task_permission(AGENT_TOOL_NAME, &content("general-purpose")));
+        assert!(is_dangerous_task_permission(
+            AGENT_TOOL_NAME,
+            &content("general-purpose")
+        ));
         // Legacy `Task` normalizes to `Agent`.
         assert!(is_dangerous_task_permission("Task", &content("anything")));
     }
@@ -394,11 +474,20 @@ mod tests {
 
     #[test]
     fn classifier_predicate_is_or_of_three() {
-        assert!(is_dangerous_classifier_permission("Bash", &content("python:*")));
-        assert!(is_dangerous_classifier_permission("PowerShell", &content("iex:*")));
+        assert!(is_dangerous_classifier_permission(
+            "Bash",
+            &content("python:*")
+        ));
+        assert!(is_dangerous_classifier_permission(
+            "PowerShell",
+            &content("iex:*")
+        ));
         assert!(is_dangerous_classifier_permission("Agent", &content("x")));
         assert!(!is_dangerous_classifier_permission("Read", &None));
-        assert!(!is_dangerous_classifier_permission("Bash", &content("ls:*")));
+        assert!(!is_dangerous_classifier_permission(
+            "Bash",
+            &content("ls:*")
+        ));
     }
 
     // ── findDangerousClassifierPermissions ──

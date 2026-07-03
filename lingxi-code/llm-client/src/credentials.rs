@@ -71,12 +71,19 @@ pub enum Credential {
 impl fmt::Debug for Credential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ApiKey(_) => formatter.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+            Self::ApiKey(_) => formatter
+                .debug_tuple("ApiKey")
+                .field(&"[REDACTED]")
+                .finish(),
             Self::BearerToken(_) => formatter
                 .debug_tuple("BearerToken")
                 .field(&"[REDACTED]")
                 .finish(),
-            Self::ChatGptOAuth { account_id, fedramp, .. } => formatter
+            Self::ChatGptOAuth {
+                account_id,
+                fedramp,
+                ..
+            } => formatter
                 .debug_struct("ChatGptOAuth")
                 .field("access_token", &"[REDACTED]")
                 .field("account_id", account_id)
@@ -239,8 +246,8 @@ impl CredentialProvider for CopilotExchangeCredentialProvider {
                 other => {
                     return Err(LlmError::InvalidRequest {
                         message: format!(
-                            "copilot credential must be an api-key/bearer OAuth token, got {other:?}"
-                        ),
+                        "copilot credential must be an api-key/bearer OAuth token, got {other:?}"
+                    ),
                     })
                 }
             };
@@ -301,13 +308,17 @@ mod tests {
         ) -> BoxFuture<'a, Result<serde_json::Value, LlmError>> {
             *self.calls.lock().unwrap() += 1;
             let e = self.expires_at;
-            Box::pin(async move { Ok(serde_json::json!({"token": "copilot-bearer", "expires_at": e})) })
+            Box::pin(
+                async move { Ok(serde_json::json!({"token": "copilot-bearer", "expires_at": e})) },
+            )
         }
     }
 
     fn copilot_scope() -> CredentialScope {
         CredentialScope::new(
-            ProviderId::OpenAICompatible { name: "github-copilot".to_string() },
+            ProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
             "github-copilot",
         )
         .with_credential_id("github-copilot")
@@ -330,8 +341,15 @@ mod tests {
         assert_eq!(first, Credential::BearerToken("copilot-bearer".to_string()));
         // Second load is served from cache → no second exchange.
         let second = provider.load(&scope).await.expect("second load");
-        assert_eq!(second, Credential::BearerToken("copilot-bearer".to_string()));
-        assert_eq!(*http.calls.lock().unwrap(), 1, "exchanged exactly once (cached)");
+        assert_eq!(
+            second,
+            Credential::BearerToken("copilot-bearer".to_string())
+        );
+        assert_eq!(
+            *http.calls.lock().unwrap(),
+            1,
+            "exchanged exactly once (cached)"
+        );
     }
 
     #[tokio::test]
@@ -363,10 +381,14 @@ mod tests {
             "github-copilot",
         );
         // A different credential id → straight passthrough (raw key, no exchange).
-        let scope = CredentialScope::new(ProviderId::OpenAI, "openai")
-            .with_credential_id("openai-api-key");
+        let scope =
+            CredentialScope::new(ProviderId::OpenAI, "openai").with_credential_id("openai-api-key");
         let got = provider.load(&scope).await.expect("passthrough");
         assert_eq!(got, Credential::ApiKey("openai_key".to_string()));
-        assert_eq!(*http.calls.lock().unwrap(), 0, "no exchange for non-copilot");
+        assert_eq!(
+            *http.calls.lock().unwrap(),
+            0,
+            "no exchange for non-copilot"
+        );
     }
 }

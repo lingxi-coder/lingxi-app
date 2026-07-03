@@ -5,7 +5,6 @@
 //! capability is unavailable; mobile composition roots wire a native Swift /
 //! Kotlin impl via `UniFFI` (P12). The Rust side is platform-agnostic.
 
-
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;

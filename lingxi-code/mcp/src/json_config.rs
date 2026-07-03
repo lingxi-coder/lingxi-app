@@ -33,7 +33,10 @@ fn expand_field(value: &str, missing: &mut Vec<String>) -> String {
 /// Expand the VALUES of a `HashMap` (keys untouched), mirroring the TS
 /// `mapValues(map, expandString)` used for `env` and `headers`
 /// (`services/mcp/config.ts:579,595`).
-fn expand_map_values(map: HashMap<String, String>, missing: &mut Vec<String>) -> HashMap<String, String> {
+fn expand_map_values(
+    map: HashMap<String, String>,
+    missing: &mut Vec<String>,
+) -> HashMap<String, String> {
     map.into_iter()
         .map(|(k, v)| {
             let v = expand_field(&v, missing);
@@ -64,7 +67,6 @@ pub enum McpJsonError {
     #[error("server '{0}' missing both command and url")]
     UnknownTransport(String),
 }
-
 
 #[derive(Debug, Deserialize)]
 struct McpJsonEntry {
@@ -627,8 +629,7 @@ mod tests {
     fn missing_var_is_left_literal_and_does_not_fail_parse() {
         // An unset `${MISSING}` with no default is left verbatim; parsing still
         // succeeds (TS surfaces a non-fatal error, never aborts the config).
-        let raw =
-            r#"{"mcpServers":{"s":{"command":"${LINGXI_MCP_TEST_UNSET_5B}","args":["ok"]}}}"#;
+        let raw = r#"{"mcpServers":{"s":{"command":"${LINGXI_MCP_TEST_UNSET_5B}","args":["ok"]}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
         match &cfgs[0].spec {
             McpTransportSpec::Stdio { command, args, .. } => {
@@ -687,7 +688,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let project = dir.path().join(".mcp.json"); // absent
         let global = dir.path().join(".lingxi.json");
-        fs::write(&global, r#"{"numStartups":3,"mcpServers":{"g":{"command":"g"}}}"#).unwrap();
+        fs::write(
+            &global,
+            r#"{"numStartups":3,"mcpServers":{"g":{"command":"g"}}}"#,
+        )
+        .unwrap();
         let cfgs = load_mcp_json_with_precedence(&project, &global);
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "g");
@@ -725,7 +730,10 @@ mod tests {
         // they match regardless of temp-dir symlink canonicalization.
         let key = migrations::global_config::project_path_for_config(cwd);
         let mut projects = serde_json::Map::new();
-        projects.insert(key, serde_json::json!({ "mcpServers": { "s": { "command": "local-s" } } }));
+        projects.insert(
+            key,
+            serde_json::json!({ "mcpServers": { "s": { "command": "local-s" } } }),
+        );
         let global_json = serde_json::json!({
             "mcpServers": { "s": { "command": "user-s" } },
             "projects": serde_json::Value::Object(projects),
@@ -750,7 +758,10 @@ mod tests {
         let global = cwd.join(".lingxi.json");
         let key = migrations::global_config::project_path_for_config(cwd);
         let mut projects = serde_json::Map::new();
-        projects.insert(key, serde_json::json!({ "mcpServers": { "loc": { "command": "loc" } } }));
+        projects.insert(
+            key,
+            serde_json::json!({ "mcpServers": { "loc": { "command": "loc" } } }),
+        );
         let global_json = serde_json::json!({
             "numStartups": 9,
             "mcpServers": { "usr": { "command": "usr" } },

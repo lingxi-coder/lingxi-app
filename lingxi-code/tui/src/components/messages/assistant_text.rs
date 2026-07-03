@@ -22,8 +22,8 @@
 //!     `permission`.
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 
-use iocraft::prelude::*;
 use crate::render_iocraft::StyleColorIocraftExt;
+use iocraft::prelude::*;
 
 use crate::render::markdown::{render_with_width as render_markdown_width, MarkdownTheme};
 use crate::render::{StyleColor, StyledLine, StyledSpan};

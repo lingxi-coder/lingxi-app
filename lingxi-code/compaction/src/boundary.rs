@@ -283,7 +283,11 @@ mod tests {
             Some(last),
             Some("ctx".to_string()),
             Some(7),
-            &["Zebra".to_string(), "alpha".to_string(), "Mango".to_string()],
+            &[
+                "Zebra".to_string(),
+                "alpha".to_string(),
+                "Mango".to_string(),
+            ],
         );
 
         assert_eq!(meta.trigger, CompactTrigger::Auto);
@@ -293,9 +297,16 @@ mod tests {
         // sorted (byte order: uppercase before lowercase)
         assert_eq!(
             meta.pre_compact_discovered_tools,
-            vec!["Mango".to_string(), "Zebra".to_string(), "alpha".to_string()]
+            vec![
+                "Mango".to_string(),
+                "Zebra".to_string(),
+                "alpha".to_string()
+            ]
         );
-        assert_eq!(meta.logical_parent_uuid.as_deref(), Some(&*last.to_string()));
+        assert_eq!(
+            meta.logical_parent_uuid.as_deref(),
+            Some(&*last.to_string())
+        );
         assert_eq!(meta.preserved_segment, None);
 
         // The in-history marker carries the exact TS sentinel content.
@@ -316,15 +327,22 @@ mod tests {
             None,
             None,
             None,
-            &["b".to_string(), "a".to_string(), "b".to_string(), "a".to_string()],
+            &[
+                "b".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+            ],
         );
-        assert_eq!(meta.pre_compact_discovered_tools, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            meta.pre_compact_discovered_tools,
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]
     fn create_omits_logical_parent_when_absent() {
-        let (_m, meta) =
-            create_compact_boundary(CompactTrigger::Manual, 0, None, None, None, &[]);
+        let (_m, meta) = create_compact_boundary(CompactTrigger::Manual, 0, None, None, None, &[]);
         assert_eq!(meta.logical_parent_uuid, None);
     }
 
@@ -465,12 +483,14 @@ mod tests {
 
     #[test]
     fn metadata_serializes_omitting_empty_optionals() {
-        let (_m, meta) =
-            create_compact_boundary(CompactTrigger::Auto, 42, None, None, None, &[]);
+        let (_m, meta) = create_compact_boundary(CompactTrigger::Auto, 42, None, None, None, &[]);
         let v = serde_json::to_value(&meta).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.get("trigger").and_then(|t| t.as_str()), Some("auto"));
-        assert_eq!(obj.get("pre_tokens").and_then(serde_json::Value::as_u64), Some(42));
+        assert_eq!(
+            obj.get("pre_tokens").and_then(serde_json::Value::as_u64),
+            Some(42)
+        );
         // empty / None fields are omitted from the wire shape
         assert!(!obj.contains_key("user_context"));
         assert!(!obj.contains_key("messages_summarized"));

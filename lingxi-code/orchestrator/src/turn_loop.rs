@@ -3,10 +3,10 @@
 use crate::conversation::{classify_api_error, ApiErrorEnvelope, ConversationOrchestrator};
 use crate::error::OrchestratorError;
 use crate::test_support::{PermissionDecision, PermissionDecisionSource, PermissionResolution};
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
+use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::path::{Component, Path, PathBuf};
 use telemetry::tengu::orchestrator as orch_events;
@@ -18,8 +18,7 @@ use tool_api::ContextModifier;
 /// call `readFileState.set(expandPath(file_path), …)` (`FileReadTool` +
 /// `FileEditTool`/`FileWriteTool`/`MultiEditTool`/`NotebookEditTool`).
 /// `/files` then renders this set (TS `cacheKeys(context.readFileState)`).
-const READ_FILE_STATE_TOOLS: &[&str] =
-    &["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"];
+const READ_FILE_STATE_TOOLS: &[&str] = &["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// Registry name of the worktree-creation tool (`tool_worktree::ENTER_TOOL_NAME`).
 /// A successful invocation of this tool is the port's sole worktree-creation
@@ -350,9 +349,11 @@ pub(crate) async fn execute_one_turn_with_recovery(
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     // Drop the per-call output-token count (A3 callers use the `_tracked`
     // variant). Preserves the historical signature for every existing caller.
-    Ok(execute_one_turn_with_recovery_tracked(orch, system, recovery)
-        .await?
-        .0)
+    Ok(
+        execute_one_turn_with_recovery_tracked(orch, system, recovery)
+            .await?
+            .0,
+    )
 }
 
 /// A3 twin of [`execute_one_turn_with_recovery`] that ALSO returns this turn
@@ -562,49 +563,49 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     {
         Ok(outcome) => match outcome {
             PtlCallOutcome::Response(resp) => resp,
-        PtlCallOutcome::PromptTooLong => {
-            let assistant_id = surface_prompt_too_long(orch).await;
-            return Ok((
-                TurnStepOutcome::Ended {
-                    final_message_id: assistant_id,
-                    stop_reason: "prompt_too_long".to_string(),
-                },
-                0,
-            ));
-        }
-        PtlCallOutcome::BlockingLimit => {
-            // PROACTIVE blocking-limit preempt: surface the prompt-too-long
-            // message (its api-error field is `invalid_request`, like the
-            // binary's `Ol({...,error:"invalid_request"})`) but end the turn with
-            // the DISTINCT terminal reason `"blocking_limit"` — the binary's
-            // `{reason:"blocking_limit"}` (offset ~208021400), kept separate from
-            // the reactive-exhausted `prompt_too_long` so SDK/stream-json
-            // consumers categorize the two preempt origins distinctly.
-            let assistant_id = surface_prompt_too_long(orch).await;
-            return Ok((
-                TurnStepOutcome::Ended {
-                    final_message_id: assistant_id,
-                    stop_reason: "blocking_limit".to_string(),
-                },
-                0,
-            ));
-        }
-        PtlCallOutcome::RapidRefillBreaker => {
-            // #54 reactive trip: surface the thrashing message (api-error field
-            // `invalid_request`, matching the binary `Ol({...,error:"invalid_request"})`)
-            // but end the turn with the terminal reason `"rapid_refill_breaker"`
-            // — the binary's loop returns `{reason:"rapid_refill_breaker"}` even
-            // though the assistant MESSAGE carries `error:"invalid_request"`
-            // (`bin/claude.exe` offset ~208016504; terminal-reason enum lists
-            // `rapid_refill_breaker`, never `invalid_request`).
-            let assistant_id = surface_rapid_refill_thrashing(orch).await;
-            return Ok((
-                TurnStepOutcome::Ended {
-                    final_message_id: assistant_id,
-                    stop_reason: "rapid_refill_breaker".to_string(),
-                },
-                0,
-            ));
+            PtlCallOutcome::PromptTooLong => {
+                let assistant_id = surface_prompt_too_long(orch).await;
+                return Ok((
+                    TurnStepOutcome::Ended {
+                        final_message_id: assistant_id,
+                        stop_reason: "prompt_too_long".to_string(),
+                    },
+                    0,
+                ));
+            }
+            PtlCallOutcome::BlockingLimit => {
+                // PROACTIVE blocking-limit preempt: surface the prompt-too-long
+                // message (its api-error field is `invalid_request`, like the
+                // binary's `Ol({...,error:"invalid_request"})`) but end the turn with
+                // the DISTINCT terminal reason `"blocking_limit"` — the binary's
+                // `{reason:"blocking_limit"}` (offset ~208021400), kept separate from
+                // the reactive-exhausted `prompt_too_long` so SDK/stream-json
+                // consumers categorize the two preempt origins distinctly.
+                let assistant_id = surface_prompt_too_long(orch).await;
+                return Ok((
+                    TurnStepOutcome::Ended {
+                        final_message_id: assistant_id,
+                        stop_reason: "blocking_limit".to_string(),
+                    },
+                    0,
+                ));
+            }
+            PtlCallOutcome::RapidRefillBreaker => {
+                // #54 reactive trip: surface the thrashing message (api-error field
+                // `invalid_request`, matching the binary `Ol({...,error:"invalid_request"})`)
+                // but end the turn with the terminal reason `"rapid_refill_breaker"`
+                // — the binary's loop returns `{reason:"rapid_refill_breaker"}` even
+                // though the assistant MESSAGE carries `error:"invalid_request"`
+                // (`bin/claude.exe` offset ~208016504; terminal-reason enum lists
+                // `rapid_refill_breaker`, never `invalid_request`).
+                let assistant_id = surface_rapid_refill_thrashing(orch).await;
+                return Ok((
+                    TurnStepOutcome::Ended {
+                        final_message_id: assistant_id,
+                        stop_reason: "rapid_refill_breaker".to_string(),
+                    },
+                    0,
+                ));
             }
         },
         // #10: a model/runtime error that escaped the API layer is NOT a hard
@@ -713,8 +714,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
                     message_count: api_success_message_count,
                     message_tokens: api_success_message_tokens,
                     did_fall_back_to_non_streaming: false,
-                    is_non_interactive_session:
-                        traits::session_flags::is_non_interactive_session(),
+                    is_non_interactive_session: traits::session_flags::is_non_interactive_session(),
                     print: traits::session_flags::is_non_interactive_session(),
                     is_tty: false,
                     query_source: "user".into(),
@@ -845,7 +845,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             // the JSONL wire). No-op when `injected_messages` is empty.
             for (m, tool_use_id) in &injected_messages {
                 s.history.push(m.clone());
-                s.injected_message_sources.insert(m.id(), tool_use_id.clone());
+                s.injected_message_sources
+                    .insert(m.id(), tool_use_id.clone());
             }
         }
         // M5-07 T13: persist the tool_result user message. Best-effort.
@@ -876,8 +877,10 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // TodoWrite message itself. No-op for the locked fixtures (a single-turn
     // run never reaches the threshold).
     orch.bump_reminder_turn_counters().await;
-    let invoked_tool_names: Vec<String> =
-        tool_uses.iter().map(|(_, name, _, _)| name.clone()).collect();
+    let invoked_tool_names: Vec<String> = tool_uses
+        .iter()
+        .map(|(_, name, _, _)| name.clone())
+        .collect();
     orch.note_todo_reminder_tool_call(&invoked_tool_names).await;
 
     // #78 nudge guard `!Pt(ce)`: suppress the thinking-only nudge during a
@@ -938,9 +941,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             // !GRe(a)`) is satisfied unconditionally (compaction runs in a
             // separate code path, never this turn step).
             Some("end_turn" | "stop_sequence") | None
-                if recovery
-                    .as_deref()
-                    .is_some_and(|s| !s.thinking_only_nudged)
+                if recovery.as_deref().is_some_and(|s| !s.thinking_only_nudged)
                     && !has_visible_text(&assistant_blocks)
                     && !prior_structured_output =>
             {
@@ -1121,7 +1122,14 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // to before, so the locked turn-loop fixtures (which never arm an
         // override) are unaffected.
         orch.api
-            .messages_create_with_opts(model, profile, system, history_snapshot, tools.clone(), max_tokens)
+            .messages_create_with_opts(
+                model,
+                profile,
+                system,
+                history_snapshot,
+                tools.clone(),
+                max_tokens,
+            )
             .await
     } else if orch.config.fallback_model.is_some() {
         orch.api
@@ -1163,7 +1171,8 @@ pub(crate) async fn call_api_with_ptl_recovery(
             let s = orch.session.lock().await;
             s.history.clone()
         };
-        let Some(truncated) = compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
+        let Some(truncated) =
+            compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
         else {
             // Nothing safe to drop (< 2 groups). Stop truncating and fall
             // through to the reactive-compact fallback.
@@ -1301,8 +1310,7 @@ async fn reissue_after_model_fallback(
 
     // (iii) Surface the user-visible warning (byte-shaped on the TS intent;
     // includes both model names).
-    let warning =
-        format!("Switched to {fallback_model} due to high demand for {original_model}");
+    let warning = format!("Switched to {fallback_model} due to high demand for {original_model}");
     orch.output.emit_text(&warning).await;
 
     // (iv) Success-path analytics — inline event name (NOT a locked const).
@@ -1374,9 +1382,7 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
 /// ending the turn with `reason:"rapid_refill_breaker"`. We surface it on the
 /// same channel as [`surface_prompt_too_long`] (a stop-reason-bearing assistant
 /// message + emit), so the turn ends cleanly.
-pub(crate) async fn surface_rapid_refill_thrashing(
-    orch: &ConversationOrchestrator,
-) -> MessageId {
+pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrator) -> MessageId {
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
@@ -1903,10 +1909,8 @@ async fn handle_malformed_tool_use(
             stop_reason: "end_turn".to_string(),
         });
     }
-    let nudge_msg = ConversationMessage::user(
-        MessageId::new(),
-        MALFORMED_TOOL_USE_RETRY_NUDGE.to_string(),
-    );
+    let nudge_msg =
+        ConversationMessage::user(MessageId::new(), MALFORMED_TOOL_USE_RETRY_NUDGE.to_string());
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -1925,8 +1929,7 @@ async fn handle_thinking_only(
     orch: &ConversationOrchestrator,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
-    let nudge_msg =
-        ConversationMessage::user(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
+    let nudge_msg = ConversationMessage::user(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -2127,7 +2130,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // model text, so the SDK frame's `content` matches the model wire.
             let model_text = match &result_block {
                 ContentBlock::ToolResult { content, .. } => content.clone(),
-                _ => format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>"),
+                _ => format!(
+                    "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
+                ),
             };
             orch.output
                 .emit_tool_result(
@@ -2234,9 +2239,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // short-circuits. Runs on the RAW `input` (pre-hook), BEFORE the
         // PreToolUse hooks/permission (claude-code order), so there is no
         // pre-hook context to fold.
-        if let Err(tool_api::ValidationError(msg)) =
-            tool_handle.validate_input(input, &ctx).await
-        {
+        if let Err(tool_api::ValidationError(msg)) = tool_handle.validate_input(input, &ctx).await {
             let model_text = format!("<tool_use_error>{msg}</tool_use_error>");
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
@@ -2613,9 +2616,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // overrides), plan mode already bound above, and a resolved `Ask` already
             // prompts. Precedence is therefore deny > ask > allow — matching the
             // binary, NOT a divergence. No-op unless a hook returned `ask`.
-            let resolution = if hook_ask
-                && matches!(resolution, PermissionResolution::Allow)
-            {
+            let resolution = if hook_ask && matches!(resolution, PermissionResolution::Allow) {
                 PermissionResolution::Ask
             } else {
                 resolution
@@ -2641,10 +2642,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     // `executePermissionDeniedHooks`, fired from
                     // `toolExecution.ts:1075`) fires ONLY on an auto-mode CLASSIFIER
                     // deny (`decisionReason.type === 'classifier'`), NOT on a
-                    // rule/mode/plan deny. The auto-mode classifier is unwired in
-                    // the public build, so this is dormant there — matching
-                    // claude-code's public build (the `TRANSCRIPT_CLASSIFIER`
-                    // feature gate is off).
+                    // rule/mode/plan deny. LingXi now wires a deterministic
+                    // auto-mode classifier, so classifier-source denies can
+                    // reach this path in normal builds.
                     if matches!(source, PermissionDecisionSource::Classifier) {
                         let denied_event = HookEvent::PermissionDenied {
                             tool_name: name.clone(),
@@ -2652,16 +2652,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             tool_use_id: tool_use_id.clone(),
                             reason: reason.clone(),
                         };
-                        let denied_agg =
-                            orch.hooks.execute(denied_event, hook_ctx.clone()).await;
+                        let denied_agg = orch.hooks.execute(denied_event, hook_ctx.clone()).await;
                         // `{retry: true}` reply (`toolExecution.ts:1080-1091`): a
                         // PermissionDenied hook can signal the auto-mode classifier
-                        // deny is now approved. We honour it ONLY behind the same gate
-                        // claude-code uses — `feature('TRANSCRIPT_CLASSIFIER')` (the
-                        // external build's `is_classifier_permissions_enabled()` const,
-                        // hardcoded `false`) AND the runtime config bit that lets a test
-                        // force the flag on. With BOTH off (the parity default) the
-                        // retry message NEVER fires on the normal deny path.
+                        // deny is now approved. We honour it when classifier
+                        // permissions are enabled, or when the runtime config bit
+                        // forces the transcript-classifier path in tests.
                         let classifier_feature_on =
                             permission::classifier::is_classifier_permissions_enabled()
                                 || orch.config.transcript_classifier_enabled;
@@ -2712,7 +2708,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                                 tool_use_id: Some(tool_use_id.to_string()),
                                 ..Default::default()
                             };
-                            match orch.perms.check_with_context(name, &effective_input, &ctx).await {
+                            match orch
+                                .perms
+                                .check_with_context(name, &effective_input, &ctx)
+                                .await
+                            {
                                 traits::permission_gate::PermissionOutcome::Allow {
                                     updated_input,
                                     // `permission_updates` (the host's
@@ -2855,8 +2855,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // `tagMessagesWithToolUseID` stamps the Skill tool's own block
                 // id as `sourceToolUseID`) for the caller's in-memory
                 // `injected_message_sources` side-table.
-                injected_messages
-                    .extend(result.new_messages.into_iter().map(|m| (m, tool_use_id.clone())));
+                injected_messages.extend(
+                    result
+                        .new_messages
+                        .into_iter()
+                        .map(|m| (m, tool_use_id.clone())),
+                );
                 // SKILLEXEC.3 (model scope): stash any one-shot `context_modifier`
                 // for the caller to fold POST-BATCH. NOT applied to the per-tool
                 // `ctx` here (which is discarded at loop end) and NOT applied
@@ -3000,10 +3004,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // (`e.outputSchema?.safeParse(...)?.success!==!1`): substitute
                 // unless validation EXPLICITLY fails. No schema → substitute.
                 let schema_ok = match tool_handle.output_schema() {
-                    Some(schema) => crate::schema_validation::validate_tool_output_schema(
-                        schema,
-                        &new_output,
-                    ),
+                    Some(schema) => {
+                        crate::schema_validation::validate_tool_output_schema(schema, &new_output)
+                    }
                     None => Ok(()),
                 };
                 match schema_ok {
@@ -3364,4 +3367,3 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
             std::string::ToString::to_string,
         )
 }
-

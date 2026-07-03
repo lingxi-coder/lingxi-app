@@ -277,8 +277,7 @@ impl CompactionOrchestrator {
         // Circuit breaker: after N consecutive failures, stop trying so a
         // hopelessly-over-limit session does not hammer the summarizer every
         // turn (`autoCompact.ts:260-265`).
-        let breaker_tripped =
-            tracking.consecutive_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES;
+        let breaker_tripped = tracking.consecutive_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES;
 
         // #54 rapid-refill (thrashing) breaker: compute `kho(tracking)` BEFORE
         // the summarizer. If the context has refilled to the limit within
@@ -325,8 +324,7 @@ impl CompactionOrchestrator {
                 }
                 Err(e) => {
                     // Increment for the circuit breaker, then propagate.
-                    tracking.consecutive_failures =
-                        tracking.consecutive_failures.saturating_add(1);
+                    tracking.consecutive_failures = tracking.consecutive_failures.saturating_add(1);
                     return Err(e);
                 }
             }
@@ -372,7 +370,9 @@ mod tests {
         // ~80 chars → ~20 tokens each, so a handful clears any small threshold.
         ConversationMessage::user(
             MessageId::new(),
-            format!("turn-{i} padding text to push the token estimate over a small threshold value"),
+            format!(
+                "turn-{i} padding text to push the token estimate over a small threshold value"
+            ),
         )
     }
 
@@ -438,7 +438,10 @@ mod tests {
         for i in 0..8 {
             let id = ToolUseId::new();
             msgs.push(assistant_tool_use("Read", id.clone()));
-            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40_000))));
+            msgs.push(user_tool_result(
+                id,
+                &format!("body-{i} {}", "x".repeat(40_000)),
+            ));
         }
         msgs
     }
@@ -560,11 +563,7 @@ mod tests {
         let msgs = microcompactable_messages();
 
         let first = orch
-            .process_iteration_tracked(
-                msgs.clone(),
-                0,
-                &mut AutoCompactTrackingState::default(),
-            )
+            .process_iteration_tracked(msgs.clone(), 0, &mut AutoCompactTrackingState::default())
             .await
             .expect("first microcompact pass succeeds");
         let second = orch
@@ -573,9 +572,17 @@ mod tests {
             .expect("second microcompact pass succeeds");
 
         assert!(!first.cache_hit, "empty cache starts with a miss");
-        assert!(second.cache_hit, "same input should hit cached microcompact");
-        assert_eq!(first.messages, second.messages, "hit returns cached summary");
-        assert!(second.layers_applied.contains(&CompactionLayer::Microcompact));
+        assert!(
+            second.cache_hit,
+            "same input should hit cached microcompact"
+        );
+        assert_eq!(
+            first.messages, second.messages,
+            "hit returns cached summary"
+        );
+        assert!(second
+            .layers_applied
+            .contains(&CompactionLayer::Microcompact));
     }
 
     // --- COMPACT.4: HISTORY_SNIP gating ---------------------------------- //

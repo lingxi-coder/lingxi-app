@@ -141,13 +141,10 @@ fn orch_with(hooks: Arc<HookExecutorImpl>) -> ConversationOrchestrator {
 async fn fire_session_start_dispatches_session_start_with_source_startup() {
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook(
-            "record-session-start",
-            HookEventType::SessionStart,
-        ));
+    registry.write().await.register(builtin_hook(
+        "record-session-start",
+        HookEventType::SessionStart,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
     let orch = orch_with(Arc::new(exec));
@@ -169,13 +166,10 @@ async fn failing_session_start_hook_does_not_break_fire() {
     // `fire_session_start` discards the aggregate, so the call must STILL
     // return cleanly (best-effort, identical to the other lifecycle arms).
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry
-        .write()
-        .await
-        .register(builtin_hook(
-            "broken-session-start",
-            HookEventType::SessionStart,
-        ));
+    registry.write().await.register(builtin_hook(
+        "broken-session-start",
+        HookEventType::SessionStart,
+    ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(FailingHandler));
     let orch = orch_with(Arc::new(exec));

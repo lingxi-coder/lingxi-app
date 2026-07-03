@@ -318,7 +318,10 @@ mod tests {
         assert!(out.ends_with('\u{2026}'));
         assert_eq!(out.chars().filter(|c| *c == 'a').count(), 79);
         // Newline forces single-line truncation with a trailing ellipsis.
-        assert_eq!(truncate_single_line("line one\nline two", 80), "line one\u{2026}");
+        assert_eq!(
+            truncate_single_line("line one\nline two", 80),
+            "line one\u{2026}"
+        );
     }
 
     #[tokio::test]
@@ -402,7 +405,11 @@ mod tests {
     async fn result_text_truncates_long_prompt() {
         let tmp = tempfile::tempdir().unwrap();
         let long = "x".repeat(120);
-        seed_tasks(tmp.path(), vec![task("daaaa0000", "*/5 * * * *", &long, true)]).await;
+        seed_tasks(
+            tmp.path(),
+            vec![task("daaaa0000", "*/5 * * * *", &long, true)],
+        )
+        .await;
 
         let tool = CronListTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let out = tool

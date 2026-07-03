@@ -47,14 +47,21 @@ pub async fn run(env: &MigrationEnv) {
     // DORMANT until tier persistence lands. TS reads getSettings_DEPRECATED
     // (merged settings); the user-settings model is the in-port stand-in
     // (doc'd: the merged read has no substrate at this pre-boot point).
-    let sp = settings_path(SettingsSource::User, &env.lingxi_config_home, &env.project_dir);
+    let sp = settings_path(
+        SettingsSource::User,
+        &env.lingxi_config_home,
+        &env.project_dir,
+    );
     let has_custom_model = read_settings_map(&sp)
         .ok()
         .is_some_and(|m| m.get("model").is_some());
     if let Err(e) = global_config::save_map(&env.global_config_path, |mut m| {
         m.insert("opusProMigrationComplete".into(), Value::Bool(true));
         if !has_custom_model {
-            m.insert("opusProMigrationTimestamp".into(), json!(MigrationEnv::now_ms()));
+            m.insert(
+                "opusProMigrationTimestamp".into(),
+                json!(MigrationEnv::now_ms()),
+            );
         }
         m
     }) {
@@ -66,7 +73,10 @@ pub async fn run(env: &MigrationEnv) {
         telemetry::tengu::migration::RESET_PRO_TO_OPUS_DEFAULT,
         std::collections::HashMap::from([
             ("skipped".to_string(), AnalyticsValue::Bool(false)),
-            ("had_custom_model".to_string(), AnalyticsValue::Bool(has_custom_model)),
+            (
+                "had_custom_model".to_string(),
+                AnalyticsValue::Bool(has_custom_model),
+            ),
         ]),
     )
     .await;
@@ -84,7 +94,10 @@ mod tests {
             global_config_path: t.global.clone(),
             lingxi_config_home: t.home.clone(),
             project_dir: t.project.clone(),
-            ctx: crate::context::MigrationContext { first_party: true, subscription_type: None },
+            ctx: crate::context::MigrationContext {
+                first_party: true,
+                subscription_type: None,
+            },
             bus: None,
         }
     }
@@ -110,7 +123,10 @@ mod tests {
         run(&env).await;
         let ev = events.lock().unwrap();
         assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].0, telemetry::tengu::migration::RESET_PRO_TO_OPUS_DEFAULT);
+        assert_eq!(
+            ev[0].0,
+            telemetry::tengu::migration::RESET_PRO_TO_OPUS_DEFAULT
+        );
         assert_eq!(ev[0].1, json!({"skipped": true}));
     }
 

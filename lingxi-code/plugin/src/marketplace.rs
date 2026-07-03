@@ -92,8 +92,8 @@ impl MarketplaceManager {
         let raw = tokio::fs::read_to_string(&index_path)
             .await
             .map_err(|_| format!("Marketplace file not found at {}", index_path.display()))?;
-        let index: MarketplaceIndex = serde_json::from_str(&raw)
-            .map_err(|e| format!("Invalid marketplace schema: {e}"))?;
+        let index: MarketplaceIndex =
+            serde_json::from_str(&raw).map_err(|e| format!("Invalid marketplace schema: {e}"))?;
         Ok((index, clone_dir))
     }
 
@@ -110,12 +110,18 @@ impl MarketplaceManager {
                 entry.name
             ));
         }
-        let rel = entry.path.as_deref().filter(|s| !s.is_empty()).unwrap_or(".");
+        let rel = entry
+            .path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(".");
         // A catalog must point only inside its own repo — reject traversal / root.
-        if Path::new(rel)
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-        {
+        if Path::new(rel).components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
             return Err(format!(
                 "Marketplace name '{}' resolves to a path outside the cache directory",
                 entry.name

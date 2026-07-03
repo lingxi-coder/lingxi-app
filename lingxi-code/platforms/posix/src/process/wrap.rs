@@ -150,10 +150,7 @@ mod tests {
     #[test]
     fn env_constants_match_claude_code() {
         assert_eq!(ENV_LINGXI_MARKER, ("LINGXI", "1"));
-        assert_eq!(
-            ENV_LINGXI_CHILD_SESSION,
-            ("LINGXI_CHILD_SESSION", "1")
-        );
+        assert_eq!(ENV_LINGXI_CHILD_SESSION, ("LINGXI_CHILD_SESSION", "1"));
         assert_eq!(ENV_GIT_EDITOR, ("GIT_EDITOR", "true"));
         assert_eq!(ENV_SHELL, "SHELL");
         assert_eq!(ENV_LINGXI_SESSION_ID, "LINGXI_SESSION_ID");

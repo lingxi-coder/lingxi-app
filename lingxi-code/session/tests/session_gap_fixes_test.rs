@@ -219,12 +219,8 @@ async fn cli_entrypoint_session_is_not_filtered() {
     let (temp, lingxi_home, cwd, dir) = setup();
     let base = SystemTime::now();
 
-    let keep = write_session_with_extras(
-        &dir,
-        &cwd,
-        serde_json::json!({"entrypoint": "cli"}),
-        base,
-    );
+    let keep =
+        write_session_with_extras(&dir, &cwd, serde_json::json!({"entrypoint": "cli"}), base);
 
     let fs = make_fs(temp.path());
     let rows = list_recent_sessions(&lingxi_home, &cwd, 5, fs)
@@ -306,7 +302,11 @@ async fn session_with_loop_text_in_non_content_context_is_not_filtered() {
         "message": {"role": "user", "content": "please loop over the files"},
     });
     let path = dir.join(format!("{keep_uuid}.jsonl"));
-    std::fs::write(&path, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&line).unwrap()),
+    )
+    .unwrap();
     filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(base)).unwrap();
 
     let fs = make_fs(temp.path());
@@ -314,7 +314,11 @@ async fn session_with_loop_text_in_non_content_context_is_not_filtered() {
         .await
         .expect("list");
 
-    assert_eq!(rows.len(), 1, "plain 'loop' text must not trigger the filter");
+    assert_eq!(
+        rows.len(),
+        1,
+        "plain 'loop' text must not trigger the filter"
+    );
     assert_eq!(rows[0].uuid, keep_uuid);
 }
 
@@ -322,9 +326,7 @@ async fn session_with_loop_text_in_non_content_context_is_not_filtered() {
 
 /// Build a minimal `LoadedTranscript` for `find_tip` unit testing.
 /// `messages` = list of (uuid, parent_uuid, type, timestamp, is_sidechain).
-fn make_transcript(
-    messages: &[(&str, Option<&str>, &str, &str, bool)],
-) -> LoadedTranscript {
+fn make_transcript(messages: &[(&str, Option<&str>, &str, &str, bool)]) -> LoadedTranscript {
     let mut t = LoadedTranscript::default();
     for &(uuid, parent, ty, ts, is_sc) in messages {
         let msg = serde_json::json!({
@@ -356,8 +358,20 @@ fn find_tip_with_explicit_last_prompt_overrides_timestamp_selection() {
     //       → b1 (ts=12:00:01, older)
     let mut t = make_transcript(&[
         ("root", None, "user", "2026-05-25T12:00:00.000Z", false),
-        ("a1", Some("root"), "user", "2026-05-25T12:00:02.000Z", false),
-        ("b1", Some("root"), "user", "2026-05-25T12:00:01.000Z", false),
+        (
+            "a1",
+            Some("root"),
+            "user",
+            "2026-05-25T12:00:02.000Z",
+            false,
+        ),
+        (
+            "b1",
+            Some("root"),
+            "user",
+            "2026-05-25T12:00:01.000Z",
+            false,
+        ),
     ]);
 
     // Without last-prompt, a1 wins (newer ts).
@@ -382,8 +396,20 @@ fn find_tip_non_explicit_last_prompt_does_not_override() {
     // where L = last_prompt_explicit. When L is false, the timestamp race runs.
     let mut t = make_transcript(&[
         ("root", None, "user", "2026-05-25T12:00:00.000Z", false),
-        ("a1", Some("root"), "user", "2026-05-25T12:00:02.000Z", false),
-        ("b1", Some("root"), "user", "2026-05-25T12:00:01.000Z", false),
+        (
+            "a1",
+            Some("root"),
+            "user",
+            "2026-05-25T12:00:02.000Z",
+            false,
+        ),
+        (
+            "b1",
+            Some("root"),
+            "user",
+            "2026-05-25T12:00:01.000Z",
+            false,
+        ),
     ]);
 
     // last_prompt_explicit = false → does NOT override.
@@ -403,8 +429,20 @@ fn find_tip_last_prompt_pointing_at_sidechain_falls_through_to_timestamp() {
     // is false (isSidechain check), so timestamp selection runs instead.
     let mut t = make_transcript(&[
         ("root", None, "user", "2026-05-25T12:00:00.000Z", false),
-        ("a1", Some("root"), "user", "2026-05-25T12:00:02.000Z", false),
-        ("sc1", Some("root"), "user", "2026-05-25T12:00:05.000Z", true), // sidechain, newer
+        (
+            "a1",
+            Some("root"),
+            "user",
+            "2026-05-25T12:00:02.000Z",
+            false,
+        ),
+        (
+            "sc1",
+            Some("root"),
+            "user",
+            "2026-05-25T12:00:05.000Z",
+            true,
+        ), // sidechain, newer
     ]);
 
     // Explicit last-prompt at sc1 — but sc1 is a sidechain → should fall through.
@@ -423,7 +461,13 @@ fn find_tip_last_prompt_pointing_at_unknown_uuid_falls_through() {
     // If the explicit last-prompt points at a uuid not in by_uuid, skip it.
     let mut t = make_transcript(&[
         ("root", None, "user", "2026-05-25T12:00:00.000Z", false),
-        ("a1", Some("root"), "user", "2026-05-25T12:00:02.000Z", false),
+        (
+            "a1",
+            Some("root"),
+            "user",
+            "2026-05-25T12:00:02.000Z",
+            false,
+        ),
     ]);
 
     t.last_prompt_leaf_uuid = Some("nonexistent-uuid".to_string());
@@ -464,7 +508,10 @@ fn route_lines_parses_last_prompt_explicit_false() {
     );
     let t = route_lines(content);
     assert_eq!(t.last_prompt_leaf_uuid.as_deref(), Some("leaf-2"));
-    assert!(!t.last_prompt_explicit, "explicit:false → last_prompt_explicit stays false");
+    assert!(
+        !t.last_prompt_explicit,
+        "explicit:false → last_prompt_explicit stays false"
+    );
 }
 
 #[test]
@@ -495,7 +542,10 @@ fn route_lines_last_prompt_explicit_sticks_to_same_uuid() {
     );
     let t = route_lines(content);
     assert_eq!(t.last_prompt_leaf_uuid.as_deref(), Some("leaf-a"));
-    assert!(t.last_prompt_explicit, "explicit carries over when same leafUuid");
+    assert!(
+        t.last_prompt_explicit,
+        "explicit carries over when same leafUuid"
+    );
 }
 
 #[test]
@@ -617,10 +667,7 @@ fn route_lines_parses_worktree_state_entries() {
     );
     let t = route_lines(content);
     let ws = t.worktree_states.get("agent-1").expect("worktree state");
-    assert_eq!(
-        ws.get("agentId").and_then(|v| v.as_str()),
-        Some("agent-1")
-    );
+    assert_eq!(ws.get("agentId").and_then(|v| v.as_str()), Some("agent-1"));
 }
 
 #[test]

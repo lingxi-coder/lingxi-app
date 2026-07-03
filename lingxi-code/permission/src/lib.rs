@@ -7,9 +7,9 @@
 
 pub mod allow_suggestion;
 pub mod auto_edit_safety;
-pub mod bash_security;
 #[cfg(feature = "bash-ast")]
 pub mod bash_ast_security;
+pub mod bash_security;
 #[cfg(feature = "bash-ast")]
 pub mod bash_tree_sitter;
 pub mod bypass_guard;
@@ -43,6 +43,7 @@ pub mod shell_command;
 pub mod shell_rule_matching;
 pub mod update;
 
+pub use allow_suggestion::{allow_suggestion, call_matches_rule};
 pub use auto_edit_safety::{
     check_path_safety_for_auto_edit, has_suspicious_windows_path_pattern,
     is_dangerous_file_path_to_auto_edit, normalize_case_for_comparison, AutoEditSafety,
@@ -51,8 +52,10 @@ pub use auto_edit_safety::{
 pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use bypass_guard::{enforce_bypass_safety, BypassEnv};
 pub use classifier::is_classifier_permissions_enabled;
+pub use cli_mode::{
+    initial_permission_mode_from_cli, permission_mode_from_cli_string, CliModeSettings,
+};
 pub use command_path_containment::check_command_path_containment;
-pub use cli_mode::{initial_permission_mode_from_cli, permission_mode_from_cli_string, CliModeSettings};
 pub use dangerous_patterns::{
     dangerous_bash_patterns, CROSS_PLATFORM_CODE_EXEC, POWERSHELL_DANGEROUS_PATTERNS,
 };
@@ -85,17 +88,14 @@ pub use policy_gate::PolicyPermissionGate;
 pub use prompting_gate::InteractivePromptingGate;
 pub use read_deny_globs::read_deny_exclude_globs;
 pub use read_only_command::command_is_read_only;
-pub use sandbox_auto_allow::SandboxAutoAllowConfig;
 pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,
     SandboxOverrideReason,
 };
-pub use allow_suggestion::{allow_suggestion, call_matches_rule};
 pub use rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
+pub use sandbox_auto_allow::SandboxAutoAllowConfig;
 pub use sed_validation::{
     sed_auto_allow_verdict, sed_constraint_verdict, SedVerdict, SED_ASK_MESSAGE, SED_ASK_REASON,
 };
-pub use shadow::{
-    detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule,
-};
+pub use shadow::{detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule};
 pub use update::PermissionUpdate;

@@ -170,20 +170,18 @@ fn submit(command: &ClientCommand) -> Frame {
 #[tokio::test]
 async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
     // (1) Start the REAL endpoint over the echo connection.
-    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(build_echo_connection()))
-        .await
-        .expect("endpoint must bind a loopback port");
+    let endpoint =
+        McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(build_echo_connection()))
+            .await
+            .expect("endpoint must bind a loopback port");
 
     // (2) Publish the discovery lockfile into a sandbox dir (no real $HOME) via
     //     the SAME library helper `main.rs` calls. This writes the file, enforces
     //     its token on the endpoint, and arms the Drop-guard.
     let tmp = tempfile::tempdir().expect("tempdir");
     let workspace = tmp.path().to_path_buf();
-    let served = boot::publish_lockfile(
-        endpoint,
-        tmp.path().to_path_buf(),
-        vec![workspace.clone()],
-    );
+    let served =
+        boot::publish_lockfile(endpoint, tmp.path().to_path_buf(), vec![workspace.clone()]);
     // Destructure so we own each piece independently: the endpoint is consumed by
     // `shutdown()` (by value), and the guard is dropped on its own to reap the
     // file at a precisely-asserted moment.
@@ -249,7 +247,10 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
     for i in 0..50 {
         match next_frame(&mut ws).await {
             Frame::Event(ClientEvent::TextDelta { text }) => {
-                assert_eq!(text, "echo: ping", "echo driver returns the prompt verbatim");
+                assert_eq!(
+                    text, "echo: ping",
+                    "echo driver returns the prompt verbatim"
+                );
                 saw_text_at.get_or_insert(i);
             }
             Frame::Event(ClientEvent::TurnEnded {
@@ -277,7 +278,10 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
     //     file when it drops; assert it is gone immediately after.
     endpoint.shutdown().await;
     drop(ws);
-    assert!(lockfile_path.exists(), "lockfile present until the guard drops");
+    assert!(
+        lockfile_path.exists(),
+        "lockfile present until the guard drops"
+    );
     drop(lock_guard);
     assert!(
         !lockfile_path.exists(),

@@ -110,12 +110,8 @@ pub async fn run_subagent(
     // so an un-wired `hook_executor` (tests / minimal builds) is a strict no-op.
     let frontmatter_cleanup = match &ctx.hook_executor {
         Some(he) if !ctx.agent_definition.frontmatter_hooks.is_empty() => {
-            he.register_agent_hooks(
-                ctx.agent_id,
-                &ctx.agent_definition.frontmatter_hooks,
-                true,
-            )
-            .await;
+            he.register_agent_hooks(ctx.agent_id, &ctx.agent_definition.frontmatter_hooks, true)
+                .await;
             Some((he.clone(), ctx.agent_id))
         }
         _ => None,
@@ -211,8 +207,10 @@ pub async fn run_subagent(
     // (otherwise the retargeted Stop→SubagentStop hooks are already gone). Only
     // when the child reached a terminal that fires SubagentStop in claude
     // (`completed` / `failed`).
-    if let (Some((he, agent_id, agent_type, session_id, cwd, agent_transcript_path)), Some(status)) =
-        (agent_scoped_stop, terminal_status)
+    if let (
+        Some((he, agent_id, agent_type, session_id, cwd, agent_transcript_path)),
+        Some(status),
+    ) = (agent_scoped_stop, terminal_status)
     {
         let stop_ctx = hooks::registry::HookContext {
             session_id,
@@ -264,7 +262,10 @@ pub async fn run_subagent(
 /// byte-exact part is the `Output does not match required schema: ` WRAPPER the
 /// caller prepends. A schema that fails to COMPILE is treated as PASS (a LingXi
 /// schema bug must not block the model), matching the binary's stance.
-fn validate_structured_output(schema_json: Option<&str>, input: &serde_json::Value) -> Result<(), String> {
+fn validate_structured_output(
+    schema_json: Option<&str>,
+    input: &serde_json::Value,
+) -> Result<(), String> {
     let Some(schema_str) = schema_json else {
         return Ok(());
     };
@@ -297,7 +298,11 @@ fn validate_structured_output(schema_json: Option<&str>, input: &serde_json::Val
 fn flatten_schema_error(err: &boon::ValidationError, out: &mut Vec<String>) {
     if err.causes.is_empty() {
         let loc = err.instance_location.to_string();
-        let loc = if loc.is_empty() { "(root)".to_string() } else { loc };
+        let loc = if loc.is_empty() {
+            "(root)".to_string()
+        } else {
+            loc
+        };
         out.push(format!("at '{loc}': {}", err.kind));
     } else {
         for cause in &err.causes {
@@ -485,8 +490,7 @@ async fn build_preload_messages(ctx: &SubagentContext) -> Vec<protocol::Conversa
                     // for rendering "Skill(name)"); the model-facing bytes — the
                     // metadata block then the skill content — are what matter for
                     // parity, and those are preserved here.
-                    let mut blocks: Vec<ContentBlock> =
-                        Vec::with_capacity(1 + load.content.len());
+                    let mut blocks: Vec<ContentBlock> = Vec::with_capacity(1 + load.content.len());
                     blocks.push(ContentBlock::Text {
                         text: format_skill_loading_metadata(&load.display_name),
                     });
@@ -668,7 +672,10 @@ async fn run_subagent_loop(
     // disables enforcement (legacy/test contexts).
     let budget = ctx.budget.clone();
     let model = resolve_model(&ctx);
-    let system: Option<String> = ctx.rendered_system_prompt.as_ref().map(std::string::ToString::to_string);
+    let system: Option<String> = ctx
+        .rendered_system_prompt
+        .as_ref()
+        .map(std::string::ToString::to_string);
     // Wire tool definitions advertised to the model on every round-trip (empty
     // when the spawner wired none). Cloned per round-trip below.
     //
@@ -756,170 +763,174 @@ async fn run_subagent_loop(
     // is per-turn-set: the `_turn` counter re-zeroes each outer iteration, so
     // every injected message gets a fresh budget.
     loop {
-    // Set to `true` when the inner turn loop hits a clean terminal stop (it has
-    // already emitted its `Completed`). Stays `false` if the loop instead falls
-    // through by exhausting `max_turns`, which needs the max-turns `Completed`.
-    let mut terminated_cleanly = false;
-    for _turn in 0..max_turns {
-        // Per-turn budget gate. This is the achievable analog of
-        // `QueryEngine.ts`'s `error_max_budget_usd` loop-terminator, built on
-        // the same frozen seam `AgentTool`'s pre-spawn gate uses
-        // (tools/agent/src/agent.rs:321): charge 0 to ask "is cumulative cost
-        // already over the configured limit?" without pricing tokens (the
-        // agent crate can't depend on lingxi-cost; the enforcer tracks cost
-        // globally, exactly like TS reading `getTotalCost()`).
-        //
-        // It intentionally diverges from QueryEngine in two ways, both forced
-        // by the frozen `BudgetEnforcerHandle` surface: (1) PLACEMENT — checked
-        // at the TOP of the turn (stop before spending) rather than TS's
-        // post-message check, so an already-over budget makes zero round-trips;
-        // (2) STRING — the denial reports the *current* cost (`format_budget_denied`
-        // byte-for-byte), not TS's "Reached maximum budget ($limit)", because the
-        // handle exposes the cumulative total but never the configured limit.
-        if let Some(b) = &budget {
-            if let Err(traits::budget::BudgetError::Exceeded { current_nano_usd }) =
-                b.check_and_charge(0).await
-            {
-                // Stop with a budget-exhausted terminal carrying the M3-05
-                // byte-locked denial string (matches `format_budget_denied`:
-                // nano_usd / 1e9, `{:.2}`). Reproduced inline because the agent
-                // crate cannot depend on lingxi-tools / lingxi-cost.
-                #[allow(clippy::cast_precision_loss)]
-                let dollars = current_nano_usd as f64 / 1_000_000_000.0;
-                let _ = out_tx
-                    .send(SubagentEvent::Failed {
-                        agent_id,
-                        error: format!("Budget exceeded (${dollars:.2}); stopped."),
-                    })
-                    .await;
-                return;
+        // Set to `true` when the inner turn loop hits a clean terminal stop (it has
+        // already emitted its `Completed`). Stays `false` if the loop instead falls
+        // through by exhausting `max_turns`, which needs the max-turns `Completed`.
+        let mut terminated_cleanly = false;
+        for _turn in 0..max_turns {
+            // Per-turn budget gate. This is the achievable analog of
+            // `QueryEngine.ts`'s `error_max_budget_usd` loop-terminator, built on
+            // the same frozen seam `AgentTool`'s pre-spawn gate uses
+            // (tools/agent/src/agent.rs:321): charge 0 to ask "is cumulative cost
+            // already over the configured limit?" without pricing tokens (the
+            // agent crate can't depend on lingxi-cost; the enforcer tracks cost
+            // globally, exactly like TS reading `getTotalCost()`).
+            //
+            // It intentionally diverges from QueryEngine in two ways, both forced
+            // by the frozen `BudgetEnforcerHandle` surface: (1) PLACEMENT — checked
+            // at the TOP of the turn (stop before spending) rather than TS's
+            // post-message check, so an already-over budget makes zero round-trips;
+            // (2) STRING — the denial reports the *current* cost (`format_budget_denied`
+            // byte-for-byte), not TS's "Reached maximum budget ($limit)", because the
+            // handle exposes the cumulative total but never the configured limit.
+            if let Some(b) = &budget {
+                if let Err(traits::budget::BudgetError::Exceeded { current_nano_usd }) =
+                    b.check_and_charge(0).await
+                {
+                    // Stop with a budget-exhausted terminal carrying the M3-05
+                    // byte-locked denial string (matches `format_budget_denied`:
+                    // nano_usd / 1e9, `{:.2}`). Reproduced inline because the agent
+                    // crate cannot depend on lingxi-tools / lingxi-cost.
+                    #[allow(clippy::cast_precision_loss)]
+                    let dollars = current_nano_usd as f64 / 1_000_000_000.0;
+                    let _ = out_tx
+                        .send(SubagentEvent::Failed {
+                            agent_id,
+                            error: format!("Budget exceeded (${dollars:.2}); stopped."),
+                        })
+                        .await;
+                    return;
+                }
+                // `Ok` and `BudgetError::Internal` fall through to the round-trip:
+                // TS has no analog branch that errors the loop on an internal
+                // budget condition, so an internal failure is non-fatal here.
             }
-            // `Ok` and `BudgetError::Internal` fall through to the round-trip:
-            // TS has no analog branch that errors the loop on an internal
-            // budget condition, so an internal failure is non-fatal here.
-        }
 
-        // Race the model round-trip against a user-termination event. A
-        // UserExit / UserInterrupt on event_rx aborts the loop -> Killed.
-        // Any other inbound event is ignored (the loop is self-driving) and
-        // we re-issue the round-trip on the next iteration.
-        //
-        // The round-trip goes over the STREAMING seam: open the SSE stream and
-        // drain it through `accumulate_stream` into the same `MessageResponse`
-        // the non-streaming path produced (the default `messages_create_stream`
-        // wraps `messages_create` losslessly, so a non-streaming client behaves
-        // identically). Dropping this future on the termination arm cancels the
-        // in-flight stream, exactly as dropping a non-streaming call would.
-        // Per-request thinking-effort (claude-code `me.effort`): the subagent's
-        // resolved effort (its definition's, possibly overridden by a workflow
-        // `agent({effort})` opt at spawn) → `output_config.effort`.
-        let effort_wire = ctx
-            .agent_definition
-            .effort
-            .as_ref()
-            .map(crate::definition::AgentEffort::to_wire);
-        let response = loop {
-            let api_call = async {
-                // Provider routing (dual-LLM dual-PROVIDER): thread the
-                // per-spawn `model_profile` as the api client's `profile` so the
-                // round-trip targets the candidate's resolved provider. `None`
-                // ⇒ default/unscoped resolution (legacy). The `_in` variants
-                // default to the profile-less methods, so a client that only
-                // implements the legacy seam is unaffected.
-                let profile = ctx.model_profile.as_deref();
-                let stream = if let Some(forced) = force_structured_tool {
-                    api_client
-                        .messages_create_stream_forced_in(
-                            &model,
-                            profile,
-                            system.as_deref(),
-                            history.clone(),
-                            tool_schemas.clone(),
-                            Some(forced),
-                            effort_wire.clone(),
-                        )
-                        .await?
-                } else {
-                    api_client
-                        .messages_create_stream_in(
-                            &model,
-                            profile,
-                            system.as_deref(),
-                            history.clone(),
-                            tool_schemas.clone(),
-                            effort_wire.clone(),
-                        )
-                        .await?
+            // Race the model round-trip against a user-termination event. A
+            // UserExit / UserInterrupt on event_rx aborts the loop -> Killed.
+            // Any other inbound event is ignored (the loop is self-driving) and
+            // we re-issue the round-trip on the next iteration.
+            //
+            // The round-trip goes over the STREAMING seam: open the SSE stream and
+            // drain it through `accumulate_stream` into the same `MessageResponse`
+            // the non-streaming path produced (the default `messages_create_stream`
+            // wraps `messages_create` losslessly, so a non-streaming client behaves
+            // identically). Dropping this future on the termination arm cancels the
+            // in-flight stream, exactly as dropping a non-streaming call would.
+            // Per-request thinking-effort (claude-code `me.effort`): the subagent's
+            // resolved effort (its definition's, possibly overridden by a workflow
+            // `agent({effort})` opt at spawn) → `output_config.effort`.
+            let effort_wire = ctx
+                .agent_definition
+                .effort
+                .as_ref()
+                .map(crate::definition::AgentEffort::to_wire);
+            let response = loop {
+                let api_call = async {
+                    // Provider routing (dual-LLM dual-PROVIDER): thread the
+                    // per-spawn `model_profile` as the api client's `profile` so the
+                    // round-trip targets the candidate's resolved provider. `None`
+                    // ⇒ default/unscoped resolution (legacy). The `_in` variants
+                    // default to the profile-less methods, so a client that only
+                    // implements the legacy seam is unaffected.
+                    let profile = ctx.model_profile.as_deref();
+                    let stream = if let Some(forced) = force_structured_tool {
+                        api_client
+                            .messages_create_stream_forced_in(
+                                &model,
+                                profile,
+                                system.as_deref(),
+                                history.clone(),
+                                tool_schemas.clone(),
+                                Some(forced),
+                                effort_wire.clone(),
+                            )
+                            .await?
+                    } else {
+                        api_client
+                            .messages_create_stream_in(
+                                &model,
+                                profile,
+                                system.as_deref(),
+                                history.clone(),
+                                tool_schemas.clone(),
+                                effort_wire.clone(),
+                            )
+                            .await?
+                    };
+                    crate::accumulator::accumulate_stream(stream).await
                 };
-                crate::accumulator::accumulate_stream(stream).await
-            };
-            if !event_channel_open {
-                break api_call.await;
-            }
-            tokio::select! {
-                biased;
-                ev = event_rx.recv() => {
-                    match ev {
-                        Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
-                            let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
-                            return;
-                        }
-                        // Non-termination event: drop the in-flight API future
-                        // and retry the round-trip on the next iteration.
-                        Some(_) => continue,
-                        // Channel closed: stop racing it from now on.
-                        None => {
-                            event_channel_open = false;
-                            continue;
+                if !event_channel_open {
+                    break api_call.await;
+                }
+                tokio::select! {
+                    biased;
+                    ev = event_rx.recv() => {
+                        match ev {
+                            Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
+                                let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+                                return;
+                            }
+                            // Non-termination event: drop the in-flight API future
+                            // and retry the round-trip on the next iteration.
+                            Some(_) => continue,
+                            // Channel closed: stop racing it from now on.
+                            None => {
+                                event_channel_open = false;
+                                continue;
+                            }
                         }
                     }
+                    resp = api_call => break resp,
                 }
-                resp = api_call => break resp,
-            }
-        };
+            };
 
-        let response = match response {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = out_tx
-                    .send(SubagentEvent::Failed {
-                        agent_id,
-                        error: format!("subagent api error: {e}"),
-                    })
-                    .await;
-                return;
-            }
-        };
+            let response = match response {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = out_tx
+                        .send(SubagentEvent::Failed {
+                            agent_id,
+                            error: format!("subagent api error: {e}"),
+                        })
+                        .await;
+                    return;
+                }
+            };
 
-        // Keep the FINAL response usage for the terminal `Completed` rollup
-        // (claude `getTokenCountFromUsage` reads the LAST assistant usage — so
-        // overwrite, never accumulate, to stay byte-faithful).
-        last_usage = response.usage.clone();
-        // Track the assistant-message count (claude `agentMessages.length`) and
-        // the FINAL turn's provider request id (claude
-        // `lastAssistantMessage.requestId`). One assistant turn per round-trip;
-        // `response.id` is the provider response id (the `requestId` analog).
-        assistant_message_count = assistant_message_count.saturating_add(1);
-        last_request_id = if response.id.is_empty() {
-            None
-        } else {
-            Some(response.id.clone())
-        };
+            // Keep the FINAL response usage for the terminal `Completed` rollup
+            // (claude `getTokenCountFromUsage` reads the LAST assistant usage — so
+            // overwrite, never accumulate, to stay byte-faithful).
+            last_usage = response.usage.clone();
+            // Track the assistant-message count (claude `agentMessages.length`) and
+            // the FINAL turn's provider request id (claude
+            // `lastAssistantMessage.requestId`). One assistant turn per round-trip;
+            // `response.id` is the provider response id (the `requestId` analog).
+            assistant_message_count = assistant_message_count.saturating_add(1);
+            last_request_id = if response.id.is_empty() {
+                None
+            } else {
+                Some(response.id.clone())
+            };
 
-        // Build the assistant turn and append to history.
-        let assistant_blocks = translate_response_blocks(&response.content);
-        let stop_reason = response.stop_reason.clone();
-        let assistant_msg = ConversationMessage::Assistant {
-            id: MessageId::new(),
-            content: assistant_blocks.clone(),
-            stop_reason: stop_reason.clone(),
-        };
-        history.push(assistant_msg.clone());
-        emit_message(&out_tx, agent_id, &assistant_msg).await;
+            // Build the assistant turn and append to history.
+            let assistant_blocks = translate_response_blocks(&response.content);
+            let stop_reason = response.stop_reason.clone();
+            let assistant_msg = ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: assistant_blocks.clone(),
+                stop_reason: stop_reason.clone(),
+            };
+            history.push(assistant_msg.clone());
+            emit_message(&out_tx, agent_id, &assistant_msg).await;
 
-        // Extract tool_use blocks.
-        let tool_uses: Vec<(protocol::ToolUseId, String, serde_json::Value, Option<String>)> =
-            assistant_blocks
+            // Extract tool_use blocks.
+            let tool_uses: Vec<(
+                protocol::ToolUseId,
+                String,
+                serde_json::Value,
+                Option<String>,
+            )> = assistant_blocks
                 .iter()
                 .filter_map(|b| match b {
                     ContentBlock::ToolUse {
@@ -932,183 +943,185 @@ async fn run_subagent_loop(
                 })
                 .collect();
 
-        // Accumulate the run-wide tool-use count (claude `totalToolUseCount`).
-        total_tool_use_count =
-            total_tool_use_count.saturating_add(tool_uses.len() as u64);
+            // Accumulate the run-wide tool-use count (claude `totalToolUseCount`).
+            total_tool_use_count = total_tool_use_count.saturating_add(tool_uses.len() as u64);
 
-        // Dispatch any tool_use blocks FIRST, then decide loop disposition by
-        // stop_reason — mirroring the orchestrator references. `execute_one_turn`
-        // (turn_loop.rs:111) always dispatches tool_uses when present regardless
-        // of stop_reason, and the streaming path (conversation.rs:815-839) only
-        // continues on `Some("tool_use")` with non-empty tool_uses, terminating
-        // on end_turn / None / any other reason. Deciding terminality *before*
-        // dispatch (the prior `tool_uses.is_empty() || end_turn` test) silently
-        // dropped tool calls on an `end_turn`+tool_use response (MAJOR #1) and
-        // looped to max_turns on a truncated/refused turn that still carried
-        // tool_uses (MAJOR #2).
-        if !tool_uses.is_empty() {
-            // Dispatch each tool_use through the inherited invoker.
-            let Some(invoker) = &ctx.tool_invoker else {
-                let _ = out_tx
-                    .send(SubagentEvent::Failed {
-                        agent_id,
-                        error: "subagent requested a tool but no tool_invoker was inherited"
-                            .to_string(),
-                    })
-                    .await;
-                return;
-            };
+            // Dispatch any tool_use blocks FIRST, then decide loop disposition by
+            // stop_reason — mirroring the orchestrator references. `execute_one_turn`
+            // (turn_loop.rs:111) always dispatches tool_uses when present regardless
+            // of stop_reason, and the streaming path (conversation.rs:815-839) only
+            // continues on `Some("tool_use")` with non-empty tool_uses, terminating
+            // on end_turn / None / any other reason. Deciding terminality *before*
+            // dispatch (the prior `tool_uses.is_empty() || end_turn` test) silently
+            // dropped tool calls on an `end_turn`+tool_use response (MAJOR #1) and
+            // looped to max_turns on a truncated/refused turn that still carried
+            // tool_uses (MAJOR #2).
+            if !tool_uses.is_empty() {
+                // Dispatch each tool_use through the inherited invoker.
+                let Some(invoker) = &ctx.tool_invoker else {
+                    let _ = out_tx
+                        .send(SubagentEvent::Failed {
+                            agent_id,
+                            error: "subagent requested a tool but no tool_invoker was inherited"
+                                .to_string(),
+                        })
+                        .await;
+                    return;
+                };
 
-            let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
-            for (tool_use_id, name, input, provider_id) in &tool_uses {
-                // Structured output: the synthetic `StructuredOutput` tool is not
-                // dispatched — its input IS the run's result, but ONLY when it
-                // VALIDATES against the schema (claude-code Ajv validation inside
-                // the tool `call`). A valid input is captured + a benign result fed
-                // back (the loop terminates below); an INVALID input feeds back an
-                // `is_error` ToolResult (`Output does not match required schema: …`)
-                // and increments the failed-validation count `kn` — the model sees
-                // the error and retries on the next turn (the `tool_use` stop keeps
-                // the loop going), up to the retry cap checked after dispatch.
-                if force_structured_tool == Some(name.as_str()) {
-                    match validate_structured_output(ctx.schema.as_deref(), input) {
-                        Ok(()) => {
-                            structured_result = Some(input.clone());
+                let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
+                for (tool_use_id, name, input, provider_id) in &tool_uses {
+                    // Structured output: the synthetic `StructuredOutput` tool is not
+                    // dispatched — its input IS the run's result, but ONLY when it
+                    // VALIDATES against the schema (claude-code Ajv validation inside
+                    // the tool `call`). A valid input is captured + a benign result fed
+                    // back (the loop terminates below); an INVALID input feeds back an
+                    // `is_error` ToolResult (`Output does not match required schema: …`)
+                    // and increments the failed-validation count `kn` — the model sees
+                    // the error and retries on the next turn (the `tool_use` stop keeps
+                    // the loop going), up to the retry cap checked after dispatch.
+                    if force_structured_tool == Some(name.as_str()) {
+                        match validate_structured_output(ctx.schema.as_deref(), input) {
+                            Ok(()) => {
+                                structured_result = Some(input.clone());
+                                tool_results.push(ContentBlock::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    // claude's StructuredOutput tool returns
+                                    // `data: "Structured output provided successfully"`
+                                    // as the tool-result content (binary 2.1.195
+                                    // strings :311431 / :438281).
+                                    content: "Structured output provided successfully".to_string(),
+                                    is_error: false,
+                                    provider_tool_use_id: provider_id.clone(),
+                                    content_blocks: None,
+                                });
+                            }
+                            Err(detail) => {
+                                structured_failed_count = structured_failed_count.saturating_add(1);
+                                tool_results.push(ContentBlock::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    content: format!(
+                                        "Output does not match required schema: {detail}"
+                                    ),
+                                    is_error: true,
+                                    provider_tool_use_id: provider_id.clone(),
+                                    content_blocks: None,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                    // Allow-list guard: when `allowed_tools` is non-empty, a model
+                    // request for a tool outside it is refused WITHOUT dispatching
+                    // (the inherited `RegistryToolInvoker` would otherwise run any
+                    // registered tool by name). Surfaced as an `is_error` ToolResult
+                    // so the model sees the refusal and can recover, mirroring how a
+                    // tool error is fed back. Empty `allowed_tools` skips the guard.
+                    if !allowed_tools.is_empty() && !allowed_tools.iter().any(|t| t == name) {
+                        // yyo companion note (binary v2.1.186 §7): when the blocked tool
+                        // is in the `nke` external companion set, append the byte-exact
+                        // guidance suffix so the model knows the tool is a subagent
+                        // boundary, not a typo. Gate on USER_TYPE like HDd.
+                        let is_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
+                        let note =
+                            companion_note_for_disallowed_tool(name, is_ant).unwrap_or_default();
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: format!(
+                                "tool {name:?} is not in this agent's allowed tools{note}"
+                            ),
+                            is_error: true,
+                            provider_tool_use_id: provider_id.clone(),
+                            content_blocks: None,
+                        });
+                        continue;
+                    }
+                    let inv_ctx = traits::tool_invoker::SubagentInvocationContext {
+                        parent_agent_id: ctx.parent_agent_id,
+                        // Swarm identity (claude-code `getAgentName()` /
+                        // `getTeammateContext()?.teamName`): a teammate's dispatched
+                        // tools see the teammate's DISPLAY name + team name so the
+                        // swarm-only `TaskUpdate` side-effects key on them. `None`
+                        // for one-shot subagents / the main thread.
+                        agent_name: ctx.agent_name.clone(),
+                        team_name: ctx.team_name.clone(),
+                        // R1: an async (backgrounded) subagent runs its tools with
+                        // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
+                        is_async: ctx.is_async,
+                        // Whether this worker may surface a permission prompt to the
+                        // user — drives the worker attribution on the prompt dialog
+                        // (claude-code's worker permission badge).
+                        can_show_permission_prompts: ctx.can_show_permission_prompts,
+                        // Per-agent cwd (worktree isolation / explicit cwd) → the
+                        // dispatched tools' working directory.
+                        cwd: ctx.cwd.clone(),
+                        // The REAL `tool_use` block id of THIS dispatching call
+                        // (claude-code `createCanUseTool(toolUseID)`): threaded into
+                        // the gate's `PermissionCheckContext` so a subagent's stdio
+                        // `can_use_tool` prompt carries the byte-faithful id instead
+                        // of a freshly minted one — matching the main loop's path.
+                        tool_use_id: Some(tool_use_id.as_str().to_string()),
+                        // This subagent's own recursion depth (claude `agentContext.depth`)
+                        // → mapped into the dispatched tool's `ToolUseContext.depth`, so a
+                        // nested `Agent` call computes the grandchild's depth (`depth+1`)
+                        // and the resolver gates `Agent` at `depth < 5`.
+                        depth: ctx.depth,
+                    };
+                    match invoker.invoke(name, input.clone(), inv_ctx).await {
+                        Ok(value) => {
+                            let content = match &value {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
-                                // claude's StructuredOutput tool returns
-                                // `data: "Structured output provided successfully"`
-                                // as the tool-result content (binary 2.1.195
-                                // strings :311431 / :438281).
-                                content: "Structured output provided successfully".to_string(),
+                                content,
                                 is_error: false,
                                 provider_tool_use_id: provider_id.clone(),
                                 content_blocks: None,
                             });
                         }
-                        Err(detail) => {
-                            structured_failed_count =
-                                structured_failed_count.saturating_add(1);
+                        Err(e) => {
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
-                                content: format!(
-                                    "Output does not match required schema: {detail}"
-                                ),
+                                // Match the main turn-loop convention
+                                // (`turn_loop.rs` `"Error: {bare}"`): the bare
+                                // model-facing message, NOT the `Display` form which
+                                // would leak the LingXi-internal `ToolInvoker: …`
+                                // prefix into the child's tool_result wire bytes.
+                                content: format!("Error: {}", e.model_facing_message()),
                                 is_error: true,
                                 provider_tool_use_id: provider_id.clone(),
                                 content_blocks: None,
                             });
                         }
                     }
-                    continue;
                 }
-                // Allow-list guard: when `allowed_tools` is non-empty, a model
-                // request for a tool outside it is refused WITHOUT dispatching
-                // (the inherited `RegistryToolInvoker` would otherwise run any
-                // registered tool by name). Surfaced as an `is_error` ToolResult
-                // so the model sees the refusal and can recover, mirroring how a
-                // tool error is fed back. Empty `allowed_tools` skips the guard.
-                if !allowed_tools.is_empty() && !allowed_tools.iter().any(|t| t == name) {
-                    // yyo companion note (binary v2.1.186 §7): when the blocked tool
-                    // is in the `nke` external companion set, append the byte-exact
-                    // guidance suffix so the model knows the tool is a subagent
-                    // boundary, not a typo. Gate on USER_TYPE like HDd.
-                    let is_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
-                    let note = companion_note_for_disallowed_tool(name, is_ant)
-                        .unwrap_or_default();
-                    tool_results.push(ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: format!(
-                            "tool {name:?} is not in this agent's allowed tools{note}"
-                        ),
-                        is_error: true,
-                        provider_tool_use_id: provider_id.clone(),
-                        content_blocks: None,
-                    });
-                    continue;
-                }
-                let inv_ctx = traits::tool_invoker::SubagentInvocationContext {
-                    parent_agent_id: ctx.parent_agent_id,
-                    // Swarm identity (claude-code `getAgentName()` /
-                    // `getTeammateContext()?.teamName`): a teammate's dispatched
-                    // tools see the teammate's DISPLAY name + team name so the
-                    // swarm-only `TaskUpdate` side-effects key on them. `None`
-                    // for one-shot subagents / the main thread.
-                    agent_name: ctx.agent_name.clone(),
-                    team_name: ctx.team_name.clone(),
-                    // R1: an async (backgrounded) subagent runs its tools with
-                    // is_non_interactive_session=true (claude-code runAgent.ts:668-672).
-                    is_async: ctx.is_async,
-                    // Whether this worker may surface a permission prompt to the
-                    // user — drives the worker attribution on the prompt dialog
-                    // (claude-code's worker permission badge).
-                    can_show_permission_prompts: ctx.can_show_permission_prompts,
-                    // Per-agent cwd (worktree isolation / explicit cwd) → the
-                    // dispatched tools' working directory.
-                    cwd: ctx.cwd.clone(),
-                    // The REAL `tool_use` block id of THIS dispatching call
-                    // (claude-code `createCanUseTool(toolUseID)`): threaded into
-                    // the gate's `PermissionCheckContext` so a subagent's stdio
-                    // `can_use_tool` prompt carries the byte-faithful id instead
-                    // of a freshly minted one — matching the main loop's path.
-                    tool_use_id: Some(tool_use_id.as_str().to_string()),
-                    // This subagent's own recursion depth (claude `agentContext.depth`)
-                    // → mapped into the dispatched tool's `ToolUseContext.depth`, so a
-                    // nested `Agent` call computes the grandchild's depth (`depth+1`)
-                    // and the resolver gates `Agent` at `depth < 5`.
-                    depth: ctx.depth,
+
+                let tool_results_msg = ConversationMessage::User {
+                    id: MessageId::new(),
+                    content: tool_results,
+                    is_meta: false,
                 };
-                match invoker.invoke(name, input.clone(), inv_ctx).await {
-                    Ok(value) => {
-                        let content = match &value {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content,
-                            is_error: false,
-                            provider_tool_use_id: provider_id.clone(),
-                            content_blocks: None,
-                        });
-                    }
-                    Err(e) => {
-                        tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            // Match the main turn-loop convention
-                            // (`turn_loop.rs` `"Error: {bare}"`): the bare
-                            // model-facing message, NOT the `Display` form which
-                            // would leak the LingXi-internal `ToolInvoker: …`
-                            // prefix into the child's tool_result wire bytes.
-                            content: format!("Error: {}", e.model_facing_message()),
-                            is_error: true,
-                            provider_tool_use_id: provider_id.clone(),
-                            content_blocks: None,
-                        });
-                    }
-                }
+                history.push(tool_results_msg.clone());
+                emit_message(&out_tx, agent_id, &tool_results_msg).await;
             }
 
-            let tool_results_msg = ConversationMessage::User {
-                id: MessageId::new(),
-                content: tool_results,
-                is_meta: false,
-            };
-            history.push(tool_results_msg.clone());
-            emit_message(&out_tx, agent_id, &tool_results_msg).await;
-        }
-
-        // claude `agent({schema})`: `kn>0 && kn>=Yr && rn===undefined` → throw the
-        // retry-cap-exceeded error (surfaced here as a terminal `Failed`). The
-        // model's StructuredOutput validations have exhausted the cap (`Yr`,
-        // `MAX_STRUCTURED_OUTPUT_RETRIES ?? 5`) with no valid output captured.
-        if force_structured_tool.is_some()
-            && structured_result.is_none()
-            && structured_failed_count > 0
-            && structured_failed_count >= structured_retry_cap
-        {
-            let calls = if structured_failed_count == 1 { "call" } else { "calls" };
-            let _ = out_tx
+            // claude `agent({schema})`: `kn>0 && kn>=Yr && rn===undefined` → throw the
+            // retry-cap-exceeded error (surfaced here as a terminal `Failed`). The
+            // model's StructuredOutput validations have exhausted the cap (`Yr`,
+            // `MAX_STRUCTURED_OUTPUT_RETRIES ?? 5`) with no valid output captured.
+            if force_structured_tool.is_some()
+                && structured_result.is_none()
+                && structured_failed_count > 0
+                && structured_failed_count >= structured_retry_cap
+            {
+                let calls = if structured_failed_count == 1 {
+                    "call"
+                } else {
+                    "calls"
+                };
+                let _ = out_tx
                 .send(SubagentEvent::Failed {
                     agent_id,
                     error: format!(
@@ -1116,42 +1129,42 @@ async fn run_subagent_loop(
                     ),
                 })
                 .await;
-            return;
-        }
+                return;
+            }
 
-        // Loop disposition. Continue ONLY when the model asked to use tools and
-        // actually emitted some; every other case is terminal — including
-        // `end_turn`, a stream with no stop_reason (`None`), and any other
-        // reason (max_tokens / stop_sequence / pause_turn / refusal), even when
-        // the truncated turn carried tool_uses we just dispatched.
-        // A captured structured output terminates the run (it IS the result),
-        // even though the forced tool call carries a `tool_use` stop reason.
-        let should_continue = stop_reason.as_deref() == Some("tool_use")
-            && !tool_uses.is_empty()
-            && structured_result.is_none();
-        if !should_continue {
-            // claude `agent({schema})` SubagentStop nudge: when the model ends a
-            // turn without a captured (valid) StructuredOutput, inject an
-            // in-conversation nudge and run another turn — up to 2 nudges (`ft`).
-            // After the 2nd, give up with the byte-exact "completed without
-            // calling" error. (The validation-RETRY case — StructuredOutput called
-            // but its input failed — does NOT reach here: that turn's `tool_use`
-            // stop keeps `should_continue` true, so the model retries until the
-            // retry cap above fires.)
-            if force_structured_tool.is_some() && structured_result.is_none() {
-                if structured_nudge_count < 2 {
-                    structured_nudge_count = structured_nudge_count.saturating_add(1);
-                    let nudge = ConversationMessage::user(
+            // Loop disposition. Continue ONLY when the model asked to use tools and
+            // actually emitted some; every other case is terminal — including
+            // `end_turn`, a stream with no stop_reason (`None`), and any other
+            // reason (max_tokens / stop_sequence / pause_turn / refusal), even when
+            // the truncated turn carried tool_uses we just dispatched.
+            // A captured structured output terminates the run (it IS the result),
+            // even though the forced tool call carries a `tool_use` stop reason.
+            let should_continue = stop_reason.as_deref() == Some("tool_use")
+                && !tool_uses.is_empty()
+                && structured_result.is_none();
+            if !should_continue {
+                // claude `agent({schema})` SubagentStop nudge: when the model ends a
+                // turn without a captured (valid) StructuredOutput, inject an
+                // in-conversation nudge and run another turn — up to 2 nudges (`ft`).
+                // After the 2nd, give up with the byte-exact "completed without
+                // calling" error. (The validation-RETRY case — StructuredOutput called
+                // but its input failed — does NOT reach here: that turn's `tool_use`
+                // stop keeps `should_continue` true, so the model retries until the
+                // retry cap above fires.)
+                if force_structured_tool.is_some() && structured_result.is_none() {
+                    if structured_nudge_count < 2 {
+                        structured_nudge_count = structured_nudge_count.saturating_add(1);
+                        let nudge = ConversationMessage::user(
                         MessageId::new(),
                         "You did not call StructuredOutput. You MUST call StructuredOutput to return your answer \u{2014} the tool input IS your answer. Call it now.".to_string(),
                     );
-                    history.push(nudge.clone());
-                    emit_message(&out_tx, agent_id, &nudge).await;
-                    // Re-run the turn loop with the nudge appended (still bounded
-                    // by `max_turns`).
-                    continue;
-                }
-                let _ = out_tx
+                        history.push(nudge.clone());
+                        emit_message(&out_tx, agent_id, &nudge).await;
+                        // Re-run the turn loop with the nudge appended (still bounded
+                        // by `max_turns`).
+                        continue;
+                    }
+                    let _ = out_tx
                     .send(SubagentEvent::Failed {
                         agent_id,
                         // Byte-locked to claude 2.1.195 (binary strings :331985 /
@@ -1163,22 +1176,52 @@ async fn run_subagent_loop(
                 error: "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)".to_string(),
                     })
                     .await;
-                return;
+                    return;
+                }
+                // claude `finalizeAgentTool`: the result's `content` is the LAST
+                // assistant message's text blocks, with a backward-scan fallback to
+                // the most recent assistant message that has text when the final turn
+                // was tool-only (agentToolUtils.ts:304-317). `history` already holds
+                // the current assistant turn (pushed above) + every prior turn.
+                // A `schema` run returns the captured StructuredOutput tool input.
+                let result = match structured_result.take() {
+                    Some(structured) => structured,
+                    None => {
+                        build_completed_result(&history, &assistant_blocks, stop_reason.as_deref())
+                    }
+                };
+                let _ = out_tx
+                    .send(SubagentEvent::Completed {
+                        agent_id,
+                        result,
+                        usage: last_usage.clone(),
+                        total_tool_use_count,
+                        total_duration_ms: elapsed_ms(run_start),
+                        assistant_message_count,
+                        last_request_id: last_request_id.clone(),
+                    })
+                    .await;
+                // Terminal stop for this turn-set: leave the inner turn loop and
+                // let the persist decision below choose between returning
+                // (non-persistent) and parking for the next message (persistent).
+                terminated_cleanly = true;
+                break;
             }
-            // claude `finalizeAgentTool`: the result's `content` is the LAST
-            // assistant message's text blocks, with a backward-scan fallback to
-            // the most recent assistant message that has text when the final turn
-            // was tool-only (agentToolUtils.ts:304-317). `history` already holds
-            // the current assistant turn (pushed above) + every prior turn.
-            // A `schema` run returns the captured StructuredOutput tool input.
-            let result = match structured_result.take() {
-                Some(structured) => structured,
-                None => build_completed_result(&history, &assistant_blocks, stop_reason.as_deref()),
-            };
+            // Otherwise loop to the next turn.
+        }
+
+        if !terminated_cleanly {
+            // The inner loop fell through: `max_turns` exhausted without a terminal
+            // stop. claude-code surfaces this as a completion carrying a max-turns
+            // reason rather than a hard failure, so the parent can still consume
+            // whatever work was produced.
             let _ = out_tx
                 .send(SubagentEvent::Completed {
                     agent_id,
-                    result,
+                    result: serde_json::json!({
+                        "reason": "max_turns_exhausted",
+                        "max_turns": max_turns,
+                    }),
                     usage: last_usage.clone(),
                     total_tool_use_count,
                     total_duration_ms: elapsed_ms(run_start),
@@ -1186,70 +1229,42 @@ async fn run_subagent_loop(
                     last_request_id: last_request_id.clone(),
                 })
                 .await;
-            // Terminal stop for this turn-set: leave the inner turn loop and
-            // let the persist decision below choose between returning
-            // (non-persistent) and parking for the next message (persistent).
-            terminated_cleanly = true;
-            break;
         }
-        // Otherwise loop to the next turn.
-    }
 
-    if !terminated_cleanly {
-        // The inner loop fell through: `max_turns` exhausted without a terminal
-        // stop. claude-code surfaces this as a completion carrying a max-turns
-        // reason rather than a hard failure, so the parent can still consume
-        // whatever work was produced.
-        let _ = out_tx
-            .send(SubagentEvent::Completed {
-                agent_id,
-                result: serde_json::json!({
-                    "reason": "max_turns_exhausted",
-                    "max_turns": max_turns,
-                }),
-                usage: last_usage.clone(),
-                total_tool_use_count,
-                total_duration_ms: elapsed_ms(run_start),
-                assistant_message_count,
-                last_request_id: last_request_id.clone(),
-            })
-            .await;
-    }
-
-    // ----- Persist decision ------------------------------------------------
-    // Non-persistent (batch-8) behavior: end after one turn-set. This preserves
-    // today's exact semantics — every existing call site sets `persistent`
-    // false, so they `return` here as before.
-    if !ctx.persistent {
-        return;
-    }
-
-    // Persistent teammate: park awaiting the next inbound `UserMessage`. If the
-    // event channel has already closed, no message can ever arrive again, so we
-    // terminate gracefully.
-    if !event_channel_open {
-        return;
-    }
-    loop {
-        match event_rx.recv().await {
-            Some(engine::Event::UserMessage { content, .. }) => {
-                // Append the injected message to history (minting our own
-                // MessageId, consistent with the assistant-id minting above —
-                // the event's message_id / request_id are the host's bookkeeping)
-                // and resume the inner turn loop with a fresh `max_turns` budget.
-                history.push(ConversationMessage::user(MessageId::new(), content));
-                break;
-            }
-            Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
-                let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
-                return;
-            }
-            // Ignore any other event while idle and keep parking.
-            Some(_) => {}
-            // Channel closed -> graceful terminate.
-            None => return,
+        // ----- Persist decision ------------------------------------------------
+        // Non-persistent (batch-8) behavior: end after one turn-set. This preserves
+        // today's exact semantics — every existing call site sets `persistent`
+        // false, so they `return` here as before.
+        if !ctx.persistent {
+            return;
         }
-    }
+
+        // Persistent teammate: park awaiting the next inbound `UserMessage`. If the
+        // event channel has already closed, no message can ever arrive again, so we
+        // terminate gracefully.
+        if !event_channel_open {
+            return;
+        }
+        loop {
+            match event_rx.recv().await {
+                Some(engine::Event::UserMessage { content, .. }) => {
+                    // Append the injected message to history (minting our own
+                    // MessageId, consistent with the assistant-id minting above —
+                    // the event's message_id / request_id are the host's bookkeeping)
+                    // and resume the inner turn loop with a fresh `max_turns` budget.
+                    history.push(ConversationMessage::user(MessageId::new(), content));
+                    break;
+                }
+                Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
+                    let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+                    return;
+                }
+                // Ignore any other event while idle and keep parking.
+                Some(_) => {}
+                // Channel closed -> graceful terminate.
+                None => return,
+            }
+        }
     }
 }
 

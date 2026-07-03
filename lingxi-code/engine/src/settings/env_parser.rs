@@ -180,5 +180,4 @@ mod tests {
         assert!(parsed.model.is_none());
         assert!(invalid.is_empty());
     }
-
 }

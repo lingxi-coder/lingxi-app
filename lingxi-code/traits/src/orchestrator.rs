@@ -336,7 +336,10 @@ pub struct ModelListing {
 #[must_use]
 pub fn parse_model_ref(input: &str, listings: &[ModelListing]) -> (String, Option<String>) {
     if let Some((prefix, rest)) = input.split_once('/') {
-        if listings.iter().any(|l| l.provider_id == prefix && l.request_model == rest) {
+        if listings
+            .iter()
+            .any(|l| l.provider_id == prefix && l.request_model == rest)
+        {
             return (rest.to_string(), Some(prefix.to_string()));
         }
     }
@@ -447,24 +450,42 @@ mod parse_model_ref_tests {
     }
     #[test]
     fn bare_id_no_slash() {
-        assert_eq!(parse_model_ref("gpt-5.2", &fixture()), ("gpt-5.2".into(), None));
+        assert_eq!(
+            parse_model_ref("gpt-5.2", &fixture()),
+            ("gpt-5.2".into(), None)
+        );
     }
     #[test]
     fn qualified_two_segments() {
-        assert_eq!(parse_model_ref("openai/gpt-5.2", &fixture()), ("gpt-5.2".into(), Some("openai".into())));
-        assert_eq!(parse_model_ref("github-copilot/gpt-5.2", &fixture()), ("gpt-5.2".into(), Some("github-copilot".into())));
+        assert_eq!(
+            parse_model_ref("openai/gpt-5.2", &fixture()),
+            ("gpt-5.2".into(), Some("openai".into()))
+        );
+        assert_eq!(
+            parse_model_ref("github-copilot/gpt-5.2", &fixture()),
+            ("gpt-5.2".into(), Some("github-copilot".into()))
+        );
     }
     #[test]
     fn two_segment_prefers_qualified_when_model_in_profile() {
-        assert_eq!(parse_model_ref("openai/gpt-4o", &fixture()), ("gpt-4o".into(), Some("openai".into())));
+        assert_eq!(
+            parse_model_ref("openai/gpt-4o", &fixture()),
+            ("gpt-4o".into(), Some("openai".into()))
+        );
     }
     #[test]
     fn fully_qualified_openrouter_slash_id() {
-        assert_eq!(parse_model_ref("openrouter/openai/gpt-4o", &fixture()), ("openai/gpt-4o".into(), Some("openrouter".into())));
+        assert_eq!(
+            parse_model_ref("openrouter/openai/gpt-4o", &fixture()),
+            ("openai/gpt-4o".into(), Some("openrouter".into()))
+        );
     }
     #[test]
     fn unknown_prefix_is_bare() {
-        assert_eq!(parse_model_ref("foo/bar", &fixture()), ("foo/bar".into(), None));
+        assert_eq!(
+            parse_model_ref("foo/bar", &fixture()),
+            ("foo/bar".into(), None)
+        );
     }
     #[test]
     fn degenerate_inputs_safe() {
@@ -1126,12 +1147,7 @@ pub trait OutputStream: Send + Sync {
     ///   `"end_turn"`), or `None` if the delta carried no stop reason.
     /// * `request_id` — the HTTP `request-id` header from the API response, when
     ///   available (used by stream-json's `assistant.request_id` field).
-    async fn emit_message_boundary(
-        &self,
-        _stop_reason: Option<&str>,
-        _request_id: Option<&str>,
-    ) {
-    }
+    async fn emit_message_boundary(&self, _stop_reason: Option<&str>, _request_id: Option<&str>) {}
 
     /// Emit a raw SSE stream event frame (`stream_event`) for
     /// `--include-partial-messages`.
@@ -1154,13 +1170,7 @@ pub trait OutputStream: Send + Sync {
     ///
     /// **Default no-op**: every pre-existing `OutputStream` impl keeps
     /// compiling unchanged. Only `StreamJsonStream` overrides this.
-    async fn emit_hook_started(
-        &self,
-        _hook_id: &str,
-        _hook_name: &str,
-        _hook_event: &str,
-    ) {
-    }
+    async fn emit_hook_started(&self, _hook_id: &str, _hook_name: &str, _hook_event: &str) {}
 
     /// Emit a `system/hook_response` frame for `--include-hook-events`.
     ///

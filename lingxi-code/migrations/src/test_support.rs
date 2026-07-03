@@ -39,7 +39,12 @@ pub fn temp_config() -> TempConfig {
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&home).expect("mk home");
     std::fs::create_dir_all(&project).expect("mk project");
-    TempConfig { _tmp: tmp, home, global, project }
+    TempConfig {
+        _tmp: tmp,
+        home,
+        global,
+        project,
+    }
 }
 
 /// Captured `(event name, metadata-as-JSON)` pairs, shared with the test
@@ -81,7 +86,9 @@ impl AnalyticsSink for CapturingSink {
 pub async fn capture_bus() -> (Arc<AnalyticsBus>, CapturedEvents) {
     let events: CapturedEvents = Arc::default();
     let bus = AnalyticsBus::new();
-    bus.attach_sink(Arc::new(CapturingSink { events: events.clone() }))
-        .await;
+    bus.attach_sink(Arc::new(CapturingSink {
+        events: events.clone(),
+    }))
+    .await;
     (Arc::new(bus), events)
 }

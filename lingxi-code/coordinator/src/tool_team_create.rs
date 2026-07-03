@@ -340,7 +340,9 @@ impl Tool for TeamCreateTool {
         //    net-new in call() — distinct from `is_enabled`'s static feature
         //    flag, which only gates whether the tool is advertised at all.
         if !self.mode.is_enabled() {
-            return Err(ToolError::InvalidInput("coordinator mode not active".into()));
+            return Err(ToolError::InvalidInput(
+                "coordinator mode not active".into(),
+            ));
         }
 
         // 1a. One-team-per-leader guard (TeamCreateTool.ts:132-140). If this
@@ -602,6 +604,7 @@ mod tests {
                 debug: false,
                 verbose: false,
                 main_loop_model: "test".into(),
+                model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
                 is_non_interactive_session: false,
@@ -975,7 +978,10 @@ mod tests {
 
         // No worker spawned, seam never invoked, team name untouched, and the
         // mode-gate early-return fired BEFORE any activation PUSH.
-        assert!(registry.list().await.is_empty(), "no worker on disabled mode");
+        assert!(
+            registry.list().await.is_empty(),
+            "no worker on disabled mode"
+        );
         assert_eq!(seam.spawns.load(Ordering::SeqCst), 0);
         assert_eq!(registry.team_name().await, None);
         assert_eq!(spy.calls(), 0, "no CoordinatorStatus push when mode is off");
@@ -1032,13 +1038,9 @@ mod tests {
         let seam = Arc::new(RecordingSeam::new("handler-task-1"));
         let (tool, _registry, _mode, _tmp) = make_tool_with_seam(seam.clone());
 
-        tool.call(
-            json!({ "team_name": "beta" }),
-            fresh_ctx(),
-            fresh_tx(),
-        )
-        .await
-        .expect("valid call");
+        tool.call(json!({ "team_name": "beta" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("valid call");
 
         assert_eq!(
             seam.spawns.load(Ordering::SeqCst),
@@ -1077,7 +1079,11 @@ mod tests {
         );
 
         // Exactly one activation PUSH carrying active_workers >= 1 + the team name.
-        assert_eq!(spy.calls(), 1, "exactly one CoordinatorStatus push on spawn");
+        assert_eq!(
+            spy.calls(),
+            1,
+            "exactly one CoordinatorStatus push on spawn"
+        );
         assert_eq!(
             spy.last(),
             Some((1, Some("alpha".to_string()))),
@@ -1134,7 +1140,10 @@ mod tests {
             .expect("create with a colliding name must succeed (rename, not error)");
 
         let final_name = res.data["team_name"].as_str().unwrap();
-        assert_ne!(final_name, "alpha", "must have been renamed off the collision");
+        assert_ne!(
+            final_name, "alpha",
+            "must have been renamed off the collision"
+        );
         assert!(
             final_name.starts_with("alpha-"),
             "rename keeps the requested name as a prefix; got: {final_name}"
@@ -1164,8 +1173,13 @@ mod tests {
             .expect("create succeeds");
 
         // Result surfaces the written path.
-        let path = res.data["team_file_path"].as_str().expect("team_file_path present");
-        assert!(path.ends_with("teams/alpha-team/config.json"), "path: {path}");
+        let path = res.data["team_file_path"]
+            .as_str()
+            .expect("team_file_path present");
+        assert!(
+            path.ends_with("teams/alpha-team/config.json"),
+            "path: {path}"
+        );
 
         // The file exists and has the TS shape.
         let on_disk = team_file::team_file_path(&home, "alpha-team");
@@ -1249,7 +1263,12 @@ mod tests {
 
         // Resolve the freshly-spawned worker + its mailbox (the same router the
         // coordinator `SendMessage` routes through).
-        let worker = registry.list().await.into_iter().next().expect("one worker");
+        let worker = registry
+            .list()
+            .await
+            .into_iter()
+            .next()
+            .expect("one worker");
         let mailbox = registry
             .mailbox_router
             .get(&worker.agent_id)
@@ -1291,15 +1310,16 @@ mod tests {
         let (tool, registry, _mode, _tmp) = make_tool_with_seam(seam.clone());
         // Note: no `.with_runtime(..)`.
 
-        tool.call(
-            json!({ "team_name": "alpha" }),
-            fresh_ctx(),
-            fresh_tx(),
-        )
-        .await
-        .expect("TeamCreate must succeed without a runtime");
+        tool.call(json!({ "team_name": "alpha" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("TeamCreate must succeed without a runtime");
 
-        let worker = registry.list().await.into_iter().next().expect("one worker");
+        let worker = registry
+            .list()
+            .await
+            .into_iter()
+            .next()
+            .expect("one worker");
         let mailbox = registry
             .mailbox_router
             .get(&worker.agent_id)

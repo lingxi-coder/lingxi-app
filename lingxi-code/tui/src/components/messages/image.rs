@@ -10,8 +10,8 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
 use crate::render_iocraft::StyleColorIocraftExt;
+use crate::theme::TuiTheme;
 
 /// Build the placeholder label (+ optional metadata suffix).
 #[must_use]

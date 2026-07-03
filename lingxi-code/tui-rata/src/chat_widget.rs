@@ -465,7 +465,7 @@ impl ChatWidget {
     /// first so the spinner text/animation reflect this tick's turn state,
     /// then draws the streaming live tail ABOVE the pane (this is the only
     /// render path for in-flight text — it is never committed to native
-    /// scrollback until finalized), then the pane (status line + composer box
+    /// scrollback until finalized), then the pane (status line + composer
     /// + overlays) pinned at the bottom.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         self.bottom_pane.set_task_running(self.pane_status());
@@ -764,7 +764,7 @@ impl ChatWidget {
     }
 
     /// `/color [name]`: set/clear/list the session accent color (tints the
-    /// composer box). Pure parse ([`crate::color::parse_color_command`]) +
+    /// composer's `›` prompt). Pure parse ([`crate::color::parse_color_command`]) +
     /// a byte-locked `system` echo; the accent itself is session-only.
     pub(crate) fn cmd_color(&mut self, args: &str) -> ChatOutcome {
         let (display, is_error) = match crate::color::parse_color_command(args) {

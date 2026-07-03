@@ -387,6 +387,32 @@ impl BottomPane {
                 self.sync_completion();
                 Some(BottomPaneOutcome::Consumed)
             }
+            // Enter on the popup COMMITS the highlighted item and CLOSES the
+            // overlay (baseline iocraft: "Enter always commits the highlighted
+            // row outright, overlay closes") — but ONLY when the buffer is not
+            // already that exact command. Without this, picking `/model` from
+            // the list while the buffer still held a partial "/" fell through
+            // and submitted the bare "/". When the buffer ALREADY equals the
+            // highlighted `/command` (the user typed it in full), Enter falls
+            // through to the composer so the command actually RUNS — that's the
+            // second-Enter-after-accept path too (the overlay is closed by then).
+            KeyCode::Enter => {
+                let insert = self.completion.as_ref()?.selected_insert().to_string();
+                if let Some((at, _)) = self.composer.at_fragment() {
+                    // `@file`: commit the highlighted path in place + close.
+                    self.composer.complete_at(at, &insert);
+                    self.completion = None;
+                    Some(BottomPaneOutcome::Consumed)
+                } else if self.composer.text() == insert {
+                    // Buffer already IS the highlighted command → let Enter run it.
+                    None
+                } else {
+                    // Partial/different `/command` → commit it + close the popup.
+                    self.composer.replace_all(&insert);
+                    self.completion = None;
+                    Some(BottomPaneOutcome::Consumed)
+                }
+            }
             KeyCode::Esc => {
                 self.completion = None;
                 Some(BottomPaneOutcome::Consumed)
@@ -1166,6 +1192,36 @@ mod tests {
         // Tab replaces the whole buffer for a /command.
         let _ = pane.handle_key(key(KeyCode::Tab));
         assert_eq!(pane.composer().text(), "/model");
+    }
+
+    #[test]
+    fn enter_accepts_the_highlighted_completion_and_closes_the_popup() {
+        // Regression: selecting a slash command from the popup with Enter must
+        // COMMIT the highlighted command into the buffer and CLOSE the popup —
+        // not fall through and submit the bare "/" typed so far (baseline
+        // iocraft: "Enter always commits the highlighted row outright, overlay
+        // closes"). Previously Enter was unhandled by the completion, so it
+        // submitted the partial buffer.
+        let mut pane = pane();
+        typ(&mut pane, "/m");
+        assert_eq!(
+            pane.completion().expect("popup open").selected_insert(),
+            "/model"
+        );
+        let outcome = pane.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(outcome, BottomPaneOutcome::Consumed),
+            "Enter must accept the completion (Consumed), not submit: {outcome:?}"
+        );
+        assert_eq!(
+            pane.composer().text(),
+            "/model",
+            "the highlighted command is committed into the buffer"
+        );
+        assert!(
+            pane.completion().is_none(),
+            "the popup closes after an Enter accept, so a second Enter can submit"
+        );
     }
 
     #[test]

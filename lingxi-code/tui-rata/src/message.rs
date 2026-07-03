@@ -48,7 +48,7 @@ pub fn render_message(
     let width = if width == 0 { DEFAULT_WIDTH } else { width };
     match entry {
         RenderedMessage::UserText { body, .. } => user_text_lines(body),
-        RenderedMessage::AssistantText { body, .. } => assistant_lines(body, width),
+        RenderedMessage::AssistantText { body, .. } => assistant_lines(body, width, theme),
         RenderedMessage::SystemText { body, is_error, .. } => {
             system_text_lines(body, *is_error, theme)
         }

@@ -10,7 +10,7 @@
 
 use tui_core::message::AdvisorKind;
 use tui_core::render::markdown::{render_with_width, MarkdownTheme};
-use tui_core::render::{StyleColor, StyledLine, StyledSpan};
+use tui_core::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
 use tui_core::theme::{Theme, ThemeName};
 
 use super::{colored_lines, plain_lines, truncate, StyledCell};
@@ -44,14 +44,27 @@ pub(crate) fn user_text_lines(body: &str) -> Vec<StyledLine> {
 
 /// Markdown-render the assistant body, prefixing the first line with the
 /// `● ` marker and indenting continuation lines (mirrors the iocraft renderer).
-pub(crate) fn assistant_lines(body: &str, width: usize) -> Vec<StyledLine> {
+///
+/// The marker takes the theme `text` color (claude-code `AssistantTextMessage`
+/// renders the dot with `color="text"`: black on light themes, white on dark),
+/// NOT the terminal default — so it stays visible/consistent across themes.
+pub(crate) fn assistant_lines(body: &str, width: usize, theme: &Theme) -> Vec<StyledLine> {
     let mut out = Vec::new();
     let mut rendered = render_with_width(body, &markdown_theme(), width)
         .into_iter()
         .filter(|line| !line.spans.is_empty());
 
+    let marker = || {
+        StyledSpan::styled(
+            ASSISTANT_MARKER,
+            SpanStyle {
+                fg: theme.text,
+                ..SpanStyle::default()
+            },
+        )
+    };
     if let Some(mut first) = rendered.next() {
-        first.spans.insert(0, StyledSpan::plain(ASSISTANT_MARKER));
+        first.spans.insert(0, marker());
         out.push(first);
     }
     for mut line in rendered {
@@ -59,7 +72,9 @@ pub(crate) fn assistant_lines(body: &str, width: usize) -> Vec<StyledLine> {
         out.push(line);
     }
     if out.is_empty() {
-        out.push(StyledLine::plain(ASSISTANT_MARKER));
+        out.push(StyledLine {
+            spans: vec![marker()],
+        });
     }
     out
 }
@@ -204,8 +219,8 @@ impl AssistantTextCell {
 }
 
 impl StyledCell for AssistantTextCell {
-    fn styled_lines(&self, width: usize, _theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
-        assistant_lines(&self.body, width)
+    fn styled_lines(&self, width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        assistant_lines(&self.body, width, theme)
     }
 }
 

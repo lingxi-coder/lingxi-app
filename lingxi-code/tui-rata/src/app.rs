@@ -1491,9 +1491,14 @@ mod tests {
         let all = rows.join("\n");
         assert!(all.contains("Shortcuts"), "{all}");
         assert!(all.contains("for commands"), "{all}");
-        // Full-frame view: no status hints, no composer prompt beneath.
+        // Full-frame view: no status hints, no composer prompt beneath — the
+        // borderless composer's `›` gutter prompt renders at column 0 of its
+        // pane, so no help row may start with it.
         assert!(!all.contains("Enter: send"), "status suppressed:\n{all}");
-        assert!(!all.contains("│> "), "composer suppressed:\n{all}");
+        assert!(
+            !rows.iter().any(|r| r.starts_with('›')),
+            "composer suppressed:\n{all}"
+        );
         // The view claims no cursor, so the draw hides it.
         assert!(terminal.cursor_hidden(), "screen view hides the cursor");
     }

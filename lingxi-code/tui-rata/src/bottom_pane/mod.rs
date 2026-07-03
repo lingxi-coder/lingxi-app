@@ -134,8 +134,8 @@ pub struct BottomPane {
     context_pressure: Option<traits::ContextPressureBanner>,
     /// Theme for status-row styling.
     theme: Theme,
-    /// Session accent color (`/color`): tints the composer box border when
-    /// set. `None` → the theme default (no tint).
+    /// Session accent color (`/color`): tints the composer's `›` gutter
+    /// prompt when set. `None` → the theme default (no tint).
     accent: Option<tui_core::render::StyleColor>,
 }
 
@@ -624,8 +624,9 @@ impl BottomPane {
 }
 
 impl Renderable for BottomPane {
-    /// Draw the pane: status row + queued-input preview + composer box, with
-    /// the completion popup anchored above the composer and stacked views
+    /// Draw the pane: status row + queued-input preview + the borderless
+    /// composer (background block with a `›` gutter prompt), with the
+    /// completion popup anchored above the composer and stacked views
     /// painted bottom-to-top over the full area — unless the active view owns
     /// the whole frame.
     fn render(&self, area: Rect, buf: &mut Buffer) {

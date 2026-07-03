@@ -47,6 +47,7 @@ tokio-util = { workspace = true }
 serde_json = { workspace = true }
 # Display-column width for CJK/wide-char-aware cursor positioning in the composer.
 unicode-width = "=0.1.14"
+uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
 protocol = { path = "../protocol" }

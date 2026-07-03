@@ -29,6 +29,7 @@ pub mod image_view;
 pub mod message;
 pub mod rate_limit_messages;
 pub mod render;
+pub mod resume;
 pub mod renderable;
 pub mod session;
 pub(crate) mod style;

@@ -1503,8 +1503,8 @@ async fn run_resume_stdio_picker(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     }
 }
 
-/// `--resume` (no id) under a full TTY — open the iocraft Resume screen over
-/// the same M5-08 loader rows. After the TUI returns, read the chosen UUID:
+/// `--resume` (no id) under a full TTY — open the ratatui Resume picker over
+/// the same M5-08 loader rows. After the picker returns, read the chosen UUID:
 /// `Some(uuid)` → "Resumed session {uuid}"; `None` → "Cancelled."
 async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     let rows = match load_resume_rows().await {
@@ -1523,14 +1523,47 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
         }
     };
 
-    match tui::session::run_resume_picker(rows).await {
-        Ok(Some(uuid)) => {
+    // Map the loader metadata into the picker's lean rows (the picker crate does
+    // not depend on the `session` loader). The dim metadata line is built with
+    // the picker's `relative_time_ago` so it stays byte-identical to the old
+    // iocraft screen: `<relative time ago> · <N> messages`.
+    let now = std::time::SystemTime::now();
+    let picker_rows: Vec<tui_rata::resume::ResumeRow> = rows
+        .iter()
+        .map(|m| {
+            let msgs = if m.message_count == 1 {
+                "1 message".to_string()
+            } else {
+                format!("{} messages", m.message_count)
+            };
+            tui_rata::resume::ResumeRow {
+                uuid: m.uuid,
+                title: m.title.clone(),
+                metadata_label: format!(
+                    "{} \u{00b7} {}",
+                    tui_rata::resume::relative_time_ago(m.modified, now),
+                    msgs
+                ),
+            }
+        })
+        .collect();
+
+    // Blocking terminal IO → off the async runtime, like the chat `run_app`.
+    let picked =
+        tokio::task::spawn_blocking(move || tui_rata::resume::run_resume_picker(picker_rows)).await;
+
+    match picked {
+        Ok(Ok(Some(uuid))) => {
             sink.text(&format!("Resumed session {uuid}\n")).await;
             exit_codes::SUCCESS
         }
-        Ok(None) => {
+        Ok(Ok(None)) => {
             sink.text("Cancelled.\n").await;
             exit_codes::SUCCESS
+        }
+        Ok(Err(e)) => {
+            sink.error("runtime", &e.to_string()).await;
+            exit_codes::RUNTIME_ERROR
         }
         Err(e) => {
             sink.error("runtime", &e.to_string()).await;

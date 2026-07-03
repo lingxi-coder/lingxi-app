@@ -42,6 +42,8 @@ pub(crate) fn footer_line(props: &FooterProps, theme: &tui_core::theme::Theme) -
     let base = match props.mode {
         FooterMode::CompletionActive => "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run",
         FooterMode::IdleVerbose => "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit",
+        // CtrlCReminder is unreachable here (early return above); listed only
+        // to keep the match exhaustive without a wildcard.
         FooterMode::Idle | FooterMode::CtrlCReminder => {
             "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit"
         }

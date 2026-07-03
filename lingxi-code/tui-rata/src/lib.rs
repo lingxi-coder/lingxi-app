@@ -30,6 +30,7 @@ pub mod rate_limit_messages;
 pub mod render;
 pub mod renderable;
 pub mod session;
+pub(crate) mod style;
 pub mod style_adapter;
 pub mod term_image;
 pub mod terminal;

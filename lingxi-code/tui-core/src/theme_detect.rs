@@ -10,6 +10,12 @@ use std::sync::OnceLock;
 /// when the OSC-11 query succeeded; `None`/unset otherwise.
 static DETECTED_BACKGROUND: OnceLock<Option<ThemeName>> = OnceLock::new();
 
+/// Process-global detected background as 8-bit RGB (set once at startup,
+/// alongside [`DETECTED_BACKGROUND`]). `Some((r,g,b))` when the OSC-11 query
+/// succeeded and parsed; `None`/unset otherwise. Feeds `tui-rata`'s
+/// `style::user_message_style()` composer-background blend.
+static DETECTED_BACKGROUND_RGB: OnceLock<Option<(u8, u8, u8)>> = OnceLock::new();
+
 /// Record the startup OSC-11 detection result (idempotent; first write wins).
 pub(crate) fn set_detected_background(bg: Option<ThemeName>) {
     let _ = DETECTED_BACKGROUND.set(bg);
@@ -19,6 +25,18 @@ pub(crate) fn set_detected_background(bg: Option<ThemeName>) {
 /// or didn't resolve.
 pub(crate) fn detected_background() -> Option<ThemeName> {
     DETECTED_BACKGROUND.get().copied().flatten()
+}
+
+/// Quantize a parsed 0.0-1.0 OSC-11 triple to 8-bit channels.
+pub(crate) fn quantize_rgb((r, g, b): (f64, f64, f64)) -> (u8, u8, u8) {
+    let q = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    (q(r), q(g), q(b))
+}
+
+/// The OSC-11-detected terminal background as 8-bit RGB, when detection ran
+/// and the terminal answered. `None` before detection or on no-reply.
+pub fn detected_background_rgb() -> Option<(u8, u8, u8)> {
+    DETECTED_BACKGROUND_RGB.get().copied().flatten()
 }
 
 /// Parse an OSC-11 background reply body (`...rgb:RRRR/GGGG/BBBB...`) into
@@ -80,12 +98,20 @@ pub(crate) fn detect_with_io<R: Read, W: Write>(mut reader: R, mut writer: W) ->
             }
         }
     }
-    let (r, g, b) = parse_osc11_rgb(&String::from_utf8_lossy(&buf))?;
-    Some(if luminance_is_light(r, g, b) {
-        ThemeName::Light
-    } else {
-        ThemeName::Dark
-    })
+    match parse_osc11_rgb(&String::from_utf8_lossy(&buf)) {
+        Some((r, g, b)) => {
+            let _ = DETECTED_BACKGROUND_RGB.set(Some(quantize_rgb((r, g, b))));
+            Some(if luminance_is_light(r, g, b) {
+                ThemeName::Light
+            } else {
+                ThemeName::Dark
+            })
+        }
+        None => {
+            let _ = DETECTED_BACKGROUND_RGB.set(None);
+            None
+        }
+    }
 }
 
 /// A `Read` over stdin that returns `Ok(0)` once a deadline passes, so a silent
@@ -197,5 +223,13 @@ mod tests {
     fn detect_with_io_no_reply_is_none() {
         let got = detect_with_io(std::io::Cursor::new(&b""[..]), std::io::sink());
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn detected_rgb_is_stored_alongside_theme() {
+        // The OnceLock is process-global; exercise the parse+quantize helper the
+        // setter uses instead of the global itself.
+        assert_eq!(quantize_rgb((1.0, 1.0, 1.0)), (255, 255, 255));
+        assert_eq!(quantize_rgb((0.0, 0.5, 1.0)), (0, 128, 255));
     }
 }

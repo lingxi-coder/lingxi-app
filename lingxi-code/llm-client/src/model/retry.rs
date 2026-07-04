@@ -517,8 +517,11 @@ pub fn next_step_with_backoff(
             DriveStep::Terminal
         }
 
-        // All other LlmError variants are unconditionally terminal.
-        LlmError::Authentication
+        // All other LlmError variants are unconditionally terminal — including
+        // SSL/cert failures (parity 2.1.201 `isSSLError` short-circuit: a cert
+        // error is terminal immediately, never consuming the retry budget).
+        LlmError::TlsCert { .. }
+        | LlmError::Authentication
         | LlmError::PermissionDenied
         | LlmError::ContextOverflow { .. }
         | LlmError::QuotaExceeded

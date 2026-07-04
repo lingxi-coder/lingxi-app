@@ -52,7 +52,7 @@ impl PermissionMode {
     #[must_use]
     pub(crate) fn title(self) -> &'static str {
         match self {
-            Self::Default | Self::Bubble => "Default",
+            Self::Default | Self::Bubble => "Manual",
             Self::Plan => "Plan Mode",
             Self::AcceptEdits => "Accept edits",
             Self::BypassPermissions => "Bypass Permissions",

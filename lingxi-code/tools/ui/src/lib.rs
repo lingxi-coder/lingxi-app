@@ -61,7 +61,21 @@ fn register_with_options(
     if include_send_message {
         reg.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
     }
-    reg.register_builtin(Arc::new(AskUserQuestionTool::new(ctx.clone())));
+    // AskUserQuestion must NOT auto-continue by default (oracle 2.1.201): the
+    // production resolver honors `askUserQuestionTimeout` (default `never` ⇒
+    // block on the user), while a non-interactive (`--print`) session still
+    // auto-picks the first option so batch runs never hang. This replaces the
+    // old `FirstOptionResolver` default, which silently auto-selected option #1
+    // in every session. See `ask_user_question::DefaultTimeoutResolver`.
+    //
+    // The idle window is fixed at the oracle default here; wiring the live
+    // `askUserQuestionTimeout` settings value into the resolver is host work.
+    reg.register_builtin(Arc::new(AskUserQuestionTool::with_resolver(
+        ctx.clone(),
+        Arc::new(ask_user_question::DefaultTimeoutResolver::new(
+            ask_user_question::AskUserQuestionTimeout::Never,
+        )),
+    )));
     reg.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
     // PARITY: the `PushNotification` tool (binary `Wzp`). Registered always; its
     // `is_enabled` (flag `tengu_kairos_push_notifications`, default off) gates

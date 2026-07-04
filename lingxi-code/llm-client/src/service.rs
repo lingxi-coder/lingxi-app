@@ -1047,6 +1047,9 @@ impl ApiService {
             LlmError::ProviderInternal => "server",
             // "http" — api-client `Http(_) => "http"` (:1146)
             LlmError::Transport { .. } => "http",
+            // "ssl_cert_error" — 2.1.201 classifier distinguishes SSL/cert
+            // transport failures (`if(JF(e)?.isSSLError)return"ssl_cert_error"`).
+            LlmError::TlsCert { .. } => "ssl_cert_error",
             // "malformed_stream" — api-client `MalformedStream(_) => "malformed_stream"` (:1155)
             LlmError::StreamInterrupted { .. } => "malformed_stream",
             // "overloaded" — api-client `Overloaded { .. } => "overloaded"` (:1149)
@@ -1407,6 +1410,7 @@ impl ApiService {
             LlmError::ProviderInternal => Some(500),
             LlmError::Overloaded { .. } => Some(529),
             LlmError::Transport { .. }
+            | LlmError::TlsCert { .. }
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }
             | LlmError::UnsupportedCapability { .. } => None,

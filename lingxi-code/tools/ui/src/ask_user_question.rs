@@ -11,10 +11,36 @@
 //!   question text to the chosen label (multi-select answers are comma-joined),
 //!   matching the TS `call` return shape.
 //!
-//! Hermetic by default: in headless Rust there is no terminal/UI permission
-//! component to collect the user's selections, so the resolver synthesizes the
-//! `answers` map. The default `FirstOptionResolver` picks each question's first
-//! option label. Production hosts override via `with_resolver`.
+//! Auto-continue policy (oracle 2.1.201): AskUserQuestion does NOT auto-continue
+//! by default. The setting `askUserQuestionTimeout: enum["60s","5m","10m",
+//! "never"]` (settings schema `askUserQuestionTimeout:E.enum([...]).catch(void 0)`,
+//! getter `Yye()`/`uSn("askUserQuestionTimeout")`, /config "Input & controls"
+//! row "Question auto-continue timeout") controls the *idle* window before an
+//! unanswered prompt auto-continues with the answers selected so far. The
+//! DEFAULT is `never` — auto-continue only runs when explicitly set to
+//! `60s`/`5m`/`10m`; otherwise the tool BLOCKS on the user. See
+//! [`AskUserQuestionTimeout`].
+//!
+//! Resolvers:
+//! - [`FirstOptionResolver`] — the hermetic / test / **headless** default
+//!   ([`AskUserQuestionTool::new`]). It synthesizes each question's first option
+//!   label (the TS prompt instructs models to put a recommended option first),
+//!   so batch `--print` runs never hang.
+//! - [`DefaultTimeoutResolver`] — the **production** resolver wired at
+//!   `lib.rs` registration. It respects `askUserQuestionTimeout`: in an
+//!   interactive session `never` ⇒ do NOT synthesize an answer (returns a
+//!   `ToolError`, blocking pending the live TUI prompt), while a duration ⇒
+//!   synthesize the afk auto-advance answer after the idle window elapses. In a
+//!   non-interactive (`--print`) session it falls back to first-option so
+//!   headless runs never block.
+//! - Production hosts may still override via [`AskUserQuestionTool::with_resolver`].
+//!
+//! REMAINING (out of scope here): the live TUI countdown widget itself —
+//! rendering "auto-continue in Ns … any key to stay", collecting the user's
+//! real selections, and the `tengu_ask_user_question_afk_auto_advance` /
+//! `_accepted` / `_rejected` / `_skipped` telemetry. Until it lands, an
+//! interactive `never` prompt surfaces a `ToolError` rather than a live
+//! selection UI.
 //!
 //! Fidelity notes / divergences (see Batch 5 spec):
 //! - TS `checkPermissions` uses `behavior:'ask'` ("Answer questions?"); the Rust
@@ -29,7 +55,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -86,6 +112,86 @@ pub const UNIQUENESS_REFINE_MESSAGE: &str =
 /// path returns `Allow`.
 pub const ASK_USER_QUESTION_ASK_MESSAGE: &str = "Answer questions?";
 
+/// `askUserQuestionTimeout` config key (settings schema + /config row).
+/// Byte-locked to the oracle key.
+pub const ASK_USER_QUESTION_TIMEOUT_KEY: &str = "askUserQuestionTimeout";
+
+/// Allowed `askUserQuestionTimeout` values, byte-faithful to the settings
+/// schema enum `askUserQuestionTimeout:E.enum(["60s","5m","10m","never"])`
+/// (oracle 2.1.201). The default is `"never"`.
+pub const ASK_USER_QUESTION_TIMEOUT_VALUES: &[&str] = &["60s", "5m", "10m", "never"];
+
+/// `askUserQuestionTimeout` — the idle window before an unanswered
+/// AskUserQuestion prompt auto-continues with the answers selected so far.
+///
+/// Oracle default is [`Never`](Self::Never): auto-continue only runs when
+/// explicitly set to `60s`/`5m`/`10m` (settings schema describe: "Idle time
+/// before questions auto-continue with any answers selected so far. Defaults to
+/// never — auto-continue only runs when explicitly set to 60s/5m/10m"). The
+/// zod field is `.catch(void 0)`, so any unparsable value falls back to the
+/// default rather than failing the load — mirrored by
+/// [`AskUserQuestionTimeout::parse_or_default`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskUserQuestionTimeout {
+    /// Wait forever — never auto-continue (the default).
+    #[default]
+    Never,
+    /// Auto-continue after 60 seconds of idle time.
+    S60,
+    /// Auto-continue after 5 minutes of idle time.
+    M5,
+    /// Auto-continue after 10 minutes of idle time.
+    M10,
+}
+
+impl AskUserQuestionTimeout {
+    /// Strict parse of a settings string. Returns `None` for any value outside
+    /// [`ASK_USER_QUESTION_TIMEOUT_VALUES`] (the caller decides whether to fall
+    /// back to the default; see [`parse_or_default`](Self::parse_or_default)).
+    #[must_use]
+    pub fn from_settings_str(s: &str) -> Option<Self> {
+        match s {
+            "never" => Some(Self::Never),
+            "60s" => Some(Self::S60),
+            "5m" => Some(Self::M5),
+            "10m" => Some(Self::M10),
+            _ => None,
+        }
+    }
+
+    /// Lenient parse mirroring the zod `.catch(void 0)` + `?? "never"` chain:
+    /// an absent or unparsable value resolves to the default ([`Never`]).
+    ///
+    /// [`Never`]: Self::Never
+    #[must_use]
+    pub fn parse_or_default(s: Option<&str>) -> Self {
+        s.and_then(Self::from_settings_str).unwrap_or_default()
+    }
+
+    /// The on-the-wire settings string (`"never"`/`"60s"`/`"5m"`/`"10m"`).
+    #[must_use]
+    pub fn as_settings_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::S60 => "60s",
+            Self::M5 => "5m",
+            Self::M10 => "10m",
+        }
+    }
+
+    /// The idle window before auto-continue fires. [`Never`](Self::Never) ⇒
+    /// `None` (block on the user forever); a duration variant ⇒ `Some(window)`.
+    #[must_use]
+    pub fn idle_window(self) -> Option<Duration> {
+        match self {
+            Self::Never => None,
+            Self::S60 => Some(Duration::from_secs(60)),
+            Self::M5 => Some(Duration::from_secs(5 * 60)),
+            Self::M10 => Some(Duration::from_secs(10 * 60)),
+        }
+    }
+}
+
 // -- Domain types ------------------------------------------------------------
 
 /// One selectable option (`questionOptionSchema`).
@@ -113,36 +219,132 @@ pub struct Question {
     pub multi_select: bool,
 }
 
+/// Synthesize the first-option answer map — each question answered with its
+/// first option's label (the TS prompt instructs models to put a recommended
+/// option first). Shared by [`FirstOptionResolver`] and the afk auto-advance /
+/// headless fallback paths of [`DefaultTimeoutResolver`].
+fn first_option_answers(questions: &[Question]) -> HashMap<String, String> {
+    let mut out = HashMap::with_capacity(questions.len());
+    for q in questions {
+        // `options` is guaranteed non-empty by validation; first label is
+        // the synthesized single-select answer.
+        if let Some(first) = q.options.first() {
+            out.insert(q.question.clone(), first.label.clone());
+        }
+    }
+    out
+}
+
+/// `ToolError` returned when an interactive prompt would BLOCK forever
+/// (`askUserQuestionTimeout == never`) but no live TUI selection widget is
+/// wired yet — the honest substitute for the oracle's "wait on the user"
+/// behavior, and the point that stops the old silent auto-continue.
+const ASK_USER_QUESTION_BLOCKED_MESSAGE: &str = "AskUserQuestion requires an interactive user selection but no live prompt UI is available in this session (askUserQuestionTimeout=never ⇒ no auto-continue)";
+
 /// Resolver trait — production wraps the terminal/UI permission component that
 /// collects the user's answers; the headless default synthesizes them.
 ///
 /// Returns a map from each question's `question` text to the chosen answer
 /// string (a single label, or for multi-select a comma-joined list of labels).
+///
+/// `non_interactive` is the session's `is_non_interactive_session` flag
+/// (`--print` / async / batch). Resolvers use it to keep headless runs from
+/// blocking while still refusing to silently auto-continue interactive ones.
 #[async_trait]
 pub trait AskUserQuestionResolver: Send + Sync {
     /// Resolve the answer map for the given questions.
     ///
     /// # Errors
-    /// Implementations may surface `ToolError` if the prompt fails.
-    async fn resolve(&self, questions: &[Question]) -> Result<HashMap<String, String>, ToolError>;
+    /// Implementations may surface `ToolError` if the prompt fails or if an
+    /// interactive prompt has no answering UI (see [`DefaultTimeoutResolver`]).
+    async fn resolve(
+        &self,
+        questions: &[Question],
+        non_interactive: bool,
+    ) -> Result<HashMap<String, String>, ToolError>;
 }
 
-/// Default hermetic resolver — answers each question with its first option's
-/// label (the TS prompt instructs models to put a recommended option first).
+/// Hermetic resolver — answers each question with its first option's label.
+///
+/// This is the default for [`AskUserQuestionTool::new`] (tests, hermetic paths)
+/// and the headless fallback: it never blocks, ignoring `non_interactive`.
 pub struct FirstOptionResolver;
 
 #[async_trait]
 impl AskUserQuestionResolver for FirstOptionResolver {
-    async fn resolve(&self, questions: &[Question]) -> Result<HashMap<String, String>, ToolError> {
-        let mut out = HashMap::with_capacity(questions.len());
-        for q in questions {
-            // `options` is guaranteed non-empty by validation; first label is
-            // the synthesized single-select answer.
-            if let Some(first) = q.options.first() {
-                out.insert(q.question.clone(), first.label.clone());
+    async fn resolve(
+        &self,
+        questions: &[Question],
+        _non_interactive: bool,
+    ) -> Result<HashMap<String, String>, ToolError> {
+        Ok(first_option_answers(questions))
+    }
+}
+
+/// Production resolver honoring `askUserQuestionTimeout` (oracle default:
+/// `never` ⇒ do NOT auto-continue).
+///
+/// Behavior:
+/// - **Non-interactive** session (`--print` / async / batch): fall back to
+///   first-option so headless runs never hang.
+/// - **Interactive**, timeout `never`: return a `ToolError`
+///   ([`ASK_USER_QUESTION_BLOCKED_MESSAGE`]) — the tool does NOT synthesize an
+///   answer, blocking pending the live TUI prompt (the residual work).
+/// - **Interactive**, timeout `60s`/`5m`/`10m`: wait the idle window, then
+///   synthesize the afk auto-advance answer (first option per question),
+///   mirroring the oracle's "auto-continue with the answers selected so far".
+///
+/// The [`AskUserQuestionTimeout`] is fixed at construction. Wiring it to the
+/// live `askUserQuestionTimeout` settings value (so a user's explicit
+/// `60s`/`5m`/`10m` opt-in takes effect) is host work; registration currently
+/// installs the oracle default ([`AskUserQuestionTimeout::Never`]).
+pub struct DefaultTimeoutResolver {
+    /// Fixed idle window; `None` ⇒ `never` (block).
+    window: Option<Duration>,
+}
+
+impl DefaultTimeoutResolver {
+    /// Construct from an [`AskUserQuestionTimeout`] setting.
+    #[must_use]
+    pub fn new(timeout: AskUserQuestionTimeout) -> Self {
+        Self {
+            window: timeout.idle_window(),
+        }
+    }
+
+    /// Construct with an explicit idle window (`None` ⇒ block). Test seam so the
+    /// afk auto-advance path can be exercised without waiting minutes.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_window(window: Option<Duration>) -> Self {
+        Self { window }
+    }
+}
+
+#[async_trait]
+impl AskUserQuestionResolver for DefaultTimeoutResolver {
+    async fn resolve(
+        &self,
+        questions: &[Question],
+        non_interactive: bool,
+    ) -> Result<HashMap<String, String>, ToolError> {
+        // Headless (`--print`) / async sessions have no interactive UI and must
+        // not block a batch run — keep the hermetic first-option behavior.
+        if non_interactive {
+            return Ok(first_option_answers(questions));
+        }
+        match self.window {
+            // `never` ⇒ block on the user. No live widget yet ⇒ surface an error
+            // instead of silently auto-continuing.
+            None => Err(ToolError::Internal(
+                ASK_USER_QUESTION_BLOCKED_MESSAGE.to_string(),
+            )),
+            // A duration ⇒ auto-continue after the idle window elapses.
+            Some(window) => {
+                tokio::time::sleep(window).await;
+                Ok(first_option_answers(questions))
             }
         }
-        Ok(out)
     }
 }
 
@@ -533,7 +735,7 @@ impl Tool for AskUserQuestionTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -562,8 +764,10 @@ impl Tool for AskUserQuestionTool {
         md.insert("_PROTO_questions".into(), pii_str(&joined));
         bus.log_event(ASK_USER_QUESTION_STARTED, md).await;
 
-        // Resolve the per-question answers (UI substitute).
-        let answers_map = match self.resolver.resolve(&questions).await {
+        // Resolve the per-question answers (UI substitute). The resolver keys
+        // its auto-continue policy off the session's interactivity.
+        let non_interactive = ctx.options.is_non_interactive_session;
+        let answers_map = match self.resolver.resolve(&questions, non_interactive).await {
             Ok(m) => m,
             Err(e) => {
                 emit_failed(&bus, "resolver_error", started.elapsed().as_millis() as u64).await;
@@ -878,6 +1082,7 @@ mod tests {
         async fn resolve(
             &self,
             questions: &[Question],
+            _non_interactive: bool,
         ) -> Result<HashMap<String, String>, ToolError> {
             let mut m = HashMap::new();
             for q in questions {
@@ -955,5 +1160,138 @@ mod tests {
         assert!(item["properties"]["header"].get("maxLength").is_none());
         assert_eq!(item["properties"]["multiSelect"]["default"], json!(false));
         assert_eq!(item["required"], json!(["question", "header", "options"]));
+    }
+
+    // --- askUserQuestionTimeout setting ---
+
+    #[test]
+    fn timeout_default_is_never_and_blocks() {
+        // Oracle default: never (wait forever, no auto-continue).
+        assert_eq!(AskUserQuestionTimeout::default(), AskUserQuestionTimeout::Never);
+        assert_eq!(AskUserQuestionTimeout::Never.idle_window(), None);
+        assert_eq!(AskUserQuestionTimeout::Never.as_settings_str(), "never");
+    }
+
+    #[test]
+    fn timeout_enum_values_byte_locked() {
+        // Byte-faithful to the settings schema enum ["60s","5m","10m","never"].
+        assert_eq!(
+            ASK_USER_QUESTION_TIMEOUT_VALUES,
+            &["60s", "5m", "10m", "never"]
+        );
+        assert_eq!(ASK_USER_QUESTION_TIMEOUT_KEY, "askUserQuestionTimeout");
+    }
+
+    #[test]
+    fn timeout_parse_strict_and_windows() {
+        assert_eq!(
+            AskUserQuestionTimeout::from_settings_str("never"),
+            Some(AskUserQuestionTimeout::Never)
+        );
+        assert_eq!(
+            AskUserQuestionTimeout::from_settings_str("60s"),
+            Some(AskUserQuestionTimeout::S60)
+        );
+        assert_eq!(
+            AskUserQuestionTimeout::from_settings_str("5m"),
+            Some(AskUserQuestionTimeout::M5)
+        );
+        assert_eq!(
+            AskUserQuestionTimeout::from_settings_str("10m"),
+            Some(AskUserQuestionTimeout::M10)
+        );
+        // Unknown value → None (strict).
+        assert_eq!(AskUserQuestionTimeout::from_settings_str("30s"), None);
+        assert_eq!(AskUserQuestionTimeout::from_settings_str(""), None);
+
+        // Idle windows.
+        assert_eq!(
+            AskUserQuestionTimeout::S60.idle_window(),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            AskUserQuestionTimeout::M5.idle_window(),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            AskUserQuestionTimeout::M10.idle_window(),
+            Some(Duration::from_secs(600))
+        );
+    }
+
+    #[test]
+    fn timeout_parse_or_default_matches_zod_catch() {
+        // zod `.catch(void 0)` + `?? "never"`: absent or unparsable ⇒ never.
+        assert_eq!(
+            AskUserQuestionTimeout::parse_or_default(None),
+            AskUserQuestionTimeout::Never
+        );
+        assert_eq!(
+            AskUserQuestionTimeout::parse_or_default(Some("bogus")),
+            AskUserQuestionTimeout::Never
+        );
+        assert_eq!(
+            AskUserQuestionTimeout::parse_or_default(Some("5m")),
+            AskUserQuestionTimeout::M5
+        );
+    }
+
+    // --- DefaultTimeoutResolver behavior ---
+
+    #[tokio::test]
+    async fn default_resolver_never_blocks_in_interactive_session() {
+        // Interactive + `never` ⇒ do NOT synthesize an answer; return an error
+        // (blocks pending the live prompt UI). This is the point that stops the
+        // old silent auto-continue.
+        let resolver = DefaultTimeoutResolver::new(AskUserQuestionTimeout::Never);
+        let qs = validate_input_internal(&one_question()).expect("ok");
+        let err = resolver
+            .resolve(&qs, /* non_interactive */ false)
+            .await
+            .expect_err("never + interactive must block, not auto-pick");
+        assert!(matches!(err, ToolError::Internal(_)));
+        assert!(format!("{err}").contains("askUserQuestionTimeout=never"));
+    }
+
+    #[tokio::test]
+    async fn default_resolver_never_auto_picks_when_headless() {
+        // Non-interactive (`--print`) ⇒ never block; fall back to first-option so
+        // batch runs complete.
+        let resolver = DefaultTimeoutResolver::new(AskUserQuestionTimeout::Never);
+        let qs = validate_input_internal(&one_question()).expect("ok");
+        let ans = resolver
+            .resolve(&qs, /* non_interactive */ true)
+            .await
+            .expect("headless must not block");
+        assert_eq!(ans.get("Pick one?").map(String::as_str), Some("Alpha"));
+    }
+
+    #[tokio::test]
+    async fn default_resolver_duration_auto_advances_interactive() {
+        // Interactive + a duration ⇒ auto-continue with first-option after the
+        // idle window. Uses a zero window so the test does not wait minutes.
+        let resolver = DefaultTimeoutResolver::with_window(Some(Duration::ZERO));
+        let qs = validate_input_internal(&one_question()).expect("ok");
+        let ans = resolver
+            .resolve(&qs, /* non_interactive */ false)
+            .await
+            .expect("duration must auto-advance");
+        assert_eq!(ans.get("Pick one?").map(String::as_str), Some("Alpha"));
+    }
+
+    #[tokio::test]
+    async fn tool_with_default_resolver_errors_interactive_never() {
+        // End-to-end via the tool `call`: production-style construction with the
+        // default (`never`) resolver blocks an interactive call.
+        let tool = AskUserQuestionTool::with_resolver(
+            shell_test_ctx(dummy_out()),
+            Arc::new(DefaultTimeoutResolver::new(AskUserQuestionTimeout::Never)),
+        );
+        // fresh_ctx() is interactive (is_non_interactive_session == false).
+        let err = tool
+            .call(one_question(), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("interactive never must not auto-continue");
+        assert!(format!("{err}").contains("askUserQuestionTimeout=never"));
     }
 }

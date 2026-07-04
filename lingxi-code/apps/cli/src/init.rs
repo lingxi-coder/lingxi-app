@@ -287,6 +287,25 @@ fn load_provider_profiles(
         .and_then(|eff| eff.settings.providers)
 }
 
+/// Load the merged `settings.axScreenReader` (project + user + env layers,
+/// gated by `--setting-sources`) — the lowest-precedence source for the
+/// [`crate::ax_screen_reader`] gate (below the env var and `--ax-screen-reader`
+/// flag). `None` when unset / on any load failure, so the gate falls back to
+/// its "off" default.
+pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
+    let (include_user, include_project) = setting_source_flags(argv.setting_sources.as_deref());
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.ax_screen_reader)
+}
+
 /// Load the persisted `settings.model` (the `/model` picker writes it via
 /// `tui::recent_models::record_default_model`). Used as the default model when
 /// `--model` is absent, so the picker choice survives a restart. `None` when

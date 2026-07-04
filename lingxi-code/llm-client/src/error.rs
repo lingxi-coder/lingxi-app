@@ -62,6 +62,28 @@ pub enum LlmError {
         /// Transport-layer failure message.
         message: String,
     },
+    /// Transport failed due to a TLS/SSL certificate error.
+    ///
+    /// A certificate failure (expired cert, self-signed cert, a corporate
+    /// TLS-intercepting proxy, a protocol/handshake fault, …) is **terminal**:
+    /// it is never retried, because retrying a handshake that can't succeed
+    /// only burns the retry budget. This is split out from
+    /// [`LlmError::Transport`] so retry classification can short-circuit it and
+    /// callers can surface the fix hint.
+    ///
+    /// Parity: claude-code 2.1.201 `JF` cause-chain classifier + the `Gyo`/`bBp`
+    /// code sets + the `YLe` hint (see [`crate::ssl`]). `code` is the matched
+    /// Node/OpenSSL error code (e.g. `CERT_HAS_EXPIRED`); `message` is the
+    /// user-facing `YLe` hint (which embeds the code and the remediation).
+    #[error("{message}")]
+    TlsCert {
+        /// The matched TLS error code (a member of the `bBp` set), e.g.
+        /// `CERT_HAS_EXPIRED`.
+        code: String,
+        /// The user-facing SSL fix hint (`YLe`) — includes the code and the
+        /// `NODE_EXTRA_CA_CERTS` / `/doctor` remediation.
+        message: String,
+    },
     /// A stream failed after semantic events had been yielded.
     #[error("stream interrupted: {message}")]
     StreamInterrupted {
@@ -80,4 +102,29 @@ pub enum LlmError {
         /// Unsupported capability name.
         capability: String,
     },
+}
+
+impl LlmError {
+    /// Build a terminal [`LlmError::TlsCert`] for the given TLS error `code`,
+    /// rendering the `YLe` fix hint into `message`.
+    ///
+    /// Parity: claude-code 2.1.201 — a cause-chain `code` in the `bBp` set
+    /// yields `isSSLError`, which short-circuits the retry loop and surfaces the
+    /// `YLe` hint (see [`crate::ssl::ssl_hint`]).
+    #[must_use]
+    pub fn tls_cert(code: impl Into<String>) -> Self {
+        let code = code.into();
+        let message = crate::ssl::ssl_hint(&code);
+        LlmError::TlsCert { code, message }
+    }
+
+    /// The matched TLS error code when this is a [`LlmError::TlsCert`], else
+    /// `None`. Mirrors reading `JF(e).code` on an `isSSLError` error.
+    #[must_use]
+    pub fn ssl_code(&self) -> Option<&str> {
+        match self {
+            LlmError::TlsCert { code, .. } => Some(code.as_str()),
+            _ => None,
+        }
+    }
 }

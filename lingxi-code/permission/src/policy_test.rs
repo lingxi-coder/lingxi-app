@@ -1102,7 +1102,7 @@ mod tests {
             _ => panic!("expected Ask"),
         }
         // Mode titles byte-locked to getModeConfig (PermissionMode.ts:46-74).
-        assert_eq!(PermissionMode::Default.title(), "Default");
+        assert_eq!(PermissionMode::Default.title(), "Manual");
         assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
         assert_eq!(
             PermissionMode::BypassPermissions.title(),

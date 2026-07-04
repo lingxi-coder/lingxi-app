@@ -424,28 +424,7 @@ impl StreamJsonStream {
             .as_ref()
             .expect("set_init_params must be called before emit_init");
         let session_id = self.session_id.lock().await.clone();
-        let frame = json!({
-            "type": "system",
-            "subtype": "init",
-            "cwd": p.cwd,
-            "session_id": session_id,
-            "tools": p.tools,
-            "mcp_servers": p.mcp_servers,
-            "model": p.model,
-            "permissionMode": p.permission_mode,
-            "slash_commands": p.slash_commands,
-            "apiKeySource": p.api_key_source,
-            "claude_code_version": p.claude_code_version,
-            "output_style": p.output_style,
-            "agents": p.agents,
-            "skills": p.skills,
-            "plugins": p.plugins,
-            "analytics_disabled": p.analytics_disabled,
-            "product_feedback_disabled": p.product_feedback_disabled,
-            "uuid": uuid,
-            "memory_paths": p.memory_paths,
-            "fast_mode_state": p.fast_mode_state
-        });
+        let frame = build_init_frame(&session_id, &uuid, p);
         drop(params_guard);
         self.enqueue(&frame);
     }
@@ -1059,6 +1038,45 @@ impl OutputStream for StreamJsonStream {
 
 // ── init-frame builder ───────────────────────────────────────────────────────
 
+/// Build the `system/init` frame `Value` (pure, no I/O) so its exact shape is
+/// unit-testable without draining stdout.
+///
+/// ORACLE (2.1.201, verified live via
+/// `echo '{"type":"user",…}' | claude -p --input-format stream-json \
+///   --output-format stream-json --verbose`): the `-p` mode `system`/`init`
+/// frame carries EXACTLY these 20 keys in this order —
+/// `type, subtype, cwd, session_id, tools, mcp_servers, model, permissionMode,
+/// slash_commands, apiKeySource, claude_code_version, output_style, agents,
+/// skills, plugins, analytics_disabled, product_feedback_disabled, uuid,
+/// memory_paths, fast_mode_state`. In particular the frame HAS `plugins` and
+/// has NO `betas` key (a default-model run emits no `betas`). The separate
+/// SDK-subprocess `initialize` payload — a different structure — is the one
+/// that carries `betas`; the streaming `system/init` frame does not.
+fn build_init_frame(session_id: &str, uuid: &str, p: &StreamJsonInitParams) -> Value {
+    json!({
+        "type": "system",
+        "subtype": "init",
+        "cwd": p.cwd,
+        "session_id": session_id,
+        "tools": p.tools,
+        "mcp_servers": p.mcp_servers,
+        "model": p.model,
+        "permissionMode": p.permission_mode,
+        "slash_commands": p.slash_commands,
+        "apiKeySource": p.api_key_source,
+        "claude_code_version": p.claude_code_version,
+        "output_style": p.output_style,
+        "agents": p.agents,
+        "skills": p.skills,
+        "plugins": p.plugins,
+        "analytics_disabled": p.analytics_disabled,
+        "product_feedback_disabled": p.product_feedback_disabled,
+        "uuid": uuid,
+        "memory_paths": p.memory_paths,
+        "fast_mode_state": p.fast_mode_state
+    })
+}
+
 /// Build `StreamJsonInitParams` from the CLI environment, the resolved
 /// permission mode, and the tool / slash-command registries.
 ///
@@ -1521,6 +1539,68 @@ mod tests {
         stream
             .emit_stream_event(r#"{"type":"message_start","message":{}}"#, true)
             .await;
+    }
+
+    /// The `system/init` frame must be byte-shape-identical to the 2.1.201
+    /// `-p --input-format stream-json` oracle: the 20 keys in exact order,
+    /// WITH `plugins`, WITHOUT `betas`. (The `betas` field the SDK-subprocess
+    /// `initialize` payload carries does NOT appear on this streaming frame —
+    /// verified live against 2.1.201.)
+    #[test]
+    fn init_frame_matches_2_1_201_p_mode_shape() {
+        let params = build_init_params(
+            "sess-oracle",
+            vec!["Bash".to_string()],
+            vec![],
+            "claude-opus-4-8",
+            "default",
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            "default",
+            None,
+            "off",
+        );
+        let frame = build_init_frame("sess-oracle", "uuid-1234", &params);
+        let obj = frame.as_object().expect("init frame is an object");
+        let keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "type",
+                "subtype",
+                "cwd",
+                "session_id",
+                "tools",
+                "mcp_servers",
+                "model",
+                "permissionMode",
+                "slash_commands",
+                "apiKeySource",
+                "claude_code_version",
+                "output_style",
+                "agents",
+                "skills",
+                "plugins",
+                "analytics_disabled",
+                "product_feedback_disabled",
+                "uuid",
+                "memory_paths",
+                "fast_mode_state",
+            ],
+            "system/init key set + order must match the 2.1.201 -p oracle"
+        );
+        // Positive: plugins present. Negative: no betas key (oracle has none).
+        assert!(obj.contains_key("plugins"), "oracle init HAS plugins");
+        assert!(
+            !obj.contains_key("betas"),
+            "oracle -p init frame has NO betas key"
+        );
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "init");
+        assert_eq!(frame["session_id"], "sess-oracle");
+        assert_eq!(frame["uuid"], "uuid-1234");
     }
 
     // ── P4: --include-hook-events (hook lifecycle frames) ─────────────────────

@@ -254,6 +254,7 @@ fn mid_conversation_system(model: &str) -> bool {
         "sonnet-4-0",
         "sonnet-4-5",
         "sonnet-4-6",
+        "sonnet-5",
         "haiku-4-5",
     ];
     !OLDER.iter().any(|older| m.contains(older))
@@ -548,10 +549,11 @@ mod tests {
         assert!(mid_conversation_system("claude-opus-4-8"));
         assert!(mid_conversation_system("claude-fable-5"));
         assert!(mid_conversation_system("claude-mythos-5"));
-        // 2.1.198 registry: claude-sonnet-5 carries the "mid_conv_system"
-        // capability → the beta rides. Contains-hazard lock: "claude-sonnet-5"
-        // must not trip the OLDER "sonnet-4-5"/"sonnet-4-6" excludes.
-        assert!(mid_conversation_system("claude-sonnet-5"));
+        // 2.1.201 gate: claude-sonnet-5 is in the OLDER return-false branch
+        // (`n==="claude-sonnet-5"||n==="claude-haiku-4-5")return!1`), so the
+        // beta does NOT ride. Contains-hazard lock: the "sonnet-5" exclude must
+        // match "claude-sonnet-5" but NOT "sonnet-4-5"/"sonnet-4-6".
+        assert!(!mid_conversation_system("claude-sonnet-5"));
         assert!(!mid_conversation_system("claude-sonnet-4-6"));
         assert!(!mid_conversation_system("claude-sonnet-4-5"));
         assert!(!mid_conversation_system("claude-opus-4-7"));

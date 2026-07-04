@@ -19,7 +19,11 @@ impl RetryPolicy {
             LlmError::RateLimited { retry_after, .. } => RetryDecision::Retry {
                 after: *retry_after,
             },
-            LlmError::Authentication
+            // SSL/cert transport failures are terminal — never retried (parity
+            // 2.1.201 `isSSLError` short-circuit; retrying a failing handshake
+            // just burns the budget).
+            LlmError::TlsCert { .. }
+            | LlmError::Authentication
             | LlmError::PermissionDenied
             | LlmError::InvalidRequest { .. }
             | LlmError::QuotaExceeded

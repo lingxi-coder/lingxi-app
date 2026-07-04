@@ -39,6 +39,12 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // scalar-override (settingsMergeCustomizer special-cases only arrays).
         output_style: next.output_style.or(prev.output_style),
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
+        // Scalar Override (later source wins), same as `telemetryEnabled`.
+        ax_screen_reader: next.ax_screen_reader.or(prev.ax_screen_reader),
+        // Scalar Override — `askUserQuestionTimeout` (enum 60s|5m|10m|never).
+        ask_user_question_timeout: next
+            .ask_user_question_timeout
+            .or(prev.ask_user_question_timeout),
         model: next.model.or(prev.model),
         // 2.1.198 AWS/GCP auth-refresh script keys — plain strings, scalar
         // Override (later source wins), same as `model`/`outputStyle`.

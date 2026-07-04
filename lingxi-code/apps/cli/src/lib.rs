@@ -57,10 +57,12 @@
 pub mod agents_notify;
 pub mod agents_registry;
 pub mod argv;
+pub mod ax_screen_reader;
 mod bypass_env;
 pub mod commands;
 pub mod control_plane;
 pub mod cwd;
+pub mod daemon_roster;
 pub mod exit_codes;
 pub mod idle_notify;
 pub mod init;
@@ -597,6 +599,23 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             return exit_codes::RUNTIME_ERROR;
         }
     };
+
+    // (2.1.201) Resolve + cache the accessibility screen-reader gate ONCE, in
+    // the binary's `uNi.isEnabled()` precedence: `--ax-screen-reader` flag →
+    // `LINGXI_AX_SCREEN_READER` env → settings `axScreenReader === true`. The
+    // gate then drives the startup announcement (below), the classic-renderer
+    // forcing, and the child-process env propagation (`ax_screen_reader::
+    // subprocess_env`). Resolving here — after settings are loadable and before
+    // mode dispatch — matches the binary, which reads `IO()` on the first
+    // startup line for every mode.
+    let ax_config = init::load_settings_ax_screen_reader(&parsed);
+    ax_screen_reader::init(parsed.ax_screen_reader, ax_config);
+    // `if(!L && process.stdout.isTTY && IO()) console.log("[Accessible screen
+    // reader mode: on]")` — `L` == print mode. Emitted for interactive stdout.
+    {
+        use std::io::IsTerminal as _;
+        ax_screen_reader::maybe_announce(parsed.print, std::io::stdout().is_terminal());
+    }
 
     // (W40-follow-up) One-time startup notices, the bounded stand-in for
     // claude-code's startup notification queue (`main.tsx:2872-2896`). TS pushes

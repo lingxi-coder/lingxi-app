@@ -183,9 +183,16 @@ fn status_error_response(status: u16, body: &str) -> ProviderResponse {
 }
 
 fn map_http_error(error: &HttpError) -> LlmError {
-    LlmError::Transport {
-        message: error.to_string(),
+    let message = error.to_string();
+    // SSL/cert transport failures must fast-fail (never retried). Parity:
+    // claude-code 2.1.201 `JF` walks the cause chain and, when it finds a code
+    // in the `bBp` SSL set, marks the error terminal + attaches the `YLe` hint.
+    // This port's HttpError is string-typed, so we scan the rendered error text
+    // for a known SSL code token (see [`crate::ssl`]).
+    if let Some(code) = crate::ssl::detect_ssl_code(&message) {
+        return LlmError::tls_cert(code);
     }
+    LlmError::Transport { message }
 }
 
 async fn open_http_stream<T: HttpTransport>(
@@ -484,6 +491,39 @@ mod request_id_tests {
         assert_eq!(
             extract_response_request_id(&map(&[("content-type", "application/json")])),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod map_http_error_tests {
+    use super::*;
+
+    #[test]
+    fn ssl_cert_connection_error_maps_to_tls_cert() {
+        // A connection failure whose text carries a `bBp` SSL code → terminal
+        // TlsCert (fast-fail), not a retryable Transport error.
+        let err = map_http_error(&HttpError::Connection(
+            "certificate has expired: CERT_HAS_EXPIRED".to_string(),
+        ));
+        match err {
+            LlmError::TlsCert { code, message } => {
+                assert_eq!(code, "CERT_HAS_EXPIRED");
+                assert!(message.contains("NODE_EXTRA_CA_CERTS"));
+            }
+            other => panic!("expected TlsCert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_ssl_connection_error_stays_transport() {
+        // A plain connection error (no SSL code) remains a retryable Transport.
+        let err = map_http_error(&HttpError::Connection(
+            "connection refused (ECONNREFUSED)".to_string(),
+        ));
+        assert!(
+            matches!(err, LlmError::Transport { .. }),
+            "non-SSL transport failure must stay Transport, got {err:?}"
         );
     }
 }

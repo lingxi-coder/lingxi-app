@@ -269,19 +269,13 @@ async fn dispatch_control_request(
 
     match subtype {
         "initialize" => {
-            // SDKControlInitializeResponse keys ONLY (commands, agents,
-            // output_style, available_output_styles, models, account, pid). The
-            // binary does NOT emit a `feedback_survey_config` here — that key was
-            // fabricated and is dropped (it is not in the schema).
-            let payload = json!({
-                "commands": init_commands,
-                "agents": init_agents,
-                "output_style": "default",
-                "available_output_styles": ["default", "Proactive", "Explanatory", "Learning"],
-                "models": init_models,
-                "account": init_account,
-                "pid": std::process::id(),
-            });
+            let payload = initialize_response_payload(
+                init_commands,
+                init_agents,
+                init_models,
+                init_account,
+                std::process::id(),
+            );
             writer.reply_success(request_id, Some(payload));
         }
         "interrupt" => {
@@ -379,12 +373,46 @@ async fn dispatch_control_request(
             writer.reply_success(request_id, None);
             end_notify.notify_one();
         }
+        "mcp_authenticate" | "mcp_reconnect" => {
+            // ORACLE (2.1.201 `-p` handler): both branches first resolve the
+            // MCP server config by `serverName`; when no server matches, they
+            // reply `error: "Server not found: {serverName}"` (verified live —
+            // `mcp_authenticate`/`mcp_reconnect` for an unknown server both
+            // return that exact string). A fresh `-p` session has no MCP
+            // servers, so this is the dominant observable path.
+            //
+            // DEFERRED (found-server path): the live handler then starts an
+            // OAuth flow (mcp_authenticate → `{authUrl, requiresUserAction,…}`)
+            // or tears down + reconnects the transport (mcp_reconnect → bare
+            // success ack). The port's stream-json server has no live OAuth /
+            // reconnect seam wired here, so a matched server is acked
+            // best-effort: `mcp_reconnect` → bare success (mirrors the binary's
+            // `Ur(_t)`), `mcp_authenticate` → success `{}`. Full flows tracked
+            // as a follow-up.
+            let server_name = field("serverName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let known: Vec<String> = orchestrator
+                .list_mcp_servers()
+                .await
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
+            if !known.iter().any(|n| n == &server_name) {
+                writer.reply_error(request_id, &format!("Server not found: {server_name}"));
+            } else if subtype == "mcp_reconnect" {
+                writer.reply_success(request_id, None);
+            } else {
+                writer.reply_success(request_id, Some(json!({})));
+            }
+        }
         // The orchestrator-free arms (set_max_thinking_tokens, get_binary_version,
-        // rename_session, message_rated, seed_read_state), the CLI-originated
-        // guard subtypes (no-reply), and the byte-exact `Unsupported control
-        // request subtype` fallthrough are pure — classified by
-        // `pure_control_response` so the wire shapes are unit-testable without a
-        // live orchestrator.
+        // rename_session, message_rated, seed_read_state, file_suggestions,
+        // mcp_oauth_callback_url), the CLI-originated guard subtypes (no-reply),
+        // and the byte-exact `Unsupported control request subtype` fallthrough
+        // are pure — classified by `pure_control_response` so the wire shapes
+        // are unit-testable without a live orchestrator.
         other => match pure_control_response(other, frame) {
             PureControlReply::Success(payload) => writer.reply_success(request_id, payload),
             PureControlReply::Error(msg) => writer.reply_error(request_id, &msg),
@@ -435,6 +463,24 @@ fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureContro
         "message_rated" => PureControlReply::Success(Some(json!({}))),
         // §2.2 #21: seed read-state cache; errors swallowed ⇒ empty ack (no seam).
         "seed_read_state" => PureControlReply::Success(None),
+        // ORACLE (2.1.201 `-p` handler): `file_suggestions` resolves against the
+        // session's FileIndex and replies `{suggestions:[...]}`. Verified live
+        // that a fresh `-p` session with no built file index returns
+        // `{suggestions:[]}` for arbitrary queries (including a query that
+        // name-matches a real cwd file). The port has no FileIndex seam wired
+        // into the stream-json server, so it faithfully returns the empty-index
+        // result. DEFERRED: index-backed suggestions once a FileIndex seam is
+        // exposed.
+        "file_suggestions" => PureControlReply::Success(Some(json!({ "suggestions": [] }))),
+        // ORACLE (2.1.201 `-p` handler): `mcp_oauth_callback_url` looks up the
+        // in-flight OAuth flow for `serverName`; with no active flow it replies
+        // `error: "No active OAuth flow for server: {serverName}"` (verified
+        // live). The port keeps no active-flow registry in the stream-json
+        // server, so this is always the faithful reply.
+        "mcp_oauth_callback_url" => {
+            let server_name = field("serverName").and_then(|v| v.as_str()).unwrap_or("");
+            PureControlReply::Error(format!("No active OAuth flow for server: {server_name}"))
+        }
         // CLI-ORIGINATED subtypes: `can_use_tool` / `request_user_dialog` /
         // `elicitation` are CLIENT→SERVER frames the CLI itself SENDS (their
         // `control_response` is handled by the resolver task). The binary checks
@@ -446,6 +492,35 @@ fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureContro
         // The binary fallthrough for every unhandled / deep [D] subtype.
         _ => PureControlReply::Error(format!("Unsupported control request subtype: {subtype}")),
     }
+}
+
+/// Build the `initialize` control_response `response` payload.
+///
+/// ORACLE (2.1.201, verified live via
+/// `{"subtype":"initialize"} | claude -p --input-format stream-json \
+///   --output-format stream-json --verbose`): the `-p` handler replies with
+/// `{commands, agents, output_style, available_output_styles, models, account,
+/// pid}` where `output_style` is `"default"` and `available_output_styles` is
+/// the 4-item list `["default","Proactive","Explanatory","Learning"]`.
+/// (NOTE: the separate REPL-bridge handler defaults these to `"normal"` /
+/// `["normal"]`, but that bridge is NOT the `-p --input-format stream-json`
+/// role this dispatcher models — the observable `-p` truth is the 4-item list.)
+fn initialize_response_payload(
+    commands: &[serde_json::Value],
+    agents: &[serde_json::Value],
+    models: &[serde_json::Value],
+    account: &serde_json::Value,
+    pid: u32,
+) -> serde_json::Value {
+    json!({
+        "commands": commands,
+        "agents": agents,
+        "output_style": "default",
+        "available_output_styles": ["default", "Proactive", "Explanatory", "Learning"],
+        "models": models,
+        "account": account,
+        "pid": pid,
+    })
 }
 
 /// Map the raw inner `control_response.response` permission payload onto a
@@ -2029,6 +2104,63 @@ mod tests {
                 "{st} must be ignored (top-of-chain guard), not Unsupported"
             );
         }
+    }
+
+    #[test]
+    fn pure_file_suggestions_returns_empty_suggestions() {
+        // ORACLE 2.1.201 `-p`: unknown/no-index query → success {suggestions:[]}.
+        let frame = req("file_suggestions", json!({ "query": "probe" }));
+        let PureControlReply::Success(Some(payload)) =
+            pure_control_response("file_suggestions", &frame)
+        else {
+            panic!("expected success payload");
+        };
+        assert_eq!(payload, json!({ "suggestions": [] }));
+    }
+
+    #[test]
+    fn pure_mcp_oauth_callback_url_no_active_flow() {
+        // ORACLE 2.1.201 `-p`: no in-flight OAuth flow ⇒ byte-exact error.
+        let frame = req(
+            "mcp_oauth_callback_url",
+            json!({ "serverName": "s1", "callbackUrl": "http://x?code=1" }),
+        );
+        assert_eq!(
+            pure_control_response("mcp_oauth_callback_url", &frame),
+            PureControlReply::Error("No active OAuth flow for server: s1".to_string())
+        );
+    }
+
+    #[test]
+    fn initialize_payload_output_style_defaults_match_p_oracle() {
+        // ORACLE 2.1.201 `-p`: output_style "default" + the 4-item list.
+        // Locks the `-p` truth (NOT the REPL-bridge "normal"/["normal"]).
+        let payload = initialize_response_payload(&[], &[], &[], &json!({}), 4242);
+        assert_eq!(payload["output_style"], "default");
+        assert_eq!(
+            payload["available_output_styles"],
+            json!(["default", "Proactive", "Explanatory", "Learning"])
+        );
+        assert_eq!(payload["pid"], 4242);
+        // Exact top-level key set (no fabricated keys).
+        let keys: Vec<&str> = payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "commands",
+                "agents",
+                "output_style",
+                "available_output_styles",
+                "models",
+                "account",
+                "pid",
+            ]
+        );
     }
 
     #[test]

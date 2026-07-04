@@ -130,14 +130,28 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // lead sentence "the Claude 5 family, Opus 4.8, and Haiku 4.5"; the Model
     // IDs render latest_per_family (fable, opus, sonnet→claude-sonnet-5,
     // haiku→dated id). The em-dash is U+2014.
-    write!(
-        &mut s,
-        "\n - The most recent Claude models are the Claude 5 family, Opus 4.8, and Haiku 4.5. \
+    //
+    // CLAUDE-ONLY (LingXi multi-provider divergence): claude-code only ever runs
+    // Claude, so it always emits this Claude-model catalog + the Claude-Opus
+    // fast-mode note. LingXi can run a non-Claude model (deepseek/gemini/…) via
+    // `/model`; feeding THAT model "the most recent Claude models are … Fable 5:
+    // 'claude-fable-5' …" both misinforms it and pollutes its self-identity (it
+    // echoes claude-fable-5 when asked "what model are you"). Gate both
+    // Claude-specific lines on the active model being a Claude model; the model
+    // id is the reliable signal (anthropic / Bedrock `anthropic.claude-*` /
+    // Vertex / Copilot `claude-*` all contain "claude"). The Claude path stays
+    // byte-identical to claude-code.
+    let is_claude = ctx.model.to_ascii_lowercase().contains("claude");
+    if is_claude {
+        write!(
+            &mut s,
+            "\n - The most recent Claude models are the Claude 5 family, Opus 4.8, and Haiku 4.5. \
 Model IDs \u{2014} Fable 5: '{MODEL_ID_FABLE}', Opus 4.8: '{MODEL_ID_OPUS}', \
 Sonnet 5: '{MODEL_ID_SONNET}', Haiku 4.5: '{MODEL_ID_HAIKU}'. \
 When building AI applications, default to the latest and most capable Claude models."
-    )
-    .unwrap();
+        )
+        .unwrap();
+    }
 
     s.push_str(
         "\n - LingXi is available as a CLI in the terminal, desktop app (Mac/Windows), \
@@ -146,12 +160,15 @@ web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
 
     // Fast-mode line: present on the MAIN path (claude-code `t?null:…` — `t` is
     // the subagent flag, false here). LingXi's subagent path is assembled
-    // separately, so the main assembler always emits this line.
-    s.push_str(
-        "\n - Fast mode for LingXi uses Claude Opus with faster output \
+    // separately, so the main assembler always emits this line. Claude-only (it
+    // describes the Claude-Opus fast path) — gated like the catalog above.
+    if is_claude {
+        s.push_str(
+            "\n - Fast mode for LingXi uses Claude Opus with faster output \
 (it does not downgrade to a smaller model). It can be toggled with /fast and is \
 available on Opus 4.8/4.7/4.6.",
-    );
+        );
+    }
 
     s
 }
@@ -215,6 +232,40 @@ The exact model ID is claude-opus-4-8[1m]."
         // Cutoff is a SEPARATE bullet immediately after the model line.
         assert!(
             out.contains("claude-opus-4-8[1m].\n - Assistant knowledge cutoff is January 2026.")
+        );
+    }
+
+    #[test]
+    fn non_claude_model_omits_the_claude_catalog_and_fast_mode_lines() {
+        // Multi-provider divergence: a non-Claude model (deepseek) must NOT be
+        // told "the most recent Claude models are … Fable 5: 'claude-fable-5'"
+        // (it misinforms + pollutes self-identity). The id-only model line and
+        // the LingXi CLI-availability line still render.
+        let mut c = ctx();
+        c.model = "deepseek-v4-pro".into();
+        c.model_marketing_name = None;
+        let out = format(&c);
+        assert!(
+            out.contains("\n - You are powered by the model deepseek-v4-pro."),
+            "id-only identity present: {out}"
+        );
+        assert!(
+            !out.contains("The most recent Claude models"),
+            "Claude catalog line must be omitted for a non-Claude model: {out}"
+        );
+        assert!(
+            !out.contains("claude-fable-5"),
+            "no claude-fable-5 in a deepseek prompt: {out}"
+        );
+        assert!(
+            !out.contains("Fast mode for LingXi uses Claude Opus"),
+            "Claude fast-mode note omitted for a non-Claude model: {out}"
+        );
+        // The provider-neutral LingXi availability line still renders, and is now
+        // the last bullet (fast-mode omitted).
+        assert!(
+            out.ends_with("IDE extensions (VS Code, JetBrains)."),
+            "LingXi availability line remains, last: {out}"
         );
     }
 

@@ -252,6 +252,25 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_an_oauth_provider_runs_the_oauth_action() {
+        // A single `oauth`-tagged provider maps (from_tag) to OAuthSoon and
+        // routes into the LIVE OAuth effect — pins the non-obvious
+        // "coming soon" variant → ConnectAction::OAuth mapping.
+        let mut v = ConnectPickerView::new(
+            [("openai-chatgpt".to_string(), "oauth".to_string())]
+                .into_iter()
+                .collect(),
+            BTreeMap::new(),
+        );
+        let outcome = v.handle_key(press(KeyCode::Enter));
+        assert!(matches!(
+            outcome,
+            ViewOutcome::RunConnectAction(ConnectAction::OAuth { ref provider_id })
+                if provider_id == "openai-chatgpt"
+        ));
+    }
+
+    #[test]
     fn esc_cancels() {
         let mut v = view();
         assert!(matches!(

@@ -1291,6 +1291,11 @@ impl ChatWidget {
                 self.turn_started_at = None;
                 self.activity = None;
                 self.current_todo = None;
+                // (review) An interrupt IS a turn boundary — clear the tool
+                // correlation map here too (a cancelled turn future may be
+                // dropped before the bridge emits `TurnEnded`), matching the
+                // other boundaries the M1 fix targeted.
+                self.tool_inputs.clear();
                 // Commit any streamed partial reply, then push the interrupt
                 // row so scrollback shows `[Request interrupted by user]` (the
                 // dim `Interrupted · …` line) — claude-code parity; the old

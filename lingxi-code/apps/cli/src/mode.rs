@@ -584,26 +584,40 @@ async fn run_web_action(
                     .map(|hits| (resolved, hits)),
                 Err(e) => Err(e),
             };
-            let (body, is_error) = match result {
+            // Build the BARE message (no ✓/✗ mark) — matches the iocraft
+            // oracle's `WebTestSummary.message`. The mark is added only when
+            // formatting the notice below (and by the picker's
+            // `web_provider_detail_lines` "Last test: {mark} {msg}" line), so
+            // storing it bare avoids a doubled mark.
+            let (bare, is_error) = match result {
                 Ok((resolved, hits)) => {
                     let count = hits.len();
-                    let top = hits
-                        .first()
-                        .map(|h| format!(" · {}", h.title))
-                        .unwrap_or_default();
-                    (format!("✓ {}: {count} results{top}", resolved.label()), false)
+                    // Guard an empty top-hit title so no dangling " · " renders
+                    // (oracle parity — DuckDuckGo/SearXNG hits can be titleless).
+                    let top = hits.first().map_or(String::new(), |h| {
+                        if h.title.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", h.title)
+                        }
+                    });
+                    (format!("{}: {count} results{top}", resolved.label()), false)
                 }
-                Err(e) => (format!("✗ {} test failed: {e}", label(provider)), true),
+                Err(e) => (format!("{} test failed: {e}", label(provider)), true),
             };
+            let mark = if is_error { "✗" } else { "✓" };
             {
                 let mut s = snapshot.lock().unwrap();
                 s.last_test = Some(tui::web::picker::WebTestSummary {
                     provider,
                     ok: !is_error,
-                    message: body.clone(),
+                    message: bare.clone(),
                 });
             }
-            let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
+            let _ = turn_tx.send(TurnEvent::SystemNotice {
+                body: format!("{mark} {bare}"),
+                is_error,
+            });
         }
     }
 }

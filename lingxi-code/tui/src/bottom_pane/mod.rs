@@ -1040,6 +1040,54 @@ mod tests {
         assert_eq!(stack.len(), 1, "pending view stays open");
     }
 
+    /// (review) The effect-outcome stack bookkeeping: a `/web` SAVE dismisses
+    /// the whole flow, a `/web` TEST keeps the view open, and any `/connect`
+    /// effect always dismisses the connect flow.
+    #[test]
+    fn effect_outcomes_close_or_keep_the_view_stack_per_kind() {
+        use tool_web::web_search_config::WebSearchProvider;
+        let drive = |outcome: ViewOutcome| {
+            let mut stack = ViewStack::new();
+            stack.push(Box::new(StubView::returning(vec![outcome])));
+            stack.route_key(key(KeyCode::Enter));
+            stack.len()
+        };
+        // SaveSecret / SaveSettings clear the whole /web stack.
+        assert_eq!(
+            drive(ViewOutcome::RunWebAction(WebAction::SaveSecret {
+                provider: WebSearchProvider::Tavily,
+                secret: "k".to_string(),
+            })),
+            0,
+            "SaveSecret clears the /web stack"
+        );
+        assert_eq!(
+            drive(ViewOutcome::RunWebAction(WebAction::SaveSettings {
+                provider: WebSearchProvider::Searxng,
+                searxng_url: Some("http://x".to_string()),
+            })),
+            0,
+            "SaveSettings clears the /web stack"
+        );
+        // TestSearch keeps the config view open (retest in place).
+        assert_eq!(
+            drive(ViewOutcome::RunWebAction(WebAction::TestSearch {
+                provider: WebSearchProvider::Tavily,
+                typed_key: None,
+            })),
+            1,
+            "TestSearch keeps the view open"
+        );
+        // Any /connect effect dismisses the whole connect flow.
+        assert_eq!(
+            drive(ViewOutcome::RunConnectAction(ConnectAction::OAuth {
+                provider_id: "anthropic".to_string(),
+            })),
+            0,
+            "RunConnectAction clears the connect stack"
+        );
+    }
+
     #[test]
     fn only_the_top_view_receives_keys() {
         let mut stack = ViewStack::new();

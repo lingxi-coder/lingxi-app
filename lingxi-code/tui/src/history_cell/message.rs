@@ -33,8 +33,22 @@ fn markdown_theme() -> MarkdownTheme {
     }
 }
 
-/// `> {body}` user echo (empty body → nothing).
-pub(crate) fn user_text_lines(body: &str) -> Vec<StyledLine> {
+/// claude-code `INTERRUPT_MESSAGE` (utils/messages.ts:207) — the `UserText`
+/// turn content pushed when a streaming turn is interrupted. Rendered as the
+/// dim `InterruptedByUser` line, not the `> ` echo.
+pub(crate) const INTERRUPT_MESSAGE: &str = "[Request interrupted by user]";
+
+/// The line body claude-code's `InterruptedByUser.tsx` shows for an
+/// interrupted turn (iocraft `user_tool_result::INTERRUPTED_LINE`).
+const INTERRUPTED_LINE: &str = "Interrupted \u{00b7} What should Claude do instead?";
+
+/// `> {body}` user echo (empty body → nothing). A body equal to
+/// [`INTERRUPT_MESSAGE`] renders the dim `  ⎿  Interrupted · …` line instead
+/// (1:1 with the iocraft `UserTextMessage` special-case).
+pub(crate) fn user_text_lines(body: &str, theme: &Theme) -> Vec<StyledLine> {
+    if body == INTERRUPT_MESSAGE {
+        return colored_lines(&format!("  \u{23BF}  {INTERRUPTED_LINE}"), theme.dim);
+    }
     if body.is_empty() {
         Vec::new()
     } else {
@@ -218,8 +232,8 @@ impl UserTextCell {
 }
 
 impl StyledCell for UserTextCell {
-    fn styled_lines(&self, _width: usize, _theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
-        user_text_lines(&self.body)
+    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        user_text_lines(&self.body, theme)
     }
 }
 

@@ -1234,6 +1234,15 @@ impl ChatWidget {
                 }
                 self.turn_started_at = None;
                 self.activity = None;
+                // Commit any streamed partial reply, then push the interrupt
+                // row so scrollback shows `[Request interrupted by user]` (the
+                // dim `Interrupted · …` line) — claude-code parity; the old
+                // iocraft backend pushed the same UserText on its Cancel branch.
+                self.flush_or_discard_active();
+                self.transcript.push_message(RenderedMessage::UserText {
+                    body: crate::history_cell::message::INTERRUPT_MESSAGE.to_string(),
+                    timestamp: 0,
+                });
                 ChatOutcome::Continue
             }
             BottomPaneOutcome::ToggleVerbose => {
@@ -1627,6 +1636,16 @@ mod tests {
         assert!(!widget.turn_running());
         assert!(widget.activity.is_none());
         assert!(widget.turn_started_at.is_none());
+        // Interrupt pushes a `[Request interrupted by user]` row rendering the
+        // dim `Interrupted · …` line into scrollback (claude-code parity).
+        let all = cells(&widget);
+        let last = all[all.len() - 1];
+        let rendered: String = last
+            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(rendered.contains("Interrupted"), "interrupt row: {rendered}");
     }
 
     #[test]

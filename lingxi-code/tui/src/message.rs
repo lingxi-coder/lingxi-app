@@ -47,7 +47,7 @@ pub fn render_message(
 ) -> Vec<StyledLine> {
     let width = if width == 0 { DEFAULT_WIDTH } else { width };
     match entry {
-        RenderedMessage::UserText { body, .. } => user_text_lines(body),
+        RenderedMessage::UserText { body, .. } => user_text_lines(body, theme),
         RenderedMessage::AssistantText { body, .. } => assistant_lines(body, width, theme),
         RenderedMessage::SystemText { body, is_error, .. } => {
             system_text_lines(body, *is_error, theme)

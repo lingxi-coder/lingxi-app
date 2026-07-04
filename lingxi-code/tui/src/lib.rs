@@ -32,6 +32,7 @@ pub mod rate_limit_messages;
 pub mod render;
 pub mod resume;
 pub mod replay;
+pub mod screen_reader;
 pub mod permission_gate;
 pub mod startup_trust;
 pub mod startup_bypass;

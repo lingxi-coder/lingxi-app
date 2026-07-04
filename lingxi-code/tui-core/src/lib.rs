@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod active_turn;
+pub mod ask_user_question_bridge;
 pub mod bash_runner;
 pub mod error;
 pub mod key_hint;

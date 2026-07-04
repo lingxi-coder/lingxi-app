@@ -27,6 +27,7 @@ pub mod gateway;
 pub mod install;
 pub mod mcp;
 pub mod plugin;
+pub mod plugin_settings;
 pub mod project;
 pub mod setup_token;
 pub mod ultrareview;

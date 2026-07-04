@@ -371,10 +371,13 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::Details(args) => run_details(args).await,
         Sub::Validate(args) => run_validate(args).await,
 
+        // On-disk `enabledPlugins` allowlist toggle (the CLI seam — settings.json
+        // read-modify-write at the chosen scope), 1:1 with claude 2.1.201.
+        Sub::Enable(args) => run_enable(args),
+        Sub::Disable(args) => run_disable(args),
+
         // NOTICE actions — parsed faithfully, declined cleanly (no network,
         // no settings-write seam, no heavy registry wiring, no fake success).
-        Sub::Enable(_) => notice("enable"),
-        Sub::Disable(_) => notice("disable"),
         Sub::Init(_) => notice("init"),
         Sub::Install(_) => notice("install"),
         Sub::Prune(_) => notice("prune"),
@@ -426,6 +429,54 @@ fn print_help() {
 fn notice(action: &str) -> i32 {
     eprintln!("lingxi-cli plugin {action}: not yet implemented");
     NOT_IMPLEMENTED
+}
+
+/// The current working directory used for project/local scope resolution
+/// (a failure to read it — unusual — degrades to `.`, matching a bare relative
+/// join).
+fn scope_cwd() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// `plugin enable <plugin>` — toggle the on-disk `enabledPlugins` allowlist.
+/// Prints the `✔`/`✘` line and maps success/failure to the exit code.
+fn run_enable(args: &EnableArgs) -> i32 {
+    let home = crate::run::lingxi_home_dir();
+    let cwd = scope_cwd();
+    match crate::commands::plugin_settings::run_enable(&args.plugin, args.scope.as_deref(), &home, &cwd)
+    {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
+}
+
+/// `plugin disable [plugin] [--all]` — toggle the on-disk `enabledPlugins`
+/// allowlist off.
+fn run_disable(args: &DisableArgs) -> i32 {
+    let home = crate::run::lingxi_home_dir();
+    let cwd = scope_cwd();
+    match crate::commands::plugin_settings::run_disable(
+        args.plugin.as_deref(),
+        args.scope.as_deref(),
+        args.all,
+        &home,
+        &cwd,
+    ) {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
 }
 
 /// The user-tier plugins directory: `$LINGXI_CONFIG_DIR`/`~/.claude` + `plugins`.

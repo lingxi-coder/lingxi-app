@@ -160,6 +160,16 @@ pub enum TurnEvent {
         /// `true` → render as an error (red); `false` → dim informational.
         is_error: bool,
     },
+    /// Captured output of a `!`-prefixed bash-mode command (run off the model
+    /// path). Rendered as a `UserBashOutput` cell — ANSI-parsed stdout then
+    /// error-tinted stderr. Sent by the CLI `on_bash` closure after the
+    /// sandboxed [`crate::bash_runner::BashRunner`] returns.
+    BashOutput {
+        /// Captured stdout.
+        stdout: String,
+        /// Captured stderr.
+        stderr: String,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on

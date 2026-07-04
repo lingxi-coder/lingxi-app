@@ -227,6 +227,7 @@ pub(crate) async fn run_ratatui(
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
+    let bash_turn_tx = turn_tx.clone();
     // (B4 Task 5 parity) Thread the composition root's shared subscription
     // slot so the widget's rate-limit composer reads the live snapshot at
     // compose time — same wiring as the iocraft `with_subscription` path.
@@ -248,12 +249,16 @@ pub(crate) async fn run_ratatui(
     let connect_key_store = tui_build.runtime.provider_key_store.clone();
     let connect_oauth = tui_build.runtime.oauth_connect_driver.clone();
     let connect_copilot = tui_build.runtime.connect_copilot.clone();
+    // (`!` bash mode) Sandboxed bash runner for `!`-prefixed commands, cloned
+    // before `tui_build` is consumed — same convention as the clusters above.
+    let bash_runner = tui_build.runtime.bash_runner.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
     let switch_handle = handle.clone();
     let web_handle = handle.clone();
     let connect_handle = handle.clone();
+    let bash_handle = handle.clone();
     let summary_orch = orchestrator.clone();
     // (/web async effects) Preload the shared `/web` config snapshot from the
     // real on-disk settings + credential-store presence, mirroring the
@@ -351,6 +356,22 @@ pub(crate) async fn run_ratatui(
             run_connect_action(action, key_store, oauth, copilot, tx).await;
         });
     };
+    // (`!` bash mode) `!command` is submitted synchronously from the blocking
+    // ratatui loop; the sandboxed run is async, so it is spawned onto the
+    // captured handle and its captured stdout/stderr fold back into the
+    // transcript via `TurnEvent::BashOutput` on the shared `turn_tx` — no LLM
+    // turn, 1:1 with claude-code bash mode.
+    let on_bash = move |command: String| {
+        let runner = bash_runner.clone();
+        let tx = bash_turn_tx.clone();
+        bash_handle.spawn(async move {
+            let out = runner.run(&command).await;
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::BashOutput {
+                stdout: out.stdout,
+                stderr: out.stderr,
+            });
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -413,6 +434,7 @@ pub(crate) async fn run_ratatui(
             on_switch_model,
             on_web_action,
             on_connect_action,
+            on_bash,
         )
     })
     .await;

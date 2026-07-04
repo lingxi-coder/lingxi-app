@@ -72,6 +72,11 @@ pub enum ChatOutcome {
     /// Copilot/OAuth sign-in. The caller runs it asynchronously and reports
     /// the result back through `TurnEvent::SystemNotice`.
     ConnectAction(ConnectAction),
+    /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
+    /// through the sandboxed [`tui_core::bash_runner::BashRunner`] (no LLM
+    /// turn) and folds the captured output back through
+    /// `TurnEvent::BashOutput`.
+    RunBash(String),
 }
 
 /// The chat surface: owns the conversation state and the interactive footer,
@@ -480,6 +485,12 @@ impl ChatWidget {
                     timestamp: 0,
                     is_error,
                 });
+            }
+            TurnEvent::BashOutput { stdout, stderr } => {
+                // `!`-command output: render inline as a bash-output cell
+                // (ANSI stdout + error-tinted stderr). No LLM turn involved.
+                self.transcript
+                    .push_message(RenderedMessage::UserBashOutput { stdout, stderr });
             }
         }
     }
@@ -1286,6 +1297,20 @@ impl ChatWidget {
     /// Route a submitted composer buffer: a registered slash command
     /// dispatches through the registry; anything else is sent as a prompt.
     fn dispatch_submission(&mut self, text: String) -> ChatOutcome {
+        // (`!` bash mode) A `!`-prefixed line runs sandboxed and renders its
+        // output inline — it is NOT sent to the model (no LLM turn). Echo the
+        // `! {command}` row now; the CLI `on_bash` closure runs it and folds
+        // stdout/stderr back as `TurnEvent::BashOutput`. 1:1 with claude-code
+        // bash mode / the old iocraft `pending_bash` path.
+        if let Some(rest) = text.strip_prefix('!') {
+            let command = rest.trim().to_string();
+            if !command.is_empty() {
+                self.transcript.push_message(RenderedMessage::UserBashInput {
+                    command: command.clone(),
+                });
+                return ChatOutcome::RunBash(command);
+            }
+        }
         if let Some(outcome) = self.handle_slash(&text) {
             return outcome;
         }
@@ -1523,6 +1548,41 @@ mod tests {
         assert!(cells(&widget)
             .iter()
             .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none()));
+    }
+
+    /// `!`-prefixed bash mode runs the command inline (no LLM turn): it echoes
+    /// the `! {command}` row and returns `ChatOutcome::RunBash`, and the
+    /// captured output folds back via `TurnEvent::BashOutput`.
+    #[test]
+    fn bang_command_runs_bash_inline_not_a_model_turn() {
+        let mut widget = widget();
+        typ(&mut widget, "!echo hi");
+        let outcome = widget.handle_key(press(KeyCode::Enter));
+        let ChatOutcome::RunBash(cmd) = outcome else {
+            panic!("expected RunBash (bash mode), got a model turn");
+        };
+        assert_eq!(cmd, "echo hi", "leading ! stripped, trimmed");
+        assert!(!widget.turn_running(), "bash mode raises no LLM turn");
+        // The `! echo hi` input row echoed into scrollback.
+        let all = cells(&widget);
+        let input: String = all[all.len() - 1]
+            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(input.contains("echo hi"), "bash input echoed: {input}");
+        // Captured output folds back via BashOutput → a bash-output cell.
+        widget.apply_turn_event(TurnEvent::BashOutput {
+            stdout: "hi\n".to_string(),
+            stderr: String::new(),
+        });
+        let all = cells(&widget);
+        let out: String = all[all.len() - 1]
+            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(out.contains("hi"), "bash output rendered: {out}");
     }
 
     #[test]

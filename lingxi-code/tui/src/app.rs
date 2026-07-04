@@ -50,6 +50,10 @@ pub struct AppCallbacks<'cb> {
     /// sign-in) asynchronously and reports the result back via a
     /// [`TurnEvent::SystemNotice`].
     pub on_connect_action: Box<dyn FnMut(ConnectAction) + 'cb>,
+    /// Executed on [`ChatOutcome::RunBash`]: the caller runs the `!`-prefixed
+    /// command through the sandboxed bash runner (no LLM turn) and folds its
+    /// output back via [`TurnEvent::BashOutput`].
+    pub on_bash: Box<dyn FnMut(String) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -141,6 +145,11 @@ impl<'cb> RataApp<'cb> {
                     // `WebAction` above.
                     ChatOutcome::ConnectAction(action) => {
                         (self.callbacks.on_connect_action)(action);
+                    }
+                    // A `!`-prefixed bash-mode command: run it off the model
+                    // path; the output returns via `TurnEvent::BashOutput`.
+                    ChatOutcome::RunBash(command) => {
+                        (self.callbacks.on_bash)(command);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -296,6 +305,7 @@ pub fn run_app(
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
     on_connect_action: impl FnMut(ConnectAction),
+    on_bash: impl FnMut(String),
 ) -> io::Result<()> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -320,6 +330,7 @@ pub fn run_app(
             on_switch_model: Box::new(on_switch_model),
             on_web_action: Box::new(on_web_action),
             on_connect_action: Box::new(on_connect_action),
+            on_bash: Box::new(on_bash),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -377,6 +388,7 @@ mod tests {
                 on_switch_model: Box::new(|_, _| {}),
                 on_web_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
+                on_bash: Box::new(|_| {}),
             },
         )
     }

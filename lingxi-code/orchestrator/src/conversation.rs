@@ -6524,6 +6524,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         use crate::prompt::{file_tree, git_status, SystemPromptContext};
 
         let cwd = self.cwd.clone();
+        // The `<env>` model-identity line ("You are powered by the model named
+        // …") must reflect the CURRENT model, not the launch model. `/model`
+        // switches update `session.model` (see `OrchestratorHandle::switch_model`
+        // → `SessionState::model`), while `config.model` stays frozen at
+        // startup. Reading `config.model` here froze the injected identity, so a
+        // switched-to model (e.g. Fable 5) still saw "You are Opus 4.8" in its
+        // system prompt and reported the stale identity. The outgoing REQUEST
+        // model already re-snapshots `session.model` each turn; this aligns the
+        // prompt identity with it. Locked briefly and released — every
+        // `build_system_prompt` caller builds the prompt BEFORE taking the
+        // session lock, so there is no reentrancy.
+        let model = self.session.lock().await.model.clone();
         let memory_files = self.memory.load(&cwd).await;
 
         let git = git_status::probe(&cwd);
@@ -6573,19 +6585,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `std::env::consts::OS` (`macos`/`linux`/`windows`). Map the two
             // divergent names so the env line is byte-exact.
             platform: node_platform_name(std::env::consts::OS).to_string(),
-            model: self.config.model.clone(),
             // SYSPROMPT.1: port TS getMarketingNameForModel / getKnowledgeCutoff
             // (`utils/model/model.ts:570`, `constants/prompts.ts:712`) so the
             // model line + cutoff sentence match claude-code instead of being
-            // stubbed to None.
-            model_marketing_name: crate::prompt::env_meta::marketing_name_for_model(
-                &self.config.model,
-            )
-            .map(String::from),
-            knowledge_cutoff: crate::prompt::env_meta::knowledge_cutoff_for_model(
-                &self.config.model,
-            )
-            .map(String::from),
+            // stubbed to None. Sourced from the LIVE `session.model` (above) so
+            // `/model` switches take effect for the identity block.
+            model_marketing_name: crate::prompt::env_meta::marketing_name_for_model(&model)
+                .map(String::from),
+            knowledge_cutoff: crate::prompt::env_meta::knowledge_cutoff_for_model(&model)
+                .map(String::from),
+            model,
             shell,
             // SYSPROMPT.1: `uname -sr` (TS getUnameSR) e.g. "Darwin 25.3.0",
             // falling back to "<os> <arch>" on Windows / spawn failure.
@@ -8233,6 +8242,59 @@ mod turn_recovery_tests {
                 .as_deref()
                 .is_some_and(|system| !system.is_empty()),
             "startup prewarm must use the assembled system prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_prompt_model_identity_follows_switch_model() {
+        // Regression (reported): /model switched the ROUTED model, but the <env>
+        // identity line ("You are powered by the model named …") stayed frozen
+        // at config.model, so a switched-to model (e.g. Fable 5) still saw — and
+        // reported — the launch model's identity (Opus 4.8). The prompt identity
+        // must track the LIVE session.model that switch_model updates.
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                model: "claude-opus-4-8".to_string(),
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        let before = orch.build_system_prompt().await;
+        assert!(
+            before.contains(
+                "powered by the model named Opus 4.8. The exact model ID is claude-opus-4-8"
+            ),
+            "launch identity present: {before}"
+        );
+
+        <ConversationOrchestrator as traits::OrchestratorHandle>::switch_model(
+            &orch,
+            "claude-fable-5",
+            None,
+        )
+        .await
+        .expect("switch_model");
+
+        let after = orch.build_system_prompt().await;
+        assert!(
+            after.contains(
+                "powered by the model named Fable 5. The exact model ID is claude-fable-5"
+            ),
+            "identity follows the switch: {after}"
+        );
+        // The stale identity LINE must be gone. (The static "most recent Claude
+        // models … Opus 4.8" catalog sentence is model-independent and stays —
+        // so assert on the identity line, not the bare "Opus 4.8" substring.)
+        assert!(
+            !after.contains("powered by the model named Opus 4.8"),
+            "the stale identity line must be gone after switching: {after}"
         );
     }
 

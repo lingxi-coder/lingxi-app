@@ -389,13 +389,19 @@ pub async fn run(cli: &Cli) -> i32 {
                 print_marketplace_help();
                 return SUCCESS;
             };
-            let action = match sub {
-                MarketplaceSub::Add(_) => "marketplace add",
-                MarketplaceSub::List(_) => "marketplace list",
-                MarketplaceSub::Remove(_) => "marketplace remove",
-                MarketplaceSub::Update(_) => "marketplace update",
-            };
-            notice(action)
+            match sub {
+                // `list` reads the resolved `known_marketplaces.json` registry.
+                MarketplaceSub::List(list_args) => {
+                    println!(
+                        "{}",
+                        crate::commands::plugin_marketplace::run_list(&plugins_dir(), list_args.json)
+                    );
+                    SUCCESS
+                }
+                MarketplaceSub::Add(_) => notice("marketplace add"),
+                MarketplaceSub::Remove(_) => notice("marketplace remove"),
+                MarketplaceSub::Update(_) => notice("marketplace update"),
+            }
         }
     }
 }

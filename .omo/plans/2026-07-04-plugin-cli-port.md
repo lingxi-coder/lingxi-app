@@ -41,20 +41,54 @@ allowlist). Exact I/O (probed):
 - `disable --all` → set every currently-`true` entry to `false`; `✔ Disabled N plugins`.
 - New module `apps/cli/src/commands/plugin_settings.rs` (scope resolve + RMW + id resolve).
 
-### 2. install / uninstall
-`install <plugin[@market]>` → resolve marketplace, git-fetch to
-`cache/{market}/{plugin}/{version}/`, `installed::record`, then enable
-(`enabledPlugins[id]=true`) at `--scope` (default user). `--config key=value`
-(repeatable) validated against manifest userConfig. `uninstall` → drop record +
-`enabledPlugins[id]=false`, delete cache (unless `--keep-data` for data dir),
-`--prune` orphaned deps (needs `-y` non-TTY). Reuse `PluginManager::install`
-arms + `MarketplaceManager`.
+### DEPENDENCY NOTE (discovered 2026-07-04 by probing real binary)
+install's happy path REQUIRES a configured marketplace, so **do marketplace
+(3) BEFORE install/uninstall (2)**. Also two pre-existing local schema drifts
+must be fixed as part of this work:
+- `plugin/src/installed.rs` `InstalledPlugins` is an OLD shape
+  (`plugins[marketplace][plugin] = {version, added}`). **Real 2.1.201 v2 schema:**
+  `{"version":2,"plugins":{"<plugin>@<market>":[{"scope","installPath","version","installedAt"(ISO8601),"lastUpdated"(ISO8601)}]}}`
+  (keyed by full id → ARRAY of per-scope records). `discover_recorded_plugins`
+  (used by the already-"real" `list`/`details`) reads the old shape → update both.
+- `plugin/src/marketplace.rs` `MarketplaceIndex` is missing the **required
+  `owner` object** — real `marketplace.json` schema rejects a catalog lacking
+  `owner:{name}` (`Invalid schema … owner: expected object, received undefined`).
 
-### 3. marketplace add / list / remove / update
-Settings key `extraKnownMarketplaces` (array of declarations). `add <source>`
-(URL/path/GitHub) `--sparse <paths…>` `--scope`; `list [--json]`
-(empty → `No marketplaces configured` / `[]`); `remove <name> [--scope]` (omit
-scope → all scopes); `update [name]` re-fetch. Reuse `resolve_index_via_git`.
+### 3. marketplace add / list / remove / update  ← DO FIRST
+Two on-disk stores, written together by `add`:
+1. settings `extraKnownMarketplaces` (per-scope DECLARATION), shape
+   `{"<name>":{"source":<S>}}` where `<S>` is one of:
+   `{"source":"directory","path":<abs>}` / `{"source":"git","url":<u>,"ref"?:<r>}`
+   / `{"source":"github","repo":<owner/repo>,"ref"?:<r>}` / `{"source":"url","url":<u>}`.
+2. `<plugins>/known_marketplaces.json` (resolved REGISTRY — the source of truth
+   `list` renders; a settings-only decl without this shows nothing).
+- name = the marketplace.json `name` field (NOT the arg/dir).
+- `add <source>`: `Adding marketplace…✔ Successfully added marketplace: <name> (declared in <scope> settings)`.
+  Sources: local dir, URL, GitHub `owner/repo`. `--sparse <paths…>` (git
+  sparse-checkout), `--scope` (default user). Reuse `resolve_index_via_git`.
+- `list`: empty → `No marketplaces configured`. Human:
+  `Configured marketplaces:\n\n  ❯ <name>\n    Source: Directory (<path>) | Git (<url>[ @ref]) | GitHub (<repo>[ @ref]) | URL (<url>)`.
+  `--json` → `[{"name","source","path"|"url"|"repo","installLocation"}]`; empty → `[]`.
+- `remove <name> [--scope]`: not-configured →
+  `✘ Failed to remove marketplace: Marketplace '<name>' not found`. success →
+  `Removed marketplace '<name>' declaration from <scope>[; still declared in <scopes>]`.
+  Omit `--scope` → remove from every scope.
+- `update [name]` re-fetch (all if no name).
+
+### 2. install / uninstall (after marketplace)
+`install <plugin[@market]>` → resolve entry from a configured marketplace,
+git/dir-fetch to `cache/{market}/{plugin}/{version}/`, write installed record
+(NEW schema above), set `enabledPlugins[id]=true` at `--scope` (default user).
+Exact I/O:
+- progress prefix `Installing plugin "<arg>"...` then ✔/✘ on the SAME line.
+- success `✔ Successfully installed plugin: <id> (scope: <scope>)`.
+- no marketplace → `✘ Failed to install plugin "<arg>": Plugin "<name>" not found in any configured marketplace`.
+- unknown market `foo@bar` → `✘ Failed to install plugin "foo@bar": Plugin "foo" not found in marketplace "bar". Your local copy may be out of date — try ` + "`claude plugin marketplace update bar`" + `.`
+- invalid scope (DIFFERENT from enable/disable!): `Invalid scope: <x>. Must be one of: user, project, local.`
+`--config key=value` (repeatable) validated against manifest userConfig.
+`uninstall <plugin>`: not-installed → `✘ Failed to uninstall plugin "<arg>": Plugin "<name>" not found in installed plugins`. On success drop record +
+`enabledPlugins[id]=false`, delete cache (keep data dir unless… `--keep-data`
+preserves `plugins/data/{id}/`), `--prune` orphaned deps (needs `-y` non-TTY).
 
 ### 4. update
 `update <plugin>` → re-fetch latest into cache, re-record, "restart required to

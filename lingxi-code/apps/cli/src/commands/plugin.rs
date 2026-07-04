@@ -371,28 +371,103 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::Details(args) => run_details(args).await,
         Sub::Validate(args) => run_validate(args).await,
 
-        // NOTICE actions — parsed faithfully, declined cleanly (no network,
-        // no settings-write seam, no heavy registry wiring, no fake success).
-        Sub::Enable(_) => notice("enable"),
-        Sub::Disable(_) => notice("disable"),
-        Sub::Init(_) => notice("init"),
-        Sub::Install(_) => notice("install"),
-        Sub::Prune(_) => notice("prune"),
-        Sub::Tag(_) => notice("tag"),
-        Sub::Uninstall(_) => notice("uninstall"),
-        Sub::Update(_) => notice("update"),
+        // On-disk `enabledPlugins` allowlist toggle (the CLI seam — settings.json
+        // read-modify-write at the chosen scope), 1:1 with claude 2.1.201.
+        Sub::Enable(args) => run_enable(args),
+        Sub::Disable(args) => run_disable(args),
+
+        // Install/uninstall — marketplace-registry materialization + on-disk state.
+        Sub::Install(args) => market_result(crate::commands::plugin_install::run_install(
+            &args.plugin,
+            Some(&args.scope),
+            &args.config,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
+        Sub::Uninstall(args) => market_result(crate::commands::plugin_install::run_uninstall(
+            &args.plugin,
+            Some(&args.scope),
+            args.keep_data,
+            args.prune,
+            args.yes,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
+
+        // `init` — scaffold a skill-plugin under ~/.lingxi/skills/ (the default
+        // scaffold; `--with` component scaffolds are a tracked follow-up).
+        Sub::Init(args) => market_result(crate::commands::plugin_init::run_init(
+            &args.name,
+            args.author.as_deref(),
+            args.author_email.as_deref(),
+            args.description.as_deref(),
+            args.force,
+            &args.with,
+            &crate::run::lingxi_home_dir(),
+        )),
+
+        // Prune orphaned auto-installed dependencies from the v2 installed record.
+        Sub::Prune(args) => market_result(crate::commands::plugin_prune::run_prune(
+            args.dry_run,
+            args.yes,
+            &args.scope,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
+        // Create a `{name}--v{version}` git tag (all output, incl. errors, to STDOUT).
+        Sub::Tag(args) => tag_result(crate::commands::plugin_tag::run_tag(
+            args.path.as_deref(),
+            args.dry_run,
+            args.force,
+            args.message.as_deref(),
+            args.push,
+            &args.remote,
+        )),
+        // Re-materialize an installed plugin from its marketplace + bump the record.
+        Sub::Update(args) => market_result(crate::commands::plugin_install::run_update(
+            &args.plugin,
+            &args.scope,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
         Sub::Marketplace(args) => {
             let Some(sub) = args.command.as_ref() else {
                 print_marketplace_help();
                 return SUCCESS;
             };
-            let action = match sub {
-                MarketplaceSub::Add(_) => "marketplace add",
-                MarketplaceSub::List(_) => "marketplace list",
-                MarketplaceSub::Remove(_) => "marketplace remove",
-                MarketplaceSub::Update(_) => "marketplace update",
-            };
-            notice(action)
+            use crate::commands::plugin_marketplace as market;
+            match sub {
+                // `list` reads the resolved `known_marketplaces.json` registry.
+                MarketplaceSub::List(list_args) => {
+                    println!("{}", market::run_list(&plugins_dir(), list_args.json));
+                    SUCCESS
+                }
+                MarketplaceSub::Add(add_args) => market_result(market::run_add(
+                    &add_args.source,
+                    add_args.scope.as_deref(),
+                    &add_args.sparse,
+                    &plugins_dir(),
+                    &crate::run::lingxi_home_dir(),
+                    &scope_cwd(),
+                )),
+                MarketplaceSub::Remove(rm_args) => market_result(market::run_remove(
+                    &rm_args.name,
+                    rm_args.scope.as_deref(),
+                    &plugins_dir(),
+                    &crate::run::lingxi_home_dir(),
+                    &scope_cwd(),
+                )),
+                MarketplaceSub::Update(up_args) => market_result(market::run_update(
+                    up_args.name.as_deref(),
+                    &plugins_dir(),
+                    &crate::run::lingxi_home_dir(),
+                    &scope_cwd(),
+                )),
+            }
         }
     }
 }
@@ -421,11 +496,83 @@ fn print_help() {
     println!();
 }
 
-/// Emit the standard "not yet implemented" line for a declined action and
-/// return `NOT_IMPLEMENTED`.
-fn notice(action: &str) -> i32 {
-    eprintln!("lingxi-cli plugin {action}: not yet implemented");
-    NOT_IMPLEMENTED
+/// Print a `plugin tag` result. Unlike [`market_result`], BOTH the Ok and Err
+/// blocks go to STDOUT — claude's `plugin tag` never writes to stderr; Err maps
+/// to exit 1.
+fn tag_result(res: Result<String, String>) -> i32 {
+    match res {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            println!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
+}
+
+/// The current working directory used for project/local scope resolution
+/// (a failure to read it — unusual — degrades to `.`, matching a bare relative
+/// join).
+fn scope_cwd() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Print a marketplace command's result (Ok → stdout/SUCCESS, Err →
+/// stderr/RUNTIME_ERROR).
+fn market_result(res: Result<String, String>) -> i32 {
+    match res {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
+}
+
+/// `plugin enable <plugin>` — toggle the on-disk `enabledPlugins` allowlist.
+/// Prints the `✔`/`✘` line and maps success/failure to the exit code.
+fn run_enable(args: &EnableArgs) -> i32 {
+    let home = crate::run::lingxi_home_dir();
+    let cwd = scope_cwd();
+    match crate::commands::plugin_settings::run_enable(&args.plugin, args.scope.as_deref(), &home, &cwd)
+    {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
+}
+
+/// `plugin disable [plugin] [--all]` — toggle the on-disk `enabledPlugins`
+/// allowlist off.
+fn run_disable(args: &DisableArgs) -> i32 {
+    let home = crate::run::lingxi_home_dir();
+    let cwd = scope_cwd();
+    match crate::commands::plugin_settings::run_disable(
+        args.plugin.as_deref(),
+        args.scope.as_deref(),
+        args.all,
+        &home,
+        &cwd,
+    ) {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
 }
 
 /// The user-tier plugins directory: `$LINGXI_CONFIG_DIR`/`~/.claude` + `plugins`.

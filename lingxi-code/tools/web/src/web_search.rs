@@ -152,7 +152,21 @@ fn hosted_web_search_enabled(
     match model_profile {
         Some("anthropic") => true,
         Some(_) => false,
-        None => web_search_is_enabled(fallback_provider, model),
+        // No explicit profile: hosted (Anthropic server-side) web search only
+        // exists for CLAUDE models. Gate the fallback on the LIVE model id being
+        // a Claude model so a non-Claude model with `model_profile == None`
+        // — a resumed cross-provider session (resume clears the profile) or the
+        // refusal-fallback swap (`session.model_profile = None`) — does NOT get
+        // the hosted framing/call-path. Without this, `fallback_provider`
+        // (inferred from the BOOT request base_url, ~always `api.anthropic.com`
+        // ⇒ FirstParty) wrongly reports hosted for e.g. a resumed deepseek turn,
+        // which then mis-frames WebSearch and attempts the hosted path against a
+        // non-Anthropic endpoint. claude-code only runs Claude, so its `None`
+        // path always saw a Claude model — byte-identical there.
+        None => {
+            model.to_ascii_lowercase().contains("claude")
+                && web_search_is_enabled(fallback_provider, model)
+        }
     }
 }
 
@@ -1014,7 +1028,9 @@ impl Tool for WebSearchTool {
         if !hosted_web_search_enabled(
             opts.model_profile.as_deref(),
             infer_api_provider(&self.ctx.provider.base_url),
-            &self.ctx.default_model,
+            // LIVE session model (falls back to the boot default only when the
+            // caller didn't thread one) — see `hosted_web_search_enabled`.
+            opts.model.as_deref().unwrap_or(&self.ctx.default_model),
         ) {
             return "Search the web and return result blocks (title + URL + snippet) as \
                     markdown links. Use this whenever you need up-to-date or real-time \
@@ -1055,7 +1071,15 @@ impl Tool for WebSearchTool {
         if !hosted_web_search_enabled(
             ctx.options.model_profile.as_deref(),
             infer_api_provider(&self.ctx.provider.base_url),
-            &self.ctx.default_model,
+            // LIVE main-loop model driving this call — see
+            // `hosted_web_search_enabled` (not the boot `ctx.default_model`).
+            // Falls back to the boot default only when the caller didn't populate
+            // one (library/unit callers with a default `ToolUseContext`).
+            if ctx.options.main_loop_model.is_empty() {
+                self.ctx.default_model.as_str()
+            } else {
+                ctx.options.main_loop_model.as_str()
+            },
         ) {
             return self.run_client_side(&parsed_input).await;
         }
@@ -1529,6 +1553,43 @@ mod tests {
     }
 
     #[test]
+    fn hosted_gate_none_profile_requires_a_claude_live_model() {
+        // Explicit anthropic profile → hosted regardless of model.
+        assert!(hosted_web_search_enabled(
+            Some("anthropic"),
+            ApiProvider::FirstParty,
+            "claude-opus-4-8"
+        ));
+        // Any other explicit profile → client-side.
+        assert!(!hosted_web_search_enabled(
+            Some("deepseek"),
+            ApiProvider::FirstParty,
+            "deepseek-v4-pro"
+        ));
+        // No profile + Claude live model on a hosted provider → hosted
+        // (claude-code parity: its `None` path always had a Claude model).
+        assert!(hosted_web_search_enabled(
+            None,
+            ApiProvider::FirstParty,
+            "claude-sonnet-5"
+        ));
+        // No profile + NON-Claude live model → client-side, EVEN THOUGH the
+        // fallback provider is FirstParty (the boot base_url). This is the
+        // regression fix: a resumed cross-provider (profile=None) deepseek turn
+        // must NOT get the hosted framing/path.
+        assert!(!hosted_web_search_enabled(
+            None,
+            ApiProvider::FirstParty,
+            "deepseek-v4-pro"
+        ));
+        assert!(!hosted_web_search_enabled(
+            None,
+            ApiProvider::FirstParty,
+            "openrouter/auto"
+        ));
+    }
+
+    #[test]
     fn infer_api_provider_from_base_url() {
         assert_eq!(
             infer_api_provider("https://api.anthropic.com"),
@@ -1954,6 +2015,16 @@ mod tests {
     }
 
     /// Build a ctx wired to `http`, returning the ctx + sink for event asserts.
+    /// A call-context representing an ANTHROPIC session, for the hosted
+    /// web-search path tests. `fresh_ctx`'s placeholder `main_loop_model`
+    /// ("test") now routes CLIENT-side under the live-model gate, so hosted
+    /// tests pin the profile explicitly (`Some("anthropic")` ⇒ hosted).
+    fn anthropic_ctx() -> tool_api::ToolUseContext {
+        let mut c = fresh_ctx();
+        c.options.model_profile = Some("anthropic".to_string());
+        c
+    }
+
     fn make_streaming_ctx(http: Arc<StreamingMockHttp>) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
@@ -2083,7 +2154,7 @@ mod tests {
         let tool = WebSearchTool::new(ctx);
         let (tx, _rx) = progress_channel();
         let res = tool
-            .call(json!({ "query": "rust async" }), fresh_ctx(), tx)
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
             .await
             .expect("ok");
 
@@ -2160,7 +2231,7 @@ mod tests {
         let tool = WebSearchTool::new(ctx);
         let (tx, mut rx) = progress_channel();
         let _res = tool
-            .call(json!({ "query": "rust async" }), fresh_ctx(), tx)
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
             .await
             .expect("ok");
         let progress = drain_progress(&mut rx);
@@ -2200,7 +2271,7 @@ mod tests {
         let tool = WebSearchTool::new(ctx);
         let (tx, _rx) = progress_channel();
         let res = tool
-            .call(json!({ "query": "rust async" }), fresh_ctx(), tx)
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
             .await
             .expect("fallback must succeed");
         let arr = res.data["results"].as_array().expect("results array");
@@ -2222,7 +2293,7 @@ mod tests {
         let tool = WebSearchTool::new(ctx);
         let (tx, _rx) = progress_channel();
         let _ = tool
-            .call(json!({ "query": "foo" }), fresh_ctx(), tx)
+            .call(json!({ "query": "foo" }), anthropic_ctx(), tx)
             .await
             .expect("ok");
         let reqs = http.received_requests();
@@ -2257,7 +2328,7 @@ mod tests {
         let tool = WebSearchTool::new(ctx);
         let (tx, _rx) = progress_channel();
         let err = tool
-            .call(json!({ "query": "rust async" }), fresh_ctx(), tx)
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
             .await
             .expect_err("500 must be Err");
         assert!(matches!(err, ToolError::Transport(_)));
@@ -2324,7 +2395,7 @@ mod tests {
         let tool = WebSearchTool::new(ctx);
         let (tx, _rx) = progress_channel();
         let err = tool
-            .call(json!({ "query": "rust async" }), fresh_ctx(), tx)
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
             .await
             .expect_err("mid-stream error must surface");
         assert!(matches!(err, ToolError::Transport(_)));
@@ -2410,7 +2481,7 @@ mod tests {
         let tool = WebSearchTool::new(ctx);
         let (tx, _rx) = progress_channel();
         let res = tool
-            .call(json!({ "query": "rust async" }), fresh_ctx(), tx)
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
             .await
             .expect("ok");
         // Model-facing text lives on `ToolCallResult.model_content` (the dispatch

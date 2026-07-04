@@ -2195,15 +2195,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
 
         // Synthesize a minimal ToolUseContext — needed by the validate_input
         // gate below and reused by the eventual `tool_handle.call()`.
-        let (messages, model_profile) = {
+        let (messages, model, model_profile) = {
             let s = orch.session.lock().await;
-            (s.history.clone(), s.model_profile.clone())
+            (s.history.clone(), s.model.clone(), s.model_profile.clone())
         };
         let ctx = ToolUseContext {
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
-                main_loop_model: orch.config.model.clone(),
+                // The LIVE session model (updated by `/model` switches / resume),
+                // not `config.model` (frozen at launch). Tools gate model-facing
+                // behavior on this — e.g. WebSearch's hosted-vs-client-side split
+                // needs the current model, so a switched/resumed non-Claude model
+                // resolves correctly.
+                main_loop_model: model,
                 model_profile,
                 max_budget_nano_usd: None,
                 mcp_clients: Vec::new(),

@@ -26,6 +26,7 @@ use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use tokio_util::sync::CancellationToken;
+use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
@@ -41,6 +42,7 @@ use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
 use crate::renderable::Renderable;
 use crate::session::SessionInfo;
+use crate::spinner;
 use crate::transcript::Transcript;
 
 /// What one routed key press or paste means to the owning event loop.
@@ -106,6 +108,17 @@ pub struct ChatWidget {
     /// Human label for what the turn is currently doing (e.g. `Running Bash`),
     /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
     activity: Option<String>,
+    /// The per-turn sampled spinner verb (claude-code `useState(() =>
+    /// sample(getSpinnerVerbs()))`): drawn once from [`crate::spinner::SPINNER_VERBS`]
+    /// on `TurnEvent::TurnStarted` and held for the turn's lifetime — the
+    /// spinner's lowest-precedence default when there is no tool activity or
+    /// active-todo verb.
+    spinner_verb: &'static str,
+    /// The session's currently in-progress todo (from the latest `TodoWrite`
+    /// tool call), threaded to the spinner so it shows the task's `activeForm`
+    /// instead of a generic tool-activity label (claude-code `Spinner.tsx:162`).
+    /// `None` outside a turn or once no todo is in progress.
+    current_todo: Option<CurrentTodo>,
     /// Permission requests waiting for the currently open prompt to resolve
     /// (prompts are serialized: one owns the keyboard at a time).
     pending_permissions: VecDeque<PermissionExchange>,
@@ -186,6 +199,8 @@ impl ChatWidget {
             current_turn: None,
             turn_started_at: None,
             activity: None,
+            spinner_verb: spinner::sample_verb(),
+            current_todo: None,
             pending_permissions: VecDeque::new(),
             start: std::time::Instant::now(),
             export_dir: crate::export::default_export_dir(),
@@ -295,6 +310,10 @@ impl ChatWidget {
             TurnEvent::TurnStarted => {
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
+                // Draw a fresh random verb for this turn (claude-code
+                // `useState(() => sample(getSpinnerVerbs()))` — one verb per
+                // turn, no rotation within it).
+                self.spinner_verb = spinner::sample_verb();
                 // A straggler active cell (missed TurnEnded) is finalized (or
                 // discarded if it's the empty placeholder) before the new
                 // streaming reply opens.
@@ -347,6 +366,18 @@ impl ChatWidget {
             }
             TurnEvent::ToolUseStart { id, tool, input } => {
                 self.activity = Some(activity_label(&tool));
+                // (Gap B) A `TodoWrite` replaces the whole session todo list
+                // each call, so its input is the authoritative source for the
+                // spinner's "current todo" (claude-code derives `currentTodo`
+                // from the live `tasksV2` list — `Spinner.tsx:162`). Refresh
+                // on the START event so the verb tracks the new in-progress
+                // task as soon as it's written, not only after the (later)
+                // tool result returns. Assigned unconditionally (including
+                // `None`) so a `TodoWrite` with no active task clears a
+                // stale one.
+                if tool == "TodoWrite" {
+                    self.current_todo = current_todo_from_todowrite_input(&input);
+                }
                 // Commit any streamed assistant text ABOVE the tool call, then
                 // render the tool-use header (`● {tool}` + input) into the
                 // transcript — claude-code parity: each tool invocation shows
@@ -385,6 +416,10 @@ impl ChatWidget {
                 self.current_turn = None;
                 self.turn_started_at = None;
                 self.activity = None;
+                // (Gap B) `current_todo` is per-turn — clear it so the next
+                // turn's spinner doesn't keep showing the previous turn's
+                // `activeForm` until a fresh `TodoWrite` arrives.
+                self.current_todo = None;
                 // Re-arm the statusline pump (claude-code executes the command
                 // on turn boundaries; the pump is debounced single-flight).
                 self.with_status_line(|s| s.dirty = true);
@@ -1245,6 +1280,7 @@ impl ChatWidget {
                 }
                 self.turn_started_at = None;
                 self.activity = None;
+                self.current_todo = None;
                 // Commit any streamed partial reply, then push the interrupt
                 // row so scrollback shows `[Request interrupted by user]` (the
                 // dim `Interrupted · …` line) — claude-code parity; the old
@@ -1373,14 +1409,25 @@ impl ChatWidget {
         }
     }
 
-    /// The current streaming-spinner text: an animated Claude-accent glyph, the
-    /// live activity (`Running Bash` from `ToolUseStart`, else `Working`), and an
-    /// elapsed-seconds counter with an interrupt hint — claude-code status parity.
+    /// The current streaming-spinner text: an animated Claude-accent glyph, a
+    /// verb, and an elapsed-seconds counter with an interrupt hint —
+    /// claude-code status parity.
+    ///
+    /// Verb precedence (mirrors the deleted iocraft `SpinnerWithVerb` /
+    /// claude-code `Spinner.tsx:169`'s `overrideMessage ?? currentTodo?.
+    /// activeForm ?? currentTodo?.subject ?? randomVerb`, adapted to this
+    /// backend's generic tool-activity label): the active `TodoWrite` todo's
+    /// `activeForm`/`subject` (Gap B, [`spinner::todo_leader_verb`]) wins,
+    /// then the in-flight tool's activity label (`Running Bash`, set from
+    /// `ToolUseStart`), then the verb sampled once for this turn from
+    /// [`spinner::SPINNER_VERBS`] (Gap A).
     fn spinner_text(&self) -> String {
         const FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
         let idx =
             usize::try_from(self.start.elapsed().as_millis() / 120).unwrap_or(0) % FRAMES.len();
-        let verb = self.activity.as_deref().unwrap_or("Working");
+        let verb = spinner::todo_leader_verb(self.current_todo.as_ref())
+            .or_else(|| self.activity.clone())
+            .unwrap_or_else(|| self.spinner_verb.to_string());
         let secs = self.turn_started_at.map_or(0, |t| t.elapsed().as_secs());
         format!("{} {verb}… ({secs}s · esc to interrupt)", FRAMES[idx])
     }
@@ -1404,6 +1451,40 @@ fn activity_label(tool: &str) -> String {
         "Task" => "Delegating".to_string(),
         other => format!("Running {other}"),
     }
+}
+
+/// (Gap B) Resolve the spinner's "current todo" from a `TodoWrite` tool
+/// input. A `TodoWrite` call replaces the entire session todo list; the
+/// spinner shows the first todo that is neither `pending` nor `completed`
+/// (claude-code `Spinner.tsx:162` — `tasksV2?.find(t => t.status !==
+/// 'pending' && t.status !== 'completed')`). Returns `None` when the input is
+/// malformed, the `todos` array is missing/empty, or every todo is
+/// pending/completed.
+///
+/// The TodoWrite wire shape is `{ todos: [{ content, status, activeForm }] }`;
+/// `content` is the spinner's `subject` fallback and `activeForm` (camelCase)
+/// its preferred verb.
+fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<CurrentTodo> {
+    let todos = input.get("todos")?.as_array()?;
+    let item = todos.iter().find(|t| {
+        let status = t.get("status").and_then(serde_json::Value::as_str);
+        // Anything not pending/completed is "active" (in_progress, or any
+        // other forward state). A missing status is treated as active too,
+        // matching the `!==` semantics of the TS predicate.
+        !matches!(status, Some("pending" | "completed"))
+    })?;
+    let subject = item
+        .get("content")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    let active_form = item
+        .get("activeForm")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some(CurrentTodo {
+        subject,
+        active_form,
+    })
 }
 
 #[cfg(test)]
@@ -2268,12 +2349,23 @@ mod tests {
         let mut widget = widget();
         submit_command(&mut widget, "go");
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        // Default activity: an animation frame glyph, "Working", elapsed
-        // seconds, and the esc-to-interrupt hint (claude-code status parity).
+        // Default verb (Gap A): a per-turn random sample from the 187-entry
+        // claude-code pool, NOT the literal "Working" — plus the animation
+        // frame glyph, elapsed seconds, and the esc-to-interrupt hint
+        // (claude-code status parity).
         let text = widget.spinner_text();
         let frame = text.chars().next().expect("spinner frame glyph");
         assert!("·✢✳✶✻✽".contains(frame), "unknown frame: {text}");
-        assert!(text.contains("Working… ("), "verb + elapsed open: {text}");
+        let verb = text
+            .split("… (")
+            .next()
+            .and_then(|prefix| prefix.split_once(' '))
+            .map(|(_, verb)| verb)
+            .unwrap_or_default();
+        assert!(
+            spinner::SPINNER_VERBS.contains(&verb),
+            "expected a sampled pool verb, got {verb:?} in {text:?}"
+        );
         assert!(text.ends_with("s · esc to interrupt)"), "hint: {text}");
         // ToolUseStart swaps the verb for the activity label.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
@@ -2282,6 +2374,85 @@ mod tests {
             input: serde_json::json!({}),
         });
         assert!(widget.spinner_text().contains("Editing… ("));
+    }
+
+    #[test]
+    fn todowrite_in_progress_task_drives_spinner_verb_via_active_form() {
+        // Gap B: a `TodoWrite` marking a task `in_progress` should show that
+        // task's `activeForm` instead of the generic "Running TodoWrite"
+        // tool-activity label or the per-turn random pool verb.
+        let mut widget = widget();
+        submit_command(&mut widget, "go");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "TodoWrite".to_string(),
+            input: serde_json::json!({
+                "todos": [
+                    {
+                        "content": "Build the project",
+                        "status": "in_progress",
+                        "activeForm": "Compiling the project",
+                    },
+                    {
+                        "content": "Write docs",
+                        "status": "pending",
+                        "activeForm": "Writing docs",
+                    },
+                ],
+            }),
+        });
+        assert!(
+            widget.spinner_text().contains("Compiling the project… ("),
+            "expected the in-progress todo's activeForm: {}",
+            widget.spinner_text()
+        );
+        // A later, unrelated tool call does not override the active todo's
+        // verb (claude-code's `currentTodo` outranks generic tool activity).
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t2"),
+            tool: "Bash".to_string(),
+            input: serde_json::json!({}),
+        });
+        assert!(widget.spinner_text().contains("Compiling the project… ("));
+        // `TurnEnded` clears the per-turn todo so a later turn with no
+        // `TodoWrite` doesn't keep showing the stale `activeForm`.
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("t2"),
+            tool: "Bash".to_string(),
+            result: serde_json::json!({}),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        assert!(!widget.spinner_text().contains("Compiling the project"));
+    }
+
+    #[test]
+    fn current_todo_from_todowrite_input_finds_first_active_task() {
+        // No `todos` array → None.
+        assert!(current_todo_from_todowrite_input(&serde_json::json!({})).is_none());
+        // Empty `todos` → None.
+        assert!(current_todo_from_todowrite_input(&serde_json::json!({ "todos": [] })).is_none());
+        // All pending/completed → None (no active task).
+        let all_done = serde_json::json!({
+            "todos": [
+                { "content": "a", "status": "completed" },
+                { "content": "b", "status": "pending" },
+            ]
+        });
+        assert!(current_todo_from_todowrite_input(&all_done).is_none());
+        // The first non-pending/non-completed task wins, using its
+        // `activeForm`/`content` verbatim.
+        let active = serde_json::json!({
+            "todos": [
+                { "content": "a", "status": "completed" },
+                { "content": "Run tests", "status": "in_progress", "activeForm": "Running tests" },
+                { "content": "c", "status": "pending" },
+            ]
+        });
+        let todo = current_todo_from_todowrite_input(&active).expect("an active todo");
+        assert_eq!(todo.subject, "Run tests");
+        assert_eq!(todo.active_form.as_deref(), Some("Running tests"));
     }
 
     #[test]

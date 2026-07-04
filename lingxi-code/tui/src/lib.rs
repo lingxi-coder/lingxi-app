@@ -38,6 +38,7 @@ pub mod startup_bypass;
 pub mod raw_screen;
 pub mod renderable;
 pub mod session;
+pub mod spinner;
 pub mod status_line;
 pub(crate) mod style;
 pub mod style_adapter;

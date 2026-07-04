@@ -224,15 +224,53 @@ pub(crate) async fn run_ratatui(
         None => (tui_build.bridge_rx, tui_build.permission_rx),
     };
     let turn_tx = tui_build.turn_tx;
+    // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
+    let web_turn_tx = turn_tx.clone();
     // (B4 Task 5 parity) Thread the composition root's shared subscription
     // slot so the widget's rate-limit composer reads the live snapshot at
     // compose time — same wiring as the iocraft `with_subscription` path.
     let subscription = tui_build.runtime.subscription.clone();
+    // (/web async effects) Shared HTTP transport + credential store for the
+    // `/web` test-search + secret-save effects, wired below.
+    let web_key_store = tui_build.runtime.provider_key_store.clone();
+    let web_http = tui_build.runtime.http.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
     let switch_handle = handle.clone();
+    let web_handle = handle.clone();
     let summary_orch = orchestrator.clone();
+    // (/web async effects) Preload the shared `/web` config snapshot from the
+    // real on-disk settings + credential-store presence, mirroring the
+    // deleted iocraft `AppState::web_config_snapshot` startup seed. Shared
+    // (`Arc<Mutex<_>>`) between `ChatWidget::cmd_web` (sync read to open the
+    // picker) and `run_web_action` (async write-back after a save/test).
+    let web_snapshot = {
+        let cfg = tui::web::persist::web_settings_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .map(|v| tool_web::web_search_config::WebSearchConfig::from_settings_json(&v))
+            .unwrap_or_default();
+        let tavily = web_key_store
+            .get_provider_key("web:tavily")
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let brave = web_key_store
+            .get_provider_key("web:brave")
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        std::sync::Arc::new(std::sync::Mutex::new(tui::web::picker::WebConfigSnapshot {
+            active: cfg.provider,
+            tavily_key: tavily,
+            brave_key: brave,
+            searxng_url: cfg.searxng_url,
+            last_test: None,
+        }))
+    };
     let current_model = session
         .models
         .iter()
@@ -265,6 +303,22 @@ pub(crate) async fn run_ratatui(
         let orch = switch_orch.clone();
         switch_handle.spawn(async move {
             let _ = orch.switch_model(&model, profile.as_deref()).await;
+        });
+    };
+    // (/web async effects) The picker/config views return `WebAction`s
+    // synchronously from the blocking ratatui loop; the actual persistence
+    // (credential-store write, settings-file merge) and the test search are
+    // async, so each action is spawned back onto the captured runtime handle
+    // — same shape as `on_submit`/`on_switch_model` above. Results land in the
+    // transcript via `TurnEvent::SystemNotice` on the shared `turn_tx`.
+    let web_snapshot_cb = web_snapshot.clone();
+    let on_web_action = move |action: tui::bottom_pane::WebAction| {
+        let key_store = web_key_store.clone();
+        let http = web_http.clone();
+        let tx = web_turn_tx.clone();
+        let snapshot = web_snapshot_cb.clone();
+        web_handle.spawn(async move {
+            run_web_action(action, key_store, http, tx, snapshot).await;
         });
     };
     // (statusline) Shared slot for the custom `statusLine` command, built from
@@ -322,11 +376,10 @@ pub(crate) async fn run_ratatui(
             permission_rx,
             Some(subscription),
             Some(status_line),
+            Some(web_snapshot),
             on_submit,
             on_switch_model,
-            // Task 4 replaces this with the real async /web effect closure
-            // (persist key/settings, test search) reporting via SystemNotice.
-            |_web_action| {},
+            on_web_action,
         )
     })
     .await;
@@ -349,6 +402,153 @@ pub(crate) async fn run_ratatui(
         Err(e) => {
             eprintln!("lingxi-cli: tui-rata task join failed: {e}");
             exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
+/// Run one `/web` [`tui::bottom_pane::WebAction`] to completion: persist a
+/// saved secret/settings change (credential store + `~/.lingxi/settings.json`
+/// merge) or run the real test search, then report the outcome to the
+/// transcript via `TurnEvent::SystemNotice`. Ported faithfully from the
+/// deleted iocraft `tui` crate's `pump_save_web_secret` / `pump_save_web_settings`
+/// / `pump_test_web_search` (git ref `f4ddad16f`, `tui/src/root.rs`), adapted
+/// from the old `Arc<Mutex<AppState>>` pump shape to the new effect-closure
+/// shape: `snapshot` is the composition root's shared `/web` config snapshot
+/// (read by the sync `ChatWidget::cmd_web` to seed the picker), updated here
+/// after a successful save so the NEXT `/web` open reflects it.
+async fn run_web_action(
+    action: tui::bottom_pane::WebAction,
+    key_store: Arc<secret::CredentialManager>,
+    http: Arc<dyn traits::HttpTransport>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+    snapshot: std::sync::Arc<std::sync::Mutex<tui::web::picker::WebConfigSnapshot>>,
+) {
+    use tool_web::web_search_config::{WebSearchConfig, WebSearchProvider};
+    use tui::bottom_pane::WebAction;
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    let label = tui::web::picker::provider_label;
+
+    match action {
+        WebAction::SaveSecret { provider, secret } => {
+            let Some(id) = tui::web::persist::web_credential_id(provider) else {
+                return;
+            };
+            match key_store.set_provider_key(id, &secret).await {
+                Ok(()) => {
+                    let searxng_url = {
+                        let mut s = snapshot.lock().unwrap();
+                        match provider {
+                            WebSearchProvider::Tavily => s.tavily_key = true,
+                            WebSearchProvider::Brave => s.brave_key = true,
+                            _ => {}
+                        }
+                        s.active = provider;
+                        s.searxng_url.clone()
+                    };
+                    let cfg = WebSearchConfig {
+                        provider,
+                        searxng_url,
+                    };
+                    if let Some(p) = tui::web::persist::web_settings_path() {
+                        let _ = tui::web::persist::save_web_settings_to(&p, &cfg);
+                    }
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("✓ Saved {} API key.", label(provider)),
+                        is_error: false,
+                    });
+                }
+                Err(e) => {
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("✗ Failed to save key: {e}"),
+                        is_error: true,
+                    });
+                }
+            }
+        }
+        WebAction::SaveSettings {
+            provider,
+            searxng_url,
+        } => {
+            let cfg = WebSearchConfig {
+                provider,
+                searxng_url: searxng_url.clone(),
+            };
+            let ok = tui::web::persist::web_settings_path()
+                .map(|p| tui::web::persist::save_web_settings_to(&p, &cfg).is_ok())
+                .unwrap_or(false);
+            if ok {
+                let mut s = snapshot.lock().unwrap();
+                s.active = provider;
+                s.searxng_url = searxng_url;
+                drop(s);
+                let _ = turn_tx.send(TurnEvent::SystemNotice {
+                    body: format!("✓ Web search set to {}.", label(provider)),
+                    is_error: false,
+                });
+            } else {
+                let _ = turn_tx.send(TurnEvent::SystemNotice {
+                    body: "✗ Failed to save web settings.".to_string(),
+                    is_error: true,
+                });
+            }
+        }
+        WebAction::TestSearch {
+            provider,
+            typed_key,
+        } => {
+            use tool_web::web_search_client::{
+                resolve_client_search_provider_with_credentials, run_client_web_search,
+                EnvSearchConfig, ResolvedWebCredentials,
+            };
+
+            let searxng_url = snapshot.lock().unwrap().searxng_url.clone();
+            let cfg = WebSearchConfig {
+                provider,
+                searxng_url,
+            };
+            let mut creds = ResolvedWebCredentials::empty();
+            match (provider, typed_key) {
+                (WebSearchProvider::Tavily, Some(k)) => creds.tavily_key = Some(k),
+                (WebSearchProvider::Brave, Some(k)) => creds.brave_key = Some(k),
+                _ => {
+                    if let Ok(Some(secret)) = key_store.get_provider_key("web:tavily").await {
+                        creds.tavily_key = Some(secret.expose_secret().clone());
+                    }
+                    if let Ok(Some(secret)) = key_store.get_provider_key("web:brave").await {
+                        creds.brave_key = Some(secret.expose_secret().clone());
+                    }
+                }
+            }
+            let env = EnvSearchConfig::from_env();
+            let result = match resolve_client_search_provider_with_credentials(
+                &cfg, &creds, &env,
+            ) {
+                Ok(resolved) => run_client_web_search(&http, &resolved, "current weather Beijing", &[], &[], 3)
+                    .await
+                    .map(|hits| (resolved, hits)),
+                Err(e) => Err(e),
+            };
+            let (body, is_error) = match result {
+                Ok((resolved, hits)) => {
+                    let count = hits.len();
+                    let top = hits
+                        .first()
+                        .map(|h| format!(" · {}", h.title))
+                        .unwrap_or_default();
+                    (format!("✓ {}: {count} results{top}", resolved.label()), false)
+                }
+                Err(e) => (format!("✗ {} test failed: {e}", label(provider)), true),
+            };
+            {
+                let mut s = snapshot.lock().unwrap();
+                s.last_test = Some(tui::web::picker::WebTestSummary {
+                    provider,
+                    ok: !is_error,
+                    message: body.clone(),
+                });
+            }
+            let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
         }
     }
 }

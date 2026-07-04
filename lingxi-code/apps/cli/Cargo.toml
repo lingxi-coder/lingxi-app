@@ -53,6 +53,12 @@ msgqueue = { path = "../../msgqueue" }
 # stream-json P2b: contextWindow/maxOutputTokens per model from the llm-client catalog.
 llm-client = { path = "../../llm-client" }
 dirs = "5"
+# `/web` async effect closure (`mode.rs::run_web_action`): persists the
+# picker/config save via `tui::web::persist`'s `WebSearchConfig`, and runs the
+# real test-search via `tool_web::web_search_client`. Naming the leaf crate
+# here (rather than only reaching it transitively through `tui`) matches the
+# `secret`/`command-core` precedent above.
+tool-web = { path = "../../tools/web" }
 tui = { path = "../../tui" }
 tui-core = { path = "../../tui-core" }
 session = { path = "../../session" }

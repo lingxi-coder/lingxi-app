@@ -257,6 +257,12 @@ impl<'cb> RataApp<'cb> {
 /// snapshot at compose time. Pass `None` when the embedder has no slot — the
 /// copy degrades to the unknown-subscription default (TS-conservative).
 ///
+/// `web_snapshot` is the composition root's shared `/web` config snapshot
+/// slot (preloaded from real config + credential-store presence at startup);
+/// `/web` reads a clone to seed the picker and the `on_web_action` effect
+/// closure updates it after a save/test. Pass `None` when the embedder has no
+/// slot — `/web` opens with the default (unconfigured) snapshot.
+///
 /// # Errors
 /// Propagates the first terminal IO error (after restoring the terminal).
 pub fn run_app(
@@ -266,6 +272,7 @@ pub fn run_app(
     permission_rx: Receiver<PermissionExchange>,
     subscription: Option<traits::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
+    web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
@@ -300,6 +307,9 @@ pub fn run_app(
     }
     if let Some(slot) = status_line {
         app.chat_widget.set_status_line(slot);
+    }
+    if let Some(slot) = web_snapshot {
+        app.chat_widget.set_web_snapshot(slot);
     }
     app.run(&mut terminal)
 }

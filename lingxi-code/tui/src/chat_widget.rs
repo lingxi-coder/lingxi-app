@@ -139,6 +139,12 @@ pub struct ChatWidget {
     /// them via [`Self::take_terminal_sequences`] and writes the bytes to the
     /// terminal that owns the controlling tty (claude-code `BEo`).
     pending_terminal_sequences: Vec<String>,
+    /// Composition-root-shared `/web` config snapshot slot (`None` until the
+    /// embedder wires one via [`Self::set_web_snapshot`]). [`Self::cmd_web`]
+    /// reads a clone to seed the picker; the async `on_web_action` effect
+    /// closure (CLI `run_ratatui`) updates it in place after a save/test so
+    /// the NEXT `/web` open reflects the latest persisted state.
+    web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
 }
 
 impl ChatWidget {
@@ -166,6 +172,7 @@ impl ChatWidget {
             subscription: None,
             status_line: None,
             pending_terminal_sequences: Vec::new(),
+            web_snapshot: None,
         }
     }
 
@@ -501,6 +508,17 @@ impl ChatWidget {
             s.dirty = true;
         }
         self.status_line = Some(slot);
+    }
+
+    /// Wire the composition root's shared `/web` config snapshot slot, preloaded
+    /// from real config + credential-store presence at startup. [`Self::cmd_web`]
+    /// reads a clone of it to seed the picker; the async `on_web_action` effect
+    /// closure keeps it current across saves/tests.
+    pub fn set_web_snapshot(
+        &mut self,
+        slot: std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>,
+    ) {
+        self.web_snapshot = Some(slot);
     }
 
     /// The current model's `(wire_id, display)` pair (falls back to
@@ -918,6 +936,22 @@ impl ChatWidget {
     pub(crate) fn cmd_theme(&mut self, _args: &str) -> ChatOutcome {
         self.bottom_pane
             .show_view(Box::new(ThemePickerView::new(self.theme_setting)));
+        ChatOutcome::Continue
+    }
+
+    /// `/web`: open the WebSearch provider picker, seeded from the shared
+    /// snapshot (real config + credential-store presence, preloaded at
+    /// startup and kept current by the async `on_web_action` effect closure).
+    /// Falls back to the default (unconfigured) snapshot when no slot is
+    /// wired (headless / tests).
+    #[allow(dead_code)]
+    pub(crate) fn cmd_web(&mut self, _args: &str) -> ChatOutcome {
+        let snapshot = self
+            .web_snapshot
+            .as_ref()
+            .map(|m| m.lock().unwrap().clone())
+            .unwrap_or_default();
+        self.bottom_pane.show_web_picker(snapshot);
         ChatOutcome::Continue
     }
 

@@ -5,4 +5,5 @@
 //! `f4ddad16f`). These are backend-neutral `KeyCode -> Outcome` reducers
 //! with no ratatui rendering yet; the ratatui views land in a later task.
 pub mod config;
+pub mod persist;
 pub mod picker;

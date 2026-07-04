@@ -45,6 +45,7 @@ impl ModelPickerView {
     /// (the row with `is_current`), or the first row when none is marked.
     #[must_use]
     pub fn new(rows: Vec<ModelRow>) -> Self {
+        let rows = group_by_provider(rows);
         let selected = rows.iter().position(|r| r.is_current).unwrap_or(0);
         let offset = selected.saturating_sub(VIEWPORT - 1);
         Self {
@@ -52,6 +53,23 @@ impl ModelPickerView {
             selected,
             offset,
         }
+    }
+
+    /// Number of dim provider header rows the render emits — one per distinct
+    /// NON-EMPTY provider group (rows with an empty provider label render no
+    /// header, matching [`Renderable::render`]).
+    fn group_count(&self) -> usize {
+        let mut n = 0usize;
+        let mut prev: Option<&str> = None;
+        for r in &self.rows {
+            if prev != Some(r.provider_label.as_str()) {
+                prev = Some(r.provider_label.as_str());
+                if !r.provider_label.is_empty() {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// Whether the picker has any rows to choose from.
@@ -76,12 +94,62 @@ impl ModelPickerView {
     }
 
     fn max_width(&self) -> usize {
-        self.rows
+        if self.rows.is_empty() {
+            return EMPTY_MESSAGE.chars().count();
+        }
+        // The widest of a model row (` › ● {display}` = display + 4 gutter cols)
+        // and a provider header (its label). Both must fit inside the modal.
+        let widest_model = self
+            .rows
             .iter()
-            .map(|r| r.display.chars().count() + r.provider_label.chars().count() + 3)
+            .map(|r| r.display.chars().count() + 4)
             .max()
-            .unwrap_or(EMPTY_MESSAGE.chars().count())
+            .unwrap_or(0);
+        let widest_header = self
+            .rows
+            .iter()
+            .map(|r| r.provider_label.chars().count())
+            .max()
+            .unwrap_or(0);
+        widest_model.max(widest_header)
     }
+}
+
+/// Stable-group rows under their provider so same-provider models render
+/// contiguously beneath one dim provider header. Provider order is
+/// first-appearance (the catalog's routable-first ordering); within a provider
+/// the incoming order is preserved (stable sort).
+fn group_by_provider(mut rows: Vec<ModelRow>) -> Vec<ModelRow> {
+    let mut order: Vec<String> = Vec::new();
+    for r in &rows {
+        if !order.iter().any(|l| l == &r.provider_label) {
+            order.push(r.provider_label.clone());
+        }
+    }
+    rows.sort_by_key(|r| {
+        order
+            .iter()
+            .position(|l| l == &r.provider_label)
+            .unwrap_or(usize::MAX)
+    });
+    // De-duplicate models that appear more than once under the same provider
+    // header (a live/routable listing plus its catalog twin surface the same
+    // `(provider, display)` — e.g. GLM-5.1 twice). Keep the first, but let a
+    // later `is_current` row win so the active model stays highlighted.
+    let mut out: Vec<ModelRow> = Vec::with_capacity(rows.len());
+    for r in rows {
+        if let Some(existing) = out
+            .iter_mut()
+            .find(|e| e.provider_label == r.provider_label && e.display == r.display)
+        {
+            if r.is_current && !existing.is_current {
+                *existing = r;
+            }
+        } else {
+            out.push(r);
+        }
+    }
+    out
 }
 
 impl Renderable for ModelPickerView {
@@ -92,7 +160,9 @@ impl Renderable for ModelPickerView {
             .min(area.width.saturating_sub(4))
             .max(24);
         let visible = self.rows.len().min(VIEWPORT);
-        let height = u16::try_from(visible + 4)
+        // + group_count() for the dim provider header rows interleaved above
+        // each group.
+        let height = u16::try_from(visible + self.group_count() + 4)
             .unwrap_or(u16::MAX)
             .min(area.height);
         let rect = centered_rect(width, height, area);
@@ -103,26 +173,36 @@ impl Renderable for ModelPickerView {
         block.render(rect, buf);
 
         let end = (self.offset + VIEWPORT).min(self.rows.len());
-        let mut lines: Vec<Line> = Vec::with_capacity(visible + 2);
+        let mut lines: Vec<Line> = Vec::with_capacity(visible + self.group_count() + 2);
         if self.rows.is_empty() {
             lines.push(Line::from(EMPTY_MESSAGE));
         }
+        // Group the visible rows under a dim provider header: a header is
+        // emitted whenever the provider changes from the previous rendered row
+        // (including the first row of the window). The model rows below it show
+        // only the model name (the provider is the header now).
+        let mut prev_label: Option<&str> = None;
         for (i, row) in self.rows[self.offset..end].iter().enumerate() {
             let idx = self.offset + i;
+            if prev_label != Some(row.provider_label.as_str()) {
+                prev_label = Some(row.provider_label.as_str());
+                if !row.provider_label.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        row.provider_label.clone(),
+                        Style::default().add_modifier(Modifier::DIM),
+                    )));
+                }
+            }
             let marker = if row.is_current { "● " } else { "  " };
             let caret = if idx == self.selected { "› " } else { "  " };
-            let label = if row.provider_label.is_empty() {
-                row.display.clone()
-            } else {
-                format!("{} ({})", row.display, row.provider_label)
-            };
             let style = if idx == self.selected {
                 Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default()
             };
+            // Models are indented one column under their provider header.
             lines.push(Line::from(Span::styled(
-                format!("{caret}{marker}{label}"),
+                format!(" {caret}{marker}{}", row.display),
                 style,
             )));
         }
@@ -138,11 +218,11 @@ impl Renderable for ModelPickerView {
         Paragraph::new(lines).render(inner, buf);
     }
 
-    /// The bottom-viewport rows the picker claims: its visible rows + modal
-    /// chrome (locked layout value: 2 models → 6 rows at 80x24). Empty lists
-    /// keep the 4-row chrome, which fits the in-view empty message + hint.
+    /// The bottom-viewport rows the picker claims: its visible model rows + one
+    /// dim header per provider group + modal chrome. Empty lists keep the 4-row
+    /// chrome, which fits the in-view empty message + hint.
     fn desired_height(&self, _width: u16) -> u16 {
-        u16::try_from(self.rows.len()).unwrap_or(0).min(12) + 4
+        u16::try_from(self.rows.len().min(12) + self.group_count()).unwrap_or(0) + 4
     }
 }
 
@@ -225,6 +305,44 @@ mod tests {
             ViewOutcome::SwitchModel { ref request_model, ref profile }
                 if request_model == "claude-opus" && profile.as_deref() == Some("anthropic")
         ));
+    }
+
+    #[test]
+    fn groups_by_provider_and_dedups_within_a_group() {
+        // Two providers, one with a duplicate model (a live + catalog twin).
+        let rows = vec![
+            ModelRow {
+                display: "GLM-5.1".into(),
+                request_model: "glm-5.1".into(),
+                profile: Some("glm-coding".into()),
+                provider_label: "GLM (coding)".into(),
+                is_current: false,
+            },
+            ModelRow {
+                display: "GPT-5.5".into(),
+                request_model: "gpt-5.5".into(),
+                profile: Some("openai".into()),
+                provider_label: "OpenAI".into(),
+                is_current: true,
+            },
+            // Same (provider, display) as the first row — must be de-duped.
+            ModelRow {
+                display: "GLM-5.1".into(),
+                request_model: "glm-5.1".into(),
+                profile: Some("glm-coding".into()),
+                provider_label: "GLM (coding)".into(),
+                is_current: false,
+            },
+        ];
+        let p = ModelPickerView::new(rows);
+        // GLM-5.1 appears once; the two providers stay grouped (2 rows total).
+        assert_eq!(p.rows.len(), 2, "the duplicate GLM-5.1 is removed");
+        assert_eq!(p.group_count(), 2, "two provider headers");
+        // The current GPT-5.5 remains selectable + highlighted.
+        assert_eq!(p.rows[p.selected()].display, "GPT-5.5");
+        let text = render_text(&p, Rect::new(0, 0, 60, 12));
+        assert!(text.contains("GLM (coding)") && text.contains("OpenAI"), "{text}");
+        assert_eq!(text.matches("GLM-5.1").count(), 1, "no duplicate row: {text}");
     }
 
     #[test]
@@ -352,7 +470,7 @@ mod tests {
             border > 30,
             "modal centered in a 120-col frame (left border at {border})"
         );
-        assert!(text.contains("› ● Sonnet (Anthropic)"), "{text}");
+        assert!(text.contains("› ● Sonnet"), "{text}");
     }
 
     #[test]
@@ -371,8 +489,9 @@ mod tests {
     }
 
     #[test]
-    fn desired_height_is_rows_plus_chrome() {
-        assert_eq!(ModelPickerView::new(rows()).desired_height(80), 6);
+    fn desired_height_is_rows_plus_headers_plus_chrome() {
+        // 2 Anthropic models + 1 provider header + 4 chrome = 7.
+        assert_eq!(ModelPickerView::new(rows()).desired_height(80), 7);
         let many: Vec<ModelRow> = (0..30)
             .map(|i| ModelRow {
                 display: format!("m{i}"),
@@ -404,9 +523,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Select model"), "{text}");
-        assert!(text.contains("Opus (Anthropic)"), "{text}");
+        // Models group under a dim provider header; rows show just the model.
+        assert!(text.contains("Anthropic"), "provider header: {text}");
+        assert!(text.contains("Opus"), "{text}");
         // Sonnet is both current (●) and the starting highlight (›).
-        assert!(text.contains("› ● Sonnet (Anthropic)"), "{text}");
+        assert!(text.contains("› ● Sonnet"), "{text}");
         // The picker width is content-driven, so the footer hint clips to it.
         assert!(text.contains("↑/↓ select"), "{text}");
     }

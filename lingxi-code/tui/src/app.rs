@@ -1480,7 +1480,8 @@ mod tests {
     fn layout_model_picker_overlays_viewport() {
         let mut app = app_with_models();
         submit_command(&mut app, "/model");
-        assert_eq!(app.viewport_height(80), 6, "picker viewport height");
+        // 2 Anthropic models + 1 provider header + 4 modal chrome = 7.
+        assert_eq!(app.viewport_height(80), 7, "picker viewport height");
         let terminal = draw_viewport(&mut app);
         let all = buffer_rows(&terminal).join("\n");
         assert!(all.contains("Select model"), "{all}");

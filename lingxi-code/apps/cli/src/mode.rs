@@ -477,10 +477,19 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         .collect();
 
     let current_model = orch.get_status_snapshot().await.model;
+    // Trim each provider to its curated "latest few" (`is_curated_model`,
+    // claude-code `modelOptions.ts`) instead of dumping the whole catalog
+    // (~460 models); the current model is always kept so it stays selectable
+    // even if it is not on the short list. The picker groups the result by
+    // provider.
     let models = orch
         .list_model_listings()
         .await
         .into_iter()
+        .filter(|m| {
+            m.request_model == current_model
+                || traits::is_curated_model(&m.provider_id, &m.request_model)
+        })
         .map(|m| ModelRow {
             is_current: m.request_model == current_model,
             display: m.display_model,

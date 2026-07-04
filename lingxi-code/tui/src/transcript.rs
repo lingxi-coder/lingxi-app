@@ -87,6 +87,15 @@ impl Transcript {
         }
     }
 
+    /// Drop the active cell WITHOUT committing it. Used to discard the empty
+    /// streaming placeholder [`TurnEvent::TurnStarted`] opens when a tool call
+    /// (or thinking block) arrives before any assistant text streams — an
+    /// empty `AssistantTextCell` would otherwise render a stray bare `●`
+    /// marker with no body.
+    pub fn discard_active(&mut self) {
+        self.active = None;
+    }
+
     /// Insert every not-yet-committed finalized cell into the terminal's
     /// native scrollback (above the bottom viewport), advancing the commit
     /// cursor. Cells that render to no lines are consumed by the cursor

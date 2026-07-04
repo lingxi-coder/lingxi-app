@@ -26,6 +26,7 @@ use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use tokio_util::sync::CancellationToken;
+use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
@@ -34,11 +35,14 @@ use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
-use crate::bottom_pane::{BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction};
+use crate::bottom_pane::{
+    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction, WebAction,
+};
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
 use crate::renderable::Renderable;
 use crate::session::SessionInfo;
+use crate::spinner;
 use crate::transcript::Transcript;
 
 /// What one routed key press or paste means to the owning event loop.
@@ -62,6 +66,19 @@ pub enum ChatOutcome {
     /// clipboard (best-effort, [`crate::copy::copy_to_clipboard_native`]).
     /// The confirmation message is already in the transcript.
     CopyToClipboard(String),
+    /// A `/web` view asked the caller to run a secret/settings save or a test
+    /// search. The caller runs it asynchronously and reports the result back
+    /// through `TurnEvent::SystemNotice`.
+    WebAction(WebAction),
+    /// A `/connect` view asked the caller to store an API key or kick off a
+    /// Copilot/OAuth sign-in. The caller runs it asynchronously and reports
+    /// the result back through `TurnEvent::SystemNotice`.
+    ConnectAction(ConnectAction),
+    /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
+    /// through the sandboxed [`tui_core::bash_runner::BashRunner`] (no LLM
+    /// turn) and folds the captured output back through
+    /// `TurnEvent::BashOutput`.
+    RunBash(String),
 }
 
 /// The chat surface: owns the conversation state and the interactive footer,
@@ -91,6 +108,17 @@ pub struct ChatWidget {
     /// Human label for what the turn is currently doing (e.g. `Running Bash`),
     /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
     activity: Option<String>,
+    /// The per-turn sampled spinner verb (claude-code `useState(() =>
+    /// sample(getSpinnerVerbs()))`): drawn once from [`crate::spinner::SPINNER_VERBS`]
+    /// on `TurnEvent::TurnStarted` and held for the turn's lifetime — the
+    /// spinner's lowest-precedence default when there is no tool activity or
+    /// active-todo verb.
+    spinner_verb: &'static str,
+    /// The session's currently in-progress todo (from the latest `TodoWrite`
+    /// tool call), threaded to the spinner so it shows the task's `activeForm`
+    /// instead of a generic tool-activity label (claude-code `Spinner.tsx:162`).
+    /// `None` outside a turn or once no todo is in progress.
+    current_todo: Option<CurrentTodo>,
     /// Permission requests waiting for the currently open prompt to resolve
     /// (prompts are serialized: one owns the keyboard at a time).
     pending_permissions: VecDeque<PermissionExchange>,
@@ -133,6 +161,26 @@ pub struct ChatWidget {
     /// them via [`Self::take_terminal_sequences`] and writes the bytes to the
     /// terminal that owns the controlling tty (claude-code `BEo`).
     pending_terminal_sequences: Vec<String>,
+    /// Live tool-call inputs keyed by `tool_use_id`, populated on
+    /// [`TurnEvent::ToolUseStart`] and consumed on the paired
+    /// [`TurnEvent::ToolUseResult`] to recover the Edit/Write diff fields
+    /// (`old_string`/`new_string`/`file_path`) for the result cell — the same
+    /// correlation the resume path does with its `tool_inputs` side-table.
+    tool_inputs: std::collections::HashMap<protocol::ToolUseId, serde_json::Value>,
+    /// Composition-root-shared `/web` config snapshot slot (`None` until the
+    /// embedder wires one via [`Self::set_web_snapshot`]). [`Self::cmd_web`]
+    /// reads a clone to seed the picker; the async `on_web_action` effect
+    /// closure (CLI `run_ratatui`) updates it in place after a save/test so
+    /// the NEXT `/web` open reflects the latest persisted state.
+    web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
+    /// Per-provider login-method tag (from the catalog auth strategy), keyed
+    /// by profile_name — the real data `/connect`'s picker groups/labels
+    /// from. Empty (default) until [`Self::set_connect_data`] wires it.
+    connect_auth_methods: std::collections::BTreeMap<String, String>,
+    /// Per-provider availability flag (already has a usable credential),
+    /// keyed by profile_name — joined into the `/connect` picker's `✓`
+    /// marker. Empty (default) until [`Self::set_connect_data`] wires it.
+    connect_availability: std::collections::BTreeMap<String, bool>,
 }
 
 impl ChatWidget {
@@ -151,6 +199,8 @@ impl ChatWidget {
             current_turn: None,
             turn_started_at: None,
             activity: None,
+            spinner_verb: spinner::sample_verb(),
+            current_todo: None,
             pending_permissions: VecDeque::new(),
             start: std::time::Instant::now(),
             export_dir: crate::export::default_export_dir(),
@@ -160,6 +210,10 @@ impl ChatWidget {
             subscription: None,
             status_line: None,
             pending_terminal_sequences: Vec::new(),
+            tool_inputs: std::collections::HashMap::new(),
+            web_snapshot: None,
+            connect_auth_methods: std::collections::BTreeMap::new(),
+            connect_availability: std::collections::BTreeMap::new(),
         }
     }
 
@@ -220,24 +274,51 @@ impl ChatWidget {
         outcome
     }
 
+    /// Commit the active streaming cell — but DISCARD it if it's the empty
+    /// `AssistantTextCell` placeholder [`TurnEvent::TurnStarted`] opens. Used
+    /// at every flush point that can fire before any assistant text streams (a
+    /// leading tool call, a thinking-first turn, or a tool-only turn), so no
+    /// stray bare `●` marker is committed with no body.
+    fn flush_or_discard_active(&mut self) {
+        let empty = self
+            .transcript
+            .mutate_active(|cell| {
+                cell.as_any()
+                    .downcast_ref::<AssistantTextCell>()
+                    .is_some_and(|a| a.body().is_empty())
+            })
+            .unwrap_or(false);
+        if empty {
+            self.transcript.discard_active();
+        } else {
+            self.transcript.flush_active();
+        }
+    }
+
     /// Fold one streaming event from the orchestrator bridge into the
     /// transcript: `TurnStarted` opens an empty active assistant cell,
-    /// `TextDelta` mutates it in place, `ToolUseStart`/`ToolUseResult` set and
-    /// clear the spinner activity, `TurnEnded` finalizes the active cell
-    /// (moves it to the committed history) and clears the in-flight cancel
-    /// token. `CostUpdated` refreshes the status-row cost, `ContextPressure`
-    /// sets/clears the pane banner, `CompactionCompleted` folds a
-    /// compact-boundary marker, `RateLimit` composes a transcript notice, and
-    /// `TerminalSequence` stages a write-through escape — every bridge-emitted
-    /// variant is handled (fix round 1: no wildcard drop).
+    /// `TextDelta` mutates it in place, `ToolUseStart`/`ToolUseResult` render
+    /// the tool-call + result cells (and set/clear the spinner activity),
+    /// `TurnEnded` finalizes the active cell (moves it to the committed
+    /// history) and clears the in-flight cancel token. `CostUpdated` refreshes
+    /// the status-row cost, `ContextPressure` sets/clears the pane banner,
+    /// `CompactionCompleted` folds a compact-boundary marker, `RateLimit`
+    /// composes a transcript notice, `TerminalSequence` stages a write-through
+    /// escape, `SystemNotice`/`BashOutput` push system/bash-output rows — every
+    /// bridge-emitted variant is handled (no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
             TurnEvent::TurnStarted => {
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
-                // A straggler active cell (missed TurnEnded) is finalized, not
-                // dropped, before the new streaming reply opens.
-                self.transcript.flush_active();
+                // Draw a fresh random verb for this turn (claude-code
+                // `useState(() => sample(getSpinnerVerbs()))` — one verb per
+                // turn, no rotation within it).
+                self.spinner_verb = spinner::sample_verb();
+                // A straggler active cell (missed TurnEnded) is finalized (or
+                // discarded if it's the empty placeholder) before the new
+                // streaming reply opens.
+                self.flush_or_discard_active();
                 self.transcript
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
             }
@@ -280,21 +361,72 @@ impl ChatWidget {
                     })
                     .unwrap_or(false);
                 if !appended {
-                    self.transcript.flush_active();
+                    self.flush_or_discard_active();
                     self.transcript.set_active(Box::new(ThinkingCell::new(delta)));
                 }
             }
-            TurnEvent::ToolUseStart { tool, .. } => {
+            TurnEvent::ToolUseStart { id, tool, input } => {
                 self.activity = Some(activity_label(&tool));
+                // (Gap B) A `TodoWrite` replaces the whole session todo list
+                // each call, so its input is the authoritative source for the
+                // spinner's "current todo" (claude-code derives `currentTodo`
+                // from the live `tasksV2` list — `Spinner.tsx:162`). Refresh
+                // on the START event so the verb tracks the new in-progress
+                // task as soon as it's written, not only after the (later)
+                // tool result returns. Assigned unconditionally (including
+                // `None`) so a `TodoWrite` with no active task clears a
+                // stale one.
+                if tool == "TodoWrite" {
+                    self.current_todo = current_todo_from_todowrite_input(&input);
+                }
+                // Commit any streamed assistant text ABOVE the tool call, then
+                // render the tool-use header (`● {tool}` + input) into the
+                // transcript — claude-code parity: each tool invocation shows
+                // as its own scrollback cell between the assistant's text
+                // segments. Without this flush the whole turn's text merged
+                // into one active cell and every tool call was invisible.
+                // Remember the input so the paired result can render the
+                // Edit/Write diff (see `ToolUseResult`).
+                self.flush_or_discard_active();
+                self.tool_inputs.insert(id.clone(), input.clone());
+                self.transcript
+                    .push_message(RenderedMessage::AssistantToolUse { id, tool, input });
             }
-            TurnEvent::ToolUseResult { .. } => {
+            TurnEvent::ToolUseResult { id, tool, result } => {
                 self.activity = None;
+                // Recover the originating call's input (for diff tools) from the
+                // side-table, mirroring the resume path's correlation, then
+                // render the `⎿ {summary}` result cell (or an Edit/Write diff).
+                let (old_string, new_string, file_path) = self
+                    .tool_inputs
+                    .remove(&id)
+                    .map_or((None, None, None), |input| {
+                        tui_core::active_turn::diff_inputs_for(&tool, &input)
+                    });
+                self.transcript.push_message(RenderedMessage::UserToolResult {
+                    id,
+                    tool,
+                    result,
+                    old_string,
+                    new_string,
+                    file_path,
+                });
             }
             TurnEvent::TurnEnded(_) => {
-                self.transcript.flush_active();
+                self.flush_or_discard_active();
                 self.current_turn = None;
                 self.turn_started_at = None;
                 self.activity = None;
+                // (Gap B) `current_todo` is per-turn — clear it so the next
+                // turn's spinner doesn't keep showing the previous turn's
+                // `activeForm` until a fresh `TodoWrite` arrives.
+                self.current_todo = None;
+                // (review M1) Drop any un-paired tool inputs — a turn
+                // interrupted between a `ToolUseStart` and its result would
+                // otherwise leak the (possibly large) input for the rest of
+                // the session. Mirrors `active_turn.rs` clearing on both
+                // turn boundaries.
+                self.tool_inputs.clear();
                 // Re-arm the statusline pump (claude-code executes the command
                 // on turn boundaries; the pump is debounced single-flight).
                 self.with_status_line(|s| s.dirty = true);
@@ -385,6 +517,23 @@ impl ChatWidget {
             // bridge — live prompts arrive through the `permission_bridge`
             // channel into [`Self::open_permission`] instead.
             TurnEvent::PermissionRequest { .. } => {}
+            // A `/web` async effect (secret/settings save, test search)
+            // finished off-loop; surface its result as a transcript line —
+            // red for a failure, dim grey otherwise (`RenderedMessage::
+            // SystemText`'s existing severity mapping).
+            TurnEvent::SystemNotice { body, is_error } => {
+                self.transcript.push_message(RenderedMessage::SystemText {
+                    body,
+                    timestamp: 0,
+                    is_error,
+                });
+            }
+            TurnEvent::BashOutput { stdout, stderr } => {
+                // `!`-command output: render inline as a bash-output cell
+                // (ANSI stdout + error-tinted stderr). No LLM turn involved.
+                self.transcript
+                    .push_message(RenderedMessage::UserBashOutput { stdout, stderr });
+            }
         }
     }
 
@@ -484,6 +633,30 @@ impl ChatWidget {
             s.dirty = true;
         }
         self.status_line = Some(slot);
+    }
+
+    /// Wire the composition root's shared `/web` config snapshot slot, preloaded
+    /// from real config + credential-store presence at startup. [`Self::cmd_web`]
+    /// reads a clone of it to seed the picker; the async `on_web_action` effect
+    /// closure keeps it current across saves/tests.
+    pub fn set_web_snapshot(
+        &mut self,
+        slot: std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>,
+    ) {
+        self.web_snapshot = Some(slot);
+    }
+
+    /// Wire the composition root's real per-provider login-method +
+    /// availability maps (derived from the live multi-provider catalog at
+    /// startup). [`Self::cmd_connect`] reads clones of both to build the
+    /// `/connect` picker; empty maps (the default) render an empty picker.
+    pub fn set_connect_data(
+        &mut self,
+        auth_methods: std::collections::BTreeMap<String, String>,
+        availability: std::collections::BTreeMap<String, bool>,
+    ) {
+        self.connect_auth_methods = auth_methods;
+        self.connect_availability = availability;
     }
 
     /// The current model's `(wire_id, display)` pair (falls back to
@@ -904,6 +1077,71 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// `/web`: open the WebSearch provider picker, seeded from the shared
+    /// snapshot (real config + credential-store presence, preloaded at
+    /// startup and kept current by the async `on_web_action` effect closure).
+    /// Falls back to the default (unconfigured) snapshot when no slot is
+    /// wired (headless / tests).
+    pub(crate) fn cmd_web(&mut self, _args: &str) -> ChatOutcome {
+        let snapshot = self
+            .web_snapshot
+            .as_ref()
+            .map(|m| m.lock().unwrap().clone())
+            .unwrap_or_default();
+        self.bottom_pane.show_web_picker(snapshot);
+        ChatOutcome::Continue
+    }
+
+    /// `/connect [provider]`: with no argument, open the grouped provider
+    /// picker seeded from the real catalog maps ([`Self::set_connect_data`]).
+    /// With a `provider` argument, skip the picker and route directly into
+    /// that provider's method-choice screen (multi-method) or its single
+    /// flow — the key-entry view for `api_key`, or a
+    /// [`ChatOutcome::ConnectAction`] effect for Copilot/OAuth providers.
+    pub(crate) fn cmd_connect(&mut self, args: &str) -> ChatOutcome {
+        let provider = args.trim();
+        if provider.is_empty() {
+            self.bottom_pane.show_connect_picker(
+                self.connect_auth_methods.clone(),
+                self.connect_availability.clone(),
+            );
+        } else {
+            // /connect <provider>: route directly (skip picker) if known,
+            // else open the picker.
+            let tag = self.connect_auth_methods.get(provider).cloned();
+            let methods = crate::connect::picker::provider_methods(provider, tag.as_deref());
+            let label = crate::connect::picker::provider_label(provider);
+            if methods.len() > 1 {
+                self.bottom_pane.show_view(Box::new(
+                    crate::bottom_pane::connect_method_view::ConnectMethodView::new(
+                        provider.to_string(),
+                        label,
+                        methods,
+                    ),
+                ));
+            } else {
+                match methods.first().copied() {
+                    Some(crate::connect::picker::ConnectMethod::ApiKey) | None => {
+                        self.bottom_pane.show_view(Box::new(
+                            crate::bottom_pane::connect_key_view::ConnectKeyView::new(provider),
+                        ));
+                    }
+                    Some(crate::connect::picker::ConnectMethod::CopilotDevice) => {
+                        return ChatOutcome::ConnectAction(ConnectAction::Copilot {
+                            provider_id: provider.to_string(),
+                        });
+                    }
+                    Some(_) => {
+                        return ChatOutcome::ConnectAction(ConnectAction::OAuth {
+                            provider_id: provider.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        ChatOutcome::Continue
+    }
+
     /// `/color [name]`: set/clear/list the session accent color (tints the
     /// composer's `›` prompt). Pure parse ([`crate::color::parse_color_command`]) +
     /// a byte-locked `system` echo; the accent itself is session-only.
@@ -955,6 +1193,9 @@ impl ChatWidget {
     fn clear_transcript(&mut self) {
         self.transcript.clear();
         self.last_rate_limit_text = None;
+        // (review M1) Reset per-turn side-tables so `/clear` starts clean.
+        self.tool_inputs.clear();
+        self.current_todo = None;
     }
 
     /// `/image <path>`: record an image message for `path` so a graphics
@@ -1049,6 +1290,21 @@ impl ChatWidget {
                 }
                 self.turn_started_at = None;
                 self.activity = None;
+                self.current_todo = None;
+                // (review) An interrupt IS a turn boundary — clear the tool
+                // correlation map here too (a cancelled turn future may be
+                // dropped before the bridge emits `TurnEnded`), matching the
+                // other boundaries the M1 fix targeted.
+                self.tool_inputs.clear();
+                // Commit any streamed partial reply, then push the interrupt
+                // row so scrollback shows `[Request interrupted by user]` (the
+                // dim `Interrupted · …` line) — claude-code parity; the old
+                // iocraft backend pushed the same UserText on its Cancel branch.
+                self.flush_or_discard_active();
+                self.transcript.push_message(RenderedMessage::UserText {
+                    body: crate::history_cell::message::INTERRUPT_MESSAGE.to_string(),
+                    timestamp: 0,
+                });
                 ChatOutcome::Continue
             }
             BottomPaneOutcome::ToggleVerbose => {
@@ -1084,12 +1340,28 @@ impl ChatWidget {
             }
             BottomPaneOutcome::RunCommand(action) => self.run_command(action),
             BottomPaneOutcome::PastedImage(path) => self.push_image(&path),
+            BottomPaneOutcome::RunWebAction(action) => ChatOutcome::WebAction(action),
+            BottomPaneOutcome::RunConnectAction(action) => ChatOutcome::ConnectAction(action),
         }
     }
 
     /// Route a submitted composer buffer: a registered slash command
     /// dispatches through the registry; anything else is sent as a prompt.
     fn dispatch_submission(&mut self, text: String) -> ChatOutcome {
+        // (`!` bash mode) A `!`-prefixed line runs sandboxed and renders its
+        // output inline — it is NOT sent to the model (no LLM turn). Echo the
+        // `! {command}` row now; the CLI `on_bash` closure runs it and folds
+        // stdout/stderr back as `TurnEvent::BashOutput`. 1:1 with claude-code
+        // bash mode / the old iocraft `pending_bash` path.
+        if let Some(rest) = text.strip_prefix('!') {
+            let command = rest.trim().to_string();
+            if !command.is_empty() {
+                self.transcript.push_message(RenderedMessage::UserBashInput {
+                    command: command.clone(),
+                });
+                return ChatOutcome::RunBash(command);
+            }
+        }
         if let Some(outcome) = self.handle_slash(&text) {
             return outcome;
         }
@@ -1152,14 +1424,25 @@ impl ChatWidget {
         }
     }
 
-    /// The current streaming-spinner text: an animated Claude-accent glyph, the
-    /// live activity (`Running Bash` from `ToolUseStart`, else `Working`), and an
-    /// elapsed-seconds counter with an interrupt hint — claude-code status parity.
+    /// The current streaming-spinner text: an animated Claude-accent glyph, a
+    /// verb, and an elapsed-seconds counter with an interrupt hint —
+    /// claude-code status parity.
+    ///
+    /// Verb precedence (mirrors the deleted iocraft `SpinnerWithVerb` /
+    /// claude-code `Spinner.tsx:169`'s `overrideMessage ?? currentTodo?.
+    /// activeForm ?? currentTodo?.subject ?? randomVerb`, adapted to this
+    /// backend's generic tool-activity label): the active `TodoWrite` todo's
+    /// `activeForm`/`subject` (Gap B, [`spinner::todo_leader_verb`]) wins,
+    /// then the in-flight tool's activity label (`Running Bash`, set from
+    /// `ToolUseStart`), then the verb sampled once for this turn from
+    /// [`spinner::SPINNER_VERBS`] (Gap A).
     fn spinner_text(&self) -> String {
         const FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
         let idx =
             usize::try_from(self.start.elapsed().as_millis() / 120).unwrap_or(0) % FRAMES.len();
-        let verb = self.activity.as_deref().unwrap_or("Working");
+        let verb = spinner::todo_leader_verb(self.current_todo.as_ref())
+            .or_else(|| self.activity.clone())
+            .unwrap_or_else(|| self.spinner_verb.to_string());
         let secs = self.turn_started_at.map_or(0, |t| t.elapsed().as_secs());
         format!("{} {verb}… ({secs}s · esc to interrupt)", FRAMES[idx])
     }
@@ -1183,6 +1466,40 @@ fn activity_label(tool: &str) -> String {
         "Task" => "Delegating".to_string(),
         other => format!("Running {other}"),
     }
+}
+
+/// (Gap B) Resolve the spinner's "current todo" from a `TodoWrite` tool
+/// input. A `TodoWrite` call replaces the entire session todo list; the
+/// spinner shows the first todo that is neither `pending` nor `completed`
+/// (claude-code `Spinner.tsx:162` — `tasksV2?.find(t => t.status !==
+/// 'pending' && t.status !== 'completed')`). Returns `None` when the input is
+/// malformed, the `todos` array is missing/empty, or every todo is
+/// pending/completed.
+///
+/// The TodoWrite wire shape is `{ todos: [{ content, status, activeForm }] }`;
+/// `content` is the spinner's `subject` fallback and `activeForm` (camelCase)
+/// its preferred verb.
+fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<CurrentTodo> {
+    let todos = input.get("todos")?.as_array()?;
+    let item = todos.iter().find(|t| {
+        let status = t.get("status").and_then(serde_json::Value::as_str);
+        // Anything not pending/completed is "active" (in_progress, or any
+        // other forward state). A missing status is treated as active too,
+        // matching the `!==` semantics of the TS predicate.
+        !matches!(status, Some("pending" | "completed"))
+    })?;
+    let subject = item
+        .get("content")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    let active_form = item
+        .get("activeForm")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some(CurrentTodo {
+        subject,
+        active_form,
+    })
 }
 
 #[cfg(test)]
@@ -1298,6 +1615,92 @@ mod tests {
         terminal
     }
 
+    /// A tool call with NO preamble text (the common agentic case) renders the
+    /// tool-use + result cells and does NOT leave a stray empty assistant
+    /// placeholder — the `TurnStarted` empty cell is discarded, not committed.
+    #[test]
+    fn tool_first_turn_renders_tool_cells_without_empty_placeholder() {
+        use crate::history_cell::tool::{ToolResultCell, ToolUseCell};
+        let mut widget = widget();
+        submit_command(&mut widget, "run it");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        // Straight to a tool call — no TextDelta first.
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Read".to_string(),
+            input: serde_json::json!({ "file_path": "/tmp/x" }),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Read".to_string(),
+            result: serde_json::json!("file body"),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        // Exactly: user "run it" · ● Read · ⎿ result — NO empty assistant cell.
+        assert_eq!(widget.transcript.committed_cells().len(), 3);
+        assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Read");
+        assert!(cells(&widget)[2].as_any().downcast_ref::<ToolResultCell>().is_some());
+        // The (empty) placeholder must not survive as an assistant cell.
+        assert!(cells(&widget)
+            .iter()
+            .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none()));
+    }
+
+    /// `!`-prefixed bash mode runs the command inline (no LLM turn): it echoes
+    /// the `! {command}` row and returns `ChatOutcome::RunBash`, and the
+    /// captured output folds back via `TurnEvent::BashOutput`.
+    #[test]
+    fn bang_command_runs_bash_inline_not_a_model_turn() {
+        let mut widget = widget();
+        typ(&mut widget, "!echo hi");
+        let outcome = widget.handle_key(press(KeyCode::Enter));
+        let ChatOutcome::RunBash(cmd) = outcome else {
+            panic!("expected RunBash (bash mode), got a model turn");
+        };
+        assert_eq!(cmd, "echo hi", "leading ! stripped, trimmed");
+        assert!(!widget.turn_running(), "bash mode raises no LLM turn");
+        // The `! echo hi` input row echoed into scrollback.
+        let all = cells(&widget);
+        let input: String = all[all.len() - 1]
+            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(input.contains("echo hi"), "bash input echoed: {input}");
+        // Captured output folds back via BashOutput → a bash-output cell.
+        widget.apply_turn_event(TurnEvent::BashOutput {
+            stdout: "hi\n".to_string(),
+            stderr: String::new(),
+        });
+        let all = cells(&widget);
+        let out: String = all[all.len() - 1]
+            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(out.contains("hi"), "bash output rendered: {out}");
+    }
+
+    /// (review M1) A turn ending between a tool's start and its result must
+    /// not leak the un-paired input for the rest of the session.
+    #[test]
+    fn tool_inputs_cleared_when_turn_ends_without_a_result() {
+        let mut widget = widget();
+        submit_command(&mut widget, "go");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Write".to_string(),
+            input: serde_json::json!({ "content": "big payload" }),
+        });
+        assert_eq!(widget.tool_inputs.len(), 1);
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        assert!(
+            widget.tool_inputs.is_empty(),
+            "un-paired tool input cleared on TurnEnded"
+        );
+    }
+
     #[test]
     fn new_seeds_transcript_and_starts_idle() {
         let seed = RenderedMessage::SystemText {
@@ -1330,7 +1733,9 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
         assert_eq!(cell::<AssistantTextCell>(&widget, 1).body(), "Hello");
 
-        // ToolUseStart sets the spinner activity; ToolUseResult clears it.
+        // ToolUseStart sets the spinner activity AND commits the streamed
+        // text above the tool call, then renders the tool-use cell; the paired
+        // ToolUseResult renders the result cell and clears the activity.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: protocol::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
@@ -1338,6 +1743,12 @@ mod tests {
         });
         assert_eq!(widget.activity.as_deref(), Some("Running Bash"));
         assert!(widget.spinner_text().contains("Running Bash"));
+        // The "Hello" reply flushed to a committed cell; the tool-use cell
+        // renders after it (cells: user, Hello, ● Bash).
+        assert_eq!(
+            cell::<crate::history_cell::tool::ToolUseCell>(&widget, 2).tool(),
+            "Bash"
+        );
         widget.apply_turn_event(TurnEvent::ToolUseResult {
             id: protocol::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
@@ -1350,7 +1761,8 @@ mod tests {
         assert!(!widget.turn_running());
         assert!(widget.turn_started_at.is_none());
         assert!(widget.transcript.active_cell().is_none(), "cell flushed");
-        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        // user "hi" · assistant "Hello" · ● Bash tool-use · ⎿ Bash result = 4.
+        assert_eq!(widget.transcript.committed_cells().len(), 4);
     }
 
     #[test]
@@ -1400,6 +1812,16 @@ mod tests {
         assert!(!widget.turn_running());
         assert!(widget.activity.is_none());
         assert!(widget.turn_started_at.is_none());
+        // Interrupt pushes a `[Request interrupted by user]` row rendering the
+        // dim `Interrupted · …` line into scrollback (claude-code parity).
+        let all = cells(&widget);
+        let last = all[all.len() - 1];
+        let rendered: String = last
+            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(rendered.contains("Interrupted"), "interrupt row: {rendered}");
     }
 
     #[test]
@@ -1962,12 +2384,23 @@ mod tests {
         let mut widget = widget();
         submit_command(&mut widget, "go");
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        // Default activity: an animation frame glyph, "Working", elapsed
-        // seconds, and the esc-to-interrupt hint (claude-code status parity).
+        // Default verb (Gap A): a per-turn random sample from the 187-entry
+        // claude-code pool, NOT the literal "Working" — plus the animation
+        // frame glyph, elapsed seconds, and the esc-to-interrupt hint
+        // (claude-code status parity).
         let text = widget.spinner_text();
         let frame = text.chars().next().expect("spinner frame glyph");
         assert!("·✢✳✶✻✽".contains(frame), "unknown frame: {text}");
-        assert!(text.contains("Working… ("), "verb + elapsed open: {text}");
+        let verb = text
+            .split("… (")
+            .next()
+            .and_then(|prefix| prefix.split_once(' '))
+            .map(|(_, verb)| verb)
+            .unwrap_or_default();
+        assert!(
+            spinner::SPINNER_VERBS.contains(&verb),
+            "expected a sampled pool verb, got {verb:?} in {text:?}"
+        );
         assert!(text.ends_with("s · esc to interrupt)"), "hint: {text}");
         // ToolUseStart swaps the verb for the activity label.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
@@ -1976,6 +2409,85 @@ mod tests {
             input: serde_json::json!({}),
         });
         assert!(widget.spinner_text().contains("Editing… ("));
+    }
+
+    #[test]
+    fn todowrite_in_progress_task_drives_spinner_verb_via_active_form() {
+        // Gap B: a `TodoWrite` marking a task `in_progress` should show that
+        // task's `activeForm` instead of the generic "Running TodoWrite"
+        // tool-activity label or the per-turn random pool verb.
+        let mut widget = widget();
+        submit_command(&mut widget, "go");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "TodoWrite".to_string(),
+            input: serde_json::json!({
+                "todos": [
+                    {
+                        "content": "Build the project",
+                        "status": "in_progress",
+                        "activeForm": "Compiling the project",
+                    },
+                    {
+                        "content": "Write docs",
+                        "status": "pending",
+                        "activeForm": "Writing docs",
+                    },
+                ],
+            }),
+        });
+        assert!(
+            widget.spinner_text().contains("Compiling the project… ("),
+            "expected the in-progress todo's activeForm: {}",
+            widget.spinner_text()
+        );
+        // A later, unrelated tool call does not override the active todo's
+        // verb (claude-code's `currentTodo` outranks generic tool activity).
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t2"),
+            tool: "Bash".to_string(),
+            input: serde_json::json!({}),
+        });
+        assert!(widget.spinner_text().contains("Compiling the project… ("));
+        // `TurnEnded` clears the per-turn todo so a later turn with no
+        // `TodoWrite` doesn't keep showing the stale `activeForm`.
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("t2"),
+            tool: "Bash".to_string(),
+            result: serde_json::json!({}),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        assert!(!widget.spinner_text().contains("Compiling the project"));
+    }
+
+    #[test]
+    fn current_todo_from_todowrite_input_finds_first_active_task() {
+        // No `todos` array → None.
+        assert!(current_todo_from_todowrite_input(&serde_json::json!({})).is_none());
+        // Empty `todos` → None.
+        assert!(current_todo_from_todowrite_input(&serde_json::json!({ "todos": [] })).is_none());
+        // All pending/completed → None (no active task).
+        let all_done = serde_json::json!({
+            "todos": [
+                { "content": "a", "status": "completed" },
+                { "content": "b", "status": "pending" },
+            ]
+        });
+        assert!(current_todo_from_todowrite_input(&all_done).is_none());
+        // The first non-pending/non-completed task wins, using its
+        // `activeForm`/`content` verbatim.
+        let active = serde_json::json!({
+            "todos": [
+                { "content": "a", "status": "completed" },
+                { "content": "Run tests", "status": "in_progress", "activeForm": "Running tests" },
+                { "content": "c", "status": "pending" },
+            ]
+        });
+        let todo = current_todo_from_todowrite_input(&active).expect("an active todo");
+        assert_eq!(todo.subject, "Run tests");
+        assert_eq!(todo.active_form.as_deref(), Some("Running tests"));
     }
 
     #[test]

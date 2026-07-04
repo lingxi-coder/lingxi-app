@@ -224,15 +224,73 @@ pub(crate) async fn run_ratatui(
         None => (tui_build.bridge_rx, tui_build.permission_rx),
     };
     let turn_tx = tui_build.turn_tx;
+    // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
+    let web_turn_tx = turn_tx.clone();
+    let connect_turn_tx = turn_tx.clone();
+    let bash_turn_tx = turn_tx.clone();
     // (B4 Task 5 parity) Thread the composition root's shared subscription
     // slot so the widget's rate-limit composer reads the live snapshot at
     // compose time — same wiring as the iocraft `with_subscription` path.
     let subscription = tui_build.runtime.subscription.clone();
+    // (/web async effects) Shared HTTP transport + credential store for the
+    // `/web` test-search + secret-save effects, wired below.
+    let web_key_store = tui_build.runtime.provider_key_store.clone();
+    let web_http = tui_build.runtime.http.clone();
+    // (/connect picker) Real per-provider login-method + availability maps,
+    // cloned before `tui_build` is consumed further below — same convention
+    // as `subscription`/`web_key_store` above.
+    let connect_auth_methods = tui_build.runtime.provider_auth_methods.clone();
+    let connect_availability = tui_build.runtime.provider_availability.clone();
+    // (/connect async effects) Shared credential store + OAuth/Copilot
+    // drivers for the real store-key / device-flow / browser sign-in
+    // effects, wired below — same convention as the `/web` cluster above.
+    // `web_key_store` is cloned again here (cheap `Arc` clone) rather than
+    // reused so each closure owns an independent handle.
+    let connect_key_store = tui_build.runtime.provider_key_store.clone();
+    let connect_oauth = tui_build.runtime.oauth_connect_driver.clone();
+    let connect_copilot = tui_build.runtime.connect_copilot.clone();
+    // (`!` bash mode) Sandboxed bash runner for `!`-prefixed commands, cloned
+    // before `tui_build` is consumed — same convention as the clusters above.
+    let bash_runner = tui_build.runtime.bash_runner.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
     let switch_handle = handle.clone();
+    let web_handle = handle.clone();
+    let connect_handle = handle.clone();
+    let bash_handle = handle.clone();
     let summary_orch = orchestrator.clone();
+    // (/web async effects) Preload the shared `/web` config snapshot from the
+    // real on-disk settings + credential-store presence, mirroring the
+    // deleted iocraft `AppState::web_config_snapshot` startup seed. Shared
+    // (`Arc<Mutex<_>>`) between `ChatWidget::cmd_web` (sync read to open the
+    // picker) and `run_web_action` (async write-back after a save/test).
+    let web_snapshot = {
+        let cfg = tui::web::persist::web_settings_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .map(|v| tool_web::web_search_config::WebSearchConfig::from_settings_json(&v))
+            .unwrap_or_default();
+        let tavily = web_key_store
+            .get_provider_key("web:tavily")
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        let brave = web_key_store
+            .get_provider_key("web:brave")
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        std::sync::Arc::new(std::sync::Mutex::new(tui::web::picker::WebConfigSnapshot {
+            active: cfg.provider,
+            tavily_key: tavily,
+            brave_key: brave,
+            searxng_url: cfg.searxng_url,
+            last_test: None,
+        }))
+    };
     let current_model = session
         .models
         .iter()
@@ -265,6 +323,53 @@ pub(crate) async fn run_ratatui(
         let orch = switch_orch.clone();
         switch_handle.spawn(async move {
             let _ = orch.switch_model(&model, profile.as_deref()).await;
+        });
+    };
+    // (/web async effects) The picker/config views return `WebAction`s
+    // synchronously from the blocking ratatui loop; the actual persistence
+    // (credential-store write, settings-file merge) and the test search are
+    // async, so each action is spawned back onto the captured runtime handle
+    // — same shape as `on_submit`/`on_switch_model` above. Results land in the
+    // transcript via `TurnEvent::SystemNotice` on the shared `turn_tx`.
+    let web_snapshot_cb = web_snapshot.clone();
+    let on_web_action = move |action: tui::bottom_pane::WebAction| {
+        let key_store = web_key_store.clone();
+        let http = web_http.clone();
+        let tx = web_turn_tx.clone();
+        let snapshot = web_snapshot_cb.clone();
+        web_handle.spawn(async move {
+            run_web_action(action, key_store, http, tx, snapshot).await;
+        });
+    };
+    // (/connect async effects) Mirrors `on_web_action` above: the picker/
+    // method/key views return a `ConnectAction` synchronously from the
+    // blocking ratatui loop; the actual persistence (credential-store
+    // write) and the OAuth/Copilot device-flow are async, so the action is
+    // spawned back onto the captured runtime handle. Results land in the
+    // transcript via `TurnEvent::SystemNotice` on the shared `turn_tx`.
+    let on_connect_action = move |action: tui::bottom_pane::ConnectAction| {
+        let key_store = connect_key_store.clone();
+        let oauth = connect_oauth.clone();
+        let copilot = connect_copilot.clone();
+        let tx = connect_turn_tx.clone();
+        connect_handle.spawn(async move {
+            run_connect_action(action, key_store, oauth, copilot, tx).await;
+        });
+    };
+    // (`!` bash mode) `!command` is submitted synchronously from the blocking
+    // ratatui loop; the sandboxed run is async, so it is spawned onto the
+    // captured handle and its captured stdout/stderr fold back into the
+    // transcript via `TurnEvent::BashOutput` on the shared `turn_tx` — no LLM
+    // turn, 1:1 with claude-code bash mode.
+    let on_bash = move |command: String| {
+        let runner = bash_runner.clone();
+        let tx = bash_turn_tx.clone();
+        bash_handle.spawn(async move {
+            let out = runner.run(&command).await;
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::BashOutput {
+                stdout: out.stdout,
+                stderr: out.stderr,
+            });
         });
     };
     // (statusline) Shared slot for the custom `statusLine` command, built from
@@ -322,8 +427,14 @@ pub(crate) async fn run_ratatui(
             permission_rx,
             Some(subscription),
             Some(status_line),
+            Some(web_snapshot),
+            connect_auth_methods,
+            connect_availability,
             on_submit,
             on_switch_model,
+            on_web_action,
+            on_connect_action,
+            on_bash,
         )
     })
     .await;
@@ -346,6 +457,241 @@ pub(crate) async fn run_ratatui(
         Err(e) => {
             eprintln!("lingxi-cli: tui-rata task join failed: {e}");
             exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
+/// Run one `/web` [`tui::bottom_pane::WebAction`] to completion: persist a
+/// saved secret/settings change (credential store + `~/.lingxi/settings.json`
+/// merge) or run the real test search, then report the outcome to the
+/// transcript via `TurnEvent::SystemNotice`. Ported faithfully from the
+/// deleted iocraft `tui` crate's `pump_save_web_secret` / `pump_save_web_settings`
+/// / `pump_test_web_search` (git ref `f4ddad16f`, `tui/src/root.rs`), adapted
+/// from the old `Arc<Mutex<AppState>>` pump shape to the new effect-closure
+/// shape: `snapshot` is the composition root's shared `/web` config snapshot
+/// (read by the sync `ChatWidget::cmd_web` to seed the picker), updated here
+/// after a successful save so the NEXT `/web` open reflects it.
+async fn run_web_action(
+    action: tui::bottom_pane::WebAction,
+    key_store: Arc<secret::CredentialManager>,
+    http: Arc<dyn traits::HttpTransport>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+    snapshot: std::sync::Arc<std::sync::Mutex<tui::web::picker::WebConfigSnapshot>>,
+) {
+    use tool_web::web_search_config::{WebSearchConfig, WebSearchProvider};
+    use tui::bottom_pane::WebAction;
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    let label = tui::web::picker::provider_label;
+
+    match action {
+        WebAction::SaveSecret { provider, secret } => {
+            let Some(id) = tui::web::persist::web_credential_id(provider) else {
+                return;
+            };
+            match key_store.set_provider_key(id, &secret).await {
+                Ok(()) => {
+                    let searxng_url = {
+                        let mut s = snapshot.lock().unwrap();
+                        match provider {
+                            WebSearchProvider::Tavily => s.tavily_key = true,
+                            WebSearchProvider::Brave => s.brave_key = true,
+                            _ => {}
+                        }
+                        s.active = provider;
+                        s.searxng_url.clone()
+                    };
+                    let cfg = WebSearchConfig {
+                        provider,
+                        searxng_url,
+                    };
+                    if let Some(p) = tui::web::persist::web_settings_path() {
+                        let _ = tui::web::persist::save_web_settings_to(&p, &cfg);
+                    }
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("✓ Saved {} API key.", label(provider)),
+                        is_error: false,
+                    });
+                }
+                Err(e) => {
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("✗ Failed to save key: {e}"),
+                        is_error: true,
+                    });
+                }
+            }
+        }
+        WebAction::SaveSettings {
+            provider,
+            searxng_url,
+        } => {
+            let cfg = WebSearchConfig {
+                provider,
+                searxng_url: searxng_url.clone(),
+            };
+            let ok = tui::web::persist::web_settings_path()
+                .map(|p| tui::web::persist::save_web_settings_to(&p, &cfg).is_ok())
+                .unwrap_or(false);
+            if ok {
+                let mut s = snapshot.lock().unwrap();
+                s.active = provider;
+                s.searxng_url = searxng_url;
+                drop(s);
+                let _ = turn_tx.send(TurnEvent::SystemNotice {
+                    body: format!("✓ Web search set to {}.", label(provider)),
+                    is_error: false,
+                });
+            } else {
+                let _ = turn_tx.send(TurnEvent::SystemNotice {
+                    body: "✗ Failed to save web settings.".to_string(),
+                    is_error: true,
+                });
+            }
+        }
+        WebAction::TestSearch {
+            provider,
+            typed_key,
+        } => {
+            use tool_web::web_search_client::{
+                resolve_client_search_provider_with_credentials, run_client_web_search,
+                EnvSearchConfig, ResolvedWebCredentials,
+            };
+
+            let searxng_url = snapshot.lock().unwrap().searxng_url.clone();
+            let cfg = WebSearchConfig {
+                provider,
+                searxng_url,
+            };
+            let mut creds = ResolvedWebCredentials::empty();
+            match (provider, typed_key) {
+                (WebSearchProvider::Tavily, Some(k)) => creds.tavily_key = Some(k),
+                (WebSearchProvider::Brave, Some(k)) => creds.brave_key = Some(k),
+                _ => {
+                    if let Ok(Some(secret)) = key_store.get_provider_key("web:tavily").await {
+                        creds.tavily_key = Some(secret.expose_secret().clone());
+                    }
+                    if let Ok(Some(secret)) = key_store.get_provider_key("web:brave").await {
+                        creds.brave_key = Some(secret.expose_secret().clone());
+                    }
+                }
+            }
+            let env = EnvSearchConfig::from_env();
+            let result = match resolve_client_search_provider_with_credentials(
+                &cfg, &creds, &env,
+            ) {
+                Ok(resolved) => run_client_web_search(&http, &resolved, "current weather Beijing", &[], &[], 3)
+                    .await
+                    .map(|hits| (resolved, hits)),
+                Err(e) => Err(e),
+            };
+            // Build the BARE message (no ✓/✗ mark) — matches the iocraft
+            // oracle's `WebTestSummary.message`. The mark is added only when
+            // formatting the notice below (and by the picker's
+            // `web_provider_detail_lines` "Last test: {mark} {msg}" line), so
+            // storing it bare avoids a doubled mark.
+            let (bare, is_error) = match result {
+                Ok((resolved, hits)) => {
+                    let count = hits.len();
+                    // Guard an empty top-hit title so no dangling " · " renders
+                    // (oracle parity — DuckDuckGo/SearXNG hits can be titleless).
+                    let top = hits.first().map_or(String::new(), |h| {
+                        if h.title.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", h.title)
+                        }
+                    });
+                    (format!("{}: {count} results{top}", resolved.label()), false)
+                }
+                Err(e) => (format!("{} test failed: {e}", label(provider)), true),
+            };
+            let mark = if is_error { "✗" } else { "✓" };
+            {
+                let mut s = snapshot.lock().unwrap();
+                s.last_test = Some(tui::web::picker::WebTestSummary {
+                    provider,
+                    ok: !is_error,
+                    message: bare.clone(),
+                });
+            }
+            let _ = turn_tx.send(TurnEvent::SystemNotice {
+                body: format!("{mark} {bare}"),
+                is_error,
+            });
+        }
+    }
+}
+
+/// Run one `/connect` [`tui::bottom_pane::ConnectAction`] to completion:
+/// persist an API key, drive the GitHub Copilot device-flow, or drive an
+/// OAuth browser sign-in — then report the outcome to the transcript via
+/// `TurnEvent::SystemNotice`. Mirrors [`run_web_action`]'s shape: the
+/// picker/method/key views return the action synchronously from the
+/// blocking ratatui loop; this async tail does the real persistence/network
+/// work off the render thread.
+async fn run_connect_action(
+    action: tui::bottom_pane::ConnectAction,
+    key_store: Arc<secret::CredentialManager>,
+    oauth: Arc<dyn command_core::OAuthConnectDriver>,
+    copilot: Arc<dyn command_core::CopilotConnectDriver>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+) {
+    use tui::bottom_pane::ConnectAction;
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    let label = tui::connect::picker::provider_label;
+    let notice = |body: String, is_error: bool| {
+        let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
+    };
+
+    match action {
+        ConnectAction::StoreKey { provider_id, key } => {
+            match key_store.set_provider_key(&provider_id, &key).await {
+                Ok(()) => notice(format!("✓ Saved {} API key.", label(&provider_id)), false),
+                Err(e) => notice(format!("✗ Failed to store key: {e}"), true),
+            }
+        }
+        ConnectAction::Copilot { provider_id: _ } => {
+            notice("Connecting to GitHub Copilot…".to_string(), false);
+            match copilot.begin(None).await {
+                Ok(step) => {
+                    // Best-effort: copy the user code to the clipboard so the
+                    // user can paste it straight into the browser tab.
+                    tui::copy::copy_to_clipboard_native(&step.user_code);
+                    notice(
+                        format!(
+                            "Enter code {} at {} — waiting for authorization…",
+                            step.user_code, step.verification_uri
+                        ),
+                        false,
+                    );
+                    match copilot.poll_to_completion(&step).await {
+                        Ok(()) => notice("✓ Connected to GitHub Copilot.".to_string(), false),
+                        Err(e) => notice(format!("✗ Copilot authorization failed: {e}"), true),
+                    }
+                }
+                Err(e) => notice(format!("✗ Copilot device flow failed: {e}"), true),
+            }
+        }
+        ConnectAction::OAuth { provider_id } => {
+            notice(
+                format!("Opening your browser to sign in to {}…", label(&provider_id)),
+                false,
+            );
+            match oauth.login(&provider_id).await {
+                Ok(msg) => {
+                    let body = if msg.trim().is_empty() {
+                        format!("✓ Signed in to {}.", label(&provider_id))
+                    } else {
+                        msg
+                    };
+                    notice(body, false);
+                }
+                Err(e) => notice(
+                    format!("✗ Sign-in failed: {e}. Try connecting with an API key instead."),
+                    true,
+                ),
+            }
         }
     }
 }

@@ -14,7 +14,18 @@ use tui_core::theme::{Theme, ThemeName};
 
 use super::{colored_lines, dim_span, truncate, StyledCell};
 
-/// A tool call: `● {tool}` header + arguments. Collapsed → a dim, truncated
+/// Tool-call header marker (claude-code `figures.BLACK_CIRCLE`): `⏺` (U+23FA)
+/// on macOS, `●` (U+25CF) elsewhere — platform-conditional at compile time,
+/// mirroring `message::ASSISTANT_MARKER` and the iocraft
+/// `assistant_tool_use::MARKER`. (The grouped-fold header stays an
+/// unconditional `●` to match the byte-locked iocraft `grouped_tool_use`.)
+const TOOL_MARKER: &str = if cfg!(target_os = "macos") {
+    "\u{23FA} "
+} else {
+    "\u{25CF} "
+};
+
+/// A tool call: `⏺ {tool}` header + arguments. Collapsed → a dim, truncated
 /// one-line summary; verbose → the pretty-printed JSON input, dim-indented.
 pub(crate) fn tool_use_lines(
     tool: &str,
@@ -25,7 +36,7 @@ pub(crate) fn tool_use_lines(
     let header = StyledLine {
         spans: vec![
             StyledSpan::styled(
-                "● ".to_string(),
+                TOOL_MARKER.to_string(),
                 SpanStyle {
                     fg: theme.success,
                     ..SpanStyle::default()
@@ -53,7 +64,7 @@ pub(crate) fn tool_use_lines(
     out
 }
 
-/// A tool result. Default: a dim `⎿ {summary}` one-liner — the string content
+/// A tool result. Default: a dim `⎿  {summary}` one-liner — the string content
 /// when present, else compact JSON. An Edit/Write result carrying the paired
 /// diff inputs (`old_string`/`new_string`) renders a structured diff instead
 /// (plan Phase 9 step 5): a dim added/removed summary header + the diff rows.
@@ -76,11 +87,11 @@ pub(crate) fn tool_result_lines(
         result.to_string()
     };
     vec![StyledLine {
-        spans: vec![dim_span(format!("  ⎿ {}", truncate(&summary, 100)), theme)],
+        spans: vec![dim_span(format!("  ⎿  {}", truncate(&summary, 100)), theme)],
     }]
 }
 
-/// The Edit/Write structured diff: a dim `  ⎿ Added N line(s)[, removed M
+/// The Edit/Write structured diff: a dim `  ⎿  Added N line(s)[, removed M
 /// line(s)]` gutter header (iocraft `added_removed_header` parity), then the
 /// diff rows from `tui_core::render::diff` — Write is a pure add (`old` =
 /// empty), `file_path` drives syntax detection, and changed rows are
@@ -98,7 +109,7 @@ fn edit_write_diff_lines(
     let (additions, removals) = diff::diff_stats(old, new);
     let summary = added_removed_header(additions, removals).unwrap_or_default();
     let mut out = vec![StyledLine {
-        spans: vec![dim_span(format!("  ⎿ {summary}"), theme)],
+        spans: vec![dim_span(format!("  ⎿  {summary}"), theme)],
     }];
     out.extend(diff::render_with_width(
         old,
@@ -188,7 +199,7 @@ pub(crate) fn group_tool_use_lines(
             out.push(StyledLine {
                 spans: vec![dim_span(
                     format!(
-                        "  ⎿ {} → {}",
+                        "  ⎿  {} → {}",
                         truncate(&input.to_string(), 60),
                         truncate(&result.to_string(), 60)
                     ),
@@ -201,7 +212,7 @@ pub(crate) fn group_tool_use_lines(
 }
 
 /// The collapsed Read/Search fold: a dim `Read/Search (N results)` count
-/// line; verbose expands the per-entry display lines under a `⎿ ` gutter
+/// line; verbose expands the per-entry display lines under a `⎿  ` gutter
 /// (tui-core `CollapsedReadSearch.entries` contract: "shown when expanded").
 pub(crate) fn collapsed_read_search_lines(
     entries: &[String],
@@ -215,7 +226,7 @@ pub(crate) fn collapsed_read_search_lines(
     if verbose {
         for entry in entries {
             out.push(StyledLine {
-                spans: vec![dim_span(format!("  ⎿ {entry}"), theme)],
+                spans: vec![dim_span(format!("  ⎿  {entry}"), theme)],
             });
         }
     }
@@ -251,7 +262,7 @@ impl StyledCell for ToolUseCell {
 }
 
 /// [`RenderedMessage::UserToolResult`](tui_core::message::RenderedMessage::UserToolResult)
-/// — the `  ⎿ {summary}` result line, or the Edit/Write structured diff when
+/// — the `  ⎿  {summary}` result line, or the Edit/Write structured diff when
 /// the paired `old_string`/`new_string` inputs are present.
 #[derive(Debug)]
 pub struct ToolResultCell {
@@ -391,7 +402,7 @@ mod tests {
         );
         let lines = plain(&cell, false);
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "● Read");
+        assert_eq!(lines[0], format!("{TOOL_MARKER}Read"));
         assert_eq!(lines[1], "  {\"file_path\":\"src/lib.rs\"}");
         assert_eq!(cell.tool(), "Read");
         // Header marker is success-colored; the tool name is unstyled.
@@ -428,7 +439,7 @@ mod tests {
             lines.len() > 2,
             "pretty JSON spans multiple lines: {lines:?}"
         );
-        assert_eq!(lines[0], "● Read");
+        assert_eq!(lines[0], format!("{TOOL_MARKER}Read"));
         assert!(lines[1].starts_with("  {"), "indented JSON: {lines:?}");
         assert!(
             lines.iter().any(|l| l.contains("\"limit\": 10")),
@@ -444,7 +455,7 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(plain(&cell, false), vec!["  ⎿ hello world".to_string()]);
+        assert_eq!(plain(&cell, false), vec!["  ⎿  hello world".to_string()]);
         let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
         assert_eq!(styled[0].spans[0].style.fg, Some(rata(Theme::dark().dim)));
     }
@@ -461,7 +472,7 @@ mod tests {
         );
         assert_eq!(
             plain(&cell, false),
-            vec!["  ⎿ line one line two".to_string()]
+            vec!["  ⎿  line one line two".to_string()]
         );
     }
 
@@ -470,7 +481,7 @@ mod tests {
         let cell = ToolResultCell::new(serde_json::json!({"status": "ok"}), None, None, None);
         assert_eq!(
             plain(&cell, false),
-            vec!["  ⎿ {\"status\":\"ok\"}".to_string()]
+            vec!["  ⎿  {\"status\":\"ok\"}".to_string()]
         );
     }
 
@@ -563,7 +574,7 @@ mod tests {
         );
         let lines = plain(&cell, false);
         assert_eq!(
-            lines[0], "  ⎿ Added 1 line, removed 1 line",
+            lines[0], "  ⎿  Added 1 line, removed 1 line",
             "summary header inside the gutter: {lines:?}"
         );
         let all = lines.join("\n");
@@ -591,12 +602,12 @@ mod tests {
             Some("x.txt".to_string()),
         );
         let lines = plain(&cell, false);
-        assert_eq!(lines[0], "  ⎿ Added 2 lines", "pure-add summary: {lines:?}");
+        assert_eq!(lines[0], "  ⎿  Added 2 lines", "pure-add summary: {lines:?}");
         let all = lines.join("\n");
         assert!(all.contains("line one"), "{all}");
         assert!(all.contains("line two"), "{all}");
-        // The plain `⎿ ok` summary is replaced by the diff.
-        assert!(!all.contains("⎿ ok"), "{all}");
+        // The plain `⎿  ok` summary is replaced by the diff.
+        assert!(!all.contains("⎿  ok"), "{all}");
     }
 
     #[test]
@@ -607,8 +618,8 @@ mod tests {
             plain(&cell, true),
             vec![
                 "Read/Search (2 results)".to_string(),
-                "  ⎿ Read a.rs".to_string(),
-                "  ⎿ Grep foo".to_string(),
+                "  ⎿  Read a.rs".to_string(),
+                "  ⎿  Grep foo".to_string(),
             ]
         );
         let styled = cell.display_lines(
@@ -653,8 +664,8 @@ mod tests {
             lines,
             vec![
                 "● Read (×2)".to_string(),
-                "  ⎿ {\"f\":\"a\"} → \"ok\"".to_string(),
-                "  ⎿ {\"f\":\"b\"} → \"ok\"".to_string(),
+                "  ⎿  {\"f\":\"a\"} → \"ok\"".to_string(),
+                "  ⎿  {\"f\":\"b\"} → \"ok\"".to_string(),
             ]
         );
     }

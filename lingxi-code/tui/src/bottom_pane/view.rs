@@ -41,6 +41,118 @@ pub enum ViewOutcome {
     OpenView(Box<dyn BottomPaneView>),
     /// The view asks the app to run a command effect on its behalf.
     RunCommand(CommandAction),
+    /// The view asks the app to run a `/web` effect (secret/settings save or
+    /// a test search) on its behalf. The view stays open — the async result
+    /// (and any later close) is a later task's concern.
+    RunWebAction(WebAction),
+    /// The view asks the app to run a `/connect` effect (store an API key, or
+    /// kick off a Copilot/OAuth sign-in) on its behalf. Unlike
+    /// [`Self::RunWebAction`], the WHOLE `/connect` view stack (picker →
+    /// method choice → key entry) is cleared when this fires — the flow is
+    /// over and the result is reported into the transcript, not back into a
+    /// still-open screen.
+    RunConnectAction(ConnectAction),
+}
+
+/// An app-level `/connect` effect a view can request via
+/// [`ViewOutcome::RunConnectAction`]. The owner runs these asynchronously
+/// (secure-store writes, OAuth/Copilot device-flow sign-in) and reports
+/// results back through the transcript (`TurnEvent::SystemNotice`).
+#[derive(Clone, PartialEq, Eq)]
+pub enum ConnectAction {
+    /// Persist an API key through the secure credential store.
+    StoreKey {
+        /// Provider/keychain id to store the key under.
+        provider_id: String,
+        /// The entered secret.
+        key: String,
+    },
+    /// Kick off the GitHub Copilot OAuth device-flow for `provider_id`.
+    Copilot {
+        /// Provider id being connected (normally `"github-copilot"`).
+        provider_id: String,
+    },
+    /// Kick off first-party OAuth browser sign-in for `provider_id`.
+    OAuth {
+        /// Provider id being connected (e.g. `"anthropic"`).
+        provider_id: String,
+    },
+}
+
+// Hand-written `Debug` that REDACTS the secret `key` — the derived impl would
+// print it verbatim, so any future `debug!`/panic on a `ConnectAction` would
+// leak the credential. Everything else is shown for diagnostics.
+impl std::fmt::Debug for ConnectAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StoreKey { provider_id, .. } => f
+                .debug_struct("StoreKey")
+                .field("provider_id", provider_id)
+                .field("key", &"<redacted>")
+                .finish(),
+            Self::Copilot { provider_id } => f
+                .debug_struct("Copilot")
+                .field("provider_id", provider_id)
+                .finish(),
+            Self::OAuth { provider_id } => f
+                .debug_struct("OAuth")
+                .field("provider_id", provider_id)
+                .finish(),
+        }
+    }
+}
+
+/// An app-level `/web` effect a view can request via
+/// [`ViewOutcome::RunWebAction`]. The owner runs these asynchronously
+/// (secure-store writes, settings writes, test network calls) and reports
+/// results back through `TurnEvent::SystemNotice`.
+#[derive(Clone, PartialEq, Eq)]
+pub enum WebAction {
+    /// Persist a secret key through the secure credential store.
+    SaveSecret {
+        provider: tool_web::web_search_config::WebSearchProvider,
+        secret: String,
+    },
+    /// Persist non-secret settings (`provider`, optional SearXNG URL).
+    SaveSettings {
+        provider: tool_web::web_search_config::WebSearchProvider,
+        searxng_url: Option<String>,
+    },
+    /// Run a test search for `provider`, optionally using a not-yet-saved
+    /// `typed_key` (the config screen's in-progress input buffer) instead of
+    /// the persisted credential.
+    TestSearch {
+        provider: tool_web::web_search_config::WebSearchProvider,
+        typed_key: Option<String>,
+    },
+}
+
+// Hand-written `Debug` that REDACTS the secret `secret`/`typed_key` — the
+// derived impl would print them verbatim, leaking the credential through any
+// future `debug!`/panic on a `WebAction`.
+impl std::fmt::Debug for WebAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SaveSecret { provider, .. } => f
+                .debug_struct("SaveSecret")
+                .field("provider", provider)
+                .field("secret", &"<redacted>")
+                .finish(),
+            Self::SaveSettings {
+                provider,
+                searxng_url,
+            } => f
+                .debug_struct("SaveSettings")
+                .field("provider", provider)
+                .field("searxng_url", searxng_url)
+                .finish(),
+            Self::TestSearch { provider, typed_key } => f
+                .debug_struct("TestSearch")
+                .field("provider", provider)
+                .field("typed_key", &typed_key.as_ref().map(|_| "<redacted>"))
+                .finish(),
+        }
+    }
 }
 
 /// The view-level payload of [`ViewOutcome::Accepted`].
@@ -97,4 +209,39 @@ pub trait BottomPaneView: Renderable {
     /// Downcasting support (MSRV 1.82 has no `dyn` trait upcasting):
     /// implementations return `self`.
     fn as_any(&self) -> &dyn Any;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tool_web::web_search_config::WebSearchProvider;
+
+    /// The hand-written `Debug` for `ConnectAction`/`WebAction` must NEVER
+    /// print the secret — a derived impl would, leaking credentials into any
+    /// future `debug!`/panic message.
+    #[test]
+    fn connect_action_debug_redacts_the_key() {
+        let action = ConnectAction::StoreKey {
+            provider_id: "anthropic".to_string(),
+            key: "sk-super-secret-value".to_string(),
+        };
+        let rendered = format!("{action:?}");
+        assert!(!rendered.contains("sk-super-secret-value"), "leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("anthropic"));
+    }
+
+    #[test]
+    fn web_action_debug_redacts_secret_and_typed_key() {
+        let save = WebAction::SaveSecret {
+            provider: WebSearchProvider::Tavily,
+            secret: "tvly-super-secret".to_string(),
+        };
+        assert!(!format!("{save:?}").contains("tvly-super-secret"));
+        let test = WebAction::TestSearch {
+            provider: WebSearchProvider::Brave,
+            typed_key: Some("brave-typed-secret".to_string()),
+        };
+        assert!(!format!("{test:?}").contains("brave-typed-secret"));
+    }
 }

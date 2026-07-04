@@ -47,7 +47,7 @@ pub fn render_message(
 ) -> Vec<StyledLine> {
     let width = if width == 0 { DEFAULT_WIDTH } else { width };
     match entry {
-        RenderedMessage::UserText { body, .. } => user_text_lines(body),
+        RenderedMessage::UserText { body, .. } => user_text_lines(body, theme),
         RenderedMessage::AssistantText { body, .. } => assistant_lines(body, width, theme),
         RenderedMessage::SystemText { body, is_error, .. } => {
             system_text_lines(body, *is_error, theme)
@@ -90,7 +90,7 @@ pub fn render_message(
         }
         RenderedMessage::CompactBoundary { .. } => compact_boundary_lines(theme),
         RenderedMessage::AssistantThinking { thinking, .. } => {
-            thinking_lines(thinking, verbose, theme)
+            thinking_lines(thinking, width, verbose, theme)
         }
         RenderedMessage::SystemApiError {
             error,

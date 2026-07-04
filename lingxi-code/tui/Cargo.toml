@@ -52,6 +52,15 @@ async-trait = { workspace = true }
 session = { path = "../session" }
 protocol = { path = "../protocol" }
 tracing = { workspace = true }
+# `/web` WebSearch-config port (screens/web_picker.rs + screens/web_config.rs
+# from the deleted iocraft `tui`): pure KeyCode->Outcome reducers over the
+# tool_web provider config + secret store + memory settings.
+tool-web = { path = "../tools/web" }
+secret = { path = "../secret" }
+memory = { path = "../memory" }
+command-core = { path = "../commands/core" }
+url = "2"
+dirs = "5"
 
 [lints]
 workspace = true

@@ -15,6 +15,9 @@
 //! cancels a turn or exits the process by itself.
 
 pub mod completion_view;
+pub mod connect_key_view;
+pub mod connect_method_view;
+pub mod connect_picker_view;
 pub mod dialog_view;
 pub mod footer;
 pub mod model_picker_view;
@@ -23,6 +26,8 @@ pub mod permission_view;
 pub mod screen_view;
 pub mod theme_picker_view;
 pub mod view;
+pub mod web_config_view;
+pub mod web_picker_view;
 
 use std::time::{Duration, Instant};
 
@@ -44,7 +49,7 @@ use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
-pub use view::{BottomPaneView, CommandAction, ViewAction, ViewOutcome};
+pub use view::{BottomPaneView, CommandAction, ConnectAction, ViewAction, ViewOutcome, WebAction};
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
@@ -88,6 +93,15 @@ pub enum BottomPaneOutcome {
     },
     /// A view asks the owner to run a command effect on its behalf.
     RunCommand(CommandAction),
+    /// A view asks the owner to run a `/web` effect on its behalf. A test
+    /// keeps the view open; a save dismisses the `/web` flow (see the
+    /// `RunWebAction` arm of [`ViewStack::apply`]).
+    RunWebAction(WebAction),
+    /// A view asks the owner to run a `/connect` effect on its behalf. Unlike
+    /// `RunWebAction`, the whole `/connect` view stack has already been
+    /// cleared by [`ViewStack::apply`] by the time this surfaces (see
+    /// [`ViewOutcome::RunConnectAction`]).
+    RunConnectAction(ConnectAction),
     /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
     /// the new state back via [`BottomPane::set_verbose`]).
     ToggleVerbose,
@@ -234,6 +248,26 @@ impl BottomPane {
         self.view_stack.push(Box::new(ModelPickerView::new(rows)));
     }
 
+    /// Open the `/web` provider picker over `snapshot` (the current
+    /// configured/active web-search state).
+    pub fn show_web_picker(&mut self, snapshot: crate::web::picker::WebConfigSnapshot) {
+        self.view_stack
+            .push(Box::new(web_picker_view::WebPickerView::new(snapshot)));
+    }
+
+    /// Open the `/connect` provider picker over `auth_methods` (per-provider
+    /// login method tag) joined with `availability` (which providers already
+    /// have a usable credential).
+    pub fn show_connect_picker(
+        &mut self,
+        auth_methods: std::collections::BTreeMap<String, String>,
+        availability: std::collections::BTreeMap<String, bool>,
+    ) {
+        self.view_stack.push(Box::new(
+            connect_picker_view::ConnectPickerView::new(auth_methods, availability),
+        ));
+    }
+
     /// Feed the owner-computed task status (spinner text + running flag).
     /// Called before routing/rendering so Ctrl-C routing and the status row
     /// reflect the owner's current turn state.
@@ -358,6 +392,8 @@ impl BottomPane {
                 profile,
             },
             ViewOutcome::RunCommand(action) => BottomPaneOutcome::RunCommand(action),
+            ViewOutcome::RunWebAction(action) => BottomPaneOutcome::RunWebAction(action),
+            ViewOutcome::RunConnectAction(action) => BottomPaneOutcome::RunConnectAction(action),
         }
     }
 
@@ -831,6 +867,33 @@ impl ViewStack {
     fn apply(&mut self, outcome: ViewOutcome) -> ViewOutcome {
         match outcome {
             ViewOutcome::Pending => ViewOutcome::Pending,
+            // A `/web` TEST keeps its view open (retest in place); a
+            // successful SAVE closes the whole `/web` flow. The async effect
+            // can't reach back into the view stack, and the config screen
+            // holds a snapshot cloned at construction time — leaving it open
+            // after a save showed stale status ("Paste Tavily API key") and
+            // made Enter look like a no-op (the iocraft backend called
+            // `close_screen()` here). The "✓ Saved" result lands in the
+            // transcript; reopening `/web` shows fresh state.
+            ViewOutcome::RunWebAction(action) => {
+                if matches!(
+                    action,
+                    WebAction::SaveSecret { .. } | WebAction::SaveSettings { .. }
+                ) {
+                    self.views.clear();
+                }
+                ViewOutcome::RunWebAction(action)
+            }
+            // A `/connect` effect, in contrast, CLOSES the whole flow: the
+            // picker → method-choice → key-entry chain is fully dismissed
+            // (unlike `/web`'s config screen, which stays open to show test/
+            // save status in place). The result (key stored, Copilot/OAuth
+            // kicked off) is reported into the transcript instead, so there is
+            // no live screen left to update.
+            ViewOutcome::RunConnectAction(action) => {
+                self.views.clear();
+                ViewOutcome::RunConnectAction(action)
+            }
             ViewOutcome::Cancelled => {
                 // A cancelled child pops alone: parents stay open (codex
                 // parity — cancel returns to the parent flow).
@@ -975,6 +1038,54 @@ mod tests {
         let outcome = stack.route_key(key(KeyCode::Down)).expect("view active");
         assert!(matches!(outcome, ViewOutcome::Pending));
         assert_eq!(stack.len(), 1, "pending view stays open");
+    }
+
+    /// (review) The effect-outcome stack bookkeeping: a `/web` SAVE dismisses
+    /// the whole flow, a `/web` TEST keeps the view open, and any `/connect`
+    /// effect always dismisses the connect flow.
+    #[test]
+    fn effect_outcomes_close_or_keep_the_view_stack_per_kind() {
+        use tool_web::web_search_config::WebSearchProvider;
+        let drive = |outcome: ViewOutcome| {
+            let mut stack = ViewStack::new();
+            stack.push(Box::new(StubView::returning(vec![outcome])));
+            stack.route_key(key(KeyCode::Enter));
+            stack.len()
+        };
+        // SaveSecret / SaveSettings clear the whole /web stack.
+        assert_eq!(
+            drive(ViewOutcome::RunWebAction(WebAction::SaveSecret {
+                provider: WebSearchProvider::Tavily,
+                secret: "k".to_string(),
+            })),
+            0,
+            "SaveSecret clears the /web stack"
+        );
+        assert_eq!(
+            drive(ViewOutcome::RunWebAction(WebAction::SaveSettings {
+                provider: WebSearchProvider::Searxng,
+                searxng_url: Some("http://x".to_string()),
+            })),
+            0,
+            "SaveSettings clears the /web stack"
+        );
+        // TestSearch keeps the config view open (retest in place).
+        assert_eq!(
+            drive(ViewOutcome::RunWebAction(WebAction::TestSearch {
+                provider: WebSearchProvider::Tavily,
+                typed_key: None,
+            })),
+            1,
+            "TestSearch keeps the view open"
+        );
+        // Any /connect effect dismisses the whole connect flow.
+        assert_eq!(
+            drive(ViewOutcome::RunConnectAction(ConnectAction::OAuth {
+                provider_id: "anthropic".to_string(),
+            })),
+            0,
+            "RunConnectAction clears the connect stack"
+        );
     }
 
     #[test]
@@ -1695,7 +1806,7 @@ mod tests {
             buffer_row(&buf, 4)
         );
         assert!(
-            buffer_row(&buf, 9).contains("/agents"),
+            buffer_row(&buf, 9).contains("/connect"),
             "sixth item visible: {}",
             buffer_row(&buf, 9)
         );

@@ -21,6 +21,7 @@ pub mod chat_widget;
 pub mod color;
 pub mod command;
 pub mod composer;
+pub mod connect;
 pub mod copy;
 pub mod export;
 pub mod files;
@@ -37,6 +38,7 @@ pub mod startup_bypass;
 pub mod raw_screen;
 pub mod renderable;
 pub mod session;
+pub mod spinner;
 pub mod status_line;
 pub(crate) mod style;
 pub mod style_adapter;
@@ -44,6 +46,7 @@ pub mod term_image;
 pub mod terminal;
 pub mod transcript;
 pub mod vim;
+pub mod web;
 
 use std::io::Stdout;
 

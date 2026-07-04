@@ -86,6 +86,22 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_mcp,
     },
     SlashCommand {
+        name: "/web",
+        aliases: &[],
+        description: "Configure web search",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_web,
+    },
+    SlashCommand {
+        name: "/connect",
+        aliases: &[],
+        description: "Connect a model provider",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_connect,
+    },
+    SlashCommand {
         name: "/hooks",
         aliases: &[],
         description: "List hooks",

@@ -33,8 +33,22 @@ fn markdown_theme() -> MarkdownTheme {
     }
 }
 
-/// `> {body}` user echo (empty body → nothing).
-pub(crate) fn user_text_lines(body: &str) -> Vec<StyledLine> {
+/// claude-code `INTERRUPT_MESSAGE` (utils/messages.ts:207) — the `UserText`
+/// turn content pushed when a streaming turn is interrupted. Rendered as the
+/// dim `InterruptedByUser` line, not the `> ` echo.
+pub(crate) const INTERRUPT_MESSAGE: &str = "[Request interrupted by user]";
+
+/// The line body claude-code's `InterruptedByUser.tsx` shows for an
+/// interrupted turn (iocraft `user_tool_result::INTERRUPTED_LINE`).
+const INTERRUPTED_LINE: &str = "Interrupted \u{00b7} What should Claude do instead?";
+
+/// `> {body}` user echo (empty body → nothing). A body equal to
+/// [`INTERRUPT_MESSAGE`] renders the dim `  ⎿  Interrupted · …` line instead
+/// (1:1 with the iocraft `UserTextMessage` special-case).
+pub(crate) fn user_text_lines(body: &str, theme: &Theme) -> Vec<StyledLine> {
+    if body == INTERRUPT_MESSAGE {
+        return colored_lines(&format!("  \u{23BF}  {INTERRUPTED_LINE}"), theme.dim);
+    }
     if body.is_empty() {
         Vec::new()
     } else {
@@ -102,16 +116,49 @@ pub(crate) fn user_bash_input_lines(command: &str, theme: &Theme) -> Vec<StyledL
     colored_lines(&format!("! {command}"), theme.dim)
 }
 
-/// Assistant thinking block: collapsed → the dim expand hint; verbose → the
-/// dim `✻ Thinking…` marker + the thinking body.
-pub(crate) fn thinking_lines(thinking: &str, verbose: bool, theme: &Theme) -> Vec<StyledLine> {
-    if verbose {
-        let mut out = colored_lines("✻ Thinking…", theme.dim);
-        out.extend(colored_lines(thinking, theme.dim));
-        out
-    } else {
-        colored_lines("✻ Thinking (ctrl+o to expand)", theme.dim)
+/// Assistant thinking block, 1:1 with the iocraft `AssistantThinkingMessage`
+/// (a documented literal-lock of claude-code `AssistantThinkingMessage.tsx`):
+/// the `∴ ` marker (U+2234), dim+italic header. Collapsed → `∴ Thinking
+/// (ctrl+o to expand)`; expanded → `∴ Thinking…`, a gap=1 blank row, then the
+/// markdown body indented 2 spaces and dim-colored. `✻` is reserved for
+/// REDACTED thinking (see [`redacted_thinking_lines`]).
+pub(crate) fn thinking_lines(
+    thinking: &str,
+    width: usize,
+    verbose: bool,
+    theme: &Theme,
+) -> Vec<StyledLine> {
+    let header = |text: &str| StyledLine {
+        spans: vec![StyledSpan::styled(
+            text.to_string(),
+            SpanStyle {
+                fg: theme.dim,
+                italic: true,
+                ..SpanStyle::default()
+            },
+        )],
+    };
+    if !verbose {
+        return vec![header("\u{2234} Thinking (ctrl+o to expand)")];
     }
+    let mut out = vec![header("\u{2234} Thinking\u{2026}")];
+    // Expanded: a gap=1 blank row, then the markdown body indented 2 and
+    // dim-colored (claude-code `<Box paddingLeft={2}><Markdown dimColor>`).
+    let body: Vec<StyledLine> = render_with_width(thinking, &markdown_theme(), width)
+        .into_iter()
+        .filter(|line| !line.spans.is_empty())
+        .collect();
+    if !body.is_empty() {
+        out.push(StyledLine { spans: Vec::new() });
+        for mut line in body {
+            for span in &mut line.spans {
+                span.style.fg = theme.dim;
+            }
+            line.spans.insert(0, StyledSpan::plain("  "));
+            out.push(line);
+        }
+    }
+    out
 }
 
 /// Redacted thinking: the bare dim `✻ Thinking…` marker (no expandable body).
@@ -185,8 +232,8 @@ impl UserTextCell {
 }
 
 impl StyledCell for UserTextCell {
-    fn styled_lines(&self, _width: usize, _theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
-        user_text_lines(&self.body)
+    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        user_text_lines(&self.body, theme)
     }
 }
 
@@ -342,8 +389,8 @@ impl ThinkingCell {
 }
 
 impl StyledCell for ThinkingCell {
-    fn styled_lines(&self, _width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
-        thinking_lines(&self.thinking, verbose, theme)
+    fn styled_lines(&self, width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
+        thinking_lines(&self.thinking, width, verbose, theme)
     }
 }
 
@@ -536,7 +583,7 @@ mod tests {
         assert_eq!(cell.thinking(), "step one\nstep two");
         assert_eq!(
             plain(&cell),
-            vec!["✻ Thinking (ctrl+o to expand)".to_string()],
+            vec!["\u{2234} Thinking (ctrl+o to expand)".to_string()],
             "collapsed shows only the hint"
         );
         let expanded: Vec<String> = cell
@@ -551,13 +598,18 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect();
-        assert_eq!(
-            expanded,
-            vec![
-                "✻ Thinking…".to_string(),
-                "step one".to_string(),
-                "step two".to_string()
-            ]
+        // Expanded: ∴ header, a gap=1 blank row, then the markdown body
+        // indented 2 spaces (1:1 with the iocraft AssistantThinkingMessage).
+        assert_eq!(expanded[0], "\u{2234} Thinking\u{2026}");
+        assert_eq!(expanded[1], "", "gap=1 blank row after the header");
+        assert!(
+            expanded[2].starts_with("  "),
+            "body indented 2: {:?}",
+            expanded[2]
+        );
+        assert!(
+            expanded.iter().any(|l| l.contains("step one")),
+            "body present: {expanded:?}"
         );
     }
 

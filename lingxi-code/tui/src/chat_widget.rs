@@ -971,7 +971,6 @@ impl ChatWidget {
     /// startup and kept current by the async `on_web_action` effect closure).
     /// Falls back to the default (unconfigured) snapshot when no slot is
     /// wired (headless / tests).
-    #[allow(dead_code)]
     pub(crate) fn cmd_web(&mut self, _args: &str) -> ChatOutcome {
         let snapshot = self
             .web_snapshot

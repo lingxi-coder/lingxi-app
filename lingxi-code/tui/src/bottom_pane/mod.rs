@@ -93,8 +93,9 @@ pub enum BottomPaneOutcome {
     },
     /// A view asks the owner to run a command effect on its behalf.
     RunCommand(CommandAction),
-    /// A view asks the owner to run a `/web` effect on its behalf (the view
-    /// stays open; see [`ViewOutcome::RunWebAction`]).
+    /// A view asks the owner to run a `/web` effect on its behalf. A test
+    /// keeps the view open; a save dismisses the `/web` flow (see the
+    /// `RunWebAction` arm of [`ViewStack::apply`]).
     RunWebAction(WebAction),
     /// A view asks the owner to run a `/connect` effect on its behalf. Unlike
     /// `RunWebAction`, the whole `/connect` view stack has already been
@@ -866,10 +867,23 @@ impl ViewStack {
     fn apply(&mut self, outcome: ViewOutcome) -> ViewOutcome {
         match outcome {
             ViewOutcome::Pending => ViewOutcome::Pending,
-            // A `/web` effect keeps its view open — the owner runs it
-            // asynchronously and the view's own state (e.g. the config
-            // screen's input buffer, test status) stays live while it waits.
-            ViewOutcome::RunWebAction(action) => ViewOutcome::RunWebAction(action),
+            // A `/web` TEST keeps its view open (retest in place); a
+            // successful SAVE closes the whole `/web` flow. The async effect
+            // can't reach back into the view stack, and the config screen
+            // holds a snapshot cloned at construction time — leaving it open
+            // after a save showed stale status ("Paste Tavily API key") and
+            // made Enter look like a no-op (the iocraft backend called
+            // `close_screen()` here). The "✓ Saved" result lands in the
+            // transcript; reopening `/web` shows fresh state.
+            ViewOutcome::RunWebAction(action) => {
+                if matches!(
+                    action,
+                    WebAction::SaveSecret { .. } | WebAction::SaveSettings { .. }
+                ) {
+                    self.views.clear();
+                }
+                ViewOutcome::RunWebAction(action)
+            }
             // A `/connect` effect, in contrast, CLOSES the whole flow: the
             // picker → method-choice → key-entry chain is fully dismissed
             // (unlike `/web`'s config screen, which stays open to show test/

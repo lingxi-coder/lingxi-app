@@ -1456,10 +1456,18 @@ async fn seed_orchestrator_session(
     // `state_from_messages`) so a resumed session continues on — and shows — its
     // saved model, not the launch default. `state_from_messages` yields
     // `DEFAULT_MODEL` when the transcript has no assistant lines, which is the
-    // correct fallback. The provider profile is not persisted in the JSONL; the
-    // llm-client registry resolves the model id to its provider by id when the
-    // profile is absent (a switched-to id like `deepseek-v4-pro` is unique).
+    // correct fallback.
     session.model = replayed.model;
+    // Clear the provider profile. The JSONL doesn't persist it, and the
+    // freshly-built orchestrator seeded `model_profile` to the DEFAULT model's
+    // provider (engine-desktop's startup `switch_model(default, Some(profile))`
+    // → e.g. `Some("anthropic")`). Leaving it scopes routing to the WRONG
+    // provider: a resumed cross-provider model like `deepseek-v4-pro` then fails
+    // its FIRST LIVE TURN with `ModelUnavailable` — `registry.resolve_in` finds
+    // nothing under `anthropic`. With `None`, the registry resolves the model id
+    // to its provider BY ID across all providers; a switched-to id like
+    // `deepseek-v4-pro` is unique, so it lands on the right provider.
+    session.model_profile = None;
 }
 
 /// `--resume` (no id) under `--no-tui` / non-TTY — the UNCHANGED M5-08 stdio
@@ -1891,6 +1899,51 @@ mod tests {
             "message": {"content": content},
         }))
         .expect("valid JsonlMessage")
+    }
+
+    #[tokio::test]
+    async fn seed_orchestrator_session_restores_saved_model_and_clears_stale_profile() {
+        // Regression (reported): a resumed cross-provider session failed its
+        // first LIVE turn with "model unavailable". The engine seeds
+        // `model_profile` to the default provider at startup; restoring the
+        // saved model but leaving that profile scopes routing to the wrong
+        // provider. Seeding must restore the model AND clear the profile so the
+        // registry resolves the model id to its provider by id.
+        let argv = tui_argv();
+        let build = crate::init::build_runtime_for_tui(&argv)
+            .await
+            .expect("build_runtime_for_tui");
+        // Simulate the engine's startup default-profile seed.
+        {
+            let handle = build.runtime.orchestrator.session();
+            let mut s = handle.lock().await;
+            s.model_profile = Some("anthropic".to_string());
+        }
+        // A transcript whose last assistant line was produced on deepseek.
+        let assistant: JsonlMessage = serde_json::from_value(serde_json::json!({
+            "type": "assistant",
+            "uuid": Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": Uuid::new_v4().to_string(),
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": "/tmp/workproj",
+            "version": "0.8.0",
+            "message": {"content": "answered on deepseek", "model": "deepseek-v4-pro"},
+        }))
+        .expect("valid JsonlMessage");
+        let messages = vec![jsonl_line("user", &serde_json::json!("hi")), assistant];
+        seed_orchestrator_session(&build.runtime.orchestrator, Uuid::new_v4(), &messages).await;
+
+        let handle = build.runtime.orchestrator.session();
+        let s = handle.lock().await;
+        assert_eq!(
+            s.model, "deepseek-v4-pro",
+            "resume restores the saved cross-provider model"
+        );
+        assert_eq!(
+            s.model_profile, None,
+            "the stale default profile is cleared so routing resolves the model id by provider"
+        );
     }
 
     #[tokio::test]

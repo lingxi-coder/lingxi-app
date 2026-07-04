@@ -768,12 +768,21 @@ impl Renderable for BottomPane {
         self.desired_height_for(width, self.status.running)
     }
 
-    /// The composer's cursor (claimed even while centered modals are open —
-    /// pre-pane behavior preserved), or the full-frame view's cursor (hidden
-    /// by default) when one owns the whole area.
+    /// The cursor claim, in priority order: a full-frame view's, then a
+    /// centered modal that claims one (a text-entry field like the `/connect`
+    /// key or `/web` config input — so the caret sits IN the field), then the
+    /// composer. List modals claim no cursor, so the composer keeps it exactly
+    /// as before.
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_pos(area);
+        }
+        if let Some(pos) = self
+            .view_stack
+            .active()
+            .and_then(|view| view.cursor_pos(area))
+        {
+            return Some(pos);
         }
         ComposerView::new(&self.composer).cursor_pos(self.zones(area)[3])
     }
@@ -781,6 +790,11 @@ impl Renderable for BottomPane {
     fn cursor_style(&self, area: Rect) -> SetCursorStyle {
         if let Some(view) = self.full_frame_view() {
             return view.cursor_style(area);
+        }
+        if let Some(view) = self.view_stack.active() {
+            if view.cursor_pos(area).is_some() {
+                return view.cursor_style(area);
+            }
         }
         ComposerView::new(&self.composer).cursor_style(self.zones(area)[3])
     }
@@ -1854,6 +1868,51 @@ mod tests {
         assert!(
             !text.contains("Connect a provider"),
             "the covered picker must NOT bleed through around the child: {text}"
+        );
+    }
+
+    #[test]
+    fn text_entry_modal_owns_the_cursor_and_paste_while_a_list_modal_leaves_them_on_the_composer() {
+        // Regression (reported /connect bugs): (1) the key-entry cursor stayed
+        // on the composer instead of moving into the field, and (2) ⌘V did
+        // nothing. A text-entry modal now claims the cursor (bar style) AND
+        // routes pastes into the field; a list modal (the picker) claims
+        // neither, so the composer keeps the cursor exactly as before.
+        let area = Rect::new(0, 0, 80, 20);
+        let mut pane = pane();
+        typ(&mut pane, "hi");
+        let composer_cursor = pane.cursor_pos(area);
+        // List modal: cursor stays on the composer, default shape.
+        pane.show_connect_picker(
+            [("openrouter".to_string(), "api_key".to_string())]
+                .into_iter()
+                .collect(),
+            std::collections::BTreeMap::new(),
+        );
+        assert_eq!(
+            pane.cursor_pos(area),
+            composer_cursor,
+            "a list modal leaves the cursor on the composer"
+        );
+        assert!(matches!(
+            pane.cursor_style(area),
+            SetCursorStyle::DefaultUserShape
+        ));
+        // Enter opens the key-entry child: the cursor moves into the field.
+        let _ = pane.handle_key(key(KeyCode::Enter));
+        let field_cursor = pane.cursor_pos(area).expect("the key field claims a cursor");
+        assert_ne!(
+            Some(field_cursor),
+            composer_cursor,
+            "the cursor moved into the key field"
+        );
+        assert!(matches!(pane.cursor_style(area), SetCursorStyle::SteadyBar));
+        // ⌘V routes into the field (not swallowed); Enter then stores the key.
+        let _ = pane.handle_paste("sk-or-v1-pasted");
+        let outcome = pane.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(outcome, BottomPaneOutcome::RunConnectAction(_)),
+            "paste + Enter reaches the store-key effect: {outcome:?}"
         );
     }
 

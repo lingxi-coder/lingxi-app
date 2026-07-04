@@ -289,13 +289,16 @@ fn de_source_catch<'de, D>(d: D) -> Result<DispatchSource, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = Option::<String>::deserialize(d)?;
-    Ok(match raw.as_deref() {
+    // Deserialize as an arbitrary Value so a WRONG-TYPED source (e.g. `42`) is
+    // coerced to fleet like zod `.catch("fleet")`, rather than erroring the whole
+    // record (which would quarantine the roster + orphan every worker).
+    let raw = serde_json::Value::deserialize(d)?;
+    Ok(match raw.as_str() {
         Some("shell") => DispatchSource::Shell,
         Some("slash") => DispatchSource::Slash,
         Some("spare") => DispatchSource::Spare,
         Some("respawn") => DispatchSource::Respawn,
-        // "fleet", any unknown string, or absent → fleet.
+        // "fleet", any unknown string, null, or a non-string value → fleet.
         _ => DispatchSource::Fleet,
     })
 }
@@ -546,6 +549,24 @@ pub fn read_roster(runtime_dir: &Path, supervisor_pid: i32, emit_events: bool) -
     // Stage 3: schema validation.
     match serde_json::from_value::<Roster>(raw.clone()) {
         Ok(mut roster) => {
+            // Envelope `proto` must be in [PROTO_MIN, PROTO] (zod
+            // `.int().min(PROTO_MIN).max(PROTO)`). An out-of-range proto (e.g. a
+            // future 2.2.x supervisor's proto:2, or a corrupt proto:0) is a schema
+            // failure → quarantine + fresh roster, NOT adopt the incompatible fleet.
+            if roster.proto < PROTO_MIN || roster.proto > PROTO {
+                let orphaned = count_workers(&raw);
+                if emit_events {
+                    emit_parse_failed(orphaned as i64, 1, "schema", Some("proto"), None);
+                }
+                quarantine(&path);
+                return corrupt(
+                    supervisor_pid,
+                    ParseFailure::Schema {
+                        orphaned,
+                        issue_path: "proto".to_string(),
+                    },
+                );
+            }
             roster.parse_failed = false;
             ReadOutcome::Ok(roster)
         }
@@ -1054,6 +1075,40 @@ mod tests {
         assert_eq!(d.source, DispatchSource::Fleet);
         assert_eq!(d.isolation, Isolation::None); // default
         assert!(d.env.is_empty()); // default {}
+    }
+
+    #[test]
+    fn source_catch_wrong_type_falls_back_to_fleet() {
+        // A WRONG-TYPED source (integer) coerces to fleet like zod `.catch`,
+        // instead of erroring the record (which would quarantine the roster).
+        let d: Dispatch = serde_json::from_value(serde_json::json!({
+            "proto": 1, "short": "abcd1234",
+            "sessionId": "s", "createdAt": 1,
+            "source": 42,
+            "cwd": "/x",
+            "launch": {"mode": "prompt", "args": []}
+        }))
+        .unwrap();
+        assert_eq!(d.source, DispatchSource::Fleet);
+    }
+
+    #[test]
+    fn out_of_range_proto_is_quarantined() {
+        let dir = tmpdir();
+        std::fs::write(
+            roster_path(&dir),
+            r#"{"proto":2,"supervisorPid":1,"updatedAt":1,"workers":{}}"#,
+        )
+        .unwrap();
+        match read_roster(&dir, 5, false) {
+            ReadOutcome::Corrupt {
+                failure: ParseFailure::Schema { issue_path, .. },
+                ..
+            } => assert_eq!(issue_path, "proto"),
+            other => panic!("expected Schema/proto corrupt, got {other:?}"),
+        }
+        // The out-of-range roster was quarantined, not left in place.
+        assert!(!roster_path(&dir).exists());
     }
 
     #[test]

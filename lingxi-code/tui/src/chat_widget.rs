@@ -274,16 +274,6 @@ impl ChatWidget {
         outcome
     }
 
-    /// Fold one streaming event from the orchestrator bridge into the
-    /// transcript: `TurnStarted` opens an empty active assistant cell,
-    /// `TextDelta` mutates it in place, `ToolUseStart`/`ToolUseResult` set and
-    /// clear the spinner activity, `TurnEnded` finalizes the active cell
-    /// (moves it to the committed history) and clears the in-flight cancel
-    /// token. `CostUpdated` refreshes the status-row cost, `ContextPressure`
-    /// sets/clears the pane banner, `CompactionCompleted` folds a
-    /// compact-boundary marker, `RateLimit` composes a transcript notice, and
-    /// `TerminalSequence` stages a write-through escape — every bridge-emitted
-    /// variant is handled (fix round 1: no wildcard drop).
     /// Commit the active streaming cell — but DISCARD it if it's the empty
     /// `AssistantTextCell` placeholder [`TurnEvent::TurnStarted`] opens. Used
     /// at every flush point that can fire before any assistant text streams (a
@@ -305,6 +295,17 @@ impl ChatWidget {
         }
     }
 
+    /// Fold one streaming event from the orchestrator bridge into the
+    /// transcript: `TurnStarted` opens an empty active assistant cell,
+    /// `TextDelta` mutates it in place, `ToolUseStart`/`ToolUseResult` render
+    /// the tool-call + result cells (and set/clear the spinner activity),
+    /// `TurnEnded` finalizes the active cell (moves it to the committed
+    /// history) and clears the in-flight cancel token. `CostUpdated` refreshes
+    /// the status-row cost, `ContextPressure` sets/clears the pane banner,
+    /// `CompactionCompleted` folds a compact-boundary marker, `RateLimit`
+    /// composes a transcript notice, `TerminalSequence` stages a write-through
+    /// escape, `SystemNotice`/`BashOutput` push system/bash-output rows — every
+    /// bridge-emitted variant is handled (no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
             TurnEvent::TurnStarted => {
@@ -420,6 +421,12 @@ impl ChatWidget {
                 // turn's spinner doesn't keep showing the previous turn's
                 // `activeForm` until a fresh `TodoWrite` arrives.
                 self.current_todo = None;
+                // (review M1) Drop any un-paired tool inputs — a turn
+                // interrupted between a `ToolUseStart` and its result would
+                // otherwise leak the (possibly large) input for the rest of
+                // the session. Mirrors `active_turn.rs` clearing on both
+                // turn boundaries.
+                self.tool_inputs.clear();
                 // Re-arm the statusline pump (claude-code executes the command
                 // on turn boundaries; the pump is debounced single-flight).
                 self.with_status_line(|s| s.dirty = true);
@@ -1186,6 +1193,9 @@ impl ChatWidget {
     fn clear_transcript(&mut self) {
         self.transcript.clear();
         self.last_rate_limit_text = None;
+        // (review M1) Reset per-turn side-tables so `/clear` starts clean.
+        self.tool_inputs.clear();
+        self.current_todo = None;
     }
 
     /// `/image <path>`: record an image message for `path` so a graphics
@@ -1664,6 +1674,26 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert!(out.contains("hi"), "bash output rendered: {out}");
+    }
+
+    /// (review M1) A turn ending between a tool's start and its result must
+    /// not leak the un-paired input for the rest of the session.
+    #[test]
+    fn tool_inputs_cleared_when_turn_ends_without_a_result() {
+        let mut widget = widget();
+        submit_command(&mut widget, "go");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Write".to_string(),
+            input: serde_json::json!({ "content": "big payload" }),
+        });
+        assert_eq!(widget.tool_inputs.len(), 1);
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        assert!(
+            widget.tool_inputs.is_empty(),
+            "un-paired tool input cleared on TurnEnded"
+        );
     }
 
     #[test]

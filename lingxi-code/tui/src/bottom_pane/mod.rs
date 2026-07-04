@@ -23,6 +23,8 @@ pub mod permission_view;
 pub mod screen_view;
 pub mod theme_picker_view;
 pub mod view;
+pub mod web_config_view;
+pub mod web_picker_view;
 
 use std::time::{Duration, Instant};
 
@@ -44,7 +46,7 @@ use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
-pub use view::{BottomPaneView, CommandAction, ViewAction, ViewOutcome};
+pub use view::{BottomPaneView, CommandAction, ViewAction, ViewOutcome, WebAction};
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
@@ -88,6 +90,9 @@ pub enum BottomPaneOutcome {
     },
     /// A view asks the owner to run a command effect on its behalf.
     RunCommand(CommandAction),
+    /// A view asks the owner to run a `/web` effect on its behalf (the view
+    /// stays open; see [`ViewOutcome::RunWebAction`]).
+    RunWebAction(WebAction),
     /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
     /// the new state back via [`BottomPane::set_verbose`]).
     ToggleVerbose,
@@ -234,6 +239,13 @@ impl BottomPane {
         self.view_stack.push(Box::new(ModelPickerView::new(rows)));
     }
 
+    /// Open the `/web` provider picker over `snapshot` (the current
+    /// configured/active web-search state).
+    pub fn show_web_picker(&mut self, snapshot: crate::web::picker::WebConfigSnapshot) {
+        self.view_stack
+            .push(Box::new(web_picker_view::WebPickerView::new(snapshot)));
+    }
+
     /// Feed the owner-computed task status (spinner text + running flag).
     /// Called before routing/rendering so Ctrl-C routing and the status row
     /// reflect the owner's current turn state.
@@ -358,6 +370,7 @@ impl BottomPane {
                 profile,
             },
             ViewOutcome::RunCommand(action) => BottomPaneOutcome::RunCommand(action),
+            ViewOutcome::RunWebAction(action) => BottomPaneOutcome::RunWebAction(action),
         }
     }
 
@@ -831,6 +844,10 @@ impl ViewStack {
     fn apply(&mut self, outcome: ViewOutcome) -> ViewOutcome {
         match outcome {
             ViewOutcome::Pending => ViewOutcome::Pending,
+            // A `/web` effect keeps its view open — the owner runs it
+            // asynchronously and the view's own state (e.g. the config
+            // screen's input buffer, test status) stays live while it waits.
+            ViewOutcome::RunWebAction(action) => ViewOutcome::RunWebAction(action),
             ViewOutcome::Cancelled => {
                 // A cancelled child pops alone: parents stay open (codex
                 // parity — cancel returns to the parent flow).

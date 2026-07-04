@@ -41,6 +41,35 @@ pub enum ViewOutcome {
     OpenView(Box<dyn BottomPaneView>),
     /// The view asks the app to run a command effect on its behalf.
     RunCommand(CommandAction),
+    /// The view asks the app to run a `/web` effect (secret/settings save or
+    /// a test search) on its behalf. The view stays open — the async result
+    /// (and any later close) is a later task's concern.
+    RunWebAction(WebAction),
+}
+
+/// An app-level `/web` effect a view can request via
+/// [`ViewOutcome::RunWebAction`]. The owner runs these asynchronously
+/// (secure-store writes, settings writes, test network calls) and reports
+/// results back through `TurnEvent::SystemNotice`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebAction {
+    /// Persist a secret key through the secure credential store.
+    SaveSecret {
+        provider: tool_web::web_search_config::WebSearchProvider,
+        secret: String,
+    },
+    /// Persist non-secret settings (`provider`, optional SearXNG URL).
+    SaveSettings {
+        provider: tool_web::web_search_config::WebSearchProvider,
+        searxng_url: Option<String>,
+    },
+    /// Run a test search for `provider`, optionally using a not-yet-saved
+    /// `typed_key` (the config screen's in-progress input buffer) instead of
+    /// the persisted credential.
+    TestSearch {
+        provider: tool_web::web_search_config::WebSearchProvider,
+        typed_key: Option<String>,
+    },
 }
 
 /// The view-level payload of [`ViewOutcome::Accepted`].

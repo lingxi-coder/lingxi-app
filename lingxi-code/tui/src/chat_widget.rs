@@ -34,7 +34,9 @@ use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
-use crate::bottom_pane::{BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction};
+use crate::bottom_pane::{
+    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, WebAction,
+};
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
 use crate::renderable::Renderable;
@@ -62,6 +64,10 @@ pub enum ChatOutcome {
     /// clipboard (best-effort, [`crate::copy::copy_to_clipboard_native`]).
     /// The confirmation message is already in the transcript.
     CopyToClipboard(String),
+    /// A `/web` view asked the caller to run a secret/settings save or a test
+    /// search. The caller runs it asynchronously and reports the result back
+    /// through `TurnEvent::SystemNotice`.
+    WebAction(WebAction),
 }
 
 /// The chat surface: owns the conversation state and the interactive footer,
@@ -385,6 +391,17 @@ impl ChatWidget {
             // bridge — live prompts arrive through the `permission_bridge`
             // channel into [`Self::open_permission`] instead.
             TurnEvent::PermissionRequest { .. } => {}
+            // A `/web` async effect (secret/settings save, test search)
+            // finished off-loop; surface its result as a transcript line —
+            // red for a failure, dim grey otherwise (`RenderedMessage::
+            // SystemText`'s existing severity mapping).
+            TurnEvent::SystemNotice { body, is_error } => {
+                self.transcript.push_message(RenderedMessage::SystemText {
+                    body,
+                    timestamp: 0,
+                    is_error,
+                });
+            }
         }
     }
 
@@ -1084,6 +1101,7 @@ impl ChatWidget {
             }
             BottomPaneOutcome::RunCommand(action) => self.run_command(action),
             BottomPaneOutcome::PastedImage(path) => self.push_image(&path),
+            BottomPaneOutcome::RunWebAction(action) => ChatOutcome::WebAction(action),
         }
     }
 

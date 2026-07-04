@@ -324,6 +324,9 @@ pub(crate) async fn run_ratatui(
             Some(status_line),
             on_submit,
             on_switch_model,
+            // Task 4 replaces this with the real async /web effect closure
+            // (persist key/settings, test search) reporting via SystemNotice.
+            |_web_action| {},
         )
     })
     .await;

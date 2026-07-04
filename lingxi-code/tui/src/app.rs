@@ -25,6 +25,7 @@ use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 
+use crate::bottom_pane::WebAction;
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
@@ -40,6 +41,10 @@ pub struct AppCallbacks<'cb> {
     /// Executed on [`ChatOutcome::SwitchModel`] with the picked
     /// `(request_model, profile)` pair.
     pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
+    /// Executed on [`ChatOutcome::WebAction`]: the caller runs the `/web`
+    /// effect (persist a key/settings, or a test search) asynchronously and
+    /// reports the result back via a [`TurnEvent::SystemNotice`].
+    pub on_web_action: Box<dyn FnMut(WebAction) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -119,6 +124,12 @@ impl<'cb> RataApp<'cb> {
                     }
                     ChatOutcome::SwitchModel(model, profile) => {
                         (self.callbacks.on_switch_model)(model, profile);
+                    }
+                    // A `/web` config effect: the caller persists/tests
+                    // off-loop and pushes the result back as a
+                    // `TurnEvent::SystemNotice`.
+                    ChatOutcome::WebAction(action) => {
+                        (self.callbacks.on_web_action)(action);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -257,6 +268,7 @@ pub fn run_app(
     status_line: Option<crate::status_line::SharedStatusLine>,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
+    on_web_action: impl FnMut(WebAction),
 ) -> io::Result<()> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -279,6 +291,7 @@ pub fn run_app(
         AppCallbacks {
             on_submit: Box::new(on_submit),
             on_switch_model: Box::new(on_switch_model),
+            on_web_action: Box::new(on_web_action),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -329,6 +342,7 @@ mod tests {
             AppCallbacks {
                 on_submit: Box::new(|_, _| {}),
                 on_switch_model: Box::new(|_, _| {}),
+                on_web_action: Box::new(|_| {}),
             },
         )
     }

@@ -148,6 +148,18 @@ pub enum TurnEvent {
         /// `anthropic-ratelimit-unified-7d-reset` (Unix-epoch seconds).
         seven_day_resets_at: Option<u64>,
     },
+    /// A one-off system notice for the transcript, fired by an app-level
+    /// async effect that isn't itself a turn (e.g. the `/web` picker's
+    /// secret/settings save or test-search result). NOT emitted by
+    /// [`BridgeOutputStream`] — the embedding CLI sends it directly on the
+    /// same `TurnEvent` channel so the result lands in the transcript on the
+    /// next render tick.
+    SystemNotice {
+        /// The notice text.
+        body: String,
+        /// `true` → render as an error (red); `false` → dim informational.
+        is_error: bool,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on

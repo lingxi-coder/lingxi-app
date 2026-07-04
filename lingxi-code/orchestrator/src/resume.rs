@@ -131,6 +131,20 @@ fn build_state_from_jsonl(
             }
             "assistant" => {
                 let content_blocks = extract_content_blocks(&m.message);
+                // Recover the session's active model: each assistant line records
+                // the model that produced it, so the LAST one is the model the
+                // session was on at save time. Restoring it (over the
+                // `DEFAULT_MODEL` seed) lets a resumed session continue on its
+                // saved model instead of the launch default — otherwise a
+                // resumed non-default session reported/showed the wrong model.
+                if let Some(model) = m
+                    .message
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    state.model = model.to_string();
+                }
                 state.history.push(ConversationMessage::Assistant {
                     id: MessageId::from_uuid(msg_uuid),
                     content: content_blocks,

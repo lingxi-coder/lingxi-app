@@ -1452,6 +1452,14 @@ async fn seed_orchestrator_session(
     let mut session = session_handle.lock().await;
     session.session_id = replayed.session_id;
     session.history = replayed.history;
+    // Restore the saved model (recovered from the last assistant line by
+    // `state_from_messages`) so a resumed session continues on — and shows — its
+    // saved model, not the launch default. `state_from_messages` yields
+    // `DEFAULT_MODEL` when the transcript has no assistant lines, which is the
+    // correct fallback. The provider profile is not persisted in the JSONL; the
+    // llm-client registry resolves the model id to its provider by id when the
+    // profile is absent (a switched-to id like `deepseek-v4-pro` is unique).
+    session.model = replayed.model;
 }
 
 /// `--resume` (no id) under `--no-tui` / non-TTY — the UNCHANGED M5-08 stdio

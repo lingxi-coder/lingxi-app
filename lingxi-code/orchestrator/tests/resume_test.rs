@@ -103,6 +103,67 @@ async fn state_from_messages_matches_disk_replay() {
 }
 
 #[tokio::test]
+async fn resume_recovers_the_saved_model_from_the_last_assistant_line() {
+    // Regression (reported): a resumed session showed the launch-default model
+    // instead of the model it was saved on. `build_state_from_jsonl` seeds
+    // DEFAULT_MODEL, then the last assistant line's `message.model` overrides it.
+    let temp = TempDir::new().unwrap();
+    let cwd_path = temp.path().join("proj");
+    tokio::fs::create_dir(&cwd_path).await.unwrap();
+    let cwd = cwd_path.to_string_lossy().into_owned();
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
+    tokio::fs::create_dir_all(&subdir).await.unwrap();
+    let sid = Uuid::new_v4();
+    let (m1, m2) = (Uuid::new_v4(), Uuid::new_v4());
+    let body = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&json!({
+            "type": "user", "uuid": m1.to_string(), "parentUuid": null,
+            "sessionId": sid.to_string(), "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+            "message": {"role": "user", "content": "hi"}
+        }))
+        .unwrap(),
+        serde_json::to_string(&json!({
+            "type": "assistant", "uuid": m2.to_string(), "parentUuid": m1.to_string(),
+            "sessionId": sid.to_string(), "timestamp": "2026-05-25T12:00:01.000Z",
+            "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+            "message": {"role": "assistant", "content": "hi there", "model": "deepseek-v4-pro"}
+        }))
+        .unwrap(),
+    );
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+    assert_eq!(
+        replayed.state.model, "deepseek-v4-pro",
+        "resume recovers the saved model from the last assistant line"
+    );
+    // The in-hand path (`state_from_messages`, used by the CLI resume mount)
+    // recovers the same model.
+    assert_eq!(
+        state_from_messages(sid, &replayed.messages).model,
+        "deepseek-v4-pro"
+    );
+}
+
+#[tokio::test]
+async fn resume_without_a_model_field_keeps_the_default() {
+    // A transcript with no `message.model` (or no assistant lines) keeps the
+    // DEFAULT_MODEL seed — the fallback stays correct.
+    let (_temp, lingxi_home, cwd, sid, _last, fs) = setup_two_turn_jsonl().await;
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+    assert_eq!(replayed.state.model, orchestrator::config::DEFAULT_MODEL);
+}
+
+#[tokio::test]
 async fn replay_propagates_loader_error() {
     let temp = TempDir::new().unwrap();
     let cwd_path = temp.path().join("proj");

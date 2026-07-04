@@ -684,6 +684,19 @@ impl ChatWidget {
         self.current_model_id_display().1
     }
 
+    /// Re-point the snapshot's `is_current` marker at `request_model` after a
+    /// `/model` switch. The `/model` picker's `●` marker, the statusline, and
+    /// [`Self::current_model_id_display`] all derive the current model from
+    /// `session.models`' `is_current` flag — which is otherwise frozen at
+    /// launch, so without this a switch left the picker/statusline showing the
+    /// OLD model. No-op if `request_model` isn't in the snapshot (then nothing
+    /// is marked current, matching an unknown model).
+    fn set_current_model(&mut self, request_model: &str) {
+        for m in &mut self.session.models {
+            m.is_current = m.request_model == request_model;
+        }
+    }
+
     /// Update one field of the shared statusline slot (no-op when unwired).
     fn with_status_line<F: FnOnce(&mut crate::status_line::StatusLineShared)>(&self, f: F) {
         if let Some(slot) = &self.status_line {
@@ -1337,6 +1350,11 @@ impl ChatWidget {
                     timestamp: 0,
                     is_error: false,
                 });
+                // Re-point the snapshot's current-model marker so the /model
+                // picker `●`, statusline, and welcome line all follow the switch
+                // (they read `session.models`' `is_current`, frozen at launch
+                // otherwise).
+                self.set_current_model(&request_model);
                 // Refresh the statusline model + re-arm the pump so the command
                 // reports the new model (claude-code re-runs on model change).
                 let display = self
@@ -2039,6 +2057,53 @@ mod tests {
         assert!(
             after.contains(&"claude-opus-4-8".to_string()),
             "anthropic current model still shown: {after:?}"
+        );
+    }
+
+    #[test]
+    fn model_picker_current_marker_follows_a_switch() {
+        // Regression (reported after resume): the /model picker `●` current
+        // marker was frozen at launch — switching updated the statusline but not
+        // `session.models`' is_current, so reopening /model still marked the OLD
+        // model. Switch Opus→Sonnet, then the reopened picker marks Sonnet.
+        let mut widget = widget_with_models(); // Opus (current) + Sonnet, anthropic connected
+        assert_eq!(
+            widget
+                .session
+                .models
+                .iter()
+                .find(|m| m.is_current)
+                .map(|m| m.request_model.as_str()),
+            Some("claude-opus-4-8")
+        );
+        submit_command(&mut widget, "/model");
+        // Picker starts on the current row (Opus); move to Sonnet and confirm.
+        widget.handle_key(press(KeyCode::Down));
+        let outcome = widget.handle_key(press(KeyCode::Enter));
+        assert!(
+            matches!(outcome, ChatOutcome::SwitchModel(ref m, _) if m == "claude-sonnet-5"),
+            "expected a switch to claude-sonnet-5"
+        );
+        // Reopen: the current marker now points at the switched-to model.
+        submit_command(&mut widget, "/model");
+        let current: Vec<String> = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| {
+                v.as_any()
+                    .downcast_ref::<crate::bottom_pane::model_picker_view::ModelPickerView>()
+            })
+            .expect("picker open")
+            .rows()
+            .iter()
+            .filter(|r| r.is_current)
+            .map(|r| r.request_model.clone())
+            .collect();
+        assert_eq!(
+            current,
+            vec!["claude-sonnet-5".to_string()],
+            "the `●` current marker follows the switch"
         );
     }
 

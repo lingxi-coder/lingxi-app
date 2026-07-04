@@ -21,6 +21,7 @@ pub mod chat_widget;
 pub mod color;
 pub mod command;
 pub mod composer;
+pub mod connect;
 pub mod copy;
 pub mod export;
 pub mod files;

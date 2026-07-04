@@ -280,20 +280,61 @@ async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
 pub async fn discover_recorded_plugins(
     plugins_dir: &Path,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    let state = crate::installed::load(plugins_dir).await;
-    let cache_root = plugins_dir.join("cache");
     let mut out = Vec::new();
-    for (marketplace, plugins) in &state.plugins {
-        for (name, record) in plugins {
-            let dir = cache_root
-                .join(sanitize_segment(marketplace, false))
-                .join(sanitize_segment(name, false))
-                .join(sanitize_segment(&record.version, true));
-            if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
-                out.push((id, manifest, dir));
+
+    // v2 schema (claude-code 2.1.201): `plugins["<plugin>@<market>"] = [ {scope,
+    // installPath, version, installedAt, lastUpdated} ]`. Each record carries the
+    // exact `installPath` cache dir, so resolution is direct. Read the raw JSON so
+    // the v2 array shape and the legacy `plugins[market][plugin]` object shape can
+    // coexist during migration.
+    let raw = tokio::fs::read_to_string(crate::installed::path(plugins_dir))
+        .await
+        .ok();
+    if let Some(records) = raw
+        .as_deref()
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+        .and_then(|v| v.get("plugins").and_then(|p| p.as_object()).cloned())
+    {
+        let cache_root = plugins_dir.join("cache");
+        for (key, value) in &records {
+            match value {
+                // v2: array of per-scope records; use each record's installPath.
+                serde_json::Value::Array(recs) => {
+                    let mut seen: Option<PathBuf> = None;
+                    for rec in recs {
+                        if let Some(path) = rec.get("installPath").and_then(|p| p.as_str()) {
+                            let dir = PathBuf::from(path);
+                            if seen.as_ref() == Some(&dir) {
+                                continue; // same cache dir across scopes — load once
+                            }
+                            if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
+                                out.push((id, manifest, dir.clone()));
+                                seen = Some(dir);
+                            }
+                        }
+                    }
+                }
+                // Legacy: `{ "<plugin>": {version, added} }` under a marketplace key.
+                serde_json::Value::Object(plugins) => {
+                    for (name, record) in plugins {
+                        let version = record
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let dir = cache_root
+                            .join(sanitize_segment(key, false))
+                            .join(sanitize_segment(name, false))
+                            .join(sanitize_segment(version, true));
+                        if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
+                            out.push((id, manifest, dir));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
+
     out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
     out
 }

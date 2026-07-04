@@ -376,13 +376,31 @@ pub async fn run(cli: &Cli) -> i32 {
         Sub::Enable(args) => run_enable(args),
         Sub::Disable(args) => run_disable(args),
 
+        // Install/uninstall — marketplace-registry materialization + on-disk state.
+        Sub::Install(args) => market_result(crate::commands::plugin_install::run_install(
+            &args.plugin,
+            Some(&args.scope),
+            &args.config,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
+        Sub::Uninstall(args) => market_result(crate::commands::plugin_install::run_uninstall(
+            &args.plugin,
+            Some(&args.scope),
+            args.keep_data,
+            args.prune,
+            args.yes,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
+
         // NOTICE actions — parsed faithfully, declined cleanly (no network,
         // no settings-write seam, no heavy registry wiring, no fake success).
         Sub::Init(_) => notice("init"),
-        Sub::Install(_) => notice("install"),
         Sub::Prune(_) => notice("prune"),
         Sub::Tag(_) => notice("tag"),
-        Sub::Uninstall(_) => notice("uninstall"),
         Sub::Update(_) => notice("update"),
         Sub::Marketplace(args) => {
             let Some(sub) = args.command.as_ref() else {

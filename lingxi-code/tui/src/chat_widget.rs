@@ -35,7 +35,7 @@ use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
 use crate::bottom_pane::{
-    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, WebAction,
+    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction, WebAction,
 };
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
@@ -68,6 +68,10 @@ pub enum ChatOutcome {
     /// search. The caller runs it asynchronously and reports the result back
     /// through `TurnEvent::SystemNotice`.
     WebAction(WebAction),
+    /// A `/connect` view asked the caller to store an API key or kick off a
+    /// Copilot/OAuth sign-in. The caller runs it asynchronously and reports
+    /// the result back through `TurnEvent::SystemNotice`.
+    ConnectAction(ConnectAction),
 }
 
 /// The chat surface: owns the conversation state and the interactive footer,
@@ -145,6 +149,14 @@ pub struct ChatWidget {
     /// closure (CLI `run_ratatui`) updates it in place after a save/test so
     /// the NEXT `/web` open reflects the latest persisted state.
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
+    /// Per-provider login-method tag (from the catalog auth strategy), keyed
+    /// by profile_name — the real data `/connect`'s picker groups/labels
+    /// from. Empty (default) until [`Self::set_connect_data`] wires it.
+    connect_auth_methods: std::collections::BTreeMap<String, String>,
+    /// Per-provider availability flag (already has a usable credential),
+    /// keyed by profile_name — joined into the `/connect` picker's `✓`
+    /// marker. Empty (default) until [`Self::set_connect_data`] wires it.
+    connect_availability: std::collections::BTreeMap<String, bool>,
 }
 
 impl ChatWidget {
@@ -173,6 +185,8 @@ impl ChatWidget {
             status_line: None,
             pending_terminal_sequences: Vec::new(),
             web_snapshot: None,
+            connect_auth_methods: std::collections::BTreeMap::new(),
+            connect_availability: std::collections::BTreeMap::new(),
         }
     }
 
@@ -519,6 +533,19 @@ impl ChatWidget {
         slot: std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>,
     ) {
         self.web_snapshot = Some(slot);
+    }
+
+    /// Wire the composition root's real per-provider login-method +
+    /// availability maps (derived from the live multi-provider catalog at
+    /// startup). [`Self::cmd_connect`] reads clones of both to build the
+    /// `/connect` picker; empty maps (the default) render an empty picker.
+    pub fn set_connect_data(
+        &mut self,
+        auth_methods: std::collections::BTreeMap<String, String>,
+        availability: std::collections::BTreeMap<String, bool>,
+    ) {
+        self.connect_auth_methods = auth_methods;
+        self.connect_availability = availability;
     }
 
     /// The current model's `(wire_id, display)` pair (falls back to
@@ -955,6 +982,57 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// `/connect [provider]`: with no argument, open the grouped provider
+    /// picker seeded from the real catalog maps ([`Self::set_connect_data`]).
+    /// With a `provider` argument, skip the picker and route directly into
+    /// that provider's method-choice screen (multi-method) or its single
+    /// flow — the key-entry view for `api_key`, or a
+    /// [`ChatOutcome::ConnectAction`] effect for Copilot/OAuth providers.
+    #[allow(dead_code)]
+    pub(crate) fn cmd_connect(&mut self, args: &str) -> ChatOutcome {
+        let provider = args.trim();
+        if provider.is_empty() {
+            self.bottom_pane.show_connect_picker(
+                self.connect_auth_methods.clone(),
+                self.connect_availability.clone(),
+            );
+        } else {
+            // /connect <provider>: route directly (skip picker) if known,
+            // else open the picker.
+            let tag = self.connect_auth_methods.get(provider).cloned();
+            let methods = crate::connect::picker::provider_methods(provider, tag.as_deref());
+            let label = crate::connect::picker::provider_label(provider);
+            if methods.len() > 1 {
+                self.bottom_pane.show_view(Box::new(
+                    crate::bottom_pane::connect_method_view::ConnectMethodView::new(
+                        provider.to_string(),
+                        label,
+                        methods,
+                    ),
+                ));
+            } else {
+                match methods.first().copied() {
+                    Some(crate::connect::picker::ConnectMethod::ApiKey) | None => {
+                        self.bottom_pane.show_view(Box::new(
+                            crate::bottom_pane::connect_key_view::ConnectKeyView::new(provider),
+                        ));
+                    }
+                    Some(crate::connect::picker::ConnectMethod::CopilotDevice) => {
+                        return ChatOutcome::ConnectAction(ConnectAction::Copilot {
+                            provider_id: provider.to_string(),
+                        });
+                    }
+                    Some(_) => {
+                        return ChatOutcome::ConnectAction(ConnectAction::OAuth {
+                            provider_id: provider.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        ChatOutcome::Continue
+    }
+
     /// `/color [name]`: set/clear/list the session accent color (tints the
     /// composer's `›` prompt). Pure parse ([`crate::color::parse_color_command`]) +
     /// a byte-locked `system` echo; the accent itself is session-only.
@@ -1136,6 +1214,7 @@ impl ChatWidget {
             BottomPaneOutcome::RunCommand(action) => self.run_command(action),
             BottomPaneOutcome::PastedImage(path) => self.push_image(&path),
             BottomPaneOutcome::RunWebAction(action) => ChatOutcome::WebAction(action),
+            BottomPaneOutcome::RunConnectAction(action) => ChatOutcome::ConnectAction(action),
         }
     }
 

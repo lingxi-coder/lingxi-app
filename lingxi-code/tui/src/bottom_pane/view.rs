@@ -45,6 +45,38 @@ pub enum ViewOutcome {
     /// a test search) on its behalf. The view stays open — the async result
     /// (and any later close) is a later task's concern.
     RunWebAction(WebAction),
+    /// The view asks the app to run a `/connect` effect (store an API key, or
+    /// kick off a Copilot/OAuth sign-in) on its behalf. Unlike
+    /// [`Self::RunWebAction`], the WHOLE `/connect` view stack (picker →
+    /// method choice → key entry) is cleared when this fires — the flow is
+    /// over and the result is reported into the transcript, not back into a
+    /// still-open screen.
+    RunConnectAction(ConnectAction),
+}
+
+/// An app-level `/connect` effect a view can request via
+/// [`ViewOutcome::RunConnectAction`]. The owner runs these asynchronously
+/// (secure-store writes, OAuth/Copilot device-flow sign-in) and reports
+/// results back through the transcript (`TurnEvent::SystemNotice`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectAction {
+    /// Persist an API key through the secure credential store.
+    StoreKey {
+        /// Provider/keychain id to store the key under.
+        provider_id: String,
+        /// The entered secret.
+        key: String,
+    },
+    /// Kick off the GitHub Copilot OAuth device-flow for `provider_id`.
+    Copilot {
+        /// Provider id being connected (normally `"github-copilot"`).
+        provider_id: String,
+    },
+    /// Kick off first-party OAuth browser sign-in for `provider_id`.
+    OAuth {
+        /// Provider id being connected (e.g. `"anthropic"`).
+        provider_id: String,
+    },
 }
 
 /// An app-level `/web` effect a view can request via

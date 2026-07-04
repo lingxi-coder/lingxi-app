@@ -234,6 +234,13 @@ pub(crate) async fn run_ratatui(
     // `/web` test-search + secret-save effects, wired below.
     let web_key_store = tui_build.runtime.provider_key_store.clone();
     let web_http = tui_build.runtime.http.clone();
+    // (/connect picker) Real per-provider login-method + availability maps,
+    // cloned before `tui_build` is consumed further below — same convention
+    // as `subscription`/`web_key_store` above. `on_connect_action` is wired
+    // as a no-op for now (Task 10 replaces it with the async store/OAuth/
+    // Copilot driver).
+    let connect_auth_methods = tui_build.runtime.provider_auth_methods.clone();
+    let connect_availability = tui_build.runtime.provider_availability.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
@@ -377,9 +384,16 @@ pub(crate) async fn run_ratatui(
             Some(subscription),
             Some(status_line),
             Some(web_snapshot),
+            connect_auth_methods,
+            connect_availability,
             on_submit,
             on_switch_model,
             on_web_action,
+            |_connect_action| {
+                // Task 10 wires the real async store/OAuth/Copilot driver;
+                // for now the API-key/OAuth/Copilot picker routing works
+                // end-to-end except this final persistence step.
+            },
         )
     })
     .await;

@@ -25,7 +25,7 @@ use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 
-use crate::bottom_pane::WebAction;
+use crate::bottom_pane::{ConnectAction, WebAction};
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
@@ -45,6 +45,11 @@ pub struct AppCallbacks<'cb> {
     /// effect (persist a key/settings, or a test search) asynchronously and
     /// reports the result back via a [`TurnEvent::SystemNotice`].
     pub on_web_action: Box<dyn FnMut(WebAction) + 'cb>,
+    /// Executed on [`ChatOutcome::ConnectAction`]: the caller runs the
+    /// `/connect` effect (store an API key, or kick off a Copilot/OAuth
+    /// sign-in) asynchronously and reports the result back via a
+    /// [`TurnEvent::SystemNotice`].
+    pub on_connect_action: Box<dyn FnMut(ConnectAction) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -130,6 +135,12 @@ impl<'cb> RataApp<'cb> {
                     // `TurnEvent::SystemNotice`.
                     ChatOutcome::WebAction(action) => {
                         (self.callbacks.on_web_action)(action);
+                    }
+                    // A `/connect` effect: store a key or kick off a
+                    // Copilot/OAuth sign-in off-loop, same shape as
+                    // `WebAction` above.
+                    ChatOutcome::ConnectAction(action) => {
+                        (self.callbacks.on_connect_action)(action);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -263,8 +274,14 @@ impl<'cb> RataApp<'cb> {
 /// closure updates it after a save/test. Pass `None` when the embedder has no
 /// slot — `/web` opens with the default (unconfigured) snapshot.
 ///
+/// `connect_auth_methods`/`connect_availability` are the composition root's
+/// real per-provider login-method + availability maps (derived from the live
+/// multi-provider catalog at startup); `/connect` reads clones to build its
+/// picker. Empty maps (the default) render an empty picker.
+///
 /// # Errors
 /// Propagates the first terminal IO error (after restoring the terminal).
+#[allow(clippy::too_many_arguments)]
 pub fn run_app(
     messages: Vec<RenderedMessage>,
     session: SessionInfo,
@@ -273,9 +290,12 @@ pub fn run_app(
     subscription: Option<traits::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
+    connect_auth_methods: std::collections::BTreeMap<String, String>,
+    connect_availability: std::collections::BTreeMap<String, bool>,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
+    on_connect_action: impl FnMut(ConnectAction),
 ) -> io::Result<()> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -299,6 +319,7 @@ pub fn run_app(
             on_submit: Box::new(on_submit),
             on_switch_model: Box::new(on_switch_model),
             on_web_action: Box::new(on_web_action),
+            on_connect_action: Box::new(on_connect_action),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -311,6 +332,8 @@ pub fn run_app(
     if let Some(slot) = web_snapshot {
         app.chat_widget.set_web_snapshot(slot);
     }
+    app.chat_widget
+        .set_connect_data(connect_auth_methods, connect_availability);
     app.run(&mut terminal)
 }
 
@@ -353,6 +376,7 @@ mod tests {
                 on_submit: Box::new(|_, _| {}),
                 on_switch_model: Box::new(|_, _| {}),
                 on_web_action: Box::new(|_| {}),
+                on_connect_action: Box::new(|_| {}),
             },
         )
     }

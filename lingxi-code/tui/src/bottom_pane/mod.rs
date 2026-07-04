@@ -15,6 +15,9 @@
 //! cancels a turn or exits the process by itself.
 
 pub mod completion_view;
+pub mod connect_key_view;
+pub mod connect_method_view;
+pub mod connect_picker_view;
 pub mod dialog_view;
 pub mod footer;
 pub mod model_picker_view;
@@ -46,7 +49,7 @@ use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
-pub use view::{BottomPaneView, CommandAction, ViewAction, ViewOutcome, WebAction};
+pub use view::{BottomPaneView, CommandAction, ConnectAction, ViewAction, ViewOutcome, WebAction};
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
@@ -93,6 +96,11 @@ pub enum BottomPaneOutcome {
     /// A view asks the owner to run a `/web` effect on its behalf (the view
     /// stays open; see [`ViewOutcome::RunWebAction`]).
     RunWebAction(WebAction),
+    /// A view asks the owner to run a `/connect` effect on its behalf. Unlike
+    /// `RunWebAction`, the whole `/connect` view stack has already been
+    /// cleared by [`ViewStack::apply`] by the time this surfaces (see
+    /// [`ViewOutcome::RunConnectAction`]).
+    RunConnectAction(ConnectAction),
     /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
     /// the new state back via [`BottomPane::set_verbose`]).
     ToggleVerbose,
@@ -246,6 +254,19 @@ impl BottomPane {
             .push(Box::new(web_picker_view::WebPickerView::new(snapshot)));
     }
 
+    /// Open the `/connect` provider picker over `auth_methods` (per-provider
+    /// login method tag) joined with `availability` (which providers already
+    /// have a usable credential).
+    pub fn show_connect_picker(
+        &mut self,
+        auth_methods: std::collections::BTreeMap<String, String>,
+        availability: std::collections::BTreeMap<String, bool>,
+    ) {
+        self.view_stack.push(Box::new(
+            connect_picker_view::ConnectPickerView::new(auth_methods, availability),
+        ));
+    }
+
     /// Feed the owner-computed task status (spinner text + running flag).
     /// Called before routing/rendering so Ctrl-C routing and the status row
     /// reflect the owner's current turn state.
@@ -371,6 +392,7 @@ impl BottomPane {
             },
             ViewOutcome::RunCommand(action) => BottomPaneOutcome::RunCommand(action),
             ViewOutcome::RunWebAction(action) => BottomPaneOutcome::RunWebAction(action),
+            ViewOutcome::RunConnectAction(action) => BottomPaneOutcome::RunConnectAction(action),
         }
     }
 
@@ -848,6 +870,16 @@ impl ViewStack {
             // asynchronously and the view's own state (e.g. the config
             // screen's input buffer, test status) stays live while it waits.
             ViewOutcome::RunWebAction(action) => ViewOutcome::RunWebAction(action),
+            // A `/connect` effect, in contrast, CLOSES the whole flow: the
+            // picker → method-choice → key-entry chain is fully dismissed
+            // (unlike `/web`'s config screen, which stays open to show test/
+            // save status in place). The result (key stored, Copilot/OAuth
+            // kicked off) is reported into the transcript instead, so there is
+            // no live screen left to update.
+            ViewOutcome::RunConnectAction(action) => {
+                self.views.clear();
+                ViewOutcome::RunConnectAction(action)
+            }
             ViewOutcome::Cancelled => {
                 // A cancelled child pops alone: parents stay open (codex
                 // parity — cancel returns to the parent flow).

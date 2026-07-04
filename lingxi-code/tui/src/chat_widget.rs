@@ -143,6 +143,12 @@ pub struct ChatWidget {
     /// them via [`Self::take_terminal_sequences`] and writes the bytes to the
     /// terminal that owns the controlling tty (claude-code `BEo`).
     pending_terminal_sequences: Vec<String>,
+    /// Live tool-call inputs keyed by `tool_use_id`, populated on
+    /// [`TurnEvent::ToolUseStart`] and consumed on the paired
+    /// [`TurnEvent::ToolUseResult`] to recover the Edit/Write diff fields
+    /// (`old_string`/`new_string`/`file_path`) for the result cell — the same
+    /// correlation the resume path does with its `tool_inputs` side-table.
+    tool_inputs: std::collections::HashMap<protocol::ToolUseId, serde_json::Value>,
     /// Composition-root-shared `/web` config snapshot slot (`None` until the
     /// embedder wires one via [`Self::set_web_snapshot`]). [`Self::cmd_web`]
     /// reads a clone to seed the picker; the async `on_web_action` effect
@@ -184,6 +190,7 @@ impl ChatWidget {
             subscription: None,
             status_line: None,
             pending_terminal_sequences: Vec::new(),
+            tool_inputs: std::collections::HashMap::new(),
             web_snapshot: None,
             connect_auth_methods: std::collections::BTreeMap::new(),
             connect_availability: std::collections::BTreeMap::new(),
@@ -257,14 +264,36 @@ impl ChatWidget {
     /// compact-boundary marker, `RateLimit` composes a transcript notice, and
     /// `TerminalSequence` stages a write-through escape — every bridge-emitted
     /// variant is handled (fix round 1: no wildcard drop).
+    /// Commit the active streaming cell — but DISCARD it if it's the empty
+    /// `AssistantTextCell` placeholder [`TurnEvent::TurnStarted`] opens. Used
+    /// at every flush point that can fire before any assistant text streams (a
+    /// leading tool call, a thinking-first turn, or a tool-only turn), so no
+    /// stray bare `●` marker is committed with no body.
+    fn flush_or_discard_active(&mut self) {
+        let empty = self
+            .transcript
+            .mutate_active(|cell| {
+                cell.as_any()
+                    .downcast_ref::<AssistantTextCell>()
+                    .is_some_and(|a| a.body().is_empty())
+            })
+            .unwrap_or(false);
+        if empty {
+            self.transcript.discard_active();
+        } else {
+            self.transcript.flush_active();
+        }
+    }
+
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
             TurnEvent::TurnStarted => {
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
-                // A straggler active cell (missed TurnEnded) is finalized, not
-                // dropped, before the new streaming reply opens.
-                self.transcript.flush_active();
+                // A straggler active cell (missed TurnEnded) is finalized (or
+                // discarded if it's the empty placeholder) before the new
+                // streaming reply opens.
+                self.flush_or_discard_active();
                 self.transcript
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
             }
@@ -307,18 +336,47 @@ impl ChatWidget {
                     })
                     .unwrap_or(false);
                 if !appended {
-                    self.transcript.flush_active();
+                    self.flush_or_discard_active();
                     self.transcript.set_active(Box::new(ThinkingCell::new(delta)));
                 }
             }
-            TurnEvent::ToolUseStart { tool, .. } => {
+            TurnEvent::ToolUseStart { id, tool, input } => {
                 self.activity = Some(activity_label(&tool));
+                // Commit any streamed assistant text ABOVE the tool call, then
+                // render the tool-use header (`● {tool}` + input) into the
+                // transcript — claude-code parity: each tool invocation shows
+                // as its own scrollback cell between the assistant's text
+                // segments. Without this flush the whole turn's text merged
+                // into one active cell and every tool call was invisible.
+                // Remember the input so the paired result can render the
+                // Edit/Write diff (see `ToolUseResult`).
+                self.flush_or_discard_active();
+                self.tool_inputs.insert(id.clone(), input.clone());
+                self.transcript
+                    .push_message(RenderedMessage::AssistantToolUse { id, tool, input });
             }
-            TurnEvent::ToolUseResult { .. } => {
+            TurnEvent::ToolUseResult { id, tool, result } => {
                 self.activity = None;
+                // Recover the originating call's input (for diff tools) from the
+                // side-table, mirroring the resume path's correlation, then
+                // render the `⎿ {summary}` result cell (or an Edit/Write diff).
+                let (old_string, new_string, file_path) = self
+                    .tool_inputs
+                    .remove(&id)
+                    .map_or((None, None, None), |input| {
+                        tui_core::active_turn::diff_inputs_for(&tool, &input)
+                    });
+                self.transcript.push_message(RenderedMessage::UserToolResult {
+                    id,
+                    tool,
+                    result,
+                    old_string,
+                    new_string,
+                    file_path,
+                });
             }
             TurnEvent::TurnEnded(_) => {
-                self.transcript.flush_active();
+                self.flush_or_discard_active();
                 self.current_turn = None;
                 self.turn_started_at = None;
                 self.activity = None;
@@ -1427,6 +1485,37 @@ mod tests {
         terminal
     }
 
+    /// A tool call with NO preamble text (the common agentic case) renders the
+    /// tool-use + result cells and does NOT leave a stray empty assistant
+    /// placeholder — the `TurnStarted` empty cell is discarded, not committed.
+    #[test]
+    fn tool_first_turn_renders_tool_cells_without_empty_placeholder() {
+        use crate::history_cell::tool::{ToolResultCell, ToolUseCell};
+        let mut widget = widget();
+        submit_command(&mut widget, "run it");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        // Straight to a tool call — no TextDelta first.
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Read".to_string(),
+            input: serde_json::json!({ "file_path": "/tmp/x" }),
+        });
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id: protocol::ToolUseId::from("t1"),
+            tool: "Read".to_string(),
+            result: serde_json::json!("file body"),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        // Exactly: user "run it" · ● Read · ⎿ result — NO empty assistant cell.
+        assert_eq!(widget.transcript.committed_cells().len(), 3);
+        assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Read");
+        assert!(cells(&widget)[2].as_any().downcast_ref::<ToolResultCell>().is_some());
+        // The (empty) placeholder must not survive as an assistant cell.
+        assert!(cells(&widget)
+            .iter()
+            .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none()));
+    }
+
     #[test]
     fn new_seeds_transcript_and_starts_idle() {
         let seed = RenderedMessage::SystemText {
@@ -1459,7 +1548,9 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
         assert_eq!(cell::<AssistantTextCell>(&widget, 1).body(), "Hello");
 
-        // ToolUseStart sets the spinner activity; ToolUseResult clears it.
+        // ToolUseStart sets the spinner activity AND commits the streamed
+        // text above the tool call, then renders the tool-use cell; the paired
+        // ToolUseResult renders the result cell and clears the activity.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: protocol::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
@@ -1467,6 +1558,12 @@ mod tests {
         });
         assert_eq!(widget.activity.as_deref(), Some("Running Bash"));
         assert!(widget.spinner_text().contains("Running Bash"));
+        // The "Hello" reply flushed to a committed cell; the tool-use cell
+        // renders after it (cells: user, Hello, ● Bash).
+        assert_eq!(
+            cell::<crate::history_cell::tool::ToolUseCell>(&widget, 2).tool(),
+            "Bash"
+        );
         widget.apply_turn_event(TurnEvent::ToolUseResult {
             id: protocol::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
@@ -1479,7 +1576,8 @@ mod tests {
         assert!(!widget.turn_running());
         assert!(widget.turn_started_at.is_none());
         assert!(widget.transcript.active_cell().is_none(), "cell flushed");
-        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        // user "hi" · assistant "Hello" · ● Bash tool-use · ⎿ Bash result = 4.
+        assert_eq!(widget.transcript.committed_cells().len(), 4);
     }
 
     #[test]

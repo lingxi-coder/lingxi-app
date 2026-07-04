@@ -90,7 +90,7 @@ pub fn render_message(
         }
         RenderedMessage::CompactBoundary { .. } => compact_boundary_lines(theme),
         RenderedMessage::AssistantThinking { thinking, .. } => {
-            thinking_lines(thinking, verbose, theme)
+            thinking_lines(thinking, width, verbose, theme)
         }
         RenderedMessage::SystemApiError {
             error,

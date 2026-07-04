@@ -1712,7 +1712,7 @@ mod tests {
             buffer_row(&buf, 4)
         );
         assert!(
-            buffer_row(&buf, 9).contains("/agents"),
+            buffer_row(&buf, 9).contains("/hooks"),
             "sixth item visible: {}",
             buffer_row(&buf, 9)
         );

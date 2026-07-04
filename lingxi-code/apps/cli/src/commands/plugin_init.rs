@@ -338,6 +338,20 @@ pub fn run_init(
     with: &[String],
     home: &Path,
 ) -> Result<String, String> {
+    // Reject names that would escape `~/.lingxi/skills/` (path traversal /
+    // arbitrary-write) — the binary validates this and writes nothing.
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name == "."
+    {
+        return Err(format!(
+            "✘ Invalid plugin name \"{name}\": Plugin name cannot contain path separators \
+             (/ or \\), \"..\" sequences, or be \".\""
+        ));
+    }
+
     // Validate `--with` components up-front (before touching the filesystem), so
     // an unknown name errors cleanly and scaffolds nothing — matching the binary.
     for component in with {
@@ -372,7 +386,8 @@ pub fn run_init(
         .map_err(|e| format!("✘ Failed to create {}: {e}", manifest_dir.display()))?;
     std::fs::write(
         manifest_dir.join("plugin.json"),
-        plugin_json(name, &author, &email, description, with_channel),
+        // The binary writes plugin.json with a trailing newline (`}\n`).
+        format!("{}\n", plugin_json(name, &author, &email, description, with_channel)),
     )
     .map_err(|e| format!("✘ Failed to write plugin.json: {e}"))?;
     std::fs::write(plugin_root.join("SKILL.md"), skill_md(name))
@@ -620,5 +635,29 @@ mod tests {
         )
         .unwrap();
         assert!(!manifest.contains("channels"));
+    }
+
+    #[test]
+    fn init_rejects_path_traversal_name() {
+        let e = env();
+        for bad in ["../pwned", "a/b", "..", "."] {
+            let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap_err();
+            assert!(
+                err.starts_with(&format!("✘ Invalid plugin name \"{bad}\":")),
+                "got: {err}"
+            );
+        }
+        // Nothing escaped the skills dir.
+        assert!(!e.home.join("pwned").exists());
+        assert!(!e.home.join("skills").join("a").exists());
+    }
+
+    #[test]
+    fn init_plugin_json_has_trailing_newline() {
+        let e = env();
+        run_init("p", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap();
+        let raw =
+            std::fs::read_to_string(root(&e, "p").join(".lingxi-plugin/plugin.json")).unwrap();
+        assert!(raw.ends_with("}\n"), "expected trailing newline");
     }
 }

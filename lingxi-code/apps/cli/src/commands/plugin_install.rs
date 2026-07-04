@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
 
-use crate::commands::plugin_settings::{Scope, SCOPES};
+use crate::commands::plugin_settings::Scope;
 
 /// Now as ISO-8601 with milliseconds + `Z`.
 fn iso_now() -> String {
@@ -196,6 +196,34 @@ fn fail(verb: &str, arg: &str, reason: &str) -> String {
     format!("✘ Failed to {verb} plugin \"{arg}\": {reason}")
 }
 
+/// The `projectPath` an install record carries at this scope: the realpath of
+/// `cwd` for `project`/`local`, `None` for `user` (which is cwd-independent).
+/// Records are keyed per (scope, projectPath), so this identifies the slot.
+fn project_path(scope: Scope, cwd: &Path) -> Option<String> {
+    match scope {
+        Scope::User => None,
+        Scope::Project | Scope::Local => Some(
+            std::fs::canonicalize(cwd)
+                .unwrap_or_else(|_| cwd.to_path_buf())
+                .display()
+                .to_string(),
+        ),
+    }
+}
+
+/// Does an installed record occupy the (scope, projectPath) slot? For `user` the
+/// scope match suffices; for project/local the record's `projectPath` must match
+/// the current one too (distinct projects install the same plugin independently).
+fn record_matches(rec: &Value, scope: Scope, proj: &Option<String>) -> bool {
+    if rec.get("scope").and_then(Value::as_str) != Some(scope.label()) {
+        return false;
+    }
+    match proj {
+        None => true,
+        Some(p) => rec.get("projectPath").and_then(Value::as_str) == Some(p.as_str()),
+    }
+}
+
 /// `plugin install <plugin[@market]> [--scope] [--config]`.
 pub fn run_install(
     arg: &str,
@@ -205,7 +233,9 @@ pub fn run_install(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
-    let scope = parse_scope(scope).map_err(|m| format!("Installing plugin \"{arg}\"...{m}"))?;
+    // Scope is validated BEFORE the "Installing plugin …" progress prefix — the
+    // binary emits the bare `Invalid scope: …` line with no prefix.
+    let scope = parse_scope(scope)?;
     let (name, market) = split_id(arg);
     let registry = load_registry(plugins_dir);
 
@@ -265,11 +295,14 @@ pub fn run_install(
     .unwrap_or_else(|| "unknown".to_string());
 
     let mut installed = load_installed(plugins_dir);
+    let proj = project_path(scope, cwd);
+    // Already installed AT THIS (scope, projectPath) slot? A record at a
+    // different scope does NOT block — install appends a second per-scope record.
     if installed
         .get("plugins")
         .and_then(|p| p.get(&full_id))
         .and_then(Value::as_array)
-        .is_some_and(|a| !a.is_empty())
+        .is_some_and(|a| a.iter().any(|r| record_matches(r, scope, &proj)))
     {
         return Ok(format!(
             "Installing plugin \"{arg}\"...✔ Plugin \"{full_id}\" is already installed (scope: {})",
@@ -287,17 +320,26 @@ pub fn run_install(
     copy_dir(&plugin_src, &dest)
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e.to_string())))?;
 
-    // Record (v2) + enable.
+    // Record (v2) — `projectPath` is the LAST field, present only for
+    // project/local scope (matching the binary's on-disk shape).
     let now = iso_now();
-    let record = serde_json::json!({
-        "scope": scope.label(),
-        "installPath": dest.display().to_string(),
-        "version": version,
-        "installedAt": now,
-        "lastUpdated": now,
-    });
+    let mut record = serde_json::Map::new();
+    record.insert("scope".to_string(), Value::String(scope.label().to_string()));
+    record.insert("installPath".to_string(), Value::String(dest.display().to_string()));
+    record.insert("version".to_string(), Value::String(version.clone()));
+    record.insert("installedAt".to_string(), Value::String(now.clone()));
+    record.insert("lastUpdated".to_string(), Value::String(now));
+    if let Some(p) = &proj {
+        record.insert("projectPath".to_string(), Value::String(p.clone()));
+    }
+    // Append to the plugin's record array (create it if this is the first scope).
     if let Some(plugins) = installed.get_mut("plugins").and_then(Value::as_object_mut) {
-        plugins.insert(full_id.clone(), Value::Array(vec![record]));
+        let arr = plugins
+            .entry(full_id.clone())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(a) = arr.as_array_mut() {
+            a.push(Value::Object(record));
+        }
     }
     write_installed(plugins_dir, &installed)
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
@@ -322,6 +364,7 @@ pub fn run_uninstall(
     cwd: &Path,
 ) -> Result<String, String> {
     let scope = parse_scope(scope)?;
+    let proj = project_path(scope, cwd);
     let (name, market) = split_id(arg);
     let mut installed = load_installed(plugins_dir);
 
@@ -336,38 +379,67 @@ pub fn run_uninstall(
             .unwrap_or_else(|| name.to_string()),
     };
 
-    let record = installed
+    let records = installed
         .get("plugins")
         .and_then(|p| p.get(&full_id))
         .and_then(Value::as_array)
         .filter(|a| !a.is_empty());
-    let Some(records) = record else {
+    let Some(records) = records else {
         return Err(fail(
             "uninstall",
             arg,
-            &format!("Plugin \"{name}\" not found in installed plugins"),
+            &format!("Plugin \"{full_id}\" not found in installed plugins"),
         ));
     };
 
-    // Orphan each cache dir (marker file; deferred sweep deletes it later).
-    for rec in records {
+    // Records at the requested (scope, projectPath) slot. If none, the plugin is
+    // installed at some OTHER scope — name it, matching the binary.
+    let matching: Vec<Value> = records
+        .iter()
+        .filter(|r| record_matches(r, scope, &proj))
+        .cloned()
+        .collect();
+    if matching.is_empty() {
+        let mut other: Vec<&str> = Vec::new();
+        for s in records.iter().filter_map(|r| r.get("scope").and_then(Value::as_str)) {
+            if !other.contains(&s) {
+                other.push(s);
+            }
+        }
+        let installed_in = other.join(", ");
+        let first = other.first().copied().unwrap_or("user");
+        return Err(fail(
+            "uninstall",
+            arg,
+            &format!(
+                "Plugin \"{full_id}\" is installed in {installed_in} scope, not {}. \
+                 Use --scope {first} to uninstall.",
+                scope.label()
+            ),
+        ));
+    }
+
+    // Orphan only the matched records' cache dirs (marker; deferred sweep deletes).
+    for rec in &matching {
         if let Some(path) = rec.get("installPath").and_then(Value::as_str) {
-            let marker = Path::new(path).join(".orphaned_at");
-            let _ = std::fs::write(marker, iso_now());
+            let _ = std::fs::write(Path::new(path).join(".orphaned_at"), iso_now());
         }
     }
 
-    // Drop the record.
+    // Drop only the matched records; remove the key once the array is empty.
     if let Some(plugins) = installed.get_mut("plugins").and_then(Value::as_object_mut) {
-        plugins.remove(&full_id);
+        if let Some(arr) = plugins.get_mut(&full_id).and_then(Value::as_array_mut) {
+            arr.retain(|r| !record_matches(r, scope, &proj));
+            if arr.is_empty() {
+                plugins.remove(&full_id);
+            }
+        }
     }
     write_installed(plugins_dir, &installed).map_err(|e| fail("uninstall", arg, &e))?;
 
-    // DELETE the enabledPlugins key across editable scopes (uninstall removes
-    // the entry entirely, unlike `disable` which sets it to false).
-    for s in SCOPES {
-        let _ = edit_enabled(s, home, cwd, &full_id, None);
-    }
+    // DELETE the enabledPlugins key at THIS scope only (uninstall removes the
+    // entry entirely, unlike `disable` which sets it to false).
+    let _ = edit_enabled(scope, home, cwd, &full_id, None);
 
     Ok(format!(
         "✔ Successfully uninstalled plugin: {} (scope: {})",
@@ -754,10 +826,8 @@ mod tests {
     fn install_invalid_scope() {
         let e = env();
         let err = run_install("hello@mymkt", Some("bogus"), &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
-        assert_eq!(
-            err,
-            "Installing plugin \"hello@mymkt\"...Invalid scope: bogus. Must be one of: user, project, local."
-        );
+        // Bare scope error — NO "Installing plugin …" prefix (matches the binary).
+        assert_eq!(err, "Invalid scope: bogus. Must be one of: user, project, local.");
     }
 
     #[test]
@@ -923,5 +993,54 @@ mod tests {
             err,
             "Invalid scope \"bogus\". Valid scopes: user, project, local, managed"
         );
+    }
+
+    #[test]
+    fn install_second_scope_appends_with_project_path() {
+        let e = env();
+        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let msg = run_install("hello@mymkt", Some("project"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        assert!(msg.contains("Successfully installed plugin: hello@mymkt (scope: project)"), "{msg}");
+        let db = installed_db(&e);
+        let arr = db["plugins"]["hello@mymkt"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["scope"], "user");
+        assert_eq!(arr[1]["scope"], "project");
+        // project record carries projectPath; user record does not.
+        assert!(arr[0].get("projectPath").is_none());
+        assert!(arr[1].get("projectPath").is_some());
+    }
+
+    #[test]
+    fn install_same_scope_twice_is_already_installed() {
+        let e = env();
+        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let msg = run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        assert!(msg.contains("already installed (scope: user)"), "{msg}");
+    }
+
+    #[test]
+    fn uninstall_scope_mismatch_names_actual_scope() {
+        let e = env();
+        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let err = run_uninstall("hello@mymkt", Some("project"), false, false, true, &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "✘ Failed to uninstall plugin \"hello@mymkt\": Plugin \"hello@mymkt\" is installed in user scope, not project. Use --scope user to uninstall."
+        );
+        // The user record is untouched.
+        assert!(installed_db(&e)["plugins"].get("hello@mymkt").is_some());
+    }
+
+    #[test]
+    fn uninstall_removes_only_matching_scope() {
+        let e = env();
+        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        run_install("hello@mymkt", Some("project"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        run_uninstall("hello@mymkt", Some("project"), false, false, true, &e.plugins, &e.home, &e.cwd).unwrap();
+        let db = installed_db(&e);
+        let arr = db["plugins"]["hello@mymkt"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["scope"], "user");
     }
 }

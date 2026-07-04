@@ -180,10 +180,10 @@ pub fn run_tag(
                 return Err(finish(
                     lines,
                     format!(
-                        "✘ Version mismatch: plugin.json says \"{version}\" but plugins[{}].version \
+                        "✘ Version mismatch: plugin.json says \"{version}\" but {} plugins[{}].version \
                          says \"{ev}\". plugin.json wins at install time, so update the marketplace \
                          entry to \"{version}\" (or remove it) before tagging.",
-                        entry.index
+                        entry.path, entry.index
                     ),
                 ));
             }
@@ -944,7 +944,8 @@ mod tests {
         });
         assert!(
             err.contains(
-                "✘ Version mismatch: plugin.json says \"1.2.3\" but plugins[0].version says \
+                "✘ Version mismatch: plugin.json says \"1.2.3\" but \
+                 .lingxi-plugin/marketplace.json plugins[0].version says \
                  \"9.9.9\". plugin.json wins at install time, so update the marketplace entry to \
                  \"1.2.3\" (or remove it) before tagging."
             ),

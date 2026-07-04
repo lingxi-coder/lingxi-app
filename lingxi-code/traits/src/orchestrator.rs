@@ -411,6 +411,28 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
     }
 }
 
+/// Whether `provider_id` has a curated shortlist in [`is_curated_model`] (an
+/// explicit `match` arm). The `/model` picker trims curated-managed providers to
+/// their shortlist, but for a CONNECTED provider with no arm — an aggregator
+/// like OpenRouter, or a user's own catalog provider — there is no meaningful
+/// "latest few", so the picker shows all of that provider's models instead of
+/// hiding every one. Keep this arm set in lockstep with [`is_curated_model`].
+#[must_use]
+pub fn provider_has_curated_list(provider_id: &str) -> bool {
+    matches!(
+        provider_id,
+        "anthropic"
+            | "builtin"
+            | "openai"
+            | "openai-chatgpt"
+            | "deepseek"
+            | "gemini"
+            | "github-copilot"
+            | "zai"
+            | "glm-coding"
+    )
+}
+
 /// Curate a flat list of model names for the no-arg/mobile listing surfaces
 /// (`ClientEvent::ModelList`, `/model` text command) that carry only `Vec<String>`.
 ///

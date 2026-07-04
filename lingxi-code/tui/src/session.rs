@@ -41,6 +41,53 @@ pub struct ModelRow {
     pub is_current: bool,
 }
 
+/// Filter the full captured model catalog down to what the `/model` picker
+/// should show: models of ELIGIBLE providers only, trimmed to each curated
+/// provider's shortlist (an aggregator like OpenRouter with no shortlist shows
+/// all of its models). The active model is always kept so it stays selectable.
+///
+/// A provider is eligible when EITHER:
+/// - it is connected (`availability[profile] == Some(true)`), OR
+/// - it is the provider of the currently-active model — the user is
+///   demonstrably using it, so its shortlist must show even if the launch
+///   availability probe didn't detect the auth mode. The probe only marks
+///   anthropic available for `ANTHROPIC_API_KEY` / Claude.ai OAuth, so a
+///   gateway (`ANTHROPIC_AUTH_TOKEN`) / Bedrock / Vertex user would otherwise
+///   lose the whole Claude shortlist — this clause prevents that regression.
+///
+/// `availability` is keyed by `profile_name` (matching [`ModelRow::profile`]).
+/// Pure, so it is unit-testable and shared by [`crate::chat_widget::ChatWidget::
+/// cmd_model`].
+#[must_use]
+pub fn connected_model_rows(
+    all: &[ModelRow],
+    availability: &std::collections::BTreeMap<String, bool>,
+) -> Vec<ModelRow> {
+    let current_provider = all
+        .iter()
+        .find(|m| m.is_current)
+        .and_then(|m| m.profile.clone());
+    all.iter()
+        .filter(|m| {
+            if m.is_current {
+                return true;
+            }
+            let Some(profile) = m.profile.as_deref() else {
+                // No provider id → can't confirm eligibility; hide it (only the
+                // current model survives without a provider). In practice every
+                // catalog listing carries a provider id.
+                return false;
+            };
+            let eligible = availability.get(profile).copied().unwrap_or(false)
+                || current_provider.as_deref() == Some(profile);
+            eligible
+                && (traits::is_curated_model(profile, &m.request_model)
+                    || !traits::provider_has_curated_list(profile))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Self-contained `/doctor` diagnostics, captured from the environment + a few
 /// live counts. Mirrors the iocraft `screens::doctor::DoctorDiagnostics` subset
 /// that needs no async handle call.
@@ -140,5 +187,83 @@ mod tests {
         assert!(s.mcp.is_empty());
         assert!(s.models.is_empty());
         assert_eq!(s.doctor.term_size, (0, 0));
+    }
+
+    fn row(display: &str, request: &str, provider: &str, current: bool) -> ModelRow {
+        ModelRow {
+            display: display.to_string(),
+            request_model: request.to_string(),
+            profile: (!provider.is_empty()).then(|| provider.to_string()),
+            provider_label: provider.to_string(),
+            is_current: current,
+        }
+    }
+
+    #[test]
+    fn connected_rows_gate_by_availability_and_curate_per_provider() {
+        use std::collections::BTreeMap;
+        let all = vec![
+            row("Claude Opus 4.8", "claude-opus-4-8", "anthropic", true), // current
+            row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", false), // curated
+            row("Claude 2 legacy", "claude-2-legacy", "anthropic", false), // NON-curated anthropic
+            row("OpenRouter Auto", "openrouter/auto", "openrouter", false), // aggregator, no shortlist
+            row("OR GPT passthrough", "openai/gpt-4o", "openrouter", false),
+            row("DeepSeek Chat", "deepseek-chat", "deepseek", false), // curated but UNCONNECTED
+        ];
+        // Only anthropic + openrouter are connected.
+        let mut avail = BTreeMap::new();
+        avail.insert("anthropic".to_string(), true);
+        avail.insert("openrouter".to_string(), true);
+        avail.insert("deepseek".to_string(), false);
+
+        let shown = connected_model_rows(&all, &avail);
+        let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
+
+        // Current always kept.
+        assert!(ids.contains(&"claude-opus-4-8"));
+        // Curated anthropic model kept; NON-curated anthropic model dropped
+        // (anthropic HAS a curated shortlist).
+        assert!(ids.contains(&"claude-sonnet-5"));
+        assert!(!ids.contains(&"claude-2-legacy"), "non-curated curated-provider model hidden");
+        // OpenRouter has no shortlist → ALL its models shown once connected.
+        assert!(ids.contains(&"openrouter/auto"));
+        assert!(ids.contains(&"openai/gpt-4o"));
+        // DeepSeek is unconnected → hidden entirely, even though curated.
+        assert!(!ids.contains(&"deepseek-chat"), "unconnected provider hidden");
+    }
+
+    #[test]
+    fn connected_rows_empty_when_nothing_connected_except_current() {
+        use std::collections::BTreeMap;
+        let all = vec![
+            row("Claude Opus 4.8", "claude-opus-4-8", "anthropic", true),
+            row("OpenRouter Auto", "openrouter/auto", "openrouter", false),
+        ];
+        // No availability at all (fresh, unauthenticated).
+        let shown = connected_model_rows(&all, &BTreeMap::new());
+        assert_eq!(shown.len(), 1, "only the current model survives");
+        assert_eq!(shown[0].request_model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn current_models_provider_is_eligible_even_when_availability_misses_it() {
+        use std::collections::BTreeMap;
+        // A gateway (ANTHROPIC_AUTH_TOKEN) / Bedrock / Vertex user: the launch
+        // probe leaves anthropic absent from the availability map, but the
+        // active model IS a Claude model — the whole Claude shortlist must
+        // still show (regression guard), while an UNconnected other provider
+        // stays hidden.
+        let all = vec![
+            row("Claude Opus 4.8", "claude-opus-4-8", "anthropic", true), // current
+            row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", false), // curated peer
+            row("Claude 2 legacy", "claude-2-legacy", "anthropic", false), // non-curated → hidden
+            row("OpenRouter Auto", "openrouter/auto", "openrouter", false), // unconnected → hidden
+        ];
+        let shown = connected_model_rows(&all, &BTreeMap::new());
+        let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
+        assert!(ids.contains(&"claude-opus-4-8"), "current kept");
+        assert!(ids.contains(&"claude-sonnet-5"), "curated peer of current provider shown");
+        assert!(!ids.contains(&"claude-2-legacy"), "non-curated still trimmed");
+        assert!(!ids.contains(&"openrouter/auto"), "unrelated unconnected provider hidden");
     }
 }

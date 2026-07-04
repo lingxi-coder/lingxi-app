@@ -643,15 +643,25 @@ async fn run_connect_action(
     let notice = |body: String, is_error: bool| {
         let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
     };
+    // On a successful connect, flip the widget's LIVE availability map so the
+    // /model picker (gated by it) surfaces this provider's models — and the
+    // /connect picker badges it ✓ — mid-session, no restart. Keyed by the same
+    // profile_name the launch availability map uses.
+    let connected = |provider_id: String| {
+        let _ = turn_tx.send(TurnEvent::ProviderConnected { provider_id });
+    };
 
     match action {
         ConnectAction::StoreKey { provider_id, key } => {
             match key_store.set_provider_key(&provider_id, &key).await {
-                Ok(()) => notice(format!("✓ Saved {} API key.", label(&provider_id)), false),
+                Ok(()) => {
+                    notice(format!("✓ Saved {} API key.", label(&provider_id)), false);
+                    connected(provider_id);
+                }
                 Err(e) => notice(format!("✗ Failed to store key: {e}"), true),
             }
         }
-        ConnectAction::Copilot { provider_id: _ } => {
+        ConnectAction::Copilot { provider_id } => {
             notice("Connecting to GitHub Copilot…".to_string(), false);
             match copilot.begin(None).await {
                 Ok(step) => {
@@ -666,7 +676,10 @@ async fn run_connect_action(
                         false,
                     );
                     match copilot.poll_to_completion(&step).await {
-                        Ok(()) => notice("✓ Connected to GitHub Copilot.".to_string(), false),
+                        Ok(()) => {
+                            notice("✓ Connected to GitHub Copilot.".to_string(), false);
+                            connected(provider_id);
+                        }
                         Err(e) => notice(format!("✗ Copilot authorization failed: {e}"), true),
                     }
                 }
@@ -686,6 +699,7 @@ async fn run_connect_action(
                         msg
                     };
                     notice(body, false);
+                    connected(provider_id);
                 }
                 Err(e) => notice(
                     format!("✗ Sign-in failed: {e}. Try connecting with an API key instead."),
@@ -823,19 +837,17 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         .collect();
 
     let current_model = orch.get_status_snapshot().await.model;
-    // Trim each provider to its curated "latest few" (`is_curated_model`,
-    // claude-code `modelOptions.ts`) instead of dumping the whole catalog
-    // (~460 models); the current model is always kept so it stays selectable
-    // even if it is not on the short list. The picker groups the result by
-    // provider.
+    // Capture the FULL catalog (every provider's models, incl. aggregators like
+    // OpenRouter). The picker no longer trims at capture time — it gates by LIVE
+    // provider availability and per-provider curation at OPEN time
+    // (`tui::session::connected_model_rows`), so a provider connected mid-session
+    // can surface its models without a relaunch. Keeping the whole catalog here
+    // is what makes that possible; a launch-time trim would permanently hide a
+    // later-connected provider.
     let models = orch
         .list_model_listings()
         .await
         .into_iter()
-        .filter(|m| {
-            m.request_model == current_model
-                || traits::is_curated_model(&m.provider_id, &m.request_model)
-        })
         .map(|m| ModelRow {
             is_current: m.request_model == current_model,
             display: m.display_model,

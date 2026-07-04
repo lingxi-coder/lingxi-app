@@ -32,9 +32,18 @@ const VIEWPORT: usize = 12;
 /// first sentence is the pre-Phase-11 app-side message, byte-preserved.
 const EMPTY_MESSAGE: &str = "No models available. Configure a provider to enable /model.";
 
-/// An interactive, scrollable model selection list.
+/// An interactive, scrollable, search-filterable model selection list.
 pub struct ModelPickerView {
+    /// The full grouped set (every eligible provider's rows). The search
+    /// `query` filters this into [`Self::rows`]; a connected aggregator like
+    /// OpenRouter contributes hundreds of models, so type-to-filter is what
+    /// keeps the picker navigable.
+    all_rows: Vec<ModelRow>,
+    /// The currently visible rows — `all_rows` filtered by `query`.
     rows: Vec<ModelRow>,
+    /// Case-insensitive search filter (matches display name, provider label,
+    /// or wire id). Empty → every row shows.
+    query: String,
     selected: usize,
     /// Top row index of the scroll window.
     offset: usize,
@@ -45,14 +54,37 @@ impl ModelPickerView {
     /// (the row with `is_current`), or the first row when none is marked.
     #[must_use]
     pub fn new(rows: Vec<ModelRow>) -> Self {
-        let rows = group_by_provider(rows);
-        let selected = rows.iter().position(|r| r.is_current).unwrap_or(0);
+        let all_rows = group_by_provider(rows);
+        let selected = all_rows.iter().position(|r| r.is_current).unwrap_or(0);
         let offset = selected.saturating_sub(VIEWPORT - 1);
         Self {
-            rows,
+            rows: all_rows.clone(),
+            all_rows,
+            query: String::new(),
             selected,
             offset,
         }
+    }
+
+    /// Recompute the visible `rows` from `all_rows` against the current
+    /// `query` (case-insensitive substring on display / provider / wire id),
+    /// then re-anchor the highlight on the current model if it survives the
+    /// filter, else the first match.
+    fn apply_filter(&mut self) {
+        let q = self.query.to_ascii_lowercase();
+        self.rows = self
+            .all_rows
+            .iter()
+            .filter(|r| {
+                q.is_empty()
+                    || r.display.to_ascii_lowercase().contains(&q)
+                    || r.provider_label.to_ascii_lowercase().contains(&q)
+                    || r.request_model.to_ascii_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect();
+        self.selected = self.rows.iter().position(|r| r.is_current).unwrap_or(0);
+        self.offset = self.selected.saturating_sub(VIEWPORT - 1);
     }
 
     /// Number of dim provider header rows the render emits — one per distinct
@@ -82,6 +114,12 @@ impl ModelPickerView {
     #[must_use]
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// The rows currently shown (grouped by provider), for inspection/tests.
+    #[must_use]
+    pub(crate) fn rows(&self) -> &[ModelRow] {
+        &self.rows
     }
 
     /// Keep the highlighted row inside the scroll window.
@@ -160,9 +198,11 @@ impl Renderable for ModelPickerView {
             .min(area.width.saturating_sub(4))
             .max(24);
         let visible = self.rows.len().min(VIEWPORT);
-        // + group_count() for the dim provider header rows interleaved above
-        // each group.
-        let height = u16::try_from(visible + self.group_count() + 4)
+        // A "Search:" filter row sits above the list whenever there are any
+        // models (present iff the catalog is non-empty, independent of the
+        // current filter). + group_count() for the dim provider header rows.
+        let search_row = usize::from(!self.all_rows.is_empty());
+        let height = u16::try_from(visible + self.group_count() + 4 + search_row)
             .unwrap_or(u16::MAX)
             .min(area.height);
         let rect = centered_rect(width, height, area);
@@ -173,9 +213,14 @@ impl Renderable for ModelPickerView {
         block.render(rect, buf);
 
         let end = (self.offset + VIEWPORT).min(self.rows.len());
-        let mut lines: Vec<Line> = Vec::with_capacity(visible + self.group_count() + 2);
-        if self.rows.is_empty() {
+        let mut lines: Vec<Line> = Vec::with_capacity(visible + self.group_count() + 3);
+        if self.all_rows.is_empty() {
             lines.push(Line::from(EMPTY_MESSAGE));
+        } else {
+            lines.push(Line::from(format!("Search: {}", self.query)));
+            if self.rows.is_empty() {
+                lines.push(Line::from("No models match."));
+            }
         }
         // Group the visible rows under a dim provider header: a header is
         // emitted whenever the provider changes from the previous rendered row
@@ -206,10 +251,10 @@ impl Renderable for ModelPickerView {
                 style,
             )));
         }
-        let hint = if self.rows.is_empty() {
+        let hint = if self.all_rows.is_empty() {
             "Esc close"
         } else {
-            "↑/↓ select · Enter switch · Esc cancel"
+            "↑/↓ · type to filter · Esc"
         };
         lines.push(Line::from(Span::styled(
             hint,
@@ -219,10 +264,12 @@ impl Renderable for ModelPickerView {
     }
 
     /// The bottom-viewport rows the picker claims: its visible model rows + one
-    /// dim header per provider group + modal chrome. Empty lists keep the 4-row
-    /// chrome, which fits the in-view empty message + hint.
+    /// dim header per provider group + the "Search:" row + modal chrome. Empty
+    /// catalogs keep the 4-row chrome, which fits the in-view empty message +
+    /// hint (no search row).
     fn desired_height(&self, _width: u16) -> u16 {
-        u16::try_from(self.rows.len().min(12) + self.group_count()).unwrap_or(0) + 4
+        let search_row = usize::from(!self.all_rows.is_empty());
+        u16::try_from(self.rows.len().min(12) + self.group_count() + search_row).unwrap_or(0) + 4
     }
 }
 
@@ -251,6 +298,17 @@ impl BottomPaneView for ModelPickerView {
                     profile: r.profile.clone(),
                 }),
             KeyCode::Esc => ViewOutcome::Cancelled,
+            // Type-to-filter: edit the search query and re-filter in place.
+            KeyCode::Char(c) => {
+                self.query.push(c);
+                self.apply_filter();
+                ViewOutcome::Pending
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.apply_filter();
+                ViewOutcome::Pending
+            }
             _ => ViewOutcome::Pending,
         }
     }
@@ -490,8 +548,8 @@ mod tests {
 
     #[test]
     fn desired_height_is_rows_plus_headers_plus_chrome() {
-        // 2 Anthropic models + 1 provider header + 4 chrome = 7.
-        assert_eq!(ModelPickerView::new(rows()).desired_height(80), 7);
+        // 2 Anthropic models + 1 provider header + 1 Search row + 4 chrome = 8.
+        assert_eq!(ModelPickerView::new(rows()).desired_height(80), 8);
         let many: Vec<ModelRow> = (0..30)
             .map(|i| ModelRow {
                 display: format!("m{i}"),
@@ -501,8 +559,8 @@ mod tests {
                 is_current: false,
             })
             .collect();
-        // Caps at the 12-row scroll viewport + 4 chrome.
-        assert_eq!(ModelPickerView::new(many).desired_height(80), 16);
+        // Caps at the 12-row scroll viewport + 1 Search row + 4 chrome.
+        assert_eq!(ModelPickerView::new(many).desired_height(80), 17);
     }
 
     #[test]
@@ -523,12 +581,62 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Select model"), "{text}");
+        // The search filter row sits above the list.
+        assert!(text.contains("Search:"), "search row present: {text}");
         // Models group under a dim provider header; rows show just the model.
         assert!(text.contains("Anthropic"), "provider header: {text}");
         assert!(text.contains("Opus"), "{text}");
         // Sonnet is both current (●) and the starting highlight (›).
         assert!(text.contains("› ● Sonnet"), "{text}");
-        // The picker width is content-driven, so the footer hint clips to it.
-        assert!(text.contains("↑/↓ select"), "{text}");
+        // The footer hint advertises the filter affordance.
+        assert!(text.contains("type to filter"), "{text}");
+    }
+
+    #[test]
+    fn typing_filters_the_visible_models_and_backspace_restores_them() {
+        let mut p = ModelPickerView::new(vec![
+            ModelRow {
+                display: "Claude Opus".into(),
+                request_model: "claude-opus-4-8".into(),
+                profile: Some("anthropic".into()),
+                provider_label: "Anthropic".into(),
+                is_current: true,
+            },
+            ModelRow {
+                display: "GPT-4o".into(),
+                request_model: "openai/gpt-4o".into(),
+                profile: Some("openrouter".into()),
+                provider_label: "OpenRouter".into(),
+                is_current: false,
+            },
+            ModelRow {
+                display: "Gemini Pro".into(),
+                request_model: "google/gemini-pro".into(),
+                profile: Some("openrouter".into()),
+                provider_label: "OpenRouter".into(),
+                is_current: false,
+            },
+        ]);
+        assert_eq!(p.rows().len(), 3, "all rows before filtering");
+        // Case-insensitive substring; matches the wire id too.
+        for c in "gpt".chars() {
+            assert!(matches!(
+                p.handle_key(press(KeyCode::Char(c))),
+                ViewOutcome::Pending
+            ));
+        }
+        let filtered: Vec<&str> = p.rows().iter().map(|r| r.request_model.as_str()).collect();
+        assert_eq!(filtered, vec!["openai/gpt-4o"], "only the GPT row matches 'gpt'");
+        // Enter switches to the single filtered match.
+        let outcome = p.handle_key(press(KeyCode::Enter));
+        assert!(matches!(
+            outcome,
+            ViewOutcome::SwitchModel { ref request_model, .. } if request_model == "openai/gpt-4o"
+        ));
+        // Backspacing the query restores the full list.
+        for _ in 0..3 {
+            p.handle_key(press(KeyCode::Backspace));
+        }
+        assert_eq!(p.rows().len(), 3, "clearing the query restores all rows");
     }
 }

@@ -534,6 +534,15 @@ impl ChatWidget {
                 self.transcript
                     .push_message(RenderedMessage::UserBashOutput { stdout, stderr });
             }
+            TurnEvent::ProviderConnected { provider_id } => {
+                // A mid-session /connect succeeded: flip the live availability
+                // map so the /model picker (gated by it) shows the newly
+                // connected provider's models — and the /connect picker badges
+                // it ✓ — without a restart. Keyed by profile_name, matching the
+                // launch map. No transcript cell (the connect flow already
+                // emitted its own ✓ SystemNotice).
+                self.connect_availability.insert(provider_id, true);
+            }
         }
     }
 
@@ -877,13 +886,18 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/model`: open the model picker over [`SessionInfo::models`]. An empty
-    /// model list still opens the picker — the view renders its own
-    /// user-facing empty message (plan Phase 11 step 5; previously an
-    /// app-side transcript dump).
+    /// `/model`: open the model picker over the CONNECTED subset of
+    /// [`SessionInfo::models`] — gated live by [`Self::connect_availability`]
+    /// (seeded from the launch provider-availability map, updated in place by
+    /// [`TurnEvent::ProviderConnected`] after a mid-session `/connect`). So a
+    /// provider connected during the session (e.g. OpenRouter) shows its models
+    /// immediately, and unconnected providers are hidden — no restart needed.
+    /// An empty result still opens the picker (it renders its own empty
+    /// message).
     pub(crate) fn cmd_model(&mut self, _args: &str) -> ChatOutcome {
-        self.bottom_pane
-            .show_model_picker(self.session.models.clone());
+        let rows =
+            crate::session::connected_model_rows(&self.session.models, &self.connect_availability);
+        self.bottom_pane.show_model_picker(rows);
         ChatOutcome::Continue
     }
 
@@ -1583,20 +1597,20 @@ mod tests {
     }
 
     fn widget_with_models() -> ChatWidget {
-        ChatWidget::new(
+        let mut widget = ChatWidget::new(
             Vec::new(),
             SessionInfo {
                 models: vec![
                     ModelRow {
                         display: "Opus".into(),
-                        request_model: "claude-opus".into(),
+                        request_model: "claude-opus-4-8".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
                         is_current: true,
                     },
                     ModelRow {
                         display: "Sonnet".into(),
-                        request_model: "claude-sonnet".into(),
+                        request_model: "claude-sonnet-5".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
                         is_current: false,
@@ -1604,7 +1618,14 @@ mod tests {
                 ],
                 ..Default::default()
             },
-        )
+        );
+        // The /model picker gates by live provider availability: anthropic must
+        // be connected for its (curated) models to show.
+        widget.set_connect_data(
+            std::collections::BTreeMap::new(),
+            [("anthropic".to_string(), true)].into_iter().collect(),
+        );
+        widget
     }
 
     /// An 80x24 bottom-anchored test terminal with a 4-row viewport.
@@ -1936,6 +1957,91 @@ mod tests {
         assert!(queued_rx.blocking_recv().is_err());
     }
 
+    fn open_picker_request_models(widget: &ChatWidget) -> Vec<String> {
+        widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| {
+                v.as_any()
+                    .downcast_ref::<crate::bottom_pane::model_picker_view::ModelPickerView>()
+            })
+            .expect("model picker open")
+            .rows()
+            .iter()
+            .map(|r| r.request_model.clone())
+            .collect()
+    }
+
+    #[test]
+    fn connecting_a_provider_mid_session_surfaces_its_models_in_the_model_picker() {
+        // Regression (reported): OpenRouter's models were absent from /model,
+        // and /model must show only connected providers. Captured catalog holds
+        // anthropic (current, connected) + OpenRouter (NOT yet connected).
+        let mut widget = ChatWidget::new(
+            Vec::new(),
+            SessionInfo {
+                models: vec![
+                    ModelRow {
+                        display: "Opus".into(),
+                        request_model: "claude-opus-4-8".into(),
+                        profile: Some("anthropic".into()),
+                        provider_label: "Anthropic".into(),
+                        is_current: true,
+                    },
+                    ModelRow {
+                        display: "OR Auto".into(),
+                        request_model: "openrouter/auto".into(),
+                        profile: Some("openrouter".into()),
+                        provider_label: "OpenRouter".into(),
+                        is_current: false,
+                    },
+                    ModelRow {
+                        display: "OR GPT".into(),
+                        request_model: "openai/gpt-4o".into(),
+                        profile: Some("openrouter".into()),
+                        provider_label: "OpenRouter".into(),
+                        is_current: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        widget.set_connect_data(
+            std::collections::BTreeMap::new(),
+            [("anthropic".to_string(), true)].into_iter().collect(),
+        );
+
+        // Before connecting OpenRouter: only anthropic's current model shows.
+        submit_command(&mut widget, "/model");
+        let before = open_picker_request_models(&widget);
+        assert!(before.contains(&"claude-opus-4-8".to_string()));
+        assert!(
+            !before.iter().any(|m| m.contains('/')),
+            "OpenRouter models hidden before connecting: {before:?}"
+        );
+        widget.handle_key(press(KeyCode::Esc));
+
+        // Connect OpenRouter mid-session — the CLI's write-back event.
+        widget.apply_turn_event(TurnEvent::ProviderConnected {
+            provider_id: "openrouter".to_string(),
+        });
+
+        // Now /model shows ALL of OpenRouter's models (aggregator, no curated
+        // shortlist) alongside the still-connected anthropic current model.
+        submit_command(&mut widget, "/model");
+        let after = open_picker_request_models(&widget);
+        assert!(
+            after.contains(&"openrouter/auto".to_string())
+                && after.contains(&"openai/gpt-4o".to_string()),
+            "OpenRouter models appear after connecting: {after:?}"
+        );
+        assert!(
+            after.contains(&"claude-opus-4-8".to_string()),
+            "anthropic current model still shown: {after:?}"
+        );
+    }
+
     #[test]
     fn model_switch_reports_request_model_and_profile() {
         let mut widget = widget_with_models();
@@ -1953,7 +2059,7 @@ mod tests {
         assert!(matches!(
             outcome,
             ChatOutcome::SwitchModel(ref m, ref p)
-                if m == "claude-opus" && p.as_deref() == Some("anthropic")
+                if m == "claude-opus-4-8" && p.as_deref() == Some("anthropic")
         ));
         assert!(!widget
             .bottom_pane()
@@ -1961,7 +2067,7 @@ mod tests {
             .contains::<ModelPickerView>());
         // The switch is echoed as a system message.
         let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
-        assert!(body.contains("Switching model to claude-opus"), "{body}");
+        assert!(body.contains("Switching model to claude-opus-4-8"), "{body}");
     }
 
     #[test]

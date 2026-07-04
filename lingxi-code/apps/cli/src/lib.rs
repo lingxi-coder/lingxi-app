@@ -62,6 +62,7 @@ mod bypass_env;
 pub mod commands;
 pub mod control_plane;
 pub mod cwd;
+pub mod daemon_lock;
 pub mod daemon_roster;
 pub mod exit_codes;
 pub mod idle_notify;

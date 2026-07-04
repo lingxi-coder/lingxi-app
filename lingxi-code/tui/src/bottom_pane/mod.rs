@@ -14,6 +14,7 @@
 //! the owner acting on the returned [`BottomPaneOutcome`]. The pane never
 //! cancels a turn or exits the process by itself.
 
+pub mod ask_user_question_view;
 pub mod completion_view;
 pub mod connect_key_view;
 pub mod connect_method_view;
@@ -38,9 +39,11 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
+use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
 use crate::bottom_pane::completion_view::{command_items, CompletionView};
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
@@ -240,6 +243,15 @@ impl BottomPane {
     pub fn show_permission(&mut self, exchange: PermissionExchange) {
         self.view_stack
             .push(Box::new(PermissionView::new(exchange)));
+    }
+
+    /// Open the `AskUserQuestion` selection widget for `exchange`: it owns the
+    /// keyboard until the user walks every question and submits, delivering the
+    /// answer map (question → chosen label(s)) through the exchange's one-shot
+    /// channel exactly once (or dropping it on cancel).
+    pub fn show_ask_user_question(&mut self, exchange: AskUserQuestionExchange) {
+        self.view_stack
+            .push(Box::new(AskUserQuestionView::new(exchange)));
     }
 
     /// Open the model picker over `rows` (an empty list renders the picker's

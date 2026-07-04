@@ -494,7 +494,8 @@ pub struct Argv {
     pub no_chrome: bool,
 
     /// Render screen-reader friendly output (flat text, no decorative borders
-    /// or animations).
+    /// or animations). Overridden by the LINGXI_AX_SCREEN_READER env var and
+    /// the --ax-screen-reader CLI flag.
     #[arg(long = "ax-screen-reader")]
     pub ax_screen_reader: bool,
 

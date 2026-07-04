@@ -26,6 +26,7 @@ pub mod normalization;
 pub mod oauth;
 pub mod raw_conn;
 pub mod registry;
+pub mod server_gate;
 pub mod xaa;
 pub mod xaa_idp;
 
@@ -50,4 +51,8 @@ pub use mcp_output_storage::{
 };
 pub use raw_conn::RawConnectionProvider;
 pub use registry::McpRegistry;
+pub use server_gate::{
+    apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled,
+    BUILTIN_COMPUTER_USE_SERVER,
+};
 pub use xaa_idp::{MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings};

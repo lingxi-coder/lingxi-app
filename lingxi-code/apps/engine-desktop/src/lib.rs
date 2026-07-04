@@ -3247,6 +3247,14 @@ pub async fn build(
             mcp_configs.push(c.clone());
         }
     }
+    // Per-project MCP-server enable/disable gate (claude-code `eI()`/`rTo()`/`bX`,
+    // 2.1.200+): the `~/.lingxi.json` `projects.<cwd_key>` keys `enabledMcpServers`
+    // (allowlist, applies ONLY to the builtin `computer-use` server) and
+    // `disabledMcpServers` (denylist, applies to every other server) mark a gated
+    // server `disabled` so it is seeded as `Disconnected` and never auto-connected
+    // (`if(eI(cn))return`) while `/mcp` still lists it as disabled. Applied AFTER
+    // the `--mcp-config` merge so an explicitly-supplied server is gated too.
+    mcp::apply_project_server_gate(&mut mcp_configs, &global_mcp_path, &cwd);
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
     // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
     // (live-client bridge), so a connected server yields a working `McpClient`

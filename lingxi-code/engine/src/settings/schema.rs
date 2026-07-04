@@ -151,9 +151,31 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_style: Option<String>,
 
+    /// Scalar field (later source wins). `askUserQuestionTimeout`: the idle
+    /// window before an `AskUserQuestion` prompt auto-continues with the
+    /// answers selected so far. Oracle 2.1.201 zod:
+    /// `askUserQuestionTimeout:E.enum(["60s","5m","10m","never"]).catch(void 0)`
+    /// with default `never` ("auto-continue only runs when explicitly set to
+    /// 60s/5m/10m"). Typed `Option<String>` (like `outputStyle`), tolerant of
+    /// unknown values via the zod `.catch` (parsed into the typed
+    /// `tool_ui::ask_user_question::AskUserQuestionTimeout` at the tool layer).
+    /// Scalar-override merge (not in `MERGE_STRATEGIES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_user_question_timeout: Option<String>,
+
     /// Scalar field (later source wins). Telemetry on/off toggle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_enabled: Option<bool>,
+
+    /// Scalar field (later source wins). `axScreenReader`: accessibility
+    /// screen-reader mode (2.1.201 settings schema `screenReader` group:
+    /// "Render screen-reader friendly output (flat text, no decorative borders
+    /// or animations). Overridden by the CLAUDE_AX_SCREEN_READER env var and
+    /// the --ax-screen-reader CLI flag."). Read by the `ax_screen_reader` gate
+    /// as the lowest-precedence source (below the env var and CLI flag). Key
+    /// stays `axScreenReader` verbatim (config wire key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ax_screen_reader: Option<bool>,
 
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +452,32 @@ mod tests {
                 "{key} must be scalar-override (later source wins)"
             );
         }
+    }
+
+    #[test]
+    fn ask_user_question_timeout_parses_and_is_scalar_override() {
+        // 2.1.201 settings schema: askUserQuestionTimeout is an enum string
+        // (60s|5m|10m|never), scalar-override merge. Default is `never`.
+        let json = r#"{ "askUserQuestionTimeout": "5m", "model": "claude-sonnet-4-5" }"#;
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("askUserQuestionTimeout must parse");
+        assert_eq!(parsed.ask_user_question_timeout.as_deref(), Some("5m"));
+        // Sibling survives the load.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire + scalar-override (not registered DeepMerge).
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"askUserQuestionTimeout\""));
+        assert!(
+            strategy_for("askUserQuestionTimeout").is_none(),
+            "askUserQuestionTimeout must be scalar-override (later source wins)"
+        );
+    }
+
+    #[test]
+    fn ask_user_question_timeout_absent_is_none() {
+        // Absent key ⇒ None (the tool layer resolves absent ⇒ default `never`).
+        let parsed: SettingsJson = serde_json::from_str(r#"{"model":"opus"}"#).expect("parse");
+        assert!(parsed.ask_user_question_timeout.is_none());
     }
 
     #[test]

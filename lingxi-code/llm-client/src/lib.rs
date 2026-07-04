@@ -35,6 +35,7 @@ pub mod route;
 pub mod service;
 pub mod sigv4;
 pub mod sse;
+pub mod ssl;
 pub mod transport;
 pub mod transport_bridge;
 pub mod types;
@@ -87,6 +88,7 @@ pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
 pub use service::{ApiService, SubscriberState};
 pub use sse::SseFrameSplitter;
+pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};
 pub use transport::{
     BoxFuture, FrameStream, ResponsesWebSocketTransportSession, StreamingResponse, Transport,
 };

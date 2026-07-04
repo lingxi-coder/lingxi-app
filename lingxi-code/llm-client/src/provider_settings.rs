@@ -719,6 +719,9 @@ pub fn anthropic_model_profiles() -> Vec<ModelProfile> {
         // (service.rs token defaults, thinking.rs reasoning set); it was just
         // missing from the profile list, so it never reached the /model picker.
         model("claude-fable-5", "claude-fable-5", &[], true),
+        // Mythos 5 — 2.1.201 catalog entry (provider_ids.first_party =
+        // "claude-mythos-5").
+        model("claude-mythos-5", "claude-mythos-5", &[], true),
     ]
 }
 
@@ -794,6 +797,30 @@ mod tests {
         let mut providers = BTreeMap::new();
         providers.insert(name.to_string(), value);
         providers
+    }
+
+    /// 2.1.201 catalog carries Mythos 5 (provider_ids.first_party =
+    /// "claude-mythos-5"), sitting after Fable 5 in the profile list.
+    #[test]
+    fn anthropic_catalog_includes_mythos_5() {
+        let profiles = anthropic_model_profiles();
+        let mythos = profiles
+            .iter()
+            .find(|p| p.display_model == "claude-mythos-5")
+            .expect("mythos-5 present in catalog");
+        assert_eq!(mythos.billing_model, "claude-mythos-5");
+        assert!(mythos.aliases.is_empty());
+        assert!(mythos.capabilities.reasoning);
+        // Ordered immediately after fable-5.
+        let fable_idx = profiles
+            .iter()
+            .position(|p| p.display_model == "claude-fable-5")
+            .expect("fable-5 present");
+        let mythos_idx = profiles
+            .iter()
+            .position(|p| p.display_model == "claude-mythos-5")
+            .expect("mythos-5 present");
+        assert_eq!(mythos_idx, fable_idx + 1);
     }
 
     #[test]
@@ -1076,8 +1103,8 @@ mod tests {
         );
 
         assert_eq!(profile.profile_name, "anthropic");
-        // 13 entries after claude-sonnet-5 joined the table (2.1.198).
-        assert_eq!(profile.models.len(), 13);
+        // 14 entries after claude-mythos-5 joined the table (2.1.201).
+        assert_eq!(profile.models.len(), 14);
         assert!(profile
             .models
             .iter()

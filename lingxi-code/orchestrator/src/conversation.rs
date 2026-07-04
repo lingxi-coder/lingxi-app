@@ -544,9 +544,9 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             LlmError::ProviderInternal => (Some("server_error"), Some(500)),
             // Timeout / transport / connection-lost tail → "server_error", no
             // status (these are not `APIError`-with-numeric-status).
-            LlmError::Transport { .. } | LlmError::StreamInterrupted { .. } => {
-                (Some("server_error"), None)
-            }
+            LlmError::Transport { .. }
+            | LlmError::TlsCert { .. }
+            | LlmError::StreamInterrupted { .. } => (Some("server_error"), None),
             // Generic `Error` fallthrough in `Flp` → "unknown".
             LlmError::CostUnavailable { .. } | LlmError::UnsupportedCapability { .. } => {
                 (Some("unknown"), None)

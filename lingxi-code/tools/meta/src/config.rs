@@ -108,6 +108,10 @@ const TEAMMATE_MODES: &[&str] = &["auto", "tmux", "in-process"];
 /// `permissions.defaultMode` options (non-`TRANSCRIPT_CLASSIFIER` branch,
 /// `supportedSettings.ts:117-119`).
 const PERMISSION_DEFAULT_MODES: &[&str] = &["default", "plan", "acceptEdits", "dontAsk"];
+/// `askUserQuestionTimeout` options — byte-faithful to the settings schema
+/// enum `askUserQuestionTimeout:E.enum(["60s","5m","10m","never"])` (oracle
+/// 2.1.201). Default is `never` (block on the user; no auto-continue).
+const ASK_USER_QUESTION_TIMEOUTS: &[&str] = &["60s", "5m", "10m", "never"];
 
 /// Storage source for a setting. Both currently back to the single
 /// `~/.lingxi/settings.json` file in this Rust stub.
@@ -309,6 +313,18 @@ pub static SUPPORTED_SETTINGS: Lazy<HashMap<&'static str, SettingConfig>> = Lazy
             source: Source::Global,
             ty: SettingType::String,
             options: Some(TEAMMATE_MODES),
+            path: None,
+        },
+    );
+    // askUserQuestionTimeout — /config "Input & controls" row "Question
+    // auto-continue timeout" (getter `Yye()`/`uSn`). Stored in user settings;
+    // enum 60s|5m|10m|never, default never (block on the user).
+    m.insert(
+        "askUserQuestionTimeout",
+        SettingConfig {
+            source: Source::Settings,
+            ty: SettingType::String,
+            options: Some(ASK_USER_QUESTION_TIMEOUTS),
             path: None,
         },
     );
@@ -898,10 +914,11 @@ mod tests {
             "permissions.defaultMode",
             "language",
             "teammateMode",
+            "askUserQuestionTimeout",
         ] {
             assert!(is_supported(key), "missing setting {key}");
         }
-        assert_eq!(SUPPORTED_SETTINGS.len(), 16);
+        assert_eq!(SUPPORTED_SETTINGS.len(), 17);
     }
 
     #[test]
@@ -963,6 +980,17 @@ mod tests {
                     .collect()
             )
         );
+        // askUserQuestionTimeout — enum 60s|5m|10m|never (default never).
+        assert_eq!(
+            get_options_for_setting("askUserQuestionTimeout"),
+            Some(
+                vec!["60s", "5m", "10m", "never"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
+        assert!(is_supported("askUserQuestionTimeout"));
         // boolean / free-string settings have no options
         assert!(get_options_for_setting("verbose").is_none());
         assert!(get_options_for_setting("model").is_none());

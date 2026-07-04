@@ -1290,3 +1290,62 @@ mod backoff_scaling_tests {
         assert_eq!(scaled_base_delay_ms(2, Some(0)), 1);
     }
 }
+
+/// SSL/cert fast-fail (parity 2.1.201 `isSSLError` short-circuit).
+#[cfg(test)]
+mod ssl_fast_fail_tests {
+    use super::*;
+    use crate::{LlmError, RetryDecision, RetryPolicy};
+
+    /// A TLS/cert error terminates immediately on the FIRST failure, never
+    /// consuming the retry budget (no `RetryAfter`) — even with a huge budget.
+    #[test]
+    fn tls_cert_is_terminal_immediately() {
+        let mut state = RetryState::default();
+        let ctl = RetryControl {
+            max_retries: DEFAULT_MAX_RETRIES,
+            ..RetryControl::default()
+        };
+        let step = next_step(&mut state, &ctl, &LlmError::tls_cert("CERT_HAS_EXPIRED"), 0);
+        assert_eq!(
+            step,
+            DriveStep::Terminal,
+            "SSL cert error must be terminal on the first failure, got {step:?}"
+        );
+        // Budget untouched — no attempt consumed.
+        assert_eq!(state.attempt, 0);
+    }
+
+    /// `RetryPolicy::classify_error` maps a TLS/cert error to `DoNotRetry`
+    /// (contrast: a plain `Transport` error is `Retry`).
+    #[test]
+    fn classify_error_does_not_retry_ssl() {
+        let policy = RetryPolicy;
+        assert_eq!(
+            policy.classify_error(&LlmError::tls_cert("SELF_SIGNED_CERT_IN_CHAIN")),
+            RetryDecision::DoNotRetry
+        );
+        // Sanity: a non-SSL transport error still retries.
+        assert!(matches!(
+            policy.classify_error(&LlmError::Transport {
+                message: "connection reset".into()
+            }),
+            RetryDecision::Retry { .. }
+        ));
+    }
+
+    /// The terminal error's `Display` carries the `YLe` fix hint (so callers
+    /// surface it verbatim), and `ssl_code()` exposes the matched code.
+    #[test]
+    fn tls_cert_surfaces_hint_and_code() {
+        let err = LlmError::tls_cert("CERT_HAS_EXPIRED");
+        assert_eq!(err.ssl_code(), Some("CERT_HAS_EXPIRED"));
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("SSL certificate error (CERT_HAS_EXPIRED)."),
+            "Display must lead with the SSL hint, got: {shown}"
+        );
+        assert!(shown.contains("NODE_EXTRA_CA_CERTS"));
+        assert!(shown.contains("/doctor"));
+    }
+}

@@ -157,6 +157,16 @@ fn requires_input(provider: WebSearchProvider) -> bool {
     )
 }
 
+/// Insert bracketed-paste `text` into the config input buffer (API key or
+/// SearXNG URL). Control characters (a trailing newline from a copied key,
+/// tabs) are stripped. The terminal delivers a paste as one event, so without
+/// this the field ignores ⌘V. Inert for keyless providers (Auto/DuckDuckGo).
+pub fn handle_web_config_paste(state: &mut WebConfigState, text: &str) {
+    if requires_input(state.provider) {
+        state.input.extend(text.chars().filter(|c| !c.is_control()));
+    }
+}
+
 fn save_outcome(state: &mut WebConfigState) -> WebConfigOutcome {
     match state.provider {
         WebSearchProvider::Tavily | WebSearchProvider::Brave => {
@@ -267,6 +277,19 @@ mod tests {
             handle_web_config_key(&mut st, key_char('t')),
             WebConfigOutcome::Test(WebSearchProvider::DuckDuckGo)
         );
+    }
+
+    #[test]
+    fn paste_appends_into_the_input_and_is_inert_for_keyless_providers() {
+        let mut st = WebConfigState::new(WebSearchProvider::Tavily, WebConfigSnapshot::default());
+        let _ = handle_web_config_key(&mut st, key_char('t'));
+        handle_web_config_paste(&mut st, "vly-secret\n");
+        assert_eq!(st.input, "tvly-secret", "paste appends, newline stripped");
+        // Keyless providers have no field — paste does nothing.
+        let mut keyless =
+            WebConfigState::new(WebSearchProvider::DuckDuckGo, WebConfigSnapshot::default());
+        handle_web_config_paste(&mut keyless, "ignored");
+        assert!(keyless.input.is_empty());
     }
 
     #[test]

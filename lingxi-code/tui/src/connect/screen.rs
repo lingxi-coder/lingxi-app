@@ -206,6 +206,18 @@ pub fn handle_connect_key(st: &mut ConnectScreenState, key: KeyCode) -> ConnectA
     }
 }
 
+/// Insert bracketed-paste `text` into the API-key field. Control characters
+/// (a trailing newline from a copied key, tabs) are stripped so the stored
+/// secret stays clean; the terminal delivers a paste as one event, so without
+/// this the masked field ignores ⌘V entirely. Inert in the Copilot / OAuth /
+/// Unavailable flows (no editable buffer). Never submits — Enter still does.
+pub fn handle_connect_paste(st: &mut ConnectScreenState, text: &str) {
+    if matches!(st.flow, ConnectFlow::ApiKey { .. }) {
+        st.key_buffer
+            .extend(text.chars().filter(|c| !c.is_control()));
+    }
+}
+
 /// Render the `/connect` body (plain text; the iocraft layer wraps it).
 #[must_use]
 pub fn render_connect_to_string(st: &ConnectScreenState) -> String {
@@ -307,6 +319,30 @@ mod tests {
                 key: "sk-secret".to_string()
             }
         );
+    }
+
+    #[test]
+    fn paste_appends_into_the_key_field_stripping_control_chars() {
+        let mut st = ConnectScreenState::api_key("openrouter", "OpenRouter");
+        let _ = handle_connect_key(&mut st, KeyCode::Char('a'));
+        // A copied key often carries a trailing newline; it must not enter the
+        // buffer, and the paste must land after already-typed input.
+        handle_connect_paste(&mut st, "sk-or-v1-xyz\n");
+        assert_eq!(st.key_buffer, "ask-or-v1-xyz", "paste appends, newline stripped");
+        assert_eq!(
+            handle_connect_key(&mut st, KeyCode::Enter),
+            ConnectAction::SubmitKey {
+                provider_id: "openrouter".to_string(),
+                key: "ask-or-v1-xyz".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn paste_is_inert_in_the_copilot_flow() {
+        let mut st = ConnectScreenState::copilot_pending();
+        handle_connect_paste(&mut st, "should-be-ignored");
+        assert!(st.key_buffer.is_empty(), "no editable field in the Copilot flow");
     }
 
     #[test]

@@ -10,6 +10,7 @@
 
 use std::any::Any;
 
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -21,8 +22,14 @@ use tool_web::web_search_config::WebSearchProvider;
 use crate::bottom_pane::dialog_view::centered_rect;
 use crate::bottom_pane::view::{BottomPaneView, ViewOutcome, WebAction};
 use crate::renderable::Renderable;
-use crate::web::config::{handle_web_config_key, WebConfigOutcome, WebConfigState};
+use crate::web::config::{
+    handle_web_config_key, handle_web_config_paste, WebConfigOutcome, WebConfigState,
+};
 use crate::web::picker::{provider_label, WebConfigSnapshot};
+
+/// Display columns of the `"Input: "` prefix on the config input line — where
+/// the value (and thus the text cursor) begins.
+const INPUT_PREFIX_COLS: u16 = 7;
 
 /// Providers whose config screen requires a typed value (API key or URL).
 /// Auto/DuckDuckGo need no input; Tavily/Brave take a secret key; SearXNG
@@ -51,27 +58,40 @@ impl WebConfigView {
             state: WebConfigState::new(provider, snapshot),
         }
     }
-}
 
-impl Renderable for WebConfigView {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        let label = provider_label(self.state.provider);
-        let title = format!("Configure {label}");
-        let status = self.state.status_text();
-        let show_input = requires_input(self.state.provider);
-        let input_line = show_input.then(|| {
+    /// Whether this provider shows an editable input line.
+    fn show_input(&self) -> bool {
+        requires_input(self.state.provider)
+    }
+
+    /// The value shown on the input line — masked for secret providers, raw
+    /// for the SearXNG URL — or `None` for keyless providers.
+    fn input_shown(&self) -> Option<String> {
+        self.show_input().then(|| {
             if is_masked(self.state.provider) {
                 "*".repeat(self.state.input.chars().count())
             } else {
                 self.state.input.clone()
             }
-        });
-        let footer = if show_input {
+        })
+    }
+
+    fn footer(&self) -> &'static str {
+        if self.show_input() {
             "Enter save · Esc cancel"
         } else {
             "Enter save · t test · Esc cancel"
-        };
+        }
+    }
 
+    /// The centered dialog rect. Shared by [`Renderable::render`] and
+    /// [`Renderable::cursor_pos`] so the text cursor lands exactly on the
+    /// rendered "Input:" line.
+    fn block_rect(&self, area: Rect) -> Rect {
+        let title = format!("Configure {}", provider_label(self.state.provider));
+        let status = self.state.status_text();
+        let input_line = self.input_shown();
+        let footer = self.footer();
         let content_width = [title.len(), status.len(), footer.len()]
             .into_iter()
             .chain(input_line.as_ref().map(|s| s.len() + 7))
@@ -81,11 +101,19 @@ impl Renderable for WebConfigView {
             .unwrap_or(u16::MAX)
             .min(area.width.saturating_sub(4))
             .max(30);
-        let rows = 2 + usize::from(show_input);
-        let height = u16::try_from(rows + 4)
-            .unwrap_or(u16::MAX)
-            .min(area.height);
-        let rect = centered_rect(width, height, area);
+        let rows = 2 + usize::from(self.show_input());
+        let height = u16::try_from(rows + 4).unwrap_or(u16::MAX).min(area.height);
+        centered_rect(width, height, area)
+    }
+}
+
+impl Renderable for WebConfigView {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let title = format!("Configure {}", provider_label(self.state.provider));
+        let status = self.state.status_text();
+        let input_line = self.input_shown();
+        let footer = self.footer();
+        let rect = self.block_rect(area);
 
         Clear.render(rect, buf);
         let block = Block::new().borders(Borders::ALL).title(title);
@@ -106,6 +134,30 @@ impl Renderable for WebConfigView {
     fn desired_height(&self, _width: u16) -> u16 {
         let rows = 2 + usize::from(requires_input(self.state.provider));
         u16::try_from(rows).unwrap_or(0) + 4
+    }
+
+    /// Claim a text cursor at the end of the input value (the SECOND inner row,
+    /// after the status line and the `"Input: "` prefix). Keyless providers
+    /// have no field and claim nothing.
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if !self.show_input() {
+            return None;
+        }
+        let inner = Block::new().borders(Borders::ALL).inner(self.block_rect(area));
+        if inner.width == 0 || inner.height < 2 {
+            return None;
+        }
+        let typed = u16::try_from(self.state.input.chars().count()).unwrap_or(u16::MAX);
+        let x = inner
+            .x
+            .saturating_add(INPUT_PREFIX_COLS)
+            .saturating_add(typed)
+            .min(inner.right().saturating_sub(1));
+        Some((x, inner.y + 1))
+    }
+
+    fn cursor_style(&self, _area: Rect) -> SetCursorStyle {
+        SetCursorStyle::SteadyBar
     }
 }
 
@@ -137,6 +189,13 @@ impl BottomPaneView for WebConfigView {
         }
     }
 
+    /// Pasting (⌘V) an API key or SearXNG URL appends into the input buffer;
+    /// the modal's default would otherwise swallow the paste with no effect.
+    fn handle_paste(&mut self, text: &str) -> ViewOutcome {
+        handle_web_config_paste(&mut self.state, text);
+        ViewOutcome::Pending
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -144,6 +203,7 @@ impl BottomPaneView for WebConfigView {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::cursor::SetCursorStyle;
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
@@ -260,6 +320,40 @@ mod tests {
         v.render(area, &mut buf);
         let text = render_text(&buf, area);
         assert!(text.contains("t test"), "{text}");
+    }
+
+    #[test]
+    fn paste_fills_the_key_field_and_enter_saves_it() {
+        let mut v = WebConfigView::new(WebSearchProvider::Tavily, WebConfigSnapshot::default());
+        assert!(matches!(
+            v.handle_paste("tvly-secret\n"),
+            ViewOutcome::Pending
+        ));
+        let outcome = v.handle_key(press(KeyCode::Enter));
+        assert!(matches!(
+            outcome,
+            ViewOutcome::RunWebAction(WebAction::SaveSecret {
+                provider: WebSearchProvider::Tavily,
+                ref secret,
+            }) if secret == "tvly-secret"
+        ));
+    }
+
+    #[test]
+    fn claims_a_bar_cursor_on_the_input_row_and_nothing_for_keyless_providers() {
+        let mut v = WebConfigView::new(WebSearchProvider::Tavily, WebConfigSnapshot::default());
+        let area = Rect::new(0, 0, 80, 12);
+        let empty = v.cursor_pos(area).expect("an input provider claims a cursor");
+        for _ in 0..3 {
+            v.handle_key(key_char('k'));
+        }
+        let filled = v.cursor_pos(area).expect("still claims a cursor");
+        assert_eq!(filled.1, empty.1, "cursor stays on the input row");
+        assert_eq!(filled.0, empty.0 + 3, "one column per typed char");
+        assert!(matches!(v.cursor_style(area), SetCursorStyle::SteadyBar));
+        // Keyless providers (Auto/DuckDuckGo) have no field → no cursor claim.
+        let keyless = WebConfigView::new(WebSearchProvider::DuckDuckGo, WebConfigSnapshot::default());
+        assert_eq!(keyless.cursor_pos(area), None);
     }
 
     fn render_text(buf: &Buffer, area: Rect) -> String {

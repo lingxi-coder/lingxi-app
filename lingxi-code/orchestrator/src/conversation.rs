@@ -6590,8 +6590,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // model line + cutoff sentence match claude-code instead of being
             // stubbed to None. Sourced from the LIVE `session.model` (above) so
             // `/model` switches take effect for the identity block.
+            //
+            // NON-Claude fallback: `marketing_name_for_model` only names Claude
+            // ids, so a switched-to non-Claude model (deepseek/gemini/…) got the
+            // weak id-only "powered by the model {id}." form. Fall back to the
+            // catalog display name so EVERY turn's identity line uses the strong
+            // "powered by the model named {name}." form with the CURRENT model.
+            // Gated on non-Claude so Claude ids keep byte-parity (an unknown
+            // Claude id stays id-only exactly like claude-code).
             model_marketing_name: crate::prompt::env_meta::marketing_name_for_model(&model)
-                .map(String::from),
+                .map(String::from)
+                .or_else(|| {
+                    (!model.to_ascii_lowercase().contains("claude"))
+                        .then(|| crate::provider_adapter::display_name_for_model(&model))
+                        .flatten()
+                }),
             knowledge_cutoff: crate::prompt::env_meta::knowledge_cutoff_for_model(&model)
                 .map(String::from),
             model,
@@ -8295,6 +8308,50 @@ mod turn_recovery_tests {
         assert!(
             !after.contains("powered by the model named Opus 4.8"),
             "the stale identity line must be gone after switching: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_claude_switch_uses_the_named_identity_form_not_id_only() {
+        // A switched-to NON-Claude model must still get the strong "powered by
+        // the model named {name}" form each turn (via the catalog display name),
+        // not the weak id-only "the model {id}." — so its current identity is
+        // asserted clearly. (Also: no Claude-catalog contamination.)
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                model: "claude-opus-4-8".to_string(),
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        <ConversationOrchestrator as traits::OrchestratorHandle>::switch_model(
+            &orch,
+            "deepseek-v4-pro",
+            Some("deepseek"),
+        )
+        .await
+        .expect("switch_model");
+
+        let sp = orch.build_system_prompt().await;
+        assert!(
+            sp.contains(" - You are powered by the model named ")
+                && sp.contains("The exact model ID is deepseek-v4-pro."),
+            "non-Claude model uses the named form with its exact id: {sp}"
+        );
+        assert!(
+            !sp.contains(" - You are powered by the model deepseek-v4-pro."),
+            "must NOT use the weak id-only fallback: {sp}"
+        );
+        // The prior fix: no Claude model-catalog line for a non-Claude model.
+        assert!(
+            !sp.contains("claude-fable-5"),
+            "no Claude catalog contamination for a non-Claude model: {sp}"
         );
     }
 

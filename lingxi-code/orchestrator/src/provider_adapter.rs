@@ -293,6 +293,33 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
     listings
 }
 
+/// Cached `request_model -> display_model` map over the full static catalog
+/// (Anthropic first-party + models.dev presets), built once on first use.
+fn catalog_display_names() -> &'static std::collections::HashMap<String, String> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        catalog_model_listings()
+            .into_iter()
+            .map(|m| (m.request_model, m.display_model))
+            .collect()
+    })
+}
+
+/// The catalog display name for `request_model` (e.g. `deepseek-v4-pro` ->
+/// `"DeepSeek V4 Pro"`), or `None` for an id not in the catalog.
+///
+/// Feeds the `<env>` identity line's marketing-name slot for NON-Claude models
+/// — Claude ids resolve their name via [`crate::prompt::env_meta::
+/// marketing_name_for_model`] (byte-parity), and only when THAT returns `None`
+/// (a non-Claude model) does the builder fall back to this so the line reads
+/// the strong "powered by the model named {name}" form instead of the weak
+/// id-only fallback. Cached, so it is cheap to call per turn.
+#[must_use]
+pub(crate) fn display_name_for_model(request_model: &str) -> Option<String> {
+    catalog_display_names().get(request_model).cloned()
+}
+
 /// Known one-line description for a built-in model wire id, mirroring the
 /// claude-code `/model` picker blurbs (`modelOptions.ts`). Matched by a
 /// case-insensitive family substring so dated ids (`claude-opus-4-7`, etc.) and

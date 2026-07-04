@@ -1016,6 +1016,16 @@ impl SubagentSpawner for PoolSubagentSpawner {
     async fn spawn(
         &self,
         request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        // Thin delegate: the real logic lives in `spawn_with_progress`, which
+        // drops the nested-progress stream when none is supplied.
+        self.spawn_with_progress(request, inherit, None).await
+    }
+
+    async fn spawn_with_progress(
+        &self,
+        request: SubagentSpawnRequest,
         // `inherit` carries the parent's Arc<dyn ToolInvoker> +
         // Arc<dyn BudgetEnforcerHandle>. The adapter stashes the tool invoker
         // on the child's `SubagentContext` so the recursion-lock + budget-
@@ -1023,6 +1033,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // child runner dispatches `tool_use` blocks through the very same
         // `Arc<dyn ToolInvoker>` the parent holds.
         inherit: SubagentInheritance,
+        // Forwards a one-line summary of each nested subagent tool call as it
+        // happens (the runner's `Message` events), so the caller can surface
+        // the subagent's work under its Task cell. `None` drops them.
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         // Resolve the REAL definition for this subagent_type (file catalog
         // overrides built-ins; unknown → general-purpose). Its tools policy /
@@ -1120,6 +1134,17 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 }
                 Some(SubagentEvent::Killed { agent_id: child_id }) => {
                     break SubagentResult::Killed { agent_id: child_id };
+                }
+                // Non-terminal `Message` events carry the subagent's assistant
+                // turns — forward a one-line summary of each tool call it makes
+                // to `progress` so the parent UI can show nested execution.
+                // Best-effort: a full/closed channel just drops the line.
+                Some(SubagentEvent::Message { message, .. }) => {
+                    if let Some(sink) = progress.as_ref() {
+                        for line in subagent_tool_call_lines(&message) {
+                            let _ = sink.try_send(line);
+                        }
+                    }
                 }
                 Some(_) => continue,
                 None => {
@@ -1230,6 +1255,60 @@ impl SubagentSpawner for PoolSubagentSpawner {
 
 /// Map a LingXi [`AgentSource`] to claude-code's `selectedAgent.source` literal
 /// (`SettingSource` ∪ `'built-in'` / `'plugin'`, loadAgentsDir.ts:137/156 +
+/// Extract a one-line summary of each tool CALL in a serialized subagent
+/// message (`SubagentEvent::Message`), for the nested-progress display. Searches
+/// the message JSON recursively for `type:"tool_use"` content blocks (robust to
+/// the message-envelope shape) and formats `Name(hint)`, where `hint` is the
+/// first string field of the tool input (file path / pattern / command).
+fn subagent_tool_call_lines(message: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_tool_calls(message, &mut out);
+    out
+}
+
+fn collect_tool_calls(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(serde_json::Value::as_str) == Some("tool_use") {
+                if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
+                    let hint = map.get("input").map(short_input_hint).unwrap_or_default();
+                    out.push(if hint.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{name}({hint})")
+                    });
+                }
+            }
+            for v in map.values() {
+                collect_tool_calls(v, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                collect_tool_calls(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// First string field of a tool `input` object (file path / pattern / command),
+/// trimmed and char-truncated to a short hint. Empty when there is none.
+fn short_input_hint(input: &serde_json::Value) -> String {
+    let Some(s) = input
+        .as_object()
+        .and_then(|o| o.values().find_map(serde_json::Value::as_str))
+    else {
+        return String::new();
+    };
+    let s = s.trim();
+    if s.chars().count() > 40 {
+        format!("{}\u{2026}", s.chars().take(40).collect::<String>())
+    } else {
+        s.to_string()
+    }
+}
+
 /// settings/constants.ts:7-21). Used by [`PoolSubagentSpawner::resolve_selection`]
 /// to emit `tengu_agent_tool_selected`'s `source` field byte-faithfully.
 fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
@@ -2458,6 +2537,53 @@ mod tests {
             agent_source_to_claude_str(AgentSource::Flag),
             "flagSettings"
         );
+    }
+
+    // ── Gap C: nested subagent tool-call surfacing ──
+
+    #[test]
+    fn subagent_tool_call_lines_extracts_name_and_hint() {
+        // A realistic subagent assistant message envelope: a text block plus two
+        // tool_use blocks. We surface only the tool_use blocks as `Name(hint)`.
+        let message = serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "let me look" },
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": { "file_path": "/etc/hosts" }
+                    },
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": { "command": "ls -la" }
+                    }
+                ]
+            }
+        });
+        assert_eq!(
+            subagent_tool_call_lines(&message),
+            vec!["Read(/etc/hosts)".to_string(), "Bash(ls -la)".to_string()],
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_lines_ignores_non_tool_content() {
+        let message = serde_json::json!({
+            "message": { "content": [{ "type": "text", "text": "no tools here" }] }
+        });
+        assert!(subagent_tool_call_lines(&message).is_empty());
+    }
+
+    #[test]
+    fn short_input_hint_truncates_long_first_string() {
+        let long = "a".repeat(60);
+        let hint = short_input_hint(&serde_json::json!({ "command": long }));
+        // 40 chars + the ellipsis.
+        assert_eq!(hint.chars().count(), 41);
+        assert!(hint.ends_with('\u{2026}'));
     }
 
     #[tokio::test]

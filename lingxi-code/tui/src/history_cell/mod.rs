@@ -261,6 +261,7 @@ pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
             kind,
         } => Box::new(team::UserTeammateCell::new(display_name, color, kind)),
         M::HookProgress { event, count, .. } => Box::new(team::HookProgressCell::new(event, count)),
+        M::SubagentActivity { text } => Box::new(team::SubagentActivityCell::new(text)),
         M::PlanApproval { kind } => Box::new(team::PlanApprovalCell::new(kind)),
         M::UserResourceUpdate { updates } => {
             Box::new(attachments::UserResourceUpdateCell::new(updates))
@@ -602,6 +603,11 @@ mod tests {
                 event: "PreToolUse".into(),
                 count: 1,
                 transcript_summary: true,
+            }
+        ));
+        assert!(maps_to::<team::SubagentActivityCell>(
+            RenderedMessage::SubagentActivity {
+                text: "Read(/etc/hosts)".into(),
             }
         ));
         assert!(maps_to::<team::PlanApprovalCell>(

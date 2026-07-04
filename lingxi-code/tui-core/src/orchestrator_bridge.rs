@@ -181,6 +181,13 @@ pub enum TurnEvent {
         /// The provider/profile that just became available.
         provider_id: String,
     },
+    /// One nested execution line from a running subagent (its tool calls, as
+    /// they happen), surfaced under the `Task` cell — otherwise a subagent's
+    /// inner work is invisible. Rendered as an indented `⎿` line.
+    SubagentActivity {
+        /// Pre-formatted one-line summary, e.g. `"Read(src/main.rs)"`.
+        text: String,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on
@@ -208,6 +215,12 @@ impl OutputStream for BridgeOutputStream {
 
     async fn emit_thinking(&self, thinking: &str, _signature: Option<&str>) {
         let _ = self.tx.send(TurnEvent::ThinkingDelta(thinking.to_string()));
+    }
+
+    async fn emit_subagent_activity(&self, text: &str) {
+        let _ = self.tx.send(TurnEvent::SubagentActivity {
+            text: text.to_string(),
+        });
     }
 
     async fn emit_tool_call(

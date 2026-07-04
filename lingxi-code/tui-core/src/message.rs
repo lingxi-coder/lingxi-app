@@ -173,6 +173,13 @@ pub enum RenderedMessage {
         /// `true` → static transcript summary; `false` → live running line.
         transcript_summary: bool,
     },
+    /// One nested execution line from a running subagent (a tool call it made),
+    /// rendered as an indented `⎿` line under its `Task` cell. Surfaces the
+    /// otherwise-invisible inner work of a `Task`/Agent invocation.
+    SubagentActivity {
+        /// Pre-formatted one-line summary, e.g. `"Read(src/main.rs)"`.
+        text: String,
+    },
     /// (M7-04) Plan approval request/response.
     PlanApproval {
         /// Request/approved/rejected content.
@@ -502,6 +509,7 @@ impl RenderedMessage {
             RenderedMessage::UserText { .. }
             | RenderedMessage::AssistantText { .. }
             | RenderedMessage::SystemText { .. }
+            | RenderedMessage::SubagentActivity { .. }
             | RenderedMessage::CompactBoundary { .. }
             | RenderedMessage::SystemTextRich { .. }
             | RenderedMessage::RateLimit { .. }

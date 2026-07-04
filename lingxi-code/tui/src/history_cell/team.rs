@@ -119,6 +119,12 @@ pub(crate) fn hook_progress_lines(event: &str, count: u32, theme: &Theme) -> Vec
     colored_lines(&format!("hook: {event} (×{count})"), theme.dim)
 }
 
+/// One nested subagent tool-call line — a dim, indented `⎿` line rendered
+/// under the parent `Task` cell so the subagent's inner work is visible.
+pub(crate) fn subagent_activity_lines(text: &str, theme: &Theme) -> Vec<StyledLine> {
+    colored_lines(&format!("  \u{23BF}  {text}"), theme.dim)
+}
+
 /// A plan-approval request/response line.
 pub(crate) fn plan_approval_lines(kind: &PlanApprovalKind, theme: &Theme) -> Vec<StyledLine> {
     match kind {
@@ -295,6 +301,27 @@ impl StyledCell for HookProgressCell {
     }
 }
 
+/// [`RenderedMessage::SubagentActivity`](tui_core::message::RenderedMessage::SubagentActivity)
+/// — one nested subagent tool-call line, dim + indented under the Task cell.
+#[derive(Debug)]
+pub struct SubagentActivityCell {
+    text: String,
+}
+
+impl SubagentActivityCell {
+    /// Wrap a nested subagent activity line.
+    #[must_use]
+    pub fn new(text: String) -> Self {
+        Self { text }
+    }
+}
+
+impl StyledCell for SubagentActivityCell {
+    fn styled_lines(&self, _width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        subagent_activity_lines(&self.text, theme)
+    }
+}
+
 /// [`RenderedMessage::PlanApproval`](tui_core::message::RenderedMessage::PlanApproval)
 /// — plan approval request (warning + plan body), approved (success) or
 /// rejected (error + optional dim feedback).
@@ -461,6 +488,17 @@ mod tests {
     fn hook_progress_cell_renders_dim_event_count() {
         let cell = HookProgressCell::new("PreToolUse".to_string(), 2);
         assert_eq!(plain(&cell), vec!["hook: PreToolUse (×2)".to_string()]);
+        assert_eq!(first_fg(&cell), Some(rata(Theme::dark().dim)));
+    }
+
+    #[test]
+    fn subagent_activity_cell_renders_dim_indented_line() {
+        let cell = SubagentActivityCell::new("Read(/etc/hosts)".to_string());
+        // Dim, indented under the parent Task cell with a `⎿` continuation glyph.
+        assert_eq!(
+            plain(&cell),
+            vec!["  \u{23BF}  Read(/etc/hosts)".to_string()]
+        );
         assert_eq!(first_fg(&cell), Some(rata(Theme::dark().dim)));
     }
 

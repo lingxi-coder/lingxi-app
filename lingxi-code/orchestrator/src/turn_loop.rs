@@ -2845,9 +2845,26 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // before `tool_handle.call()`, so no subagent spawns and neither event
         // fires.
 
-        // One-shot progress channel — receiver dropped immediately.
-        let (progress_tx, _progress_rx) =
-            tokio::sync::mpsc::channel::<tool_api::progress::ToolProgress>(8);
+        // Progress channel: drained CONCURRENTLY with the tool call. The Agent
+        // tool forwards a `{"subagent_activity": "<line>"}` payload per nested
+        // subagent tool call; re-emit each as `emit_subagent_activity` so the
+        // subagent's work renders under its Task cell. Other tools send nothing,
+        // so this is a no-op for them. The consumer exits when the tool drops
+        // `progress_tx` (call returns).
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::channel::<tool_api::progress::ToolProgress>(64);
+        let progress_output = orch.output.clone();
+        let progress_consumer = tokio::spawn(async move {
+            while let Some(p) = progress_rx.recv().await {
+                if let Some(text) = p
+                    .data
+                    .get("subagent_activity")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    progress_output.emit_subagent_activity(text).await;
+                }
+            }
+        });
 
         // Time the tool dispatch ONLY (excludes the permission prompt above and
         // the Post hooks below) — surfaced to PostToolUse/Failure hooks as
@@ -2856,6 +2873,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let tool_outcome = tool_handle
             .call(effective_input.clone(), ctx, progress_tx)
             .await;
+        // The tool has dropped `progress_tx`; drain the consumer to completion.
+        let _ = progress_consumer.await;
         #[allow(clippy::cast_possible_truncation)]
         let tool_duration_ms = tool_started.elapsed().as_millis() as u64;
 

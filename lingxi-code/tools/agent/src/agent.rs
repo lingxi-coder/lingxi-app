@@ -1097,7 +1097,7 @@ impl Tool for AgentTool {
         &self,
         input: Value,
         ctx: ToolUseContext,
-        _progress: ToolProgressSender,
+        progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         let invocation_id = Self::fresh_invocation_id();
@@ -1647,7 +1647,29 @@ Use /mcp to configure and authenticate the required MCP servers.",
             depth: ctx.depth + 1,
         };
 
-        let outcome = spawner.spawn(request, inherit).await;
+        // Nested-progress bridge: `spawn_with_progress` feeds one String line per
+        // subagent tool call; forward each as a `ToolProgress` the turn loop
+        // re-emits as `SubagentActivity`, so the subagent's work renders under
+        // this Task cell. The forwarder ends when `spawn_with_progress` returns
+        // (its `prog_tx` drops → `prog_rx` closes).
+        let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let forward_progress = progress.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(line) = prog_rx.recv().await {
+                let _ = forward_progress
+                    .send(tool_api::progress::ToolProgress {
+                        tool_use_id: protocol::ToolUseId::new(),
+                        data: serde_json::json!({ "subagent_activity": line }),
+                    })
+                    .await;
+            }
+        });
+
+        let outcome = spawner
+            .spawn_with_progress(request, inherit, Some(prog_tx))
+            .await;
+        // `prog_tx` is now dropped → the forwarder drains and exits.
+        let _ = forwarder.await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         // Worktree lifecycle (claude `fe()`): once the agent finished, KEEP the

@@ -25,7 +25,7 @@ use crate::history_cell::system::{
 };
 use crate::history_cell::team::{
     agent_notification_lines, channel_message_lines, hook_progress_lines, plan_approval_lines,
-    shutdown_lines, task_assignment_lines, teammate_lines,
+    shutdown_lines, subagent_activity_lines, task_assignment_lines, teammate_lines,
 };
 use crate::history_cell::tool::{
     collapsed_read_search_lines, command_output_lines, group_tool_use_lines, tool_result_lines,
@@ -122,6 +122,7 @@ pub fn render_message(
         RenderedMessage::HookProgress { event, count, .. } => {
             hook_progress_lines(event, *count, theme)
         }
+        RenderedMessage::SubagentActivity { text } => subagent_activity_lines(text, theme),
         RenderedMessage::UserResourceUpdate { updates } => resource_update_lines(updates),
         RenderedMessage::UserImage {
             image_id, metadata, ..
@@ -438,6 +439,7 @@ mod tests {
             RenderedMessage::UserTeammate { .. } => "UserTeammate",
             RenderedMessage::Advisor { .. } => "Advisor",
             RenderedMessage::HookProgress { .. } => "HookProgress",
+            RenderedMessage::SubagentActivity { .. } => "SubagentActivity",
             RenderedMessage::PlanApproval { .. } => "PlanApproval",
             RenderedMessage::UserBashInput { .. } => "UserBashInput",
             RenderedMessage::UserBashOutput { .. } => "UserBashOutput",

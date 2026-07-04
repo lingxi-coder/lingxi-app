@@ -13,9 +13,20 @@
 //! git/github/url human render mirrors the binary's exact template
 //! `Source: Git (${url}${ref?`@${ref}`:""})` etc.).
 //!
-//! `add` / `remove` / `update` (which WRITE the registry + the per-scope
-//! `extraKnownMarketplaces` settings declaration, and clone/fetch sources) are
-//! the follow-up increment — see `.omo/plans/2026-07-04-plugin-cli-port.md`.
+//! `add` / `remove` / `update` WRITE the registry + the per-scope
+//! `extraKnownMarketplaces` settings declaration. `add` classifies its source
+//! 1:1 with the binary's `Idr` resolver — a local **directory** (verified 1:1),
+//! a **github** `owner/repo` shorthand or a **git** clone URL (both cloned via
+//! `MarketplaceManager::resolve_index_via_git` into
+//! `<plugins>/marketplaces/<name>/`), or a hosted **url** `marketplace.json`.
+//!
+//! Residuals: the **url** source's HTTP `marketplace.json` download is not
+//! ported (the plugin crate has no HTTP-catalog fetch) — it classifies + shapes
+//! the `source` object but declines the fetch; a `ref` on a github/git source is
+//! recorded in the `source` object but not checked out (the shared clone helper
+//! fetches the default branch); and the network add path emits a single result
+//! line rather than the binary's live per-step progress
+//! ("Refreshing marketplace cache…", "Cloning repository…", …).
 
 use std::path::{Path, PathBuf};
 
@@ -179,15 +190,245 @@ fn declaring_scopes(name: &str, home: &Path, cwd: &Path) -> Vec<Scope> {
         .collect()
 }
 
+/// A classified `plugin marketplace add <source>` argument.
+///
+/// Mirrors the binary's `Idr(source)` resolver: an SSH / HTTP(S) / local /
+/// GitHub-shorthand string is normalized to one of these variants, each of which
+/// maps to a settings + registry `source` object of a distinct shape
+/// (`{source:"directory",path}` / `{source:"github",repo,ref?}` /
+/// `{source:"git",url,ref?}` / `{source:"url",url}`).
+#[derive(Debug, Clone, PartialEq)]
+enum Source {
+    /// A local directory holding a `.lingxi-plugin/marketplace.json`.
+    Directory(PathBuf),
+    /// A GitHub `owner/repo` shorthand (cloned via `github.com`).
+    Github { repo: String, git_ref: Option<String> },
+    /// A full git clone URL (SSH `git@…`, or an HTTP(S) URL ending `.git` /
+    /// containing `/_git/`, or a `github.com/owner/repo` HTTP URL — `.git`
+    /// appended).
+    Git { url: String, git_ref: Option<String> },
+    /// A hosted `marketplace.json` fetched over HTTP(S) (no git clone).
+    Url { url: String },
+}
+
+/// The unclassifiable-source error (binary: `cli_marketplace_add_invalid_source`).
+fn invalid_source_format() -> String {
+    "✘ Invalid marketplace source format. Try: owner/repo, https://..., or ./path".to_string()
+}
+
+/// The has-`/` but malformed GitHub shorthand error (binary-verbatim).
+fn invalid_shorthand(t: &str) -> String {
+    format!(
+        "✘ '{t}' is not a valid GitHub owner/repo shorthand. For a git repo, use the full https:// clone URL from your host (typically ending in .git — some hosts like Azure DevOps omit it). For a hosted marketplace.json, use its https:// URL. For a local path, use ./ or an absolute path."
+    )
+}
+
+/// GitHub owner segment: `[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?`.
+fn valid_owner(o: &str) -> bool {
+    let b = o.as_bytes();
+    if b.is_empty() {
+        return false;
+    }
+    let alnum = |c: u8| c.is_ascii_alphanumeric();
+    if !alnum(b[0]) || !alnum(b[b.len() - 1]) {
+        return false;
+    }
+    o.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// GitHub `owner/repo` shorthand: owner as above, `/`, then a repo of
+/// `[A-Za-z0-9._-]+` (exactly one slash).
+fn valid_owner_repo(a: &str) -> bool {
+    let Some((owner, repo)) = a.split_once('/') else {
+        return false;
+    };
+    if repo.is_empty() || repo.contains('/') {
+        return false;
+    }
+    valid_owner(owner)
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// SSH scp-like git URL: `[A-Za-z0-9._-]+@[^:]+:.+` with an optional `#ref`.
+/// Returns `(url, ref?)` (the `#ref` split off the url), else `None`.
+fn match_ssh_git(t: &str) -> Option<(String, Option<String>)> {
+    let (left, git_ref) = match t.split_once('#') {
+        Some((l, r)) if !r.is_empty() => (l, Some(r.to_string())),
+        Some((l, _)) => (l, None),
+        None => (t, None),
+    };
+    let at = left.find('@')?;
+    let user = &left[..at];
+    if user.is_empty()
+        || !user
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-')
+    {
+        return None;
+    }
+    let rest = &left[at + 1..];
+    let colon = rest.find(':')?;
+    if colon == 0 || rest[colon + 1..].is_empty() {
+        return None; // host non-empty, path non-empty
+    }
+    Some((left.to_string(), git_ref))
+}
+
+/// The `(host, pathname)` of an HTTP(S) URL (userinfo/`:port`/query/fragment
+/// stripped from the host; pathname stops at `?`/`#`).
+fn http_host_path(url: &str) -> (String, String) {
+    let after = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let hostport = &after[..end];
+    let host = hostport.rsplit('@').next().unwrap_or(hostport);
+    let host = host.split(':').next().unwrap_or(host);
+    let rest = &after[end..];
+    let path_end = rest.find(['?', '#']).unwrap_or(rest.len());
+    (host.to_string(), rest[..path_end].to_string())
+}
+
+/// The known git host (binary `$m`): `github.com` after stripping `www.`.
+fn is_github_host(host: &str) -> bool {
+    let mut h = host;
+    while let Some(rest) = h.strip_prefix("www.") {
+        h = rest;
+    }
+    h == "github.com"
+}
+
+/// pathname `^/[^/]+/[^/]+` — at least an `owner/repo` pair.
+fn path_has_owner_repo(path: &str) -> bool {
+    let mut segs = path.trim_start_matches('/').split('/');
+    matches!((segs.next(), segs.next()), (Some(a), Some(b)) if !a.is_empty() && !b.is_empty())
+}
+
+/// Classify a `plugin marketplace add` source string, 1:1 with the binary's
+/// `Idr` order: SSH git → HTTP(S) → local (`./ ../ / ~`) → GitHub shorthand →
+/// unclassifiable. `Err` is a fully-formed (pre-"Adding marketplace…") error.
+fn classify_source(source: &str) -> Result<Source, String> {
+    let t = source.trim();
+
+    // 1. SSH scp-like git URL.
+    if let Some((url, git_ref)) = match_ssh_git(t) {
+        return Ok(Source::Git { url, git_ref });
+    }
+
+    // 2. HTTP(S): a `.git` / `/_git/` URL (any host) is a git clone; a
+    //    `github.com/owner/repo` URL is a git clone with `.git` appended;
+    //    anything else is a hosted `marketplace.json` (`url`).
+    if t.starts_with("http://") || t.starts_with("https://") {
+        let (base, git_ref) = match t.split_once('#') {
+            Some((b, r)) if !r.is_empty() => (b.to_string(), Some(r.to_string())),
+            _ => (t.trim_end_matches('#').to_string(), None),
+        };
+        if base.ends_with(".git") || base.contains("/_git/") {
+            return Ok(Source::Git { url: base, git_ref });
+        }
+        let (host, path) = http_host_path(&base);
+        if is_github_host(&host) && path_has_owner_repo(&path) {
+            let url = if base.ends_with(".git") {
+                base
+            } else {
+                format!("{base}.git")
+            };
+            return Ok(Source::Git { url, git_ref });
+        }
+        return Ok(Source::Url { url: base });
+    }
+
+    // 3. Local path (explicit `./ ../ / ~` prefix — matching the binary, which
+    //    does NOT treat a bare relative name as a path). Existence + kind are
+    //    resolved via the filesystem; only a directory is supported here (a
+    //    `.json` file source is a residual — see module residuals).
+    if t.starts_with("./") || t.starts_with("../") || t.starts_with('/') || t.starts_with('~') {
+        let abs =
+            std::fs::canonicalize(source).map_err(|_| format!("✘ Path does not exist: {source}"))?;
+        if !abs.is_dir() {
+            return Err(format!("✘ Path does not exist: {source}"));
+        }
+        return Ok(Source::Directory(abs));
+    }
+
+    // 4. GitHub `owner/repo` shorthand (contains `/`, not `@`-prefixed, no `:`).
+    if t.contains('/') && !t.starts_with('@') {
+        if t.contains(':') {
+            return Err(invalid_source_format());
+        }
+        let (repo, git_ref) = {
+            let idx = t.find(['#', '@']);
+            match idx {
+                Some(i) => {
+                    let r = &t[i + 1..];
+                    (
+                        t[..i].to_string(),
+                        if r.is_empty() { None } else { Some(r.to_string()) },
+                    )
+                }
+                None => (t.to_string(), None),
+            }
+        };
+        if !valid_owner_repo(&repo) {
+            return Err(invalid_shorthand(t));
+        }
+        return Ok(Source::Github { repo, git_ref });
+    }
+
+    // 5. Unclassifiable.
+    Err(invalid_source_format())
+}
+
+/// The settings / registry `source` sub-object for a classified source.
+fn source_object(src: &Source) -> Value {
+    let mut o = Map::new();
+    match src {
+        Source::Directory(p) => {
+            o.insert("source".to_string(), Value::String("directory".to_string()));
+            o.insert("path".to_string(), Value::String(p.display().to_string()));
+        }
+        Source::Github { repo, git_ref } => {
+            o.insert("source".to_string(), Value::String("github".to_string()));
+            o.insert("repo".to_string(), Value::String(repo.clone()));
+            if let Some(r) = git_ref {
+                o.insert("ref".to_string(), Value::String(r.clone()));
+            }
+        }
+        Source::Git { url, git_ref } => {
+            o.insert("source".to_string(), Value::String("git".to_string()));
+            o.insert("url".to_string(), Value::String(url.clone()));
+            if let Some(r) = git_ref {
+                o.insert("ref".to_string(), Value::String(r.clone()));
+            }
+        }
+        Source::Url { url } => {
+            o.insert("source".to_string(), Value::String("url".to_string()));
+            o.insert("url".to_string(), Value::String(url.clone()));
+        }
+    }
+    Value::Object(o)
+}
+
 /// `plugin marketplace add <source> [--scope] [--sparse]`.
 ///
-/// Wires the local-**directory** source (verified 1:1): read + validate the
-/// `<dir>/.lingxi-plugin/marketplace.json` (requires `name` + `owner` object),
-/// then write BOTH the resolved registry entry (`known_marketplaces.json`) and
-/// the per-scope `extraKnownMarketplaces` declaration. If the registry already
-/// has the name it only (re)writes the scope declaration and reports "already on
-/// disk". Non-directory sources (github/git/url, which clone) are the next
-/// increment.
+/// Classifies `<source>` (directory / GitHub-shorthand / git-URL / hosted-URL,
+/// 1:1 with the binary `Idr`), then writes BOTH the resolved registry entry
+/// (`known_marketplaces.json`) and the per-scope `extraKnownMarketplaces`
+/// declaration. If the registry already has the name it only (re)writes the
+/// scope declaration and reports "already on disk".
+///
+/// - **directory** (verified 1:1): read + validate the local
+///   `<dir>/.lingxi-plugin/marketplace.json` (requires `name` + `owner` object).
+/// - **github / git** (network): clone the marketplace repo into
+///   `<plugins>/marketplaces/<name>/` via `MarketplaceManager::resolve_index_via_git`,
+///   taking the marketplace `name` from the cloned catalog and setting
+///   `installLocation` to the clone dir.
+/// - **url**: a hosted `marketplace.json` fetched over HTTP — classification +
+///   `source` object are shaped, but the download itself is a residual (the
+///   plugin crate has no HTTP-catalog fetch), so it declines cleanly.
 pub fn run_add(
     source: &str,
     scope: Option<&str>,
@@ -196,26 +437,29 @@ pub fn run_add(
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
-    // Local path existence is checked FIRST (before the "Adding marketplace…"
-    // progress line), matching the binary.
-    let looks_local = source.starts_with('/')
-        || source.starts_with('.')
-        || source.starts_with('~')
-        || Path::new(source).exists();
-    if !looks_local {
-        return Err(format!(
-            "✘ Non-directory marketplace sources (github/git/url) are not yet supported: {source}"
-        ));
-    }
-    let abs = std::fs::canonicalize(source).map_err(|_| format!("✘ Path does not exist: {source}"))?;
-    if !abs.is_dir() {
-        return Err(format!("✘ Path does not exist: {source}"));
-    }
+    // Classification (incl. local existence) is checked FIRST — before scope,
+    // and before any "Adding marketplace…" progress line — matching the binary.
+    let classified = classify_source(source)?;
     let target = match scope {
         Some(s) => Scope::parse(s).ok_or_else(|| market_invalid_scope(s))?,
         None => Scope::User,
     };
 
+    match classified {
+        Source::Directory(abs) => add_directory(&abs, target, plugins_dir, home, cwd),
+        remote => add_remote(&remote, target, plugins_dir, home, cwd),
+    }
+}
+
+/// The local-directory add path (unchanged behaviour): validate the manifest,
+/// then write the scope declaration + registry entry.
+fn add_directory(
+    abs: &Path,
+    target: Scope,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
     // From here the "Adding marketplace…" progress prefix is part of the line.
     let manifest_path = abs.join(branding::PLUGIN_MANIFEST_DIR).join("marketplace.json");
     let raw = std::fs::read_to_string(&manifest_path).map_err(|_| {
@@ -249,37 +493,174 @@ pub fn run_add(
         ));
     }
 
-    let source_value = serde_json::json!({
-        "source": "directory",
-        "path": abs.display().to_string(),
-    });
+    let source_value = source_object(&Source::Directory(abs.to_path_buf()));
+    write_marketplace(
+        &name,
+        &source_value,
+        &abs.display().to_string(),
+        target,
+        plugins_dir,
+        home,
+        cwd,
+    )
+}
 
+/// The network add path (github / git clone; url declines). Clones the catalog,
+/// takes the marketplace `name` from it, and records `installLocation` = the
+/// clone dir.
+fn add_remote(
+    remote: &Source,
+    target: Scope,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
+    // Determine the clone URL + a provisional clone-dir name hint (the final
+    // directory is renamed to the marketplace's own name after the catalog is
+    // parsed, matching the binary's temp-then-rename).
+    let (clone_url, hint) = match remote {
+        Source::Github { repo, .. } => (format!("https://github.com/{repo}.git"), repo.clone()),
+        Source::Git { url, .. } => (url.clone(), url_repo_hint(url)),
+        Source::Url { url } => {
+            // A hosted marketplace.json is fetched over HTTP, not git-cloned; the
+            // plugin crate has no HTTP-catalog fetch yet (module residual).
+            return Err(format!(
+                "Adding marketplace…✘ Failed to add marketplace: Hosted marketplace.json URL sources are not yet supported: {url}"
+            ));
+        }
+        Source::Directory(_) => unreachable!("add_remote called with a directory source"),
+    };
+
+    // From here the "Adding marketplace…" progress prefix is part of the line.
+    let (name, clone_dir) = clone_marketplace(plugins_dir, &clone_url, &hint)
+        .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+
+    let source_value = source_object(remote);
+    write_marketplace(
+        &name,
+        &source_value,
+        &clone_dir.display().to_string(),
+        target,
+        plugins_dir,
+        home,
+        cwd,
+    )
+}
+
+/// A provisional clone-dir name derived from a git URL's last path segment
+/// (`.git` stripped). Only transient — the dir is renamed to the marketplace's
+/// declared name once the catalog is parsed.
+fn url_repo_hint(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let last = trimmed.rsplit(['/', ':']).next().unwrap_or(trimmed);
+    last.strip_suffix(".git").unwrap_or(last).to_string()
+}
+
+/// Sanitize one clone-dir path segment exactly as the plugin crate's
+/// (`pub(crate)`) `discovery::sanitize_segment` does for marketplace names:
+/// replace any char outside `[A-Za-z0-9\-_]` with `-`, and collapse an
+/// empty / `.` / `..` result to `-`.
+fn sanitize_segment(s: &str) -> String {
+    let mapped: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if mapped.is_empty() || mapped == "." || mapped == ".." {
+        "-".to_string()
+    } else {
+        mapped
+    }
+}
+
+/// Clone (and parse) a marketplace git repo via the plugin crate's
+/// `MarketplaceManager::resolve_index_via_git` — run on a dedicated thread with
+/// its own current-thread runtime so it is safe to call from the async CLI
+/// dispatcher without nesting runtimes. Returns `(marketplace_name, clone_dir)`,
+/// where the clone dir is renamed to `marketplaces/<marketplace-name>/` so
+/// `installLocation` matches the binary.
+fn clone_marketplace(
+    plugins_dir: &Path,
+    clone_url: &str,
+    hint: &str,
+) -> Result<(String, PathBuf), String> {
+    let plugins_dir = plugins_dir.to_path_buf();
+    let url = clone_url.to_string();
+    let hint = hint.to_string();
+    std::thread::spawn(move || -> Result<(String, PathBuf), String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mgr = plugin::MarketplaceManager::new(plugins_dir.clone());
+        let (index, clone_dir) = rt.block_on(mgr.resolve_index_via_git(&url, &hint))?;
+        let name = index.name;
+        // Rename the (hint-named) clone to the marketplace's own name so the
+        // recorded installLocation is `marketplaces/<marketplace-name>/`. The
+        // segment sanitizer mirrors the plugin crate's `sanitize_segment` (which
+        // is `pub(crate)`) so the target matches `resolve_index_via_git`'s own
+        // clone-dir layout.
+        let final_dir = plugins_dir
+            .join("marketplaces")
+            .join(sanitize_segment(&name));
+        let final_dir = if final_dir == clone_dir {
+            clone_dir
+        } else {
+            let _ = std::fs::remove_dir_all(&final_dir);
+            match std::fs::rename(&clone_dir, &final_dir) {
+                Ok(()) => final_dir,
+                Err(_) => clone_dir,
+            }
+        };
+        Ok((name, final_dir))
+    })
+    .join()
+    .map_err(|_| "Failed to clone marketplace repository: worker thread panicked".to_string())?
+}
+
+/// Shared writer for both add paths: write the per-scope declaration, then the
+/// resolved registry entry (or report "already on disk").
+fn write_marketplace(
+    name: &str,
+    source_value: &Value,
+    install_location: &str,
+    target: Scope,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
     // Per-scope declaration (settings.extraKnownMarketplaces[name] = {source}).
     let mut extra = read_extra(target, home, cwd);
-    extra.insert(name.clone(), serde_json::json!({ "source": source_value }));
-    write_extra(target, home, cwd, extra).map_err(|e| {
-        format!("Adding marketplace…✘ Failed to add marketplace: {e}")
-    })?;
+    extra.insert(
+        name.to_string(),
+        serde_json::json!({ "source": source_value.clone() }),
+    );
+    write_extra(target, home, cwd, extra)
+        .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
 
     // Registry (resolved) — only written when the name is not already on disk.
     let mut registry = load_registry(plugins_dir);
-    if registry.contains_key(&name) {
+    if registry.contains_key(name) {
         return Ok(format!(
             "Adding marketplace…✔ Marketplace '{name}' already on disk — declared in {} settings",
             target.label()
         ));
     }
     registry.insert(
-        name.clone(),
+        name.to_string(),
         serde_json::json!({
-            "source": source_value,
-            "installLocation": abs.display().to_string(),
+            "source": source_value.clone(),
+            "installLocation": install_location,
             "lastUpdated": iso_now(),
         }),
     );
-    write_registry(plugins_dir, &registry).map_err(|e| {
-        format!("Adding marketplace…✘ Failed to add marketplace: {e}")
-    })?;
+    write_registry(plugins_dir, &registry)
+        .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
     Ok(format!(
         "Adding marketplace…✔ Successfully added marketplace: {name} (declared in {} settings)",
         target.label()
@@ -680,6 +1061,209 @@ mod tests {
         run_add(&src, None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
         let msg = run_update(None, &e.plugins, &e.home, &e.cwd).unwrap();
         assert_eq!(msg, "Updating 1 marketplace(s)...✔ Successfully updated 1 marketplace(s)");
+    }
+
+    // ---- source classification (pure, no network) ----
+
+    #[test]
+    fn classify_github_shorthand() {
+        assert_eq!(
+            classify_source("anthropics/claude-plugins-official").unwrap(),
+            Source::Github {
+                repo: "anthropics/claude-plugins-official".to_string(),
+                git_ref: None
+            }
+        );
+        // `#ref` and `@ref` both split off the ref.
+        assert_eq!(
+            classify_source("acme/plugins#v2").unwrap(),
+            Source::Github { repo: "acme/plugins".to_string(), git_ref: Some("v2".to_string()) }
+        );
+        assert_eq!(
+            classify_source("acme/plugins@main").unwrap(),
+            Source::Github { repo: "acme/plugins".to_string(), git_ref: Some("main".to_string()) }
+        );
+    }
+
+    #[test]
+    fn classify_github_shorthand_invalid() {
+        // Two slashes → not `owner/repo` → the shorthand error (has prefix `✘`).
+        let err = classify_source("foo/bar/baz").unwrap_err();
+        assert_eq!(
+            err,
+            "✘ 'foo/bar/baz' is not a valid GitHub owner/repo shorthand. For a git repo, use the full https:// clone URL from your host (typically ending in .git — some hosts like Azure DevOps omit it). For a hosted marketplace.json, use its https:// URL. For a local path, use ./ or an absolute path."
+        );
+    }
+
+    #[test]
+    fn classify_unclassifiable() {
+        for bad in ["not a repo", "", "justtext"] {
+            assert_eq!(
+                classify_source(bad).unwrap_err(),
+                "✘ Invalid marketplace source format. Try: owner/repo, https://..., or ./path"
+            );
+        }
+        // A `/`-bearing string that also has `:` is unclassifiable (not github).
+        assert_eq!(
+            classify_source("foo/bar:baz").unwrap_err(),
+            "✘ Invalid marketplace source format. Try: owner/repo, https://..., or ./path"
+        );
+    }
+
+    #[test]
+    fn classify_ssh_git() {
+        assert_eq!(
+            classify_source("git@github.com:foo/bar.git").unwrap(),
+            Source::Git { url: "git@github.com:foo/bar.git".to_string(), git_ref: None }
+        );
+        assert_eq!(
+            classify_source("git@github.com:foo/bar.git#dev").unwrap(),
+            Source::Git { url: "git@github.com:foo/bar.git".to_string(), git_ref: Some("dev".to_string()) }
+        );
+    }
+
+    #[test]
+    fn classify_http_git_urls() {
+        // github.com/owner/repo → git, `.git` appended.
+        assert_eq!(
+            classify_source("https://github.com/anthropics/claude-plugins-official").unwrap(),
+            Source::Git {
+                url: "https://github.com/anthropics/claude-plugins-official.git".to_string(),
+                git_ref: None
+            }
+        );
+        // `www.` is stripped for the host test.
+        assert_eq!(
+            classify_source("https://www.github.com/o/r").unwrap(),
+            Source::Git { url: "https://www.github.com/o/r.git".to_string(), git_ref: None }
+        );
+        // Any host ending `.git` → git (with `#ref` split off).
+        assert_eq!(
+            classify_source("https://gitlab.com/foo/bar.git#main").unwrap(),
+            Source::Git { url: "https://gitlab.com/foo/bar.git".to_string(), git_ref: Some("main".to_string()) }
+        );
+        // `/_git/` (Azure DevOps) → git.
+        assert_eq!(
+            classify_source("https://dev.azure.com/org/proj/_git/repo").unwrap(),
+            Source::Git { url: "https://dev.azure.com/org/proj/_git/repo".to_string(), git_ref: None }
+        );
+    }
+
+    #[test]
+    fn classify_http_url_sources() {
+        // Non-github host, no `.git` → hosted marketplace.json (url).
+        assert_eq!(
+            classify_source("https://example.com/marketplace.json").unwrap(),
+            Source::Url { url: "https://example.com/marketplace.json".to_string() }
+        );
+        // github.com WITHOUT an owner/repo path → url, not git.
+        assert_eq!(
+            classify_source("https://github.com/onlyone").unwrap(),
+            Source::Url { url: "https://github.com/onlyone".to_string() }
+        );
+    }
+
+    #[test]
+    fn classify_directory_and_missing() {
+        let e = full_env();
+        let abs = std::fs::canonicalize(&e.market).unwrap();
+        assert_eq!(
+            classify_source(&e.market.to_string_lossy()).unwrap(),
+            Source::Directory(abs)
+        );
+        assert_eq!(
+            classify_source("/no/such/dir").unwrap_err(),
+            "✘ Path does not exist: /no/such/dir"
+        );
+    }
+
+    // ---- settings/registry `source` object shaping ----
+
+    #[test]
+    fn source_object_shapes() {
+        assert_eq!(
+            source_object(&Source::Github { repo: "a/b".to_string(), git_ref: None }),
+            json!({"source": "github", "repo": "a/b"})
+        );
+        assert_eq!(
+            source_object(&Source::Github { repo: "a/b".to_string(), git_ref: Some("v1".to_string()) }),
+            json!({"source": "github", "repo": "a/b", "ref": "v1"})
+        );
+        assert_eq!(
+            source_object(&Source::Git { url: "https://x/y.git".to_string(), git_ref: None }),
+            json!({"source": "git", "url": "https://x/y.git"})
+        );
+        assert_eq!(
+            source_object(&Source::Git { url: "https://x/y.git".to_string(), git_ref: Some("dev".to_string()) }),
+            json!({"source": "git", "url": "https://x/y.git", "ref": "dev"})
+        );
+        assert_eq!(
+            source_object(&Source::Url { url: "https://x/cat.json".to_string() }),
+            json!({"source": "url", "url": "https://x/cat.json"})
+        );
+        assert_eq!(
+            source_object(&Source::Directory(PathBuf::from("/abs/mkt"))),
+            json!({"source": "directory", "path": "/abs/mkt"})
+        );
+    }
+
+    #[test]
+    fn url_repo_hint_strips_git_suffix() {
+        assert_eq!(url_repo_hint("https://gitlab.com/foo/bar.git"), "bar");
+        assert_eq!(url_repo_hint("git@github.com:foo/baz.git"), "baz");
+        assert_eq!(url_repo_hint("https://example.com/deep/repo/"), "repo");
+    }
+
+    #[test]
+    fn add_url_source_declines() {
+        let e = full_env();
+        let err = run_add(
+            "https://example.com/marketplace.json",
+            None,
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Adding marketplace…✘ Failed to add marketplace: Hosted marketplace.json URL sources are not yet supported: https://example.com/marketplace.json"
+        );
+    }
+
+    #[test]
+    fn add_invalid_source_errors_without_prefix() {
+        let e = full_env();
+        // Classification error precedes even scope validation (like directory
+        // path-not-exist) — no "Adding marketplace…" prefix.
+        let err = run_add("not a repo", Some("bogus"), &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "✘ Invalid marketplace source format. Try: owner/repo, https://..., or ./path"
+        );
+    }
+
+    #[test]
+    fn add_remote_writes_registry_and_declaration() {
+        // Network-backed end-to-end clone; opt-in (needs a reachable public
+        // marketplace repo). Set LINGXI_PLUGIN_NET_TEST=owner/repo to run.
+        let Ok(repo) = std::env::var("LINGXI_PLUGIN_NET_TEST") else {
+            return;
+        };
+        let e = full_env();
+        let msg = run_add(&repo, None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        assert!(
+            msg.starts_with("Adding marketplace…✔ Successfully added marketplace: "),
+            "got: {msg}"
+        );
+        assert!(msg.ends_with("(declared in user settings)"), "got: {msg}");
+        // A registry entry with a git/github source + installLocation was written.
+        let reg = registry_of(&e);
+        let (_, entry) = reg.as_object().unwrap().iter().next().unwrap();
+        let kind = entry["source"]["source"].as_str().unwrap();
+        assert!(matches!(kind, "git" | "github"), "kind: {kind}");
+        assert!(entry["installLocation"].as_str().unwrap().contains("marketplaces"));
     }
 
     #[test]

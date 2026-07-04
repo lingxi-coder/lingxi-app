@@ -376,6 +376,249 @@ pub fn run_uninstall(
     ))
 }
 
+/// Validate a `plugin update` `--scope`. Unlike the install family, update's
+/// valid set INCLUDES `managed` (a read-only enterprise scope that update may
+/// name but never has an editable record at), and its invalid-scope wording is
+/// distinct: `Invalid scope "<s>". Valid scopes: user, project, local, managed`
+/// (no ✘ prefix; emitted before the `Checking for updates…` line).
+fn parse_update_scope(scope: &str) -> Result<&str, String> {
+    match scope {
+        "user" | "project" | "local" | "managed" => Ok(scope),
+        _ => Err(format!(
+            "Invalid scope \"{scope}\". Valid scopes: user, project, local, managed"
+        )),
+    }
+}
+
+/// The project-root path recorded for a scope (`project`/`local` → cwd; `user`/
+/// `managed` → none), used both to disambiguate multi-install records and to
+/// render the `not installed at scope <scope> (<path>)` suffix.
+fn scope_project_path(scope: &str, cwd: &Path) -> Option<PathBuf> {
+    if scope == "project" || scope == "local" {
+        Some(cwd.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Resolve a full `name@market` id to its marketplace + on-disk plugin source
+/// dir (mirrors `iP`): a bare id (no `@`) or a market/plugin the registry can't
+/// resolve ⇒ `None` (⇒ the caller's `Plugin "<name>" not found`).
+fn resolve_source(plugins_dir: &Path, id: &str) -> Option<(String, PathBuf)> {
+    let (name, market) = split_id(id);
+    let market = market?;
+    let registry = load_registry(plugins_dir);
+    let root = registry.get(market).and_then(install_location)?;
+    let rel = marketplace_entry_source(&root, name)?;
+    Some((market.to_string(), root.join(rel)))
+}
+
+/// The version string from a plugin's own manifest (`unknown` when absent).
+fn plugin_version(plugin_src: &Path) -> String {
+    std::fs::read_to_string(
+        plugin_src
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from))
+    .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `plugin update <plugin> [--scope]` — re-materialize an installed plugin from
+/// its marketplace and bump the on-disk record. 1:1 with claude-code 2.1.201
+/// (`ukc`/`Rvt`/`Prf`, directory sources; probed against the real binary).
+///
+/// Output is two lines: a `Checking for updates for plugin "<arg>" at <scope>
+/// scope…` header (always, once the scope parses) followed by the result:
+///
+/// * up-to-date → `✔ <name> is already at the latest version (<version>).`
+/// * a newer marketplace version → re-copy the plugin tree into the versioned
+///   cache `cache/<market>/<name>/<version>/`, point the record's `installPath`
+///   at it, set `version` + bump `lastUpdated` (keeping `installedAt`), orphan
+///   the previous cache dir (a `.orphaned_at` marker, when unreferenced) →
+///   `✔ Plugin "<name>" updated from <old> to <new> for scope <scope>. Restart
+///   to apply changes.` (`enabledPlugins` is NOT touched.)
+///
+/// Errors (each after the header, `✘ Failed to update plugin "<arg>": …`):
+/// a plugin not resolvable in any marketplace → `Plugin "<name>" not found`;
+/// resolvable but never installed → `Plugin "<name>" is not installed`; installed
+/// but not at the requested scope → `Plugin "<name>" is not installed at scope
+/// <scope>` (with ` (<cwd>)` for project/local). An unknown `--scope` errors
+/// (no header) with the update-family `Invalid scope …` wording.
+pub fn run_update(
+    arg: &str,
+    scope: &str,
+    plugins_dir: &Path,
+    _home: &Path,
+    cwd: &Path,
+) -> Result<String, String> {
+    let scope = parse_update_scope(scope)?;
+    let header = format!("Checking for updates for plugin \"{arg}\" at {scope} scope\u{2026}\n");
+    match update_inner(arg, scope, plugins_dir, cwd) {
+        Ok(msg) => Ok(format!("{header}\u{2714} {msg}")),
+        Err(reason) => Err(format!("{header}{}", fail("update", arg, &reason))),
+    }
+}
+
+/// The core update resolution + materialization (sans the header/`✔`/`✘`
+/// framing). `Ok` carries the bare success sentence; `Err` the bare reason.
+fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Result<String, String> {
+    // Display name for every message = the ORIGINAL arg's name-part (matches the
+    // binary's `n` from `zo(e)`, which case-resolution does not rewrite).
+    let (name, market) = split_id(arg);
+
+    // Resolve the id against the installed keys (exact, then case-insensitive —
+    // `Loe`); a bare name that matches no key stays bare (⇒ "not found").
+    let mut installed = load_installed(plugins_dir);
+    let base = match market {
+        Some(m) => format!("{name}@{m}"),
+        None => arg.to_string(),
+    };
+    let id = installed
+        .get("plugins")
+        .and_then(Value::as_object)
+        .and_then(|p| {
+            p.keys()
+                .find(|k| k.as_str() == base)
+                .cloned()
+                .or_else(|| p.keys().find(|k| k.eq_ignore_ascii_case(&base)).cloned())
+        })
+        .unwrap_or(base);
+
+    // `iP`: the plugin must resolve to a marketplace source, else "not found".
+    let Some((market_name, plugin_src)) = resolve_source(plugins_dir, &id) else {
+        return Err(format!("Plugin \"{name}\" not found"));
+    };
+
+    // Must have at least one installed record for the id.
+    let has_records = installed
+        .get("plugins")
+        .and_then(|p| p.get(&id))
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    if !has_records {
+        return Err(format!("Plugin \"{name}\" is not installed"));
+    }
+
+    // Filter by scope; the projectPath only disambiguates WHICH record when
+    // several share the scope (an empty scope set ⇒ "not installed at scope").
+    let project_path = scope_project_path(scope, cwd);
+    let want_pp = project_path.as_ref().map(|p| p.display().to_string());
+    let (idx, old_version, old_path) = {
+        let records = installed
+            .get("plugins")
+            .and_then(|p| p.get(&id))
+            .and_then(Value::as_array)
+            .unwrap();
+        let scoped: Vec<usize> = records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.get("scope").and_then(Value::as_str) == Some(scope))
+            .map(|(i, _)| i)
+            .collect();
+        if scoped.is_empty() {
+            let disp = match &want_pp {
+                Some(p) => format!("{scope} ({p})"),
+                None => scope.to_string(),
+            };
+            return Err(format!("Plugin \"{name}\" is not installed at scope {disp}"));
+        }
+        let idx = scoped
+            .iter()
+            .copied()
+            .find(|&i| {
+                let rp = records[i].get("projectPath").and_then(Value::as_str);
+                match &want_pp {
+                    Some(w) => rp == Some(w.as_str()),
+                    None => rp.is_none(),
+                }
+            })
+            .unwrap_or(scoped[0]);
+        let ov = records[idx]
+            .get("version")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let op = records[idx]
+            .get("installPath")
+            .and_then(Value::as_str)
+            .map(String::from);
+        (idx, ov, op)
+    };
+
+    // The marketplace's current version + the cache dir it would land in.
+    let new_version = plugin_version(&plugin_src);
+    let id_name = split_id(&id).0;
+    let dest = plugins_dir
+        .join("cache")
+        .join(sanitize(&market_name, false))
+        .join(sanitize(id_name, false))
+        .join(sanitize(&new_version, true));
+    let dest_str = dest.display().to_string();
+
+    // Already current (same version, or the record already points at the target
+    // cache dir) — no copy, no record change.
+    if new_version != "unknown"
+        && (old_version.as_deref() == Some(new_version.as_str())
+            || old_path.as_deref() == Some(dest_str.as_str()))
+    {
+        return Ok(format!(
+            "{name} is already at the latest version ({new_version})."
+        ));
+    }
+
+    // Re-materialize into the (new) versioned cache.
+    let _ = std::fs::remove_dir_all(&dest);
+    copy_dir(&plugin_src, &dest).map_err(|e| e.to_string())?;
+
+    // Bump the record in place (installPath/version/lastUpdated; installedAt and
+    // scope are preserved).
+    let now = iso_now();
+    if let Some(rec) = installed
+        .get_mut("plugins")
+        .and_then(Value::as_object_mut)
+        .and_then(|p| p.get_mut(&id))
+        .and_then(Value::as_array_mut)
+        .and_then(|a| a.get_mut(idx))
+        .and_then(Value::as_object_mut)
+    {
+        rec.insert("installPath".to_string(), Value::String(dest_str.clone()));
+        rec.insert("version".to_string(), Value::String(new_version.clone()));
+        rec.insert("lastUpdated".to_string(), Value::String(now));
+    }
+    write_installed(plugins_dir, &installed)?;
+
+    // Orphan the previous cache dir when it changed and no other record still
+    // references it (marker only; the deferred sweep that deletes it is not
+    // ported — same as uninstall).
+    if let Some(old) = old_path.as_deref() {
+        if old != dest_str {
+            let still_referenced = installed
+                .get("plugins")
+                .and_then(Value::as_object)
+                .is_some_and(|p| {
+                    p.values()
+                        .filter_map(Value::as_array)
+                        .flatten()
+                        .any(|r| r.get("installPath").and_then(Value::as_str) == Some(old))
+                });
+            if !still_referenced {
+                let _ = std::fs::write(Path::new(old).join(".orphaned_at"), iso_now());
+            }
+        }
+    }
+
+    let scope_disp = match &want_pp {
+        Some(p) => format!("{scope} ({p})"),
+        None => scope.to_string(),
+    };
+    let old_disp = old_version.as_deref().unwrap_or("unknown");
+    Ok(format!(
+        "Plugin \"{name}\" updated from {old_disp} to {new_version} for scope {scope_disp}. Restart to apply changes."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +782,146 @@ mod tests {
         assert_eq!(
             err,
             "✘ Failed to uninstall plugin \"foo\": Plugin \"foo\" not found in installed plugins"
+        );
+    }
+
+    /// Bump the marketplace's `hello` plugin to `version`, adding a marker file.
+    fn bump_market_hello(e: &Env, version: &str) {
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            format!(r#"{{"name":"hello","version":"{version}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            e.market.join("plugins").join("hello").join("commands").join("new.md"),
+            "# new",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn update_bumps_version_recopies_and_orphans_old() {
+        let e = env();
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let installed_at = installed_db(&e)["plugins"]["hello@mymkt"][0]["installedAt"].clone();
+        bump_market_hello(&e, "2.0.0");
+
+        let msg = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        assert_eq!(
+            msg,
+            "Checking for updates for plugin \"hello@mymkt\" at user scope\u{2026}\n\
+             \u{2714} Plugin \"hello\" updated from 1.2.3 to 2.0.0 for scope user. Restart to apply changes."
+        );
+
+        // New version materialized (with the new component), old version orphaned.
+        let new_cache = e.plugins.join("cache/mymkt/hello/2.0.0");
+        assert!(new_cache.join(".lingxi-plugin/plugin.json").exists());
+        assert!(new_cache.join("commands/new.md").exists());
+        assert!(e.plugins.join("cache/mymkt/hello/1.2.3/.orphaned_at").exists());
+        assert!(e.plugins.join("cache/mymkt/hello/1.2.3/commands/hi.md").exists());
+
+        // Record bumped: version + installPath + lastUpdated changed; installedAt kept.
+        let db = installed_db(&e);
+        let rec = &db["plugins"]["hello@mymkt"][0];
+        assert_eq!(rec["scope"], "user");
+        assert_eq!(rec["version"], "2.0.0");
+        assert_eq!(rec["installPath"], new_cache.display().to_string());
+        assert_eq!(rec["installedAt"], installed_at); // installedAt preserved
+        assert!(rec["lastUpdated"].is_string());
+        // enabledPlugins untouched by update.
+        assert_eq!(user_settings(&e)["enabledPlugins"]["hello@mymkt"], Value::Bool(true));
+    }
+
+    #[test]
+    fn update_already_latest() {
+        let e = env();
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let msg = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        assert_eq!(
+            msg,
+            "Checking for updates for plugin \"hello@mymkt\" at user scope\u{2026}\n\
+             \u{2714} hello is already at the latest version (1.2.3)."
+        );
+    }
+
+    #[test]
+    fn update_bare_name_not_found() {
+        let e = env();
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let err = run_update("hello", "user", &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Checking for updates for plugin \"hello\" at user scope\u{2026}\n\
+             ✘ Failed to update plugin \"hello\": Plugin \"hello\" not found"
+        );
+    }
+
+    #[test]
+    fn update_unknown_plugin_in_marketplace_not_found() {
+        let e = env();
+        let err = run_update("foo@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Checking for updates for plugin \"foo@mymkt\" at user scope\u{2026}\n\
+             ✘ Failed to update plugin \"foo@mymkt\": Plugin \"foo\" not found"
+        );
+    }
+
+    #[test]
+    fn update_in_marketplace_but_not_installed() {
+        let e = env();
+        // Add a `world` plugin to the marketplace but never install it.
+        std::fs::write(
+            e.market.join(branding::PLUGIN_MANIFEST_DIR).join("marketplace.json"),
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"hello","source":"./plugins/hello"},{"name":"world","source":"./plugins/world"}]}"#,
+        )
+        .unwrap();
+        let err = run_update("world@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Checking for updates for plugin \"world@mymkt\" at user scope\u{2026}\n\
+             ✘ Failed to update plugin \"world@mymkt\": Plugin \"world\" is not installed"
+        );
+    }
+
+    #[test]
+    fn update_wrong_scope_managed() {
+        let e = env();
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let err = run_update("hello@mymkt", "managed", &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Checking for updates for plugin \"hello@mymkt\" at managed scope\u{2026}\n\
+             ✘ Failed to update plugin \"hello@mymkt\": Plugin \"hello\" is not installed at scope managed"
+        );
+    }
+
+    #[test]
+    fn update_wrong_scope_project_shows_cwd() {
+        let e = env();
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        let err = run_update("hello@mymkt", "project", &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "Checking for updates for plugin \"hello@mymkt\" at project scope\u{2026}\n\
+                 ✘ Failed to update plugin \"hello@mymkt\": Plugin \"hello\" is not installed at scope project ({})",
+                e.cwd.display()
+            )
+        );
+    }
+
+    #[test]
+    fn update_invalid_scope_has_no_header() {
+        let e = env();
+        let err = run_update("hello@mymkt", "bogus", &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Invalid scope \"bogus\". Valid scopes: user, project, local, managed"
         );
     }
 }

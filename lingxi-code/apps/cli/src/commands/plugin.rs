@@ -404,14 +404,36 @@ pub async fn run(cli: &Cli) -> i32 {
             args.author_email.as_deref(),
             args.description.as_deref(),
             args.force,
+            &args.with,
             &crate::run::lingxi_home_dir(),
         )),
 
-        // NOTICE actions — parsed faithfully, declined cleanly (no network,
-        // no settings-write seam, no heavy registry wiring, no fake success).
-        Sub::Prune(_) => notice("prune"),
-        Sub::Tag(_) => notice("tag"),
-        Sub::Update(_) => notice("update"),
+        // Prune orphaned auto-installed dependencies from the v2 installed record.
+        Sub::Prune(args) => market_result(crate::commands::plugin_prune::run_prune(
+            args.dry_run,
+            args.yes,
+            &args.scope,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
+        // Create a `{name}--v{version}` git tag (all output, incl. errors, to STDOUT).
+        Sub::Tag(args) => tag_result(crate::commands::plugin_tag::run_tag(
+            args.path.as_deref(),
+            args.dry_run,
+            args.force,
+            args.message.as_deref(),
+            args.push,
+            &args.remote,
+        )),
+        // Re-materialize an installed plugin from its marketplace + bump the record.
+        Sub::Update(args) => market_result(crate::commands::plugin_install::run_update(
+            &args.plugin,
+            &args.scope,
+            &plugins_dir(),
+            &crate::run::lingxi_home_dir(),
+            &scope_cwd(),
+        )),
         Sub::Marketplace(args) => {
             let Some(sub) = args.command.as_ref() else {
                 print_marketplace_help();
@@ -474,11 +496,20 @@ fn print_help() {
     println!();
 }
 
-/// Emit the standard "not yet implemented" line for a declined action and
-/// return `NOT_IMPLEMENTED`.
-fn notice(action: &str) -> i32 {
-    eprintln!("lingxi-cli plugin {action}: not yet implemented");
-    NOT_IMPLEMENTED
+/// Print a `plugin tag` result. Unlike [`market_result`], BOTH the Ok and Err
+/// blocks go to STDOUT — claude's `plugin tag` never writes to stderr; Err maps
+/// to exit 1.
+fn tag_result(res: Result<String, String>) -> i32 {
+    match res {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            println!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
 }
 
 /// The current working directory used for project/local scope resolution

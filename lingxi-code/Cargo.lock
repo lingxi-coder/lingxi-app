@@ -5682,21 +5682,27 @@ name = "tui"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "command-core",
  "crossterm",
+ "dirs",
  "image 0.25.5",
  "llm-client",
+ "memory",
  "permission",
  "protocol",
  "ratatui",
  "ratatui-image",
+ "secret",
  "serde_json",
  "session",
  "tokio",
  "tokio-util",
+ "tool-web",
  "tracing",
  "traits",
  "tui-core",
  "unicode-width 0.1.14",
+ "url",
  "uuid",
 ]
 

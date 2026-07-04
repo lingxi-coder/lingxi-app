@@ -44,9 +44,13 @@ pub enum Scope {
 /// The editable scopes, in auto-detect / `--all` search order.
 const EDITABLE: [Scope; 3] = [Scope::User, Scope::Project, Scope::Local];
 
+/// The editable scopes, in auto-detect / iteration order (shared with the
+/// marketplace command).
+pub(crate) const SCOPES: [Scope; 3] = EDITABLE;
+
 impl Scope {
     /// The scope's wire label (matches the `(scope: …)` success suffix).
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Scope::User => "user",
             Scope::Project => "project",
@@ -56,7 +60,7 @@ impl Scope {
 
     /// Parse a `--scope` value; `None` when unrecognized (the caller emits the
     /// `Invalid scope …` error). `managed` is intentionally NOT accepted here.
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
             "user" => Some(Scope::User),
             "project" => Some(Scope::Project),
@@ -66,7 +70,7 @@ impl Scope {
     }
 
     /// Resolve the settings.json path for this scope.
-    fn path(self, home: &Path, cwd: &Path) -> PathBuf {
+    pub(crate) fn path(self, home: &Path, cwd: &Path) -> PathBuf {
         match self {
             Scope::User => home.join("settings.json"),
             Scope::Project => cwd.join(branding::DOT_DIR).join("settings.json"),

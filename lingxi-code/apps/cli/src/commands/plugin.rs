@@ -389,18 +389,34 @@ pub async fn run(cli: &Cli) -> i32 {
                 print_marketplace_help();
                 return SUCCESS;
             };
+            use crate::commands::plugin_marketplace as market;
             match sub {
                 // `list` reads the resolved `known_marketplaces.json` registry.
                 MarketplaceSub::List(list_args) => {
-                    println!(
-                        "{}",
-                        crate::commands::plugin_marketplace::run_list(&plugins_dir(), list_args.json)
-                    );
+                    println!("{}", market::run_list(&plugins_dir(), list_args.json));
                     SUCCESS
                 }
-                MarketplaceSub::Add(_) => notice("marketplace add"),
-                MarketplaceSub::Remove(_) => notice("marketplace remove"),
-                MarketplaceSub::Update(_) => notice("marketplace update"),
+                MarketplaceSub::Add(add_args) => market_result(market::run_add(
+                    &add_args.source,
+                    add_args.scope.as_deref(),
+                    &add_args.sparse,
+                    &plugins_dir(),
+                    &crate::run::lingxi_home_dir(),
+                    &scope_cwd(),
+                )),
+                MarketplaceSub::Remove(rm_args) => market_result(market::run_remove(
+                    &rm_args.name,
+                    rm_args.scope.as_deref(),
+                    &plugins_dir(),
+                    &crate::run::lingxi_home_dir(),
+                    &scope_cwd(),
+                )),
+                MarketplaceSub::Update(up_args) => market_result(market::run_update(
+                    up_args.name.as_deref(),
+                    &plugins_dir(),
+                    &crate::run::lingxi_home_dir(),
+                    &scope_cwd(),
+                )),
             }
         }
     }
@@ -442,6 +458,21 @@ fn notice(action: &str) -> i32 {
 /// join).
 fn scope_cwd() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Print a marketplace command's result (Ok → stdout/SUCCESS, Err →
+/// stderr/RUNTIME_ERROR).
+fn market_result(res: Result<String, String>) -> i32 {
+    match res {
+        Ok(msg) => {
+            println!("{msg}");
+            SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            RUNTIME_ERROR
+        }
+    }
 }
 
 /// `plugin enable <plugin>` — toggle the on-disk `enabledPlugins` allowlist.

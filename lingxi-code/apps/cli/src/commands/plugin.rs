@@ -396,9 +396,19 @@ pub async fn run(cli: &Cli) -> i32 {
             &scope_cwd(),
         )),
 
+        // `init` — scaffold a skill-plugin under ~/.lingxi/skills/ (the default
+        // scaffold; `--with` component scaffolds are a tracked follow-up).
+        Sub::Init(args) => market_result(crate::commands::plugin_init::run_init(
+            &args.name,
+            args.author.as_deref(),
+            args.author_email.as_deref(),
+            args.description.as_deref(),
+            args.force,
+            &crate::run::lingxi_home_dir(),
+        )),
+
         // NOTICE actions — parsed faithfully, declined cleanly (no network,
         // no settings-write seam, no heavy registry wiring, no fake success).
-        Sub::Init(_) => notice("init"),
         Sub::Prune(_) => notice("prune"),
         Sub::Tag(_) => notice("tag"),
         Sub::Update(_) => notice("update"),

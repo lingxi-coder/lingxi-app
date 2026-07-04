@@ -27,6 +27,7 @@ pub mod gateway;
 pub mod install;
 pub mod mcp;
 pub mod plugin;
+pub mod plugin_init;
 pub mod plugin_install;
 pub mod plugin_marketplace;
 pub mod plugin_settings;

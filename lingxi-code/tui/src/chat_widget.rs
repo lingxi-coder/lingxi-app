@@ -987,7 +987,6 @@ impl ChatWidget {
     /// that provider's method-choice screen (multi-method) or its single
     /// flow — the key-entry view for `api_key`, or a
     /// [`ChatOutcome::ConnectAction`] effect for Copilot/OAuth providers.
-    #[allow(dead_code)]
     pub(crate) fn cmd_connect(&mut self, args: &str) -> ChatOutcome {
         let provider = args.trim();
         if provider.is_empty() {

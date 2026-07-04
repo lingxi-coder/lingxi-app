@@ -226,6 +226,7 @@ pub(crate) async fn run_ratatui(
     let turn_tx = tui_build.turn_tx;
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
+    let connect_turn_tx = turn_tx.clone();
     // (B4 Task 5 parity) Thread the composition root's shared subscription
     // slot so the widget's rate-limit composer reads the live snapshot at
     // compose time — same wiring as the iocraft `with_subscription` path.
@@ -236,16 +237,23 @@ pub(crate) async fn run_ratatui(
     let web_http = tui_build.runtime.http.clone();
     // (/connect picker) Real per-provider login-method + availability maps,
     // cloned before `tui_build` is consumed further below — same convention
-    // as `subscription`/`web_key_store` above. `on_connect_action` is wired
-    // as a no-op for now (Task 10 replaces it with the async store/OAuth/
-    // Copilot driver).
+    // as `subscription`/`web_key_store` above.
     let connect_auth_methods = tui_build.runtime.provider_auth_methods.clone();
     let connect_availability = tui_build.runtime.provider_availability.clone();
+    // (/connect async effects) Shared credential store + OAuth/Copilot
+    // drivers for the real store-key / device-flow / browser sign-in
+    // effects, wired below — same convention as the `/web` cluster above.
+    // `web_key_store` is cloned again here (cheap `Arc` clone) rather than
+    // reused so each closure owns an independent handle.
+    let connect_key_store = tui_build.runtime.provider_key_store.clone();
+    let connect_oauth = tui_build.runtime.oauth_connect_driver.clone();
+    let connect_copilot = tui_build.runtime.connect_copilot.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
     let switch_handle = handle.clone();
     let web_handle = handle.clone();
+    let connect_handle = handle.clone();
     let summary_orch = orchestrator.clone();
     // (/web async effects) Preload the shared `/web` config snapshot from the
     // real on-disk settings + credential-store presence, mirroring the
@@ -328,6 +336,21 @@ pub(crate) async fn run_ratatui(
             run_web_action(action, key_store, http, tx, snapshot).await;
         });
     };
+    // (/connect async effects) Mirrors `on_web_action` above: the picker/
+    // method/key views return a `ConnectAction` synchronously from the
+    // blocking ratatui loop; the actual persistence (credential-store
+    // write) and the OAuth/Copilot device-flow are async, so the action is
+    // spawned back onto the captured runtime handle. Results land in the
+    // transcript via `TurnEvent::SystemNotice` on the shared `turn_tx`.
+    let on_connect_action = move |action: tui::bottom_pane::ConnectAction| {
+        let key_store = connect_key_store.clone();
+        let oauth = connect_oauth.clone();
+        let copilot = connect_copilot.clone();
+        let tx = connect_turn_tx.clone();
+        connect_handle.spawn(async move {
+            run_connect_action(action, key_store, oauth, copilot, tx).await;
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -389,11 +412,7 @@ pub(crate) async fn run_ratatui(
             on_submit,
             on_switch_model,
             on_web_action,
-            |_connect_action| {
-                // Task 10 wires the real async store/OAuth/Copilot driver;
-                // for now the API-key/OAuth/Copilot picker routing works
-                // end-to-end except this final persistence step.
-            },
+            on_connect_action,
         )
     })
     .await;
@@ -563,6 +582,80 @@ async fn run_web_action(
                 });
             }
             let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
+        }
+    }
+}
+
+/// Run one `/connect` [`tui::bottom_pane::ConnectAction`] to completion:
+/// persist an API key, drive the GitHub Copilot device-flow, or drive an
+/// OAuth browser sign-in — then report the outcome to the transcript via
+/// `TurnEvent::SystemNotice`. Mirrors [`run_web_action`]'s shape: the
+/// picker/method/key views return the action synchronously from the
+/// blocking ratatui loop; this async tail does the real persistence/network
+/// work off the render thread.
+async fn run_connect_action(
+    action: tui::bottom_pane::ConnectAction,
+    key_store: Arc<secret::CredentialManager>,
+    oauth: Arc<dyn command_core::OAuthConnectDriver>,
+    copilot: Arc<dyn command_core::CopilotConnectDriver>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+) {
+    use tui::bottom_pane::ConnectAction;
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    let label = tui::connect::picker::provider_label;
+    let notice = |body: String, is_error: bool| {
+        let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
+    };
+
+    match action {
+        ConnectAction::StoreKey { provider_id, key } => {
+            match key_store.set_provider_key(&provider_id, &key).await {
+                Ok(()) => notice(format!("✓ Saved {} API key.", label(&provider_id)), false),
+                Err(e) => notice(format!("✗ Failed to store key: {e}"), true),
+            }
+        }
+        ConnectAction::Copilot { provider_id: _ } => {
+            notice("Connecting to GitHub Copilot…".to_string(), false);
+            match copilot.begin(None).await {
+                Ok(step) => {
+                    // Best-effort: copy the user code to the clipboard so the
+                    // user can paste it straight into the browser tab.
+                    tui::copy::copy_to_clipboard_native(&step.user_code);
+                    notice(
+                        format!(
+                            "Enter code {} at {} — waiting for authorization…",
+                            step.user_code, step.verification_uri
+                        ),
+                        false,
+                    );
+                    match copilot.poll_to_completion(&step).await {
+                        Ok(()) => notice("✓ Connected to GitHub Copilot.".to_string(), false),
+                        Err(e) => notice(format!("✗ Copilot authorization failed: {e}"), true),
+                    }
+                }
+                Err(e) => notice(format!("✗ Copilot device flow failed: {e}"), true),
+            }
+        }
+        ConnectAction::OAuth { provider_id } => {
+            notice(
+                format!("Opening your browser to sign in to {}…", label(&provider_id)),
+                false,
+            );
+            match oauth.login(&provider_id).await {
+                Ok(msg) => {
+                    let body = if msg.trim().is_empty() {
+                        format!("✓ Signed in to {}.", label(&provider_id))
+                    } else {
+                        msg
+                    };
+                    notice(body, false);
+                }
+                Err(e) => notice(
+                    format!("✗ Sign-in failed: {e}. Try connecting with an API key instead."),
+                    true,
+                ),
+            }
         }
     }
 }

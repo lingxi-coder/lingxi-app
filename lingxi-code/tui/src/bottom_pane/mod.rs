@@ -1758,7 +1758,7 @@ mod tests {
             buffer_row(&buf, 4)
         );
         assert!(
-            buffer_row(&buf, 9).contains("/hooks"),
+            buffer_row(&buf, 9).contains("/connect"),
             "sixth item visible: {}",
             buffer_row(&buf, 9)
         );

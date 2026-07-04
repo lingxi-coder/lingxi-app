@@ -543,6 +543,13 @@ impl ChatWidget {
                 // emitted its own ✓ SystemNotice).
                 self.connect_availability.insert(provider_id, true);
             }
+            TurnEvent::SubagentActivity { text } => {
+                // A running subagent (Task/Agent) made a tool call — render it as
+                // an indented `⎿` line so its inner work is visible under the
+                // Task cell (otherwise a subagent's execution is invisible).
+                self.transcript
+                    .push_message(RenderedMessage::SubagentActivity { text });
+            }
         }
     }
 

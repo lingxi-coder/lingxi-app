@@ -1069,6 +1069,15 @@ pub trait OutputStream: Send + Sync {
     /// client-adapter overrides this to surface a `ClientEvent::ThinkingDelta`.
     async fn emit_thinking(&self, _thinking: &str, _signature: Option<&str>) {}
 
+    /// Emit one nested execution line from a RUNNING subagent (its tool calls,
+    /// as they happen) so the UI can surface the subagent's work under its
+    /// `Task` cell — the parity gap where only the top-level Task line showed.
+    /// `text` is a pre-formatted one-line summary (e.g. `"Read(src/main.rs)"`).
+    ///
+    /// **Default no-op**: sinks that don't render nested progress (CLI,
+    /// mocks) keep compiling unchanged; the TUI bridge overrides it.
+    async fn emit_subagent_activity(&self, _text: &str) {}
+
     /// Emit an incremental token-usage update for the latest API call.
     ///
     /// Added by the §0.7 "light up thinking/usage" follow-up. Called from

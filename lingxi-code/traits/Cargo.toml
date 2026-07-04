@@ -17,11 +17,14 @@ indexmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# `sync` only (mpsc channels) — the `SubagentSpawner::spawn_with_progress`
+# nested-progress stream. No runtime pulled into this low-level crate.
+tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 
 [dev-dependencies]
 # `#[tokio::test]` for the async default-impl test on `HttpTransport`.
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 
 [lints]
 workspace = true

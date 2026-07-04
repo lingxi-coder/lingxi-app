@@ -410,6 +410,25 @@ pub trait SubagentSpawner: Send + Sync {
         inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError>;
 
+    /// Like [`Self::spawn`], but forwards a one-line summary of each nested
+    /// subagent step (its tool calls, as they run) to `progress` so the caller
+    /// (`AgentTool`) can surface the subagent's work under its `Task` cell.
+    ///
+    /// Defaulted to [`Self::spawn`] (dropping `progress`) so existing impls and
+    /// tests need no change (frozen-crate rule); the production pool spawner
+    /// overrides it to pump non-terminal events through. `progress` is a
+    /// plain `String` channel — `traits` cannot depend on `tool-api`'s
+    /// `ToolProgress` (cycle), so the AgentTool bridges the string into a
+    /// `ToolProgress` on its side.
+    async fn spawn_with_progress(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn(request, inherit).await
+    }
+
     /// The resolved subagent catalog (built-ins + any wired user/project
     /// agents), used by `AgentTool` to render its dynamic tool prompt.
     ///

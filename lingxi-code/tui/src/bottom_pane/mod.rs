@@ -713,8 +713,8 @@ impl Renderable for BottomPane {
     /// flight) + context-pressure banner + queued-input preview + the
     /// borderless composer (background block with a `›` gutter prompt), then
     /// the below-composer slot — the completion popup when open, the
-    /// key-hint footer otherwise — with stacked views painted bottom-to-top
-    /// over the full area, unless the active view owns the whole frame.
+    /// key-hint footer otherwise — with the active (top) stacked view painted
+    /// over the full area, unless it owns the whole frame.
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if let Some(view) = self.full_frame_view() {
             view.render(area, buf);
@@ -749,7 +749,13 @@ impl Renderable for BottomPane {
         } else {
             footer::render_footer(below, buf, &self.footer_props(), &self.theme);
         }
-        for view in self.view_stack.views() {
+        // Only the active (top) view paints: each stacked view is a
+        // self-contained modal that `Clear`s just its own centered rect, so
+        // painting a covered parent underneath a narrower child leaks the
+        // parent's border/rows around the child (the reported `/connect`
+        // picker-behind-key-entry overlap). This mirrors `desired_height_for`,
+        // which already sizes the pane for the active view alone.
+        if let Some(view) = self.view_stack.active() {
             view.render(area, buf);
         }
     }
@@ -1817,6 +1823,38 @@ mod tests {
         );
         // The cursor sits on the composer's prompt row, after the "/".
         assert_eq!(pane.cursor_pos(area), Some((3, 1)));
+    }
+
+    #[test]
+    fn only_the_top_stacked_view_paints_so_a_narrow_child_hides_its_wider_parent() {
+        // Regression (reported /connect bug): opening the narrow key-entry
+        // view over the wider provider picker painted BOTH modals — the
+        // picker's border and row text bled out around the centered key box
+        // (each view Clears only its own rect). Only the active (top) view may
+        // paint; the covered parent must be fully hidden.
+        let mut pane = pane();
+        pane.show_connect_picker(
+            [("openrouter".to_string(), "api_key".to_string())]
+                .into_iter()
+                .collect(),
+            std::collections::BTreeMap::new(),
+        );
+        // openrouter is single-method (api_key): Enter opens the key-entry
+        // child straight on top of the picker.
+        let _ = pane.handle_key(key(KeyCode::Enter));
+        assert_eq!(pane.view_stack().len(), 2, "picker + key-entry stacked");
+        let area = Rect::new(0, 0, 80, pane.desired_height(80).max(14));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        let text = buffer_rows(&buf).join("\n");
+        assert!(
+            text.contains("Connect OpenRouter"),
+            "the active key-entry view paints: {text}"
+        );
+        assert!(
+            !text.contains("Connect a provider"),
+            "the covered picker must NOT bleed through around the child: {text}"
+        );
     }
 
     // ===== Plan Phase 13 step 4: cursor containment =====

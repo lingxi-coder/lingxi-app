@@ -170,6 +170,17 @@ pub enum TurnEvent {
         /// Captured stderr.
         stderr: String,
     },
+    /// A provider gained a usable credential mid-session (a successful
+    /// `/connect` StoreKey / OAuth / Copilot login). The CLI's connect closure
+    /// sends this so the widget flips its live availability map — which gates
+    /// the `/model` picker (and badges the `/connect` picker) — WITHOUT a
+    /// restart. NOT emitted by [`BridgeOutputStream`]; sent directly like
+    /// [`Self::SystemNotice`]. Keyed by `profile_name` (e.g. `"openrouter"`),
+    /// the same key space as the launch availability map.
+    ProviderConnected {
+        /// The provider/profile that just became available.
+        provider_id: String,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on

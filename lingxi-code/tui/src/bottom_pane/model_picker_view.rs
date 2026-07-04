@@ -84,6 +84,12 @@ impl ModelPickerView {
         self.selected
     }
 
+    /// The rows currently shown (grouped by provider), for inspection/tests.
+    #[must_use]
+    pub(crate) fn rows(&self) -> &[ModelRow] {
+        &self.rows
+    }
+
     /// Keep the highlighted row inside the scroll window.
     fn follow(&mut self) {
         if self.selected < self.offset {

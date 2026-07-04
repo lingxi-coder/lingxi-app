@@ -1040,14 +1040,14 @@ mod tests {
             models: vec![
                 crate::session::ModelRow {
                     display: "Opus".into(),
-                    request_model: "claude-opus".into(),
+                    request_model: "claude-opus-4-8".into(),
                     profile: Some("anthropic".into()),
                     provider_label: "Anthropic".into(),
                     is_current: true,
                 },
                 crate::session::ModelRow {
                     display: "Sonnet".into(),
-                    request_model: "claude-sonnet".into(),
+                    request_model: "claude-sonnet-5".into(),
                     profile: Some("anthropic".into()),
                     provider_label: "Anthropic".into(),
                     is_current: false,
@@ -1055,6 +1055,12 @@ mod tests {
             ],
             ..Default::default()
         });
+        // The /model picker gates by live provider availability: anthropic must
+        // be connected for its (curated) models to show.
+        app.chat_widget.set_connect_data(
+            std::collections::BTreeMap::new(),
+            [("anthropic".to_string(), true)].into_iter().collect(),
+        );
         app
     }
 
@@ -1107,7 +1113,7 @@ mod tests {
         assert!(matches!(
             outcome,
             ChatOutcome::SwitchModel(ref m, ref p)
-                if m == "claude-opus" && p.as_deref() == Some("anthropic")
+                if m == "claude-opus-4-8" && p.as_deref() == Some("anthropic")
         ));
         assert!(!app
             .chat_widget
@@ -1162,7 +1168,7 @@ mod tests {
             .contains::<ModelPickerView>());
         app.on_key(press(KeyCode::Up));
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, ChatOutcome::SwitchModel(ref m, _) if m == "claude-opus"));
+        assert!(matches!(outcome, ChatOutcome::SwitchModel(ref m, _) if m == "claude-opus-4-8"));
     }
 
     // NOTE (plan Phase 6): `view_run_command_outcomes_dispatch_to_the_app`

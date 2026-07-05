@@ -274,21 +274,34 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
             })
             .collect();
 
-    // 2. Static models.dev presets (OpenAI, Gemini, DeepSeek, …).
+    // 2. Static models.dev presets (OpenAI, Gemini, DeepSeek, …). EXCLUDE models
+    //    that don't support tool calls (`tool_call=false` — image/TTS/audio
+    //    models, gpt-3.5-turbo, gpt-5-chat-latest, the aion-labs set, ~85
+    //    OpenRouter passthroughs). The agent sends tools on EVERY turn, so such a
+    //    model can never complete an agentic turn — it hard-fails "unsupported
+    //    capability: tools" (llm-client `validate_capabilities`). Offering it in
+    //    the `/model` picker is offering a permanently-broken pick; it stays
+    //    resolvable by explicit id for any non-agentic caller.
     let catalog = llm_client::builtin_presets();
     if let Ok(registry) = llm_client::ModelRegistry::from_config(llm_client::ClientConfig {
         providers: catalog.providers,
     }) {
-        listings.extend(registry.available_models().into_iter().map(|m| {
-            let label = provider_label(&m.profile_name).to_string();
-            row(
-                m.display_model,
-                m.request_model,
-                label,
-                m.profile_name,
-                m.description,
-            )
-        }));
+        listings.extend(
+            registry
+                .available_models()
+                .into_iter()
+                .filter(|m| m.capabilities.tools)
+                .map(|m| {
+                    let label = provider_label(&m.profile_name).to_string();
+                    row(
+                        m.display_model,
+                        m.request_model,
+                        label,
+                        m.profile_name,
+                        m.description,
+                    )
+                }),
+        );
     }
     listings
 }
@@ -668,6 +681,27 @@ mod tests {
             listings.iter().any(|l| l.description.is_some()),
             "expected at least one catalog listing to carry a description"
         );
+    }
+
+    #[test]
+    fn list_model_listings_excludes_no_tool_models() {
+        // Models with `tool_call=false` (image/TTS models, gpt-3.5-turbo, …) can
+        // never complete an agentic turn — the agent always sends tools — so they
+        // must NOT appear in the /model picker catalog. Tool-capable models stay.
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let listings = OrchestratorApiClient::list_model_listings(&adapter);
+        let has = |id: &str| listings.iter().any(|l| l.request_model == id);
+
+        // Excluded: tool_call=false in the vendored models.dev slices.
+        assert!(!has("gpt-3.5-turbo"), "no-tool OpenAI model must be hidden");
+        assert!(
+            !has("gemini-2.5-flash-image"),
+            "no-tool Gemini image model must be hidden"
+        );
+        // Kept: tool-capable models remain selectable.
+        assert!(has("deepseek-chat"), "tool-capable model must remain");
+        assert!(has("gpt-5.2"), "tool-capable OpenAI model must remain");
     }
 
     #[test]

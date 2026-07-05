@@ -2,18 +2,14 @@
 //! `(<timer> · <↑|↓> <N> tokens)` builder, 1:1 with claude-code 2.1.201's
 //! `SpinnerAnimationRow.tsx` + `utils/format.ts`.
 //!
-//! The real spinner line is `<glyph> <verb>…` and, ONLY after
-//! [`SHOW_TOKENS_AFTER_MS`] of elapsed turn time (or verbose), appends
-//! `(<formatDuration(elapsed)> · <mode-arrow> <formatNumber(tokens)> tokens)`.
-//! The token count is a char→token estimate: `round(response_chars / 4)`
-//! (`Spinner.tsx:210` `Math.round(responseLengthRef.current / 4)`). The
-//! mode arrow is `↑` while requesting (awaiting the response) and `↓` while
-//! receiving (tool-use / responding / thinking). "esc to interrupt" is NOT in
-//! the spinner — it lives in the footer.
-
-/// Elapsed turn time before the timer + token counter appear
-/// (`SpinnerAnimationRow.tsx:19` `SHOW_TOKENS_AFTER_MS`).
-pub(crate) const SHOW_TOKENS_AFTER_MS: u128 = 30_000;
+//! The real spinner line is `<glyph> <verb>… (<formatDuration(elapsed)> ·
+//! <mode-arrow> <formatNumber(tokens)> tokens)`, shown from the start of the
+//! turn (verified live against the real 2.1.201 binary: `(3s · ↓ 111 tokens)`
+//! by ~3s in). The token count is a char→token estimate:
+//! `round(response_chars / 4)` (`Spinner.tsx:210`). The mode arrow is `↑` while
+//! requesting (awaiting the response) and `↓` while receiving (tool-use /
+//! responding / thinking). "esc to interrupt" is NOT in the spinner — it lives
+//! in the status row.
 
 /// Up-arrow (`figures.arrowUp`) — shown while requesting (awaiting the response).
 pub(crate) const ARROW_UP: &str = "↑";
@@ -95,17 +91,12 @@ pub(crate) fn mode_arrow(receiving: bool) -> &'static str {
     }
 }
 
-/// Build the trailing status parenthetical for the spinner, or `None` when it
-/// should be absent (before [`SHOW_TOKENS_AFTER_MS`]). `response_chars` is the
-/// running length of the streamed response; the token estimate is `chars / 4`.
-///
-/// Shapes (after the threshold): `"(5s)"`, or `"(1m 5s · ↓ 1.3k tokens)"` once
-/// the token estimate is `> 0`. `receiving` picks the ↑/↓ arrow.
+/// Build the trailing status parenthetical for the spinner: `"(5s)"` early, or
+/// `"(1m 5s · ↓ 1.3k tokens)"` once the token estimate (`chars / 4`) is `> 0`.
+/// Shown from the start of the turn (the real binary shows the timer + counter
+/// within a few seconds, NOT after a 30s delay). `receiving` picks the ↑/↓ arrow.
 #[must_use]
-pub(crate) fn status_paren(elapsed_ms: u128, response_chars: u64, receiving: bool) -> Option<String> {
-    if elapsed_ms <= SHOW_TOKENS_AFTER_MS {
-        return None;
-    }
+pub(crate) fn status_paren(elapsed_ms: u128, response_chars: u64, receiving: bool) -> String {
     let mut parts: Vec<String> = vec![format_duration(elapsed_ms)];
     let tokens = (response_chars as f64 / 4.0).round() as u64;
     if tokens > 0 {
@@ -115,7 +106,7 @@ pub(crate) fn status_paren(elapsed_ms: u128, response_chars: u64, receiving: boo
             format_number(tokens)
         ));
     }
-    Some(format!("({})", parts.join(" · ")))
+    format!("({})", parts.join(" · "))
 }
 
 #[cfg(test)]
@@ -146,34 +137,21 @@ mod tests {
     }
 
     #[test]
-    fn status_paren_hidden_before_threshold() {
-        assert_eq!(status_paren(0, 4000, true), None);
-        assert_eq!(status_paren(SHOW_TOKENS_AFTER_MS, 4000, true), None);
-        assert_eq!(status_paren(29_999, 4000, true), None);
-    }
-
-    #[test]
-    fn status_paren_timer_only_when_no_tokens() {
-        // Just past 30s with no streamed chars → timer only.
-        assert_eq!(status_paren(31_000, 0, true).as_deref(), Some("(31s)"));
+    fn status_paren_shows_from_the_start_timer_only_when_no_tokens() {
+        // Timer from 0s (no 30s gate); no tokens yet → timer only.
+        assert_eq!(status_paren(0, 0, false), "(0s)");
+        assert_eq!(status_paren(3_000, 0, false), "(3s)");
     }
 
     #[test]
     fn status_paren_timer_and_tokens_with_arrow() {
-        // 40s, 5200 chars → 5200/4 = 1300 tokens → "1.3k", receiving → ↓.
-        assert_eq!(
-            status_paren(40_000, 5200, true).as_deref(),
-            Some("(40s · ↓ 1.3k tokens)")
-        );
+        // 3s, 444 chars → 111 tokens, receiving → ↓ (matches the live capture).
+        assert_eq!(status_paren(3_000, 444, true), "(3s · ↓ 111 tokens)");
+        // 40s, 5200 chars → 1300 tokens → "1.3k".
+        assert_eq!(status_paren(40_000, 5200, true), "(40s · ↓ 1.3k tokens)");
         // requesting (not yet receiving) → ↑.
-        assert_eq!(
-            status_paren(40_000, 5200, false).as_deref(),
-            Some("(40s · ↑ 1.3k tokens)")
-        );
+        assert_eq!(status_paren(40_000, 5200, false), "(40s · ↑ 1.3k tokens)");
         // Over a minute → formatDuration "1m 5s".
-        assert_eq!(
-            status_paren(65_000, 400, true).as_deref(),
-            Some("(1m 5s · ↓ 100 tokens)")
-        );
+        assert_eq!(status_paren(65_000, 400, true), "(1m 5s · ↓ 100 tokens)");
     }
 }

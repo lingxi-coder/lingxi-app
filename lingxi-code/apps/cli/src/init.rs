@@ -684,6 +684,19 @@ pub async fn build_runtime_from_config(
 /// `Default`. The bypass-safety guard is NOT re-run here — `run_cli` already
 /// ran it once before dispatch (a refusal exits before this fn is reached).
 pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
+    build_runtime_for_tui_inner(argv, None).await
+}
+
+/// [`build_runtime_for_tui`] with an explicit resume session id. When `Some`,
+/// the engine's JSONL writer is named `<resume_session_id>.jsonl` (via
+/// `session_id_override`) and opened in APPEND mode, so a resumed turn continues
+/// the SAME on-disk file the history was loaded from — instead of forking a
+/// fresh-uuid file (which split the conversation across files sharing one
+/// sessionId). The fresh-launch path passes `None` (unchanged).
+pub async fn build_runtime_for_tui_inner(
+    argv: &Argv,
+    resume_session_id: Option<uuid::Uuid>,
+) -> Result<TuiBuild, InitError> {
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
     // (MULTIMODAL.1) Clone the sender BEFORE it is moved into the
     // `BridgeOutputStream` so the TUI's turn-spawn pump can emit
@@ -698,6 +711,14 @@ pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     // (TUI-PERM) Resolve config ONCE so the gate's persist paths come from the
     // SAME cfg the engine builds with (no double resolve, no lost paths).
     let mut cfg = resolve_desktop_config(argv, permission_mode);
+
+    // RESUME: name the JSONL writer's file by the RESUMED session id so new turns
+    // append to `<id>.jsonl` (the same file the history loaded from) rather than
+    // forking a fresh-uuid file. The writer opens append-mode, and these session
+    // files carry no meta header (each line is a message), so appending is safe.
+    if let Some(id) = resume_session_id {
+        cfg.session_id_override = Some(id.to_string());
+    }
 
     // Interactive permission gate: an unresolved mutating `Ask` surfaces the
     // TUI dialog over this channel instead of auto-allowing. AllowAlways

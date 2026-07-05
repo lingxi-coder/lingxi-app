@@ -1260,6 +1260,16 @@ impl ConversationOrchestrator {
         self.jsonl_writer.is_some()
     }
 
+    /// Seed the JSONL parent-uuid chain pointer so the FIRST append after a
+    /// resume chains via `parent_uuid` off the resumed transcript's tail
+    /// (matching the M5-07 writer's chain semantics). Used by the CLI's
+    /// resume-into-TUI seed alongside adopting the resumed history + id; without
+    /// it the first appended message would be a chain orphan (recoverable, but
+    /// this keeps the on-disk chain linear).
+    pub async fn seed_last_jsonl_uuid(&self, last_uuid: Option<String>) {
+        *self.last_jsonl_uuid.lock().await = last_uuid;
+    }
+
     /// Attach the resolved claude-home (`$LINGXI_CONFIG_DIR ?? ~/.claude`) so
     /// hook payloads carry a deterministically-computed `transcript_path` even
     /// when no [`JsonlWriter`] is wired (the production case). Builder-style —

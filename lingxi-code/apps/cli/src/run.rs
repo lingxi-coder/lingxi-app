@@ -1483,7 +1483,10 @@ async fn mount_resumed_tui(
     session_id: uuid::Uuid,
     messages: Vec<JsonlMessage>,
 ) -> i32 {
-    let tui_build = match crate::init::build_runtime_for_tui(argv).await {
+    // Build with the RESUMED session id as the JSONL writer's file name, so new
+    // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
+    // fresh-uuid file — the fix for resume splitting a conversation across files.
+    let tui_build = match crate::init::build_runtime_for_tui_inner(argv, Some(session_id)).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("lingxi-cli: tui init failed: {e}");
@@ -1521,6 +1524,15 @@ async fn seed_orchestrator_session(
     messages: &[JsonlMessage],
 ) {
     let replayed = orchestrator::state_from_messages(session_id, messages);
+    // Seed the parent-uuid chain off the resumed transcript's tail so the first
+    // append after resume chains cleanly (the writer file is the same
+    // `<session_id>.jsonl` when built via `build_runtime_for_tui_inner`).
+    let last_uuid = messages
+        .iter()
+        .rev()
+        .map(|m| m.uuid.clone())
+        .find(|u| !u.is_empty());
+    orchestrator.seed_last_jsonl_uuid(last_uuid).await;
     // `session()` returns an owned `Arc<Mutex<SessionState>>`; bind it so the
     // lock guard does not borrow a temporary that is freed at end-of-statement.
     let session_handle = orchestrator.session();
@@ -2018,6 +2030,51 @@ mod tests {
         assert_eq!(
             s.model_profile, None,
             "the stale default profile is cleared so routing resolves the model id by provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_build_targets_the_resumed_session_file_not_a_fork() {
+        // Regression (reported): resuming session X, asking more, then resuming X
+        // again lost the later messages — because the resume build forked a
+        // FRESH-uuid rollout file (session_id_override=None) while only seeding
+        // the id in memory, splitting the conversation across two files sharing
+        // one sessionId. The fix threads the resumed id as session_id_override,
+        // which names the JSONL writer `<id>.jsonl` (append mode) — the SAME file
+        // the history loads from. We assert the built orchestrator ADOPTS the
+        // resumed id (the value that names the on-disk writer file), and that a
+        // fresh build instead mints its own id (which would fork a new file).
+        let argv = tui_argv();
+        let resumed_id = Uuid::new_v4();
+        let resumed = crate::init::build_runtime_for_tui_inner(&argv, Some(resumed_id))
+            .await
+            .expect("resume build");
+        let adopted = resumed
+            .runtime
+            .orchestrator
+            .session()
+            .lock()
+            .await
+            .session_id
+            .as_uuid();
+        assert_eq!(
+            adopted, resumed_id,
+            "resume build must adopt the resumed id (names the <id>.jsonl writer file)"
+        );
+        let fresh = crate::init::build_runtime_for_tui_inner(&argv, None)
+            .await
+            .expect("fresh build");
+        let fresh_id = fresh
+            .runtime
+            .orchestrator
+            .session()
+            .lock()
+            .await
+            .session_id
+            .as_uuid();
+        assert_ne!(
+            fresh_id, resumed_id,
+            "a fresh (non-resume) build mints its own id — no accidental collision"
         );
     }
 

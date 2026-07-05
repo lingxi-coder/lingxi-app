@@ -5520,7 +5520,8 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     let cost_usage = crate::cost_wiring::llm_usage_to_cost_usage(usage);
                     let cache_read = usage.billable_tokens.cache_read;
                     let cache_create = usage.billable_tokens.cache_write;
-                    let model_ref = crate::cost_wiring::model_ref_from_string(&model);
+                    let model_ref =
+                        crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
                     let elapsed = api_call_started.elapsed();
                     let retries = self.streaming_api.last_retry_count();
                     let cost_for_this_call = tracker
@@ -6887,9 +6888,13 @@ As you answer the user's questions, you can use the following context:\n\
 
         // ~1% of the active model's context window (TS getCharBudget). Resolved
         // with no betas — the small 200k↔1M budget delta only matters past ~30
-        // skills, where the budgeter degrades gracefully.
+        // skills, where the budgeter degrades gracefully. Read the LIVE model
+        // (mutated by /model + resume), not the frozen boot `config.model`, so a
+        // switch across a 200k↔1M window boundary re-sizes the budget correctly
+        // (mirrors `build_prompt_context`).
+        let model = self.session.lock().await.model.clone();
         let window =
-            compaction::context_window::context_window_for_model(&self.config.model, &[]) as usize;
+            compaction::context_window::context_window_for_model(&model, &[]) as usize;
         let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
         Some(ConversationMessage::user(MessageId::new(), content))
     }

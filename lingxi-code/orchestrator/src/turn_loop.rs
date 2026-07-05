@@ -674,7 +674,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
         let cache_read = response.usage.billable_tokens.cache_read;
         let cache_create = response.usage.billable_tokens.cache_write;
-        let model_ref = crate::cost_wiring::model_ref_from_string(&model);
+        let model_ref = crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
         let elapsed = api_call_started.elapsed();
         let retries = orch.api.last_retry_count();
         let cost_for_this_call = tracker

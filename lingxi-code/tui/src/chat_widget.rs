@@ -1494,17 +1494,15 @@ impl ChatWidget {
         let verb = spinner::todo_leader_verb(self.current_todo.as_ref())
             .or_else(|| self.activity.clone())
             .unwrap_or_else(|| self.spinner_verb.to_string());
-        let base = format!("{} {verb}…", FRAMES[idx]);
-        // After SHOW_TOKENS_AFTER_MS, append the live `(<dur> · <↑|↓> <N> tokens)`
-        // counter (claude-code `SpinnerAnimationRow.tsx`). `receiving` (↓) once
-        // any delta/tool has arrived, else requesting (↑). The interrupt hint is
-        // NOT here — it lives in the status row (`status_indicator_line`).
+        // Append the live `(<dur> · <↑|↓> <N> tokens)` counter from the start of
+        // the turn (claude-code `SpinnerAnimationRow.tsx`; verified vs the real
+        // binary). `receiving` (↓) once any delta/tool has arrived, else
+        // requesting (↑). The interrupt hint is NOT here — it lives in the status
+        // row (`status_indicator_line`).
         let elapsed_ms = self.turn_started_at.map_or(0, |t| t.elapsed().as_millis());
         let receiving = self.response_chars > 0 || self.activity.is_some();
-        match crate::spinner_status::status_paren(elapsed_ms, self.response_chars, receiving) {
-            Some(paren) => format!("{base} {paren}"),
-            None => base,
-        }
+        let paren = crate::spinner_status::status_paren(elapsed_ms, self.response_chars, receiving);
+        format!("{} {verb}… {paren}", FRAMES[idx])
     }
 }
 
@@ -2590,18 +2588,19 @@ mod tests {
         let text = widget.spinner_text();
         let frame = text.chars().next().expect("spinner frame glyph");
         assert!("·✢✳✶✻✽".contains(frame), "unknown frame: {text}");
-        // A fresh turn (< SHOW_TOKENS_AFTER_MS) is just "<frame> <verb>…" — the
-        // timer + token-counter paren only appears after 30s (the interrupt hint
-        // now lives in the status row, not the spinner text).
+        // Format is "<frame> <verb>… (<dur> …)" — the timer paren shows from the
+        // start (no 30s gate); the interrupt hint lives in the status row.
         let verb = text
-            .split_once(' ')
-            .map(|(_, rest)| rest.trim_end_matches('…'))
+            .split("… ")
+            .next()
+            .and_then(|prefix| prefix.split_once(' '))
+            .map(|(_, verb)| verb)
             .unwrap_or_default();
         assert!(
             spinner::SPINNER_VERBS.contains(&verb),
             "expected a sampled pool verb, got {verb:?} in {text:?}"
         );
-        assert!(text.ends_with('…'), "fresh-turn spinner has no paren: {text}");
+        assert!(text.contains("… (0s"), "spinner should carry the live timer: {text}");
         // ToolUseStart swaps the verb for the activity label.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: protocol::ToolUseId::from("t1"),

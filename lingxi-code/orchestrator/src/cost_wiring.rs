@@ -62,13 +62,22 @@ fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderI
     }
 }
 
-/// Build a fully-qualified [`ModelRef`] from a model string: the prefix selects
-/// the provider, and the local model id (prefix stripped) is what the price
-/// catalog is keyed on. `claude-*` / bare strings keep the full string as the
-/// model id, so Anthropic cost attribution is byte-identical to before.
+/// Build a fully-qualified [`ModelRef`] for cost + telemetry attribution.
+///
+/// Prefer the LIVE session `profile` when known: `model` is the bare wire id and
+/// the real provider lives in `session.model_profile`. Falling back to
+/// [`llm_client::split_profile_model`] (the `profile = None` path) only sees the
+/// bare id and mis-infers `anthropic` for every non-`claude-` bare id (deepseek,
+/// `gpt-*`, `gemini-*`) AND for provider-shared `claude-*` ids (e.g. Copilot /
+/// Bedrock Claude) — misattributing the cost and the `tengu_api_success`
+/// `provider` tag to Anthropic. String-parsing is kept only as the no-profile
+/// fallback (e.g. an explicit `openai/gpt-4o` reference).
 #[must_use]
-pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
-    let (profile, bare) = llm_client::split_profile_model(model);
+pub(crate) fn model_ref_from_string(model: &str, profile: Option<&str>) -> ModelRef {
+    let (profile, bare) = match profile {
+        Some(p) => (p.to_string(), model.to_string()),
+        None => llm_client::split_profile_model(model),
+    };
     let pricing_provider = llm_client::pricing_provider_id_for_profile(
         &profile,
         &llm_client::ProviderId::OpenAICompatible {
@@ -353,14 +362,54 @@ mod tests {
 
     #[test]
     fn model_ref_strips_prefix_for_priced_lookup() {
-        // Prefixed → provider + stripped local id (matches price-table keys).
-        let mr = model_ref_from_string("openai/gpt-4o");
+        // No live profile → string-parse fallback: prefix → provider + stripped id.
+        let mr = model_ref_from_string("openai/gpt-4o", None);
         assert_eq!(mr.provider, ProviderId::OpenAI);
         assert_eq!(mr.model, "gpt-4o");
-        // Anthropic back-compat: full string kept as the model id.
-        let mr = model_ref_from_string("claude-opus-4-7");
+        // Anthropic back-compat: bare `claude-*` full string kept as the model id.
+        let mr = model_ref_from_string("claude-opus-4-7", None);
         assert_eq!(mr.provider, ProviderId::Anthropic);
         assert_eq!(mr.model, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn model_ref_attributes_to_the_live_provider_profile() {
+        // Bug fix: with a bare wire id, the provider lives in the LIVE profile.
+        // Without it, split_profile_model mis-infers `anthropic` for every one of
+        // these — misattributing cost + the tengu_api_success provider tag.
+
+        // deepseek bare id → deepseek, NOT anthropic.
+        let mr = model_ref_from_string("deepseek-chat", Some("deepseek"));
+        assert_eq!(
+            mr.provider,
+            ProviderId::OpenAICompatible {
+                name: "deepseek".to_string()
+            }
+        );
+        assert_eq!(mr.model, "deepseek-chat");
+
+        // Provider-shared claude id served by Copilot → copilot, NOT anthropic.
+        let mr = model_ref_from_string("claude-opus-4-8", Some("github-copilot"));
+        assert_eq!(
+            mr.provider,
+            ProviderId::OpenAICompatible {
+                name: "github-copilot".to_string()
+            }
+        );
+
+        // Live `anthropic` profile still attributes to Anthropic.
+        let mr = model_ref_from_string("claude-opus-4-8", Some("anthropic"));
+        assert_eq!(mr.provider, ProviderId::Anthropic);
+
+        // openai / gemini bare ids attribute correctly, not to anthropic.
+        assert_eq!(
+            model_ref_from_string("gpt-5.2", Some("openai")).provider,
+            ProviderId::OpenAI
+        );
+        assert_eq!(
+            model_ref_from_string("gemini-2.5-pro", Some("gemini")).provider,
+            ProviderId::GoogleGemini
+        );
     }
 
     // ── 3c-T3: llm_catalog_from_cost bridge conversion tests ────────────────

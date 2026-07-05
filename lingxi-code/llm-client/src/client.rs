@@ -704,7 +704,13 @@ impl DefaultLlmClient {
         &self,
         request: &LlmRequest,
     ) -> Result<ProviderRequest, LlmError> {
-        let resolved_route = self.registry.resolve(&request.model)?;
+        // Scope resolution to the request's live provider profile, exactly like
+        // `prepare_at`. Resolving unscoped drops `request.profile` and would raise
+        // a spurious "ambiguous across profiles" error (or pick the wrong route)
+        // whenever the same wire id is configured under two profiles.
+        let resolved_route = self
+            .registry
+            .resolve_in(&request.model, request.profile.as_deref())?;
         validate_capabilities(request, resolved_route.capabilities)?;
 
         let entry = self

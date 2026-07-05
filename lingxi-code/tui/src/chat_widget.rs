@@ -2071,14 +2071,19 @@ mod tests {
             provider_id: "openrouter".to_string(),
         });
 
-        // Now /model shows ALL of OpenRouter's models (aggregator, no curated
-        // shortlist) alongside the still-connected anthropic current model.
+        // Now /model surfaces OpenRouter's CURATED shortlist (the `openrouter/auto`
+        // alias) alongside the still-connected anthropic current model. The paid
+        // non-alias passthrough (`openai/gpt-4o`) is trimmed by the opencode-style
+        // OpenRouter curation (free + latest-aliases only).
         submit_command(&mut widget, "/model");
         let after = open_picker_request_models(&widget);
         assert!(
-            after.contains(&"openrouter/auto".to_string())
-                && after.contains(&"openai/gpt-4o".to_string()),
-            "OpenRouter models appear after connecting: {after:?}"
+            after.contains(&"openrouter/auto".to_string()),
+            "OpenRouter alias appears after connecting: {after:?}"
+        );
+        assert!(
+            !after.contains(&"openai/gpt-4o".to_string()),
+            "paid non-alias OpenRouter model trimmed by curation: {after:?}"
         );
         assert!(
             after.contains(&"claude-opus-4-8".to_string()),

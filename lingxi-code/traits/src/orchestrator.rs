@@ -281,6 +281,11 @@ pub struct StatusSnapshot {
     pub session_id: String,
     /// Active model name (e.g. `"claude-opus-4-7"`).
     pub model: String,
+    /// Active model's provider profile (e.g. `Some("copilot")`), disambiguating a
+    /// model id shared across providers (e.g. `gpt-5.5` on both OpenAI and
+    /// Copilot). `None` when routing resolves the id by-provider (e.g. after a
+    /// cross-provider resume that clears the profile).
+    pub model_profile: Option<String>,
     /// Total messages in the session history.
     pub n_messages: u32,
     /// Cumulative cost in USD.

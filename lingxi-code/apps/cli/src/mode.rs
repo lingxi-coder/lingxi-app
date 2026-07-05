@@ -836,7 +836,9 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         })
         .collect();
 
-    let current_model = orch.get_status_snapshot().await.model;
+    let current_snapshot = orch.get_status_snapshot().await;
+    let current_model = current_snapshot.model;
+    let current_profile = current_snapshot.model_profile;
     // Capture the FULL catalog (every provider's models, incl. aggregators like
     // OpenRouter). The picker no longer trims at capture time — it gates by LIVE
     // provider availability and per-provider curation at OPEN time
@@ -849,7 +851,15 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         .await
         .into_iter()
         .map(|m| ModelRow {
-            is_current: m.request_model == current_model,
+            // Mark the current row by (model AND provider) so a wire id shared
+            // across providers (e.g. `gpt-5.5` on both OpenAI and Copilot) only
+            // dots the ACTUAL current provider's row. When the current profile is
+            // unknown (None — e.g. resolve-by-id after a cross-provider resume),
+            // fall back to matching by model id alone.
+            is_current: m.request_model == current_model
+                && current_profile
+                    .as_deref()
+                    .is_none_or(|p| p == m.provider_id),
             display: m.display_model,
             request_model: m.request_model,
             profile: (!m.provider_id.is_empty()).then_some(m.provider_id),

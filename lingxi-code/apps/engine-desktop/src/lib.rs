@@ -2702,6 +2702,7 @@ pub async fn build(
                 provider_id: profile.clone(),
                 provider_label: label.clone(),
                 description: m.description.clone(),
+                supports_reasoning: m.capabilities.reasoning,
             })
         })
         .collect();
@@ -7954,6 +7955,7 @@ mod tests {
                 provider_id: "openai".to_string(),
                 provider_label: "OpenAI".to_string(),
                 description: None,
+                supports_reasoning: false,
             },
             traits::ModelListing {
                 display_model: "gpt-4o".to_string(),
@@ -7961,6 +7963,7 @@ mod tests {
                 provider_id: "github-copilot".to_string(),
                 provider_label: "GitHub Copilot".to_string(),
                 description: None,
+                supports_reasoning: false,
             },
             traits::ModelListing {
                 display_model: "claude-sonnet-4-6".to_string(),
@@ -7968,6 +7971,7 @@ mod tests {
                 provider_id: "anthropic".to_string(),
                 provider_label: "Anthropic".to_string(),
                 description: None,
+                supports_reasoning: true,
             },
         ];
 

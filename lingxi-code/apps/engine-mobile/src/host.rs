@@ -530,6 +530,7 @@ pub async fn build_mobile_inner(
                 provider_id: profile.clone(),
                 provider_label: profile.clone(),
                 description: m.description.clone(),
+                supports_reasoning: m.capabilities.reasoning,
             })
         })
         .collect();
@@ -3478,6 +3479,7 @@ mod tests {
                 provider_id: "openai".to_string(),
                 provider_label: "openai".to_string(),
                 description: None,
+                supports_reasoning: false,
             },
             traits::ModelListing {
                 display_model: "gpt-5.2".to_string(),
@@ -3485,6 +3487,7 @@ mod tests {
                 provider_id: "github-copilot".to_string(),
                 provider_label: "github-copilot".to_string(),
                 description: None,
+                supports_reasoning: false,
             },
             traits::ModelListing {
                 display_model: "claude-sonnet-4-20250514".to_string(),
@@ -3492,6 +3495,7 @@ mod tests {
                 provider_id: "anthropic".to_string(),
                 provider_label: "anthropic".to_string(),
                 description: None,
+                supports_reasoning: true,
             },
         ];
 

@@ -247,7 +247,8 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
                request_model: String,
                label: String,
                provider: String,
-               description: Option<String>| {
+               description: Option<String>,
+               supports_reasoning: bool| {
         let description =
             description.or_else(|| model_description(&request_model).map(str::to_string));
         traits::orchestrator::ModelListing {
@@ -256,6 +257,7 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
             provider_label: label,
             provider_id: provider,
             description,
+            supports_reasoning,
         }
     };
 
@@ -264,12 +266,14 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
         llm_client::anthropic_model_profiles()
             .into_iter()
             .map(|m| {
+                let supports_reasoning = m.capabilities.reasoning;
                 row(
                     m.display_model,
                     m.request_model,
                     provider_label("anthropic").to_string(),
                     "anthropic".to_string(),
                     m.description,
+                    supports_reasoning,
                 )
             })
             .collect();
@@ -293,12 +297,14 @@ fn catalog_model_listings() -> Vec<traits::orchestrator::ModelListing> {
                 .filter(|m| m.capabilities.tools)
                 .map(|m| {
                     let label = provider_label(&m.profile_name).to_string();
+                    let supports_reasoning = m.capabilities.reasoning;
                     row(
                         m.display_model,
                         m.request_model,
                         label,
                         m.profile_name,
                         m.description,
+                        supports_reasoning,
                     )
                 }),
         );
@@ -702,6 +708,25 @@ mod tests {
         // Kept: tool-capable models remain selectable.
         assert!(has("deepseek-chat"), "tool-capable model must remain");
         assert!(has("gpt-5.2"), "tool-capable OpenAI model must remain");
+    }
+
+    #[test]
+    fn list_model_listings_surfaces_reasoning_capability() {
+        // The picker's thinking indicator reads `supports_reasoning` off each
+        // listing (populated from the catalog `capabilities.reasoning`).
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let adapter = make_adapter(transport);
+        let listings = OrchestratorApiClient::list_model_listings(&adapter);
+        let reasoning = |id: &str| {
+            listings
+                .iter()
+                .find(|l| l.request_model == id)
+                .map(|l| l.supports_reasoning)
+        };
+        // Claude 4.x/5 support extended thinking.
+        assert_eq!(reasoning("claude-opus-4-8"), Some(true));
+        // A visible (tool-capable) but non-thinking model is flagged false.
+        assert_eq!(reasoning("qwen/qwen3-coder:free"), Some(false));
     }
 
     #[test]

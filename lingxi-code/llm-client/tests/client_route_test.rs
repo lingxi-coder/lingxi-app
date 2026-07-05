@@ -251,13 +251,47 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
         "reasoning must be stripped from the wire body: {body}"
     );
 
-    // Sanity: a genuinely unsupported HARD capability still errors.
-    let mut streamed = LlmRequest::new("qwen/qwen3-coder:free");
-    streamed.reasoning = Some(ReasoningConfig::Enabled {
-        budget_tokens: 2048,
-    });
-    // tools on a tools-capable model + reasoning both fine → still Ok.
-    assert!(client.prepare(&streamed).await.is_ok());
+    // The MID-CONVERSATION case: history carries Reasoning / RedactedThinking
+    // blocks from an earlier thinking model. Those blocks must be stripped too —
+    // `validate_capabilities` rejects them independently of the top-level field,
+    // so a switch after any thinking must not hard-fail.
+    let mut resumed = LlmRequest::new("qwen/qwen3-coder:free");
+    resumed.messages = vec![
+        llm_client::Message {
+            role: "assistant".to_string(),
+            content: vec![
+                llm_client::ContentBlock::Reasoning {
+                    text: "let me think".to_string(),
+                    signature: None,
+                },
+                llm_client::ContentBlock::Text {
+                    text: "the answer is 42".to_string(),
+                    cache_control: None,
+                },
+            ],
+        },
+        llm_client::Message {
+            role: "user".to_string(),
+            content: vec![llm_client::ContentBlock::Text {
+                text: "thanks".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    // No top-level reasoning field this turn — only history blocks.
+    let prepared = client
+        .prepare(&resumed)
+        .await
+        .expect("history reasoning blocks must be stripped, not hard-fail");
+    let body = prepared.provider_request.body_json.to_string();
+    assert!(
+        !body.contains("let me think"),
+        "history reasoning block must be stripped from the wire body: {body}"
+    );
+    assert!(
+        body.contains("the answer is 42"),
+        "non-reasoning content must survive: {body}"
+    );
 }
 
 #[test]

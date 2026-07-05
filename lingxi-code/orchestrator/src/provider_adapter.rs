@@ -339,6 +339,47 @@ pub(crate) fn display_name_for_model(request_model: &str) -> Option<String> {
     catalog_display_names().get(request_model).cloned()
 }
 
+/// Cached `request_model -> UNIQUE provider profile`. The value is `None` when
+/// the same wire id is served by MORE than one provider (ambiguous), so callers
+/// don't guess. Built once from the full catalog.
+fn catalog_provider_profiles() -> &'static std::collections::HashMap<String, Option<String>> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<String, Option<String>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for l in catalog_model_listings() {
+            let request_model = l.request_model;
+            let provider = l.provider_id;
+            match map.get_mut(&request_model) {
+                // Already seen under a DIFFERENT provider → ambiguous.
+                Some(existing) => {
+                    if existing.as_deref() != Some(provider.as_str()) {
+                        *existing = None;
+                    }
+                }
+                None => {
+                    map.insert(request_model, Some(provider));
+                }
+            }
+        }
+        map
+    })
+}
+
+/// The UNIQUE provider profile that serves `request_model` in the catalog, or
+/// `None` when the id is unknown OR served by more than one provider. Lets
+/// cost/telemetry attribute a bare wire id whose live session profile is unknown
+/// (e.g. after a cross-provider `--resume` clears it) to its REAL provider
+/// instead of blindly defaulting to Anthropic.
+#[must_use]
+pub(crate) fn provider_for_model(request_model: &str) -> Option<String> {
+    catalog_provider_profiles()
+        .get(request_model)
+        .cloned()
+        .flatten()
+}
+
 /// Known one-line description for a built-in model wire id, mirroring the
 /// claude-code `/model` picker blurbs (`modelOptions.ts`). Matched by a
 /// case-insensitive family substring so dated ids (`claude-opus-4-7`, etc.) and
@@ -699,15 +740,20 @@ mod tests {
         let listings = OrchestratorApiClient::list_model_listings(&adapter);
         let has = |id: &str| listings.iter().any(|l| l.request_model == id);
 
-        // Excluded: tool_call=false in the vendored models.dev slices.
-        assert!(!has("gpt-3.5-turbo"), "no-tool OpenAI model must be hidden");
+        // Excluded: genuinely tool_call=false in the vendored models.dev slices.
+        assert!(
+            !has("gpt-5-chat-latest"),
+            "no-tool OpenAI chat model must be hidden"
+        );
         assert!(
             !has("gemini-2.5-flash-image"),
             "no-tool Gemini image model must be hidden"
         );
-        // Kept: tool-capable models remain selectable.
+        // Kept: tool-capable models remain selectable — incl. gpt-3.5-turbo,
+        // whose tool_call=false was a DATA error (it supports function calling).
         assert!(has("deepseek-chat"), "tool-capable model must remain");
         assert!(has("gpt-5.2"), "tool-capable OpenAI model must remain");
+        assert!(has("gpt-3.5-turbo"), "gpt-3.5-turbo supports tools — must remain");
     }
 
     #[test]

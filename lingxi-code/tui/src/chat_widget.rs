@@ -1384,11 +1384,15 @@ impl ChatWidget {
                 self.set_current_model(&request_model, profile.as_deref());
                 // Refresh the statusline model + re-arm the pump so the command
                 // reports the new model (claude-code re-runs on model change).
+                // Read the row `set_current_model` just marked `is_current` (already
+                // provider-scoped) — NOT `find(request_model)` alone, which for a
+                // wire id shared across providers could pick the wrong provider's
+                // display and diverge from the ● marker.
                 let display = self
                     .session
                     .models
                     .iter()
-                    .find(|m| m.request_model == request_model)
+                    .find(|m| m.is_current)
                     .map_or_else(|| request_model.clone(), |m| m.display.clone());
                 self.with_status_line(|s| {
                     s.data.model_id = request_model.clone();
@@ -1659,6 +1663,7 @@ mod tests {
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
                         is_current: true,
+                        supports_reasoning: true,
                     },
                     ModelRow {
                         display: "Sonnet".into(),
@@ -1666,6 +1671,7 @@ mod tests {
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
                         is_current: false,
+                        supports_reasoning: true,
                     },
                 ],
                 ..Default::default()
@@ -2040,6 +2046,7 @@ mod tests {
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
                         is_current: true,
+                        supports_reasoning: true,
                     },
                     ModelRow {
                         display: "OR Auto".into(),
@@ -2047,6 +2054,7 @@ mod tests {
                         profile: Some("openrouter".into()),
                         provider_label: "OpenRouter".into(),
                         is_current: false,
+                        supports_reasoning: true,
                     },
                     ModelRow {
                         display: "OR GPT".into(),
@@ -2054,6 +2062,7 @@ mod tests {
                         profile: Some("openrouter".into()),
                         provider_label: "OpenRouter".into(),
                         is_current: false,
+                        supports_reasoning: true,
                     },
                 ],
                 ..Default::default()
@@ -2162,6 +2171,7 @@ mod tests {
                         profile: Some("openai".into()),
                         provider_label: "OpenAI".into(),
                         is_current: false,
+                        supports_reasoning: true,
                     },
                     ModelRow {
                         display: "GPT-5.5".into(),
@@ -2169,6 +2179,7 @@ mod tests {
                         profile: Some("github-copilot".into()),
                         provider_label: "GitHub Copilot".into(),
                         is_current: false,
+                        supports_reasoning: true,
                     },
                 ],
                 ..Default::default()

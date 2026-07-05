@@ -1044,6 +1044,7 @@ mod tests {
                     profile: Some("anthropic".into()),
                     provider_label: "Anthropic".into(),
                     is_current: true,
+                    supports_reasoning: true,
                 },
                 crate::session::ModelRow {
                     display: "Sonnet".into(),
@@ -1051,6 +1052,7 @@ mod tests {
                     profile: Some("anthropic".into()),
                     provider_label: "Anthropic".into(),
                     is_current: false,
+                    supports_reasoning: true,
                 },
             ],
             ..Default::default()

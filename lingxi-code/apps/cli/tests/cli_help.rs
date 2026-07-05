@@ -92,6 +92,36 @@ fn help_lists_debug_flag() {
 }
 
 #[test]
+fn help_omits_leaked_engineering_notes() {
+    // Regression lock: internal engineering/impl notes (plan-mission tags,
+    // binary offsets, reference source paths) must never render in user-facing
+    // `--help`. They live as plain `//` comments in argv.rs, not `///` docs.
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cc2.1.198").not())
+        .stdout(predicate::str::contains("RESIDUAL").not())
+        .stdout(predicate::str::contains("binary @").not())
+        .stdout(predicate::str::contains("main.tsx").not());
+}
+
+#[test]
+fn help_bare_flag_lists_skipped_subsystems() {
+    // FIX 2: the `--bare` help must name the skipped subsystems and the
+    // strict-auth clause (2.1.199+ wording, LINGXI_SIMPLE naming).
+    Command::cargo_bin("lingxi-cli")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("auto-memory"))
+        .stdout(predicate::str::contains("keychain"))
+        .stdout(predicate::str::contains("LINGXI_SIMPLE=1"));
+}
+
+#[test]
 fn version_flag_exits_zero() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()

@@ -137,11 +137,18 @@ fn build_state_from_jsonl(
                 // `DEFAULT_MODEL` seed) lets a resumed session continue on its
                 // saved model instead of the launch default — otherwise a
                 // resumed non-default session reported/showed the wrong model.
+                //
+                // SKIP placeholder markers like `<synthetic>` (error/system
+                // messages that carry no real model): a real model id never
+                // starts with `<`. Otherwise a session whose LAST assistant line
+                // was a synthetic error (e.g. a request-rejection notice) would
+                // resume onto model `<synthetic>` → `resolve_in` → ModelUnavailable
+                // on the first turn.
                 if let Some(model) = m
                     .message
                     .get("model")
                     .and_then(serde_json::Value::as_str)
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
                 {
                     state.model = model.to_string();
                 }

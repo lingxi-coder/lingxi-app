@@ -153,6 +153,60 @@ async fn resume_recovers_the_saved_model_from_the_last_assistant_line() {
 }
 
 #[tokio::test]
+async fn resume_skips_synthetic_model_marker() {
+    // Regression (reported "model unavailable" after resume): when the LAST
+    // assistant line is a SYNTHETIC error/system message (model "<synthetic>",
+    // e.g. a request-rejection notice), resume must NOT adopt "<synthetic>" as
+    // the active model — that would fail `resolve_in` → ModelUnavailable on the
+    // first turn. It keeps the last REAL model instead.
+    let temp = TempDir::new().unwrap();
+    let cwd_path = temp.path().join("proj");
+    tokio::fs::create_dir(&cwd_path).await.unwrap();
+    let cwd = cwd_path.to_string_lossy().into_owned();
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
+    tokio::fs::create_dir_all(&subdir).await.unwrap();
+    let sid = Uuid::new_v4();
+    let (m1, m2, m3) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let line = |uuid: Uuid, parent: Option<Uuid>, role: &str, model: Option<&str>, text: &str| {
+        let mut msg = json!({"role": role, "content": text});
+        if let Some(m) = model {
+            msg["model"] = json!(m);
+        }
+        serde_json::to_string(&json!({
+            "type": role, "uuid": uuid.to_string(),
+            "parentUuid": parent.map(|p| p.to_string()),
+            "sessionId": sid.to_string(), "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+            "message": msg,
+        }))
+        .unwrap()
+    };
+    let body = format!(
+        "{}\n{}\n{}\n",
+        line(m1, None, "user", None, "hi"),
+        line(m2, Some(m1), "assistant", Some("gpt-5.5"), "hi there"),
+        // A synthetic error message closed the session.
+        line(m3, Some(m2), "assistant", Some("<synthetic>"), "invalid request: ..."),
+    );
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
+    let replayed = replay_session_state(&lingxi_home, &cwd, sid, fs)
+        .await
+        .expect("replay ok");
+    assert_eq!(
+        replayed.state.model, "gpt-5.5",
+        "synthetic marker is skipped; the last REAL model is kept"
+    );
+    assert_eq!(
+        state_from_messages(sid, &replayed.messages).model,
+        "gpt-5.5"
+    );
+}
+
+#[tokio::test]
 async fn resume_without_a_model_field_keeps_the_default() {
     // A transcript with no `message.model` (or no assistant lines) keeps the
     // DEFAULT_MODEL seed — the fallback stays correct.

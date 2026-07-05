@@ -263,6 +263,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            parent_model_override: None,
         }
     }
 

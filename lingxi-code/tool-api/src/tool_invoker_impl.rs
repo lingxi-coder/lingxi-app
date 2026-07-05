@@ -123,7 +123,16 @@ impl ToolInvoker for RegistryToolInvoker {
             options: crate::context::ToolUseOptions {
                 debug: false,
                 verbose: false,
-                main_loop_model: "subagent".into(),
+                // The DISPATCHING subagent's own resolved model (claude-code
+                // `runAgent.ts:678` seeds each child's `mainLoopModel:
+                // resolvedAgentModel`), so a recursive `Agent` tool call reads the
+                // IMMEDIATE parent's model via `toolUseContext.options.mainLoopModel`
+                // (claude `AgentTool.tsx:418`). Falls back to the legacy `"subagent"`
+                // placeholder when the dispatching runner wired no parent model.
+                main_loop_model: ctx
+                    .parent_model
+                    .clone()
+                    .unwrap_or_else(|| "subagent".into()),
                 model_profile: None,
                 max_budget_nano_usd: None,
                 mcp_clients: vec![],
@@ -516,6 +525,7 @@ mod tests {
                     cwd: None,
                     tool_use_id: None,
                     depth: 0,
+                    parent_model: None,
                 },
             )
             .await
@@ -533,6 +543,110 @@ mod tests {
             Some("alpha"),
             "the team name reaches ToolUseContext.team_name (getTeammateContext()?.teamName)"
         );
+    }
+
+    /// Tool fixture that records the `main_loop_model` the dispatched
+    /// `ToolUseContext` carries, so a test can assert the DISPATCHING subagent's
+    /// resolved model reaches a recursive tool call (claude-code
+    /// `AgentTool.tsx:418` `toolUseContext.options.mainLoopModel`).
+    struct ModelRecordingTool {
+        captured: Arc<StdMutex<Option<String>>>,
+    }
+    #[async_trait]
+    impl Tool for ModelRecordingTool {
+        fn name(&self) -> &str {
+            "ModelRecordingTool"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &RECORDING_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> PermissionResult {
+            allow_for_tests()
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "rec".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            "rec".into()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            ctx: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            *self.captured.lock().unwrap() = Some(ctx.options.main_loop_model.clone());
+            Ok(ToolCallResult {
+                data: json!({}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+        fn interrupt_behavior(&self, _input: &serde_json::Value) -> InterruptBehavior {
+            InterruptBehavior::Cancel
+        }
+    }
+
+    /// The DISPATCHING subagent's own resolved model
+    /// ([`SubagentInvocationContext::parent_model`]) must reach the dispatched
+    /// tool's `ToolUseContext.options.main_loop_model` — this is what makes a
+    /// NESTED `Agent` tool call resolve its child's model against the IMMEDIATE
+    /// parent's model (claude-code `runAgent.ts:678` → `AgentTool.tsx:418`). When
+    /// unset it falls back to the legacy `"subagent"` placeholder.
+    #[tokio::test]
+    async fn registry_invoker_threads_parent_model_into_main_loop_model() {
+        let captured: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(ModelRecordingTool {
+            captured: captured.clone(),
+        }));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+
+        let mut ctx = no_ctx();
+        ctx.parent_model = Some("claude-sonnet-5".to_string());
+        invoker
+            .invoke("ModelRecordingTool", json!({}), ctx)
+            .await
+            .expect("dispatch ok");
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some("claude-sonnet-5"),
+            "the dispatching subagent's model reaches ToolUseContext.options.main_loop_model"
+        );
+
+        // Unset parent_model ⇒ the legacy placeholder (byte-identical fallback).
+        *captured.lock().unwrap() = None;
+        invoker
+            .invoke("ModelRecordingTool", json!({}), no_ctx())
+            .await
+            .expect("dispatch ok");
+        assert_eq!(captured.lock().unwrap().as_deref(), Some("subagent"));
     }
 
     // ──── enforcement 3b: permission gate before dispatch ──────────────
@@ -561,6 +675,7 @@ mod tests {
             cwd: None,
             tool_use_id: None,
             depth: 0,
+            parent_model: None,
         }
     }
 
@@ -648,6 +763,7 @@ mod tests {
             cwd: None,
             tool_use_id: None,
             depth: 0,
+            parent_model: None,
         }
     }
 
@@ -730,6 +846,7 @@ mod tests {
             cwd: None,
             tool_use_id: Some(id.to_string()),
             depth: 0,
+            parent_model: None,
         }
     }
 

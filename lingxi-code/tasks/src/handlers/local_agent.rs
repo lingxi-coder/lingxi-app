@@ -272,6 +272,8 @@ impl Task for LocalAgentHandler {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            // Top-level spawn ⇒ the spawner's own default model anchors resolution.
+            parent_model_override: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer

@@ -153,6 +153,18 @@ pub struct SubagentSpawnRequest {
     /// it behaves like a top-level spawn (the conservative direction).
     #[serde(default)]
     pub depth: u32,
+    /// The parent / main-loop model to resolve this spawn's `AgentModel::Inherit`
+    /// + bare-family aliases against (claude-code `AgentTool.tsx:418`
+    /// `getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, …)`).
+    /// `AgentTool` fills it from `ToolUseContext.options.main_loop_model` — the
+    /// LIVE session model at the top level (so a mid-session `/model` switch is
+    /// reflected), or the IMMEDIATE parent subagent's resolved model on a NESTED
+    /// spawn (claude `runAgent.ts:678` seeds each child's `mainLoopModel:
+    /// resolvedAgentModel`). When set (and non-empty) it takes precedence over the
+    /// spawner's boot/live `default_model`; `None`/empty ⇒ the spawner's own
+    /// default is used (non-`AgentTool` spawn paths / legacy serialized payloads).
+    #[serde(default)]
+    pub parent_model_override: Option<String>,
 }
 
 /// Token-usage rollup returned at the end of a successful spawn.

@@ -294,11 +294,11 @@ where
             //   • anything else (move, startup-from-empty): clear from the
             //     higher of the two tops, the conservative original behavior.
             let same_top = !old.is_empty() && area.x == old.x && area.top() == old.top();
-            if same_top && area.bottom() >= old.bottom() {
-                // Pure growth: no destructive clear, just force a full repaint.
-                self.set_viewport_area(area);
-                self.invalidate_viewport();
-            } else {
+            if !(same_top && area.bottom() >= old.bottom()) {
+                // Not pure growth: physically clear the rows that actually go
+                // stale (pure growth needs none — the composer redraw paints
+                // the new rows, and a clear-to-end here would leak a cleared
+                // composer row into scrollback on iTerm2).
                 let clear_from = if old.is_empty() {
                     area.as_position()
                 } else if same_top {
@@ -309,8 +309,19 @@ where
                     old.as_position()
                 };
                 self.clear_after_position(clear_from)?;
-                self.set_viewport_area(area);
             }
+            self.set_viewport_area(area);
+            // Force a full repaint of the NEW viewport on the next draw — for
+            // EVERY rect change (grow, shrink, move), not just pure growth.
+            // `diff_buffers` skips a blank cell equal to the previous buffer, so
+            // a shrink (which resets the previous buffer to plain blanks WITHOUT
+            // `skip`) would leave the footer's 2-column indent / composer gutter
+            // unrepainted — stale `│`/`└` scrollback bleeding through as the
+            // reported `│└Enter: send`. `invalidate_viewport` marks every
+            // previous cell `skip` so blanks re-emit as spaces. It is
+            // row-bounded (no clear-to-end), so it does NOT reintroduce the
+            // iTerm2 scrollback-orphan leak the no-clear growth path avoids.
+            self.invalidate_viewport();
         }
         Ok(())
     }
@@ -1218,6 +1229,53 @@ mod tests {
             leading,
             vec![(0, " ".to_string()), (1, " ".to_string())],
             "leading blank columns must be repainted as spaces after invalidate"
+        );
+    }
+
+    #[test]
+    fn viewport_shrink_repaints_leading_blank_columns() {
+        // Regression (footer `│└Enter: send` bleed): when the inline viewport
+        // SHRINKS — a finished turn's live tail (e.g. a markdown table or a
+        // just-dismissed bordered modal, whose rows carry `│`/`└` glyphs) is
+        // flushed to scrollback and the pane collapses back to composer +
+        // footer — the footer lands on a physical row that a tick earlier held
+        // those glyphs. The shrink branch reset the previous buffer to plain
+        // blanks WITHOUT `skip`, so `diff_buffers` saw the footer's 2-column
+        // indent as unchanged and never repainted it, leaving the stale `│└`
+        // showing through. Every viewport rect change (not just pure growth)
+        // must invalidate so blank columns repaint as spaces.
+        let mut term = test_terminal(10, 6);
+        term.set_bottom_viewport_height(4).unwrap(); // grow to 4 rows
+        term.set_bottom_viewport_height(2).unwrap(); // shrink to 2 (same top)
+
+        assert!(
+            term.previous_buffer().content.iter().all(|c| c.skip),
+            "a viewport shrink must invalidate the previous buffer so blank \
+             columns repaint (footer left-edge artifact)"
+        );
+
+        // Observable: a frame with two leading blank columns then text repaints
+        // those blanks as spaces (erasing any stale `│└`).
+        let area = term.viewport_area;
+        let mut next = Buffer::empty(area);
+        for (i, ch) in "  Enter".chars().enumerate() {
+            next.cell_mut(Position::new(u16::try_from(i).unwrap(), area.y))
+                .unwrap()
+                .set_symbol(&ch.to_string());
+        }
+        let leading: Vec<(u16, String)> = diff_buffers(term.previous_buffer(), &next)
+            .into_iter()
+            .filter_map(|c| match c {
+                DrawCommand::Put { x, y, cell } if x < 2 && y == area.y => {
+                    Some((x, cell.symbol().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            leading,
+            vec![(0, " ".to_string()), (1, " ".to_string())],
+            "leading blank columns must repaint as spaces after a shrink"
         );
     }
 

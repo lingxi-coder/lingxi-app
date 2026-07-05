@@ -187,6 +187,60 @@ async fn emit_end_turn_carries_real_cost() {
 }
 
 #[tokio::test]
+async fn restore_session_cost_seeds_the_snapshot_total() {
+    // Resume parity: restoring a prior session's cost makes it visible in the
+    // very next snapshot, before any new turn runs (the footer shows the
+    // running total instead of $0 after `--resume`).
+    let (orch, _rx) = make_orch_with_n_responses(0).await;
+    orch.restore_session_cost(17_500_000).await; // $0.0175 from the prior run
+    let snap = orch.snapshot_cost().await;
+    assert!(
+        (snap.total_usd - 0.0175).abs() < 1e-9,
+        "restored total_usd should be 0.0175, got {}",
+        snap.total_usd
+    );
+}
+
+#[tokio::test]
+async fn restore_then_run_turn_accumulates_on_top() {
+    // A restored session keeps accumulating: the next turn adds to the restored
+    // base, not to zero.
+    let (orch, _rx) = make_orch_with_n_responses(1).await;
+    orch.restore_session_cost(17_500_000).await; // prior $0.0175
+    orch.run_turn("hi").await.unwrap(); // + this turn's $0.0175
+    let snap = orch.snapshot_cost().await;
+    assert!(
+        (snap.total_usd - 0.0350).abs() < 1e-9,
+        "restored + new turn should be 0.0350, got {}",
+        snap.total_usd
+    );
+}
+
+#[tokio::test]
+async fn restore_session_cost_without_a_tracker_is_a_noop() {
+    // Library users who never wire a tracker: restore must not panic and the
+    // snapshot stays zero.
+    let api = Arc::new(MockApiClient::new(Vec::new()));
+    let tools = Arc::new(ToolRegistry::new());
+    let hooks = noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let output = Arc::new(MockOutputStream::new());
+    let memory = Arc::new(StaticMemoryProvider::empty());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api,
+        tools,
+        hooks,
+        perms,
+        output,
+        memory,
+        std::env::temp_dir(),
+    );
+    orch.restore_session_cost(17_500_000).await; // no tracker → silently ignored
+    assert_eq!(orch.snapshot_cost().await.total_usd, 0.0);
+}
+
+#[tokio::test]
 async fn no_tracker_returns_zeroed_snapshot() {
     // Backward compat — library users who don't wire a tracker still get
     // a valid (zero) snapshot with the correct session_id.

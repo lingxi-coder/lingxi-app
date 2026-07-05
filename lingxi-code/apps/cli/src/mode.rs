@@ -312,6 +312,16 @@ pub(crate) async fn run_ratatui(
     } else {
         resumed_messages
     };
+    // Resume parity: if the cost tracker was seeded from a restored session
+    // (`mount_resumed_tui`), surface its accumulated cost in the footer on the
+    // very first frame — before any new turn — by emitting an initial
+    // `CostUpdated`. A fresh session's tracker is zero, so this is a no-op
+    // there. `turn_tx` and the widget's `bridge_rx` share one channel
+    // (init.rs), so the event reaches the widget as soon as it starts draining.
+    let initial_cost = orchestrator.snapshot_cost().await.total_usd;
+    if initial_cost > 0.0 {
+        let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
+    }
     let on_submit = move |prompt: String, cancel: CancellationToken| {
         let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
         let orch = orchestrator.clone();
@@ -439,6 +449,25 @@ pub(crate) async fn run_ratatui(
     })
     .await;
     status_pump.abort();
+    // Resume parity (claude-code `saveCurrentSessionCosts`, fired on process
+    // exit): persist this session's accumulated cost to the project config,
+    // keyed by (project, session id), so a later `--resume` of THIS session
+    // restores it into the footer. Best-effort — a config-write failure must
+    // never change the exit code. Runs for every exit arm (clean quit or TUI
+    // failure), matching the reference's unconditional exit hook.
+    {
+        let total_usd = summary_orch.snapshot_cost().await.total_usd;
+        let session_uuid = summary_orch.current_session_id().await.as_uuid();
+        if let Some(cfg_path) = migrations::global_config::global_config_path() {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            crate::session_cost::save_session_cost(
+                &cfg_path,
+                &cwd,
+                &session_uuid.to_string(),
+                total_usd,
+            );
+        }
+    }
     match run_result {
         Ok(Ok(())) => {
             // Print the BARE uuid (not the `sess:`-prefixed SessionId Display):

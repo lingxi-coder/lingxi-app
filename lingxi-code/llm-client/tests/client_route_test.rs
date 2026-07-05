@@ -2,7 +2,7 @@ use llm_client::client::DefaultLlmClient;
 use llm_client::{
     AuthStrategy, Capabilities, ClientConfig, CredentialConfig, LlmError, LlmRequest, ModelProfile,
     PricingConfig, ProtocolFamily, ProviderId, ProviderProfile, ProviderStreamTransport,
-    ResponseFormat,
+    ReasoningConfig, ResponseFormat,
 };
 
 #[tokio::test]
@@ -193,6 +193,71 @@ async fn non_copilot_openai_chat_provider_is_never_overridden() {
         prepared.provider_request.url,
         "https://openrouter.ai/api/v1/chat/completions"
     );
+}
+
+#[tokio::test]
+async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
+    // Live-QA regression: with the session thinking config on, switching to a
+    // model whose catalog capabilities advertise NO reasoning (e.g. an OpenRouter
+    // free coder model) carried `request.reasoning`, and prepare hard-failed with
+    // "unsupported capability: reasoning". Reasoning is a best-effort enhancement:
+    // it must silently DROP for such a model, not break the turn.
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            profile_name: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "Qwen3 Coder (free)".to_string(),
+                request_model: "qwen/qwen3-coder:free".to_string(),
+                billing_model: "qwen/qwen3-coder:free".to_string(),
+                aliases: vec![],
+                description: None,
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    reasoning: false,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+        }],
+    };
+    let client = DefaultLlmClient::from_config(config).unwrap();
+    let mut req = LlmRequest::new("qwen/qwen3-coder:free");
+    req.reasoning = Some(ReasoningConfig::Enabled {
+        budget_tokens: 2048,
+    });
+
+    // Must PREPARE OK (previously errored with UnsupportedCapability { reasoning }).
+    let prepared = client
+        .prepare(&req)
+        .await
+        .expect("reasoning must be dropped, not hard-fail the request");
+    // And the reasoning must not leak onto the wire body.
+    let body = prepared.provider_request.body_json.to_string();
+    assert!(
+        !body.contains("reasoning") && !body.contains("thinking"),
+        "reasoning must be stripped from the wire body: {body}"
+    );
+
+    // Sanity: a genuinely unsupported HARD capability still errors.
+    let mut streamed = LlmRequest::new("qwen/qwen3-coder:free");
+    streamed.reasoning = Some(ReasoningConfig::Enabled {
+        budget_tokens: 2048,
+    });
+    // tools on a tools-capable model + reasoning both fine → still Ok.
+    assert!(client.prepare(&streamed).await.is_ok());
 }
 
 #[test]

@@ -179,6 +179,7 @@ mod tests {
                 provider_id: provider_id.to_string(),
                 provider_label: provider_id.to_string(),
                 description: None,
+                supports_reasoning: false,
             }
         }
 

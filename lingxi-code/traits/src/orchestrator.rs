@@ -341,6 +341,13 @@ pub struct ModelListing {
     /// label with `paddingLeft={2}` + `color="inactive"`). `None` ⇒ no extra line.
     #[serde(default)]
     pub description: Option<String>,
+    /// Whether this model supports extended thinking / reasoning. Surfaced in the
+    /// `/model` picker so a NON-thinking model is flagged — a session thinking
+    /// budget silently does not apply to it (the surprising case; most models DO
+    /// think). `#[serde(default)]` (`false`) keeps older serialized listings
+    /// deserializing unchanged.
+    #[serde(default)]
+    pub supports_reasoning: bool,
 }
 
 /// Parse a (possibly `profile/model`) text reference against the live model
@@ -482,6 +489,7 @@ mod parse_model_ref_tests {
             provider_id: provider_id.to_string(),
             provider_label: provider_id.to_string(),
             description: None,
+            supports_reasoning: false,
         }
     }
     fn fixture() -> Vec<ModelListing> {
@@ -549,6 +557,7 @@ mod curated_model_tests {
             provider_id: provider_id.to_string(),
             provider_label: provider_id.to_string(),
             description: None,
+            supports_reasoning: false,
         }
     }
 

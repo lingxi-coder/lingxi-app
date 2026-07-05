@@ -3135,6 +3135,14 @@ pub async fn build(
     // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
     // subagent tool pool is unfiltered (byte-identical to before).
     let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
+    // FIX (B-agent-model-inheritance): grab the set-once live-default-model cell
+    // BEFORE boxing, to fill once the orchestrator (which owns the LIVE
+    // `session.model`) exists — same cycle-break as the cells above. Once filled,
+    // a spawn whose request carries no `parent_model_override` (the non-`AgentTool`
+    // spawn paths) resolves `AgentModel::Inherit` against the LIVE session model
+    // (updated by `/model` switches / resume) instead of the boot snapshot below.
+    let subagent_default_model_provider_cell =
+        subagent_spawner_concrete.default_model_provider_handle();
     // Box ONCE as the concrete `Arc<PoolSubagentSpawner>` so it can serve as
     // BOTH the one-shot `SubagentSpawner` and the persistent/resume
     // `StreamingSubagentSpawner` (Phase-1 seam) — the LocalAgent handler needs
@@ -4851,6 +4859,20 @@ pub async fn build(
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+    // FIX (B-agent-model-inheritance): now that the orchestrator exists, wire the
+    // subagent spawner's LIVE default-model source to read the orchestrator's LIVE
+    // `session.model` (the SAME source `build_prompt_context` / `get_status_snapshot`
+    // read — updated by a mid-session `/model` switch or resume), superseding the
+    // boot snapshot `orch_cfg.model` for spawns that carry no `parent_model_override`.
+    // The read happens at spawn time (during tool execution, when the session lock
+    // is free), so a `try_lock` fast path is sufficient; on the rare contended read
+    // it returns `None` and the spawner falls back to its boot snapshot.
+    {
+        let session = orch.session();
+        let _ = subagent_default_model_provider_cell.set(std::sync::Arc::new(move || {
+            session.try_lock().ok().map(|s| s.model.clone())
+        }));
+    }
     // TPM-C (Task 5 step 2): seed the initial model_profile from a
     // profile-qualified default_model.  SessionState::empty starts model_profile
     // at None; this is a no-op when default_model is a bare id.

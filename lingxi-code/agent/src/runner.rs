@@ -1090,6 +1090,15 @@ async fn run_subagent_loop(
                         // nested `Agent` call computes the grandchild's depth (`depth+1`)
                         // and the resolver gates `Agent` at `depth < 5`.
                         depth: ctx.depth,
+                        // This subagent's OWN resolved main-loop model — so a NESTED
+                        // `Agent` tool call resolves its child's model against THIS
+                        // subagent's model (claude-code `runAgent.ts:678` seeds each
+                        // child's `mainLoopModel: resolvedAgentModel`), read by the
+                        // recursive AgentTool via `ToolUseContext.options.main_loop_model`
+                        // (claude `AgentTool.tsx:418`). The RegistryToolInvoker maps this
+                        // into that field; the definition's model is already the concrete
+                        // Explicit id resolved at spawn time.
+                        parent_model: Some(resolve_model(&ctx)),
                     };
                     match invoker.invoke(name, input.clone(), inv_ctx).await {
                         Ok(value) => {

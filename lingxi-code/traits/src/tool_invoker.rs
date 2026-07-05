@@ -73,6 +73,15 @@ pub struct SubagentInvocationContext {
     /// subagent tool-resolver can gate `Agent` at `depth < 5`. `0` for the main
     /// thread / a top-level dispatch (and every legacy/test call site).
     pub depth: u32,
+    /// The DISPATCHING subagent's OWN resolved main-loop model (claude-code
+    /// `runAgent.ts:678` seeds each child's `mainLoopModel: resolvedAgentModel`,
+    /// so a NESTED `Agent` call inside a subagent resolves its child's model
+    /// against the IMMEDIATE parent's resolved model, not the top-level main-loop
+    /// model). The dispatch invoker maps it into `ToolUseContext.options.main_loop_model`
+    /// so a recursive `Agent` tool call reads the parent's model (claude
+    /// `AgentTool.tsx:418` `toolUseContext.options.mainLoopModel`). `None` for the
+    /// main thread / legacy call sites (⇒ the invoker keeps its placeholder model).
+    pub parent_model: Option<String>,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

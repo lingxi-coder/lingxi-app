@@ -361,6 +361,29 @@ fn normalize_description_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The parent / main-loop model a spawn's `AgentModel::Inherit` + bare family
+/// aliases resolve against — claude-code `AgentTool.tsx:418`
+/// `getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, …)`.
+///
+/// At the top level `ToolUseContext.options.main_loop_model` is the LIVE session
+/// model (the orchestrator sets it from `session.model`, updated by `/model`
+/// switches / resume), so a mid-session model change is reflected in subsequently
+/// spawned subagents. On a NESTED spawn the `RegistryToolInvoker` seeds it from
+/// the dispatching subagent's own resolved model (claude `runAgent.ts:678`
+/// `mainLoopModel: resolvedAgentModel`), so a child inherits its IMMEDIATE
+/// parent's model. Threaded onto `SubagentSpawnRequest.parent_model_override`,
+/// where it takes precedence over the spawner's boot/live `default_model`. An
+/// empty model (the invoker's legacy placeholder / an unset context) yields
+/// `None`, leaving the spawner to fall back to its own default.
+fn main_loop_model_parent(ctx: &ToolUseContext) -> Option<String> {
+    let model = ctx.options.main_loop_model.trim();
+    if model.is_empty() || model == "subagent" {
+        None
+    } else {
+        Some(model.to_string())
+    }
+}
+
 impl AgentTool {
     /// Construct.
     #[must_use]
@@ -871,6 +894,10 @@ Reach for this when the task matches an available agent type, when you have inde
             // z6(parentContext) + 1`). The spawner stamps it onto the child's
             // SubagentContext; the resolver gates the child's `Agent` at depth<5.
             depth: ctx.depth + 1,
+            // Parent / main-loop model for this child's `Inherit` + family aliases
+            // (claude `getAgentModel(…, toolUseContext.options.mainLoopModel, …)`,
+            // AgentTool.tsx:418) — see the sync spawn path for the full note.
+            parent_model_override: main_loop_model_parent(ctx),
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -1645,6 +1672,15 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // z6(parentContext) + 1`). The spawner stamps it onto the child's
             // SubagentContext; the resolver gates the child's `Agent` at depth<5.
             depth: ctx.depth + 1,
+            // The parent / main-loop model this child's `Inherit` + family aliases
+            // resolve against (claude `getAgentModel(selectedAgent.model,
+            // toolUseContext.options.mainLoopModel, …)`, AgentTool.tsx:418): the
+            // LIVE session model at the top level (a mid-session `/model` switch is
+            // reflected), or the IMMEDIATE parent subagent's resolved model on a
+            // nested spawn (the RegistryToolInvoker seeds `main_loop_model` from the
+            // dispatching runner's own model, mirroring runAgent.ts:678). When set
+            // it takes precedence over the spawner's boot/live `default_model`.
+            parent_model_override: main_loop_model_parent(&ctx),
         };
 
         // Nested-progress bridge: `spawn_with_progress` feeds one String line per

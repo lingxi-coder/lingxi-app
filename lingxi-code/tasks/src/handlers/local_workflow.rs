@@ -437,6 +437,8 @@ fn make_request(
         system_prompt_addendum,
         additional_disallowed_tools,
         depth: 0,
+        // Workflow-spawned agents are top-level ⇒ the spawner's default anchors.
+        parent_model_override: None,
     }
 }
 

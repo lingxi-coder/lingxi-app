@@ -87,11 +87,27 @@ pub struct PoolSubagentSpawner {
     /// Parent / main-loop model used as the `AgentModel::Inherit` target and the
     /// tier-match anchor when resolving a spawn's model preference to a concrete
     /// wire id (see [`crate::model_resolution::resolve_agent_model`]). Set at
-    /// boot from `cfg.model` (a snapshot — a mid-session `/model` switch is not
-    /// reflected; documented in `model_resolution`). `None` (the default /
-    /// tests) leaves the definition's model string RAW (legacy behavior: the
-    /// runner's `resolve_model` emits `Inherit`→`"inherit"` / the bare alias).
+    /// boot from `cfg.model` (a BOOT snapshot). This is only the FALLBACK now: a
+    /// per-spawn [`SubagentSpawnRequest::parent_model_override`] (the LIVE session
+    /// model / immediate parent model threaded by `AgentTool`) wins over it, and
+    /// [`Self::default_model_provider`] — when wired — supersedes this snapshot
+    /// with the LIVE session model for non-`AgentTool` spawn paths. `None` (the
+    /// default / tests, with no provider wired) leaves the definition's model
+    /// string RAW (legacy behavior: the runner's `resolve_model` emits
+    /// `Inherit`→`"inherit"` / the bare alias).
     default_model: Option<String>,
+    /// Optional LIVE source for the default parent / main-loop model, superseding
+    /// the boot snapshot [`Self::default_model`] when set. Called at spawn time so
+    /// a mid-session `/model` switch is reflected in a subsequently-spawned
+    /// subagent whose request carries no `parent_model_override` (the non-`AgentTool`
+    /// spawn paths — dream / local_agent / workflow / background). The composition
+    /// root wires it to read the orchestrator's LIVE `session.model` (the SAME
+    /// source `build_prompt_context` / `get_status_snapshot` read); the `agent`
+    /// crate cannot reach the orchestrator (dep cycle), so it is a plain closure
+    /// filled via [`Self::default_model_provider_handle`] after the orchestrator
+    /// exists. A SET-ONCE cell mirroring [`Self::tool_registry`]. Unfilled (the
+    /// default / tests) ⇒ [`Self::default_model`] stands (byte-identical legacy).
+    default_model_provider: Arc<std::sync::OnceLock<DefaultModelProvider>>,
     /// Live/boot permission-mode anchor threaded into
     /// [`crate::model_resolution::resolve_agent_model`] so an `AgentModel::Inherit`
     /// spawn gets the plan-mode runtime resolution (`opusplan`→Opus / `haiku`→
@@ -192,6 +208,14 @@ pub struct PoolSubagentSpawner {
 /// root; only the resolved model id varies per spawn.
 pub type SubagentEnvRenderer = Arc<dyn Fn(&str, Option<&std::path::Path>) -> String + Send + Sync>;
 
+/// Reads the LIVE default parent / main-loop model at spawn time (claude-code
+/// `getMainLoopModel()` off the current session). Returns `None` when the live
+/// source is momentarily unavailable (e.g. the session lock is contended), in
+/// which case the spawner falls back to its boot snapshot
+/// [`PoolSubagentSpawner::default_model`]. Wired at the composition root; see
+/// [`PoolSubagentSpawner::default_model_provider`].
+pub type DefaultModelProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 impl PoolSubagentSpawner {
     /// Construct an adapter wrapping `pool` with no API client (legacy stub
     /// runner). Use [`Self::with_api_client`] to enable the real multi-turn
@@ -209,6 +233,7 @@ impl PoolSubagentSpawner {
             builtins: Arc::new(builtins),
             agent_catalog: Arc::new(std::sync::OnceLock::new()),
             default_model: None,
+            default_model_provider: Arc::new(std::sync::OnceLock::new()),
             permission_mode: PermissionMode::Default,
             model_setting: None,
             session_provider_first_party: true,
@@ -268,6 +293,58 @@ impl PoolSubagentSpawner {
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
         self
+    }
+
+    /// Return a clone of the set-once default-model-provider cell so the host can
+    /// fill it AFTER the orchestrator (which owns the live session model) exists —
+    /// the same cycle-break as [`Self::tool_registry_handle`] (the spawner is
+    /// boxed before the orchestrator is built). Once filled, the live source
+    /// supersedes the boot snapshot [`Self::default_model`] for spawns whose
+    /// request carries no `parent_model_override`. First fill wins.
+    #[must_use]
+    pub fn default_model_provider_handle(&self) -> Arc<std::sync::OnceLock<DefaultModelProvider>> {
+        self.default_model_provider.clone()
+    }
+
+    /// Builder: set the live default-model provider immediately (tests). The boot
+    /// path uses [`Self::default_model_provider_handle`] to fill it later (the
+    /// orchestrator that owns the live model does not exist at construction).
+    #[must_use]
+    pub fn with_default_model_provider(self, provider: DefaultModelProvider) -> Self {
+        let _ = self.default_model_provider.set(provider);
+        self
+    }
+
+    /// The effective default parent / main-loop model at spawn time: the LIVE
+    /// source ([`Self::default_model_provider`]) when wired and returning a
+    /// non-empty value, else the boot snapshot [`Self::default_model`]. This is
+    /// the anchor for `AgentModel::Inherit` + family-alias resolution when a spawn
+    /// request carries no `parent_model_override` (claude-code `getMainLoopModel()`).
+    fn resolved_default_model(&self) -> Option<String> {
+        if let Some(provider) = self.default_model_provider.get() {
+            if let Some(model) = provider() {
+                if !model.is_empty() {
+                    return Some(model);
+                }
+            }
+        }
+        self.default_model.clone()
+    }
+
+    /// The parent / main-loop model this spawn resolves `AgentModel::Inherit` +
+    /// bare family aliases against: the request's `parent_model_override` (the
+    /// LIVE session model / immediate parent model threaded by `AgentTool`,
+    /// claude-code `AgentTool.tsx:418`) when present and non-empty, else the
+    /// spawner's own [`Self::resolved_default_model`] (boot/live fallback for the
+    /// non-`AgentTool` spawn paths).
+    fn effective_parent_model(&self, request: &SubagentSpawnRequest) -> Option<String> {
+        request
+            .parent_model_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.resolved_default_model())
     }
 
     /// Builder: set the live/boot permission-mode anchor threaded into
@@ -418,13 +495,26 @@ impl PoolSubagentSpawner {
     ///
     /// First looks the definition up by precedence (see [`Self::lookup_definition`]),
     /// then resolves its [`AgentModel`] to a concrete wire model id via
-    /// [`crate::model_resolution::resolve_agent_model`] (when a `default_model`
-    /// is wired): `Inherit`→parent model; a bare family alias→the parent's exact
-    /// id when same-tier, else the family's concrete default id. Without
-    /// `default_model` the model string is left RAW (legacy behavior).
-    async fn resolve_definition(&self, subagent_type: &str) -> AgentDefinition {
+    /// [`crate::model_resolution::resolve_agent_model`] (when a `parent_model`
+    /// is supplied): `Inherit`→parent model; a bare family alias→the parent's exact
+    /// id when same-tier, else the family's concrete default id. Without a
+    /// `parent_model` the model string is left RAW (legacy behavior). The caller
+    /// computes `parent_model` via [`Self::effective_parent_model`] (the request's
+    /// `parent_model_override` — the LIVE / immediate-parent model — else the
+    /// spawner's boot/live default).
+    async fn resolve_definition(
+        &self,
+        subagent_type: &str,
+        parent_model: Option<&str>,
+    ) -> AgentDefinition {
         let mut def = self.lookup_definition(subagent_type).await;
-        if let Some(parent_model) = &self.default_model {
+        // An explicit `parent_model` (the request override) wins; otherwise fall
+        // back to the spawner's own live/boot default. `None` on BOTH ⇒ the model
+        // string is left RAW (legacy: the runner emits `Inherit`→`"inherit"`).
+        let parent = parent_model
+            .map(str::to_string)
+            .or_else(|| self.resolved_default_model());
+        if let Some(parent_model) = parent.as_deref() {
             // 2.1.198 `GAe`: the built-in Explore definition's model is derived
             // from the SESSION model (inherit, capped at "opus" for
             // fable/mythos-class firstParty sessions) BEFORE the normal
@@ -545,14 +635,20 @@ impl PoolSubagentSpawner {
         // Delegate to the shared resolver (single source of truth, also used by
         // the in-process teammate handler). The tool-wide deny names come from the
         // boot policy via the set-once cell (UNFILLED / EMPTY ⇒ no tools dropped,
-        // regression-safe); the resolved model anchors the model-gated tool prompt.
+        // regression-safe). The `default_model` only anchors the model-gated tool
+        // prompt for an `AgentModel::Inherit` def; on the production spawn path the
+        // def's model is already resolved to `Explicit` (so the param is inert
+        // there), hence the LIVE default (provider else boot snapshot) is a
+        // faithful anchor for the direct-call / Inherit case without needing the
+        // per-request override threaded here.
         let empty: Vec<String> = Vec::new();
         let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
+        let default_model = self.resolved_default_model();
         crate::tool_resolver::resolve_subagent_tools(
             registry,
             agent_def,
             denied,
-            self.default_model.as_deref(),
+            default_model.as_deref(),
             depth,
         )
         .await
@@ -726,7 +822,16 @@ impl PoolSubagentSpawner {
         inherit: SubagentInheritance,
         persistent: bool,
     ) -> SubagentContext {
-        let mut def = self.resolve_definition(&request.subagent_type).await;
+        // The parent / main-loop model this spawn resolves against: the request's
+        // `parent_model_override` (the LIVE session model at top level / the
+        // immediate parent subagent's resolved model when nested — threaded by
+        // `AgentTool`, claude `AgentTool.tsx:418`) else the spawner's boot/live
+        // default. Computed ONCE and threaded into definition + model-override +
+        // tool resolution so all three agree on the same anchor.
+        let parent_model = self.effective_parent_model(request);
+        let mut def = self
+            .resolve_definition(&request.subagent_type, parent_model.as_deref())
+            .await;
         // Per-spawn system-prompt override (workflow xBp / DBp): replace the
         // resolved definition's body with the caller's override BEFORE the Notes
         // trailer is appended by `make_subagent_context`.
@@ -760,7 +865,7 @@ impl PoolSubagentSpawner {
                 def.model = AgentModel::Explicit(model_pref.to_string());
             } else {
                 let requested = AgentModel::Alias(model_pref.to_string());
-                def.model = match &self.default_model {
+                def.model = match parent_model.as_deref() {
                     Some(parent) => {
                         AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
                             &requested,
@@ -1203,7 +1308,14 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // takes precedence over the definition's model frontmatter. Resolve to a
         // concrete id when a parent/main-loop model is wired; without one the
         // resolved id is left empty (no default to anchor against).
-        let resolved_model = match &self.default_model {
+        // Use the LIVE default (provider else boot snapshot) so the
+        // `tengu_agent_tool_selected` metadata reports the model a top-level spawn
+        // will actually resolve to after a mid-session `/model` switch. (The
+        // per-spawn `parent_model_override` is not available at this pre-spawn
+        // selection seam — a nested selection's telemetry therefore reports the
+        // top-level model, a minor telemetry-only nuance; the SPAWN itself uses the
+        // correct immediate-parent model via `build_subagent_context`.)
+        let resolved_model = match self.resolved_default_model() {
             Some(parent) => {
                 let pref = match model {
                     Some(m) => AgentModel::Alias(m.to_string()),
@@ -1213,13 +1325,13 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     // the spawn will actually use.
                     None => crate::model_resolution::resolve_builtin_explore_model(
                         &def,
-                        parent,
+                        &parent,
                         self.session_provider_first_party,
                     ),
                 };
                 crate::model_resolution::resolve_agent_model(
                     &pref,
-                    parent,
+                    &parent,
                     self.permission_mode,
                     self.model_setting.as_deref(),
                 )
@@ -1853,7 +1965,7 @@ mod tests {
         // `inherit` (2.1.198 `qme` frontmatter; the session cap is applied by
         // GAe on the resolved path), a real system prompt, and the high
         // built-in turn cap (not the old 1).
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("Explore", None).await;
         assert_eq!(def.agent_type, "Explore");
         assert!(matches!(def.tools, AgentToolPolicy::Except(_)));
         assert!(matches!(&def.model, AgentModel::Inherit));
@@ -1866,7 +1978,7 @@ mod tests {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
-        let def = spawner.resolve_definition("no-such-agent").await;
+        let def = spawner.resolve_definition("no-such-agent", None).await;
         assert_eq!(def.agent_type, "general-purpose");
         assert!(matches!(def.tools, AgentToolPolicy::All { .. }));
     }
@@ -1884,7 +1996,7 @@ mod tests {
         };
         let catalog = Arc::new(RwLock::new(vec![custom]));
         let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("Explore", None).await;
         assert_eq!(def.agent_type, "Explore");
         // The catalog one (Explicit[Read]) wins over the built-in (Except[…]).
         assert!(matches!(def.tools, AgentToolPolicy::Explicit(_)));
@@ -1900,7 +2012,7 @@ mod tests {
         // general-purpose is AgentModel::Inherit; with a default model wired it
         // resolves to that concrete parent model id.
         let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
-        let def = spawner.resolve_definition("general-purpose").await;
+        let def = spawner.resolve_definition("general-purpose", None).await;
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
     }
 
@@ -1911,7 +2023,7 @@ mod tests {
         // claude-code-guide is Alias("haiku"); parent is opus (different tier)
         // → resolves to haiku's concrete default id, NOT the parent.
         let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
-        let def = spawner.resolve_definition("claude-code-guide").await;
+        let def = spawner.resolve_definition("claude-code-guide", None).await;
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
     }
 
@@ -1924,7 +2036,7 @@ mod tests {
         // A haiku/sonnet/opus-named session model → GAe "inherit" → the parent
         // model verbatim (NOT the old haiku alias resolution).
         let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("Explore", None).await;
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
     }
 
@@ -1935,7 +2047,7 @@ mod tests {
         // A fable/mythos-class session model (names none of haiku/sonnet/opus)
         // on firstParty → GAe "opus" → the opus family default id.
         let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-fable-5");
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("Explore", None).await;
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-opus-4-8"));
     }
 
@@ -1950,7 +2062,7 @@ mod tests {
         let spawner = PoolSubagentSpawner::new(pool)
             .with_default_model("gpt-4o")
             .with_session_provider_first_party(false);
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("Explore", None).await;
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "gpt-4o"));
     }
 
@@ -1971,7 +2083,7 @@ mod tests {
         let spawner = PoolSubagentSpawner::new(pool)
             .with_agent_catalog(catalog)
             .with_default_model("claude-fable-5");
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("Explore", None).await;
         // haiku alias, parent fable (no tier match) → the haiku default id —
         // NOT the opus cap.
         assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
@@ -1984,8 +2096,181 @@ mod tests {
         // No default model wired (legacy/tests): the alias is NOT resolved — the
         // runner's resolve_model then emits it raw (back-compat).
         let spawner = PoolSubagentSpawner::new(pool);
-        let def = spawner.resolve_definition("claude-code-guide").await;
+        let def = spawner.resolve_definition("claude-code-guide", None).await;
         assert!(matches!(&def.model, AgentModel::Alias(m) if m == "haiku"));
+    }
+
+    // ── FIX (B-agent-model-inheritance): live /model switch + nested parent ──
+
+    #[tokio::test]
+    async fn live_default_model_provider_supersedes_boot_snapshot() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A boot snapshot AND a live provider: the live provider wins.
+        let live = Arc::new(std::sync::Mutex::new("claude-sonnet-5".to_string()));
+        let live_read = live.clone();
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("claude-opus-4-7")
+            .with_default_model_provider(Arc::new(move || {
+                Some(live_read.lock().unwrap().clone())
+            }));
+        assert_eq!(
+            spawner.resolved_default_model().as_deref(),
+            Some("claude-sonnet-5"),
+            "live provider supersedes the boot snapshot"
+        );
+        // An `Inherit` spawn resolves to the LIVE model, not the boot snapshot.
+        let def = spawner.resolve_definition("general-purpose", None).await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"));
+    }
+
+    #[tokio::test]
+    async fn inherit_spawn_reflects_mid_session_model_switch() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // Simulate the orchestrator's live session model behind a provider.
+        let live = Arc::new(std::sync::Mutex::new("claude-opus-4-7".to_string()));
+        let live_read = live.clone();
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model_provider(Arc::new(
+            move || Some(live_read.lock().unwrap().clone()),
+        ));
+        // Before a /model switch: Inherit resolves to the current live model.
+        let before = spawner.resolve_definition("general-purpose", None).await;
+        assert!(matches!(&before.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
+        // /model switch → the live source returns the NEW model …
+        *live.lock().unwrap() = "claude-sonnet-5".to_string();
+        assert_eq!(
+            spawner.resolved_default_model().as_deref(),
+            Some("claude-sonnet-5")
+        );
+        // … and a subsequently-spawned Inherit subagent picks it up.
+        let after = spawner.resolve_definition("general-purpose", None).await;
+        assert!(matches!(&after.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"));
+    }
+
+    #[tokio::test]
+    async fn empty_live_provider_reading_falls_back_to_boot_snapshot() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A provider that is momentarily unavailable (returns None) → the boot
+        // snapshot stands (mirrors a contended `try_lock` at the composition root).
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("claude-opus-4-7")
+            .with_default_model_provider(Arc::new(|| None));
+        assert_eq!(
+            spawner.resolved_default_model().as_deref(),
+            Some("claude-opus-4-7")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_parent_override_wins_over_default() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A nested spawn: `AgentTool` threads the IMMEDIATE parent subagent's
+        // resolved model as the explicit `parent_model`, which must win over the
+        // spawner's top-level default (claude runAgent.ts:678).
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
+        // general-purpose is Inherit → resolves to the OVERRIDE, not the default.
+        let def = spawner
+            .resolve_definition("general-purpose", Some("claude-sonnet-5"))
+            .await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"));
+    }
+
+    #[tokio::test]
+    async fn build_subagent_context_inherit_resolves_to_parent_model_override() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // Full spawn path: a request carrying `parent_model_override` (the LIVE /
+        // immediate-parent model `AgentTool` threads from
+        // `ToolUseContext.options.main_loop_model`) resolves the child's
+        // `AgentModel::Inherit` against THAT model, not the boot default.
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: false,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 1,
+            parent_model_override: Some("claude-sonnet-5".to_string()),
+        };
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+        let ctx = spawner.build_subagent_context(&req, inherit, false).await;
+        assert!(
+            matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"),
+            "nested spawn inherits its immediate parent's resolved model, got {:?}",
+            ctx.agent_definition.model
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_parent_model_precedence_override_then_live_then_boot() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model("boot-model")
+            .with_default_model_provider(Arc::new(|| Some("live-model".to_string())));
+        let mut req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: String::new(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: false,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: Some("override-model".to_string()),
+        };
+        // Override present → override wins.
+        assert_eq!(
+            spawner.effective_parent_model(&req).as_deref(),
+            Some("override-model")
+        );
+        // Override absent → the LIVE provider wins over the boot snapshot.
+        req.parent_model_override = None;
+        assert_eq!(
+            spawner.effective_parent_model(&req).as_deref(),
+            Some("live-model")
+        );
+        // An empty override is treated as absent (falls through to the default).
+        req.parent_model_override = Some("   ".to_string());
+        assert_eq!(
+            spawner.effective_parent_model(&req).as_deref(),
+            Some("live-model")
+        );
     }
 
     #[test]
@@ -2161,7 +2446,7 @@ mod tests {
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool)
             .with_tool_registry(registry_with(&["Read", "Grep", "Edit", "Write"]));
-        let def = spawner.resolve_definition("Explore").await;
+        let def = spawner.resolve_definition("Explore", None).await;
         let (schemas, allowed) = spawner.resolve_tools(&def, 0).await;
         let names: Vec<&str> = schemas
             .iter()
@@ -2292,10 +2577,11 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            parent_model_override: None,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
-        let mut def = spawner.resolve_definition(&req.subagent_type).await;
+        let mut def = spawner.resolve_definition(&req.subagent_type, None).await;
         if let Some(model_pref) = req.model.as_deref() {
             let requested = AgentModel::Alias(model_pref.to_string());
             def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
@@ -2395,6 +2681,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            parent_model_override: None,
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -2468,6 +2755,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            parent_model_override: None,
         };
 
         // Non-fork: env block appended after the body, joined by a blank line,
@@ -2659,6 +2947,7 @@ mod tests {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
+            parent_model_override: None,
         };
         let err = spawner
             .spawn_async(

@@ -548,6 +548,64 @@ mod tests {
         );
     }
 
+    // FIX (B-agent-model-inheritance): the AgentTool threads
+    // `ToolUseContext.options.main_loop_model` (claude `AgentTool.tsx:418`
+    // `toolUseContext.options.mainLoopModel`) onto the spawn request's
+    // `parent_model_override`, so a top-level spawn resolves against the LIVE
+    // session model and a nested spawn against the immediate parent's model.
+    #[tokio::test]
+    async fn agent_tool_threads_main_loop_model_as_parent_override() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.main_loop_model = "claude-sonnet-5".to_string();
+        let input = serde_json::json!({ "description": "do it", "prompt": "go" });
+        tool.call(input, ctx, fresh_tx()).await.expect("spawn ok");
+        let inv = spawner.invocations();
+        assert_eq!(
+            inv[0].request.parent_model_override.as_deref(),
+            Some("claude-sonnet-5"),
+            "the live/parent main_loop_model is threaded as the spawn's parent override"
+        );
+    }
+
+    // The legacy `"subagent"` placeholder (an un-seeded dispatch) is NOT threaded
+    // as a parent override — the spawner then falls back to its own default.
+    #[tokio::test]
+    async fn agent_tool_placeholder_main_loop_model_is_not_threaded() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.main_loop_model = "subagent".to_string();
+        let input = serde_json::json!({ "description": "do it", "prompt": "go" });
+        tool.call(input, ctx, fresh_tx()).await.expect("spawn ok");
+        let inv = spawner.invocations();
+        assert!(
+            inv[0].request.parent_model_override.is_none(),
+            "the placeholder model must not shadow the spawner default"
+        );
+    }
+
     // Serializes the LINGXI_DISABLE_BACKGROUND_TASKS env across the two
     // background tests below (env is process-global).
     static BG_DISABLE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

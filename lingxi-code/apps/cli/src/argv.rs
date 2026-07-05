@@ -45,8 +45,7 @@ pub struct Argv {
     pub command: Option<crate::commands::Commands>,
 
     /// The user prompt for this one-shot conversation
-    ///
-    /// When absent (and `--resume` is not set), enters REPL mode (M5-13).
+    // When absent (and `--resume` is not set), enters REPL mode (M5-13).
     pub prompt: Option<String>,
 
     /// Print mode: exit after first end_turn
@@ -54,28 +53,28 @@ pub struct Argv {
     pub print: bool,
 
     /// Resume a previous session by UUID (or interactive picker if absent)
-    ///
-    /// claude-code: `-r, --resume [value]` — "Resume a conversation by session
-    /// ID, or open interactive picker with optional search term" (`main.tsx:988`).
-    /// The value is OPTIONAL (`[value]`): `-r`/`--resume` with no argument yields
-    /// the empty-string picker sentinel; with an argument it carries the id /
-    /// search term. (The user-facing help first line is byte-locked by plan
-    /// M5-12 / `cli_help.rs`, so it is kept as the original wording above.)
+    //
+    // claude-code: `-r, --resume [value]` — "Resume a conversation by session
+    // ID, or open interactive picker with optional search term" (`main.tsx:988`).
+    // The value is OPTIONAL (`[value]`): `-r`/`--resume` with no argument yields
+    // the empty-string picker sentinel; with an argument it carries the id /
+    // search term. (The user-facing help first line is byte-locked by plan
+    // M5-12 / `cli_help.rs`, so it is kept as the original wording above.)
     #[arg(short = 'r', long = "resume", value_name = "ID", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
     /// Continue the most recent conversation in the current directory
-    ///
-    /// claude-code: `-c, --continue` (`main.tsx:988`). FLAG PARSE ONLY here — the
-    /// continue runtime (load-most-recent-in-cwd) is wired by the CLI entrypoint
-    /// (`lib.rs` / `run.rs`), not this struct.
+    //
+    // claude-code: `-c, --continue` (`main.tsx:988`). FLAG PARSE ONLY here — the
+    // continue runtime (load-most-recent-in-cwd) is wired by the CLI entrypoint
+    // (`lib.rs` / `run.rs`), not this struct.
     #[arg(short = 'c', long = "continue")]
     pub continue_session: bool,
 
     /// When resuming, create a new session ID instead of reusing the original (use with --resume or --continue)
-    ///
-    /// claude-code: `--fork-session` (`main.tsx:988`). FLAG PARSE ONLY here — the
-    /// fork runtime (mint a fresh session id on resume) is wired downstream.
+    //
+    // claude-code: `--fork-session` (`main.tsx:988`). FLAG PARSE ONLY here — the
+    // fork runtime (mint a fresh session id on resume) is wired downstream.
     #[arg(long = "fork-session")]
     pub fork_session: bool,
 
@@ -84,15 +83,15 @@ pub struct Argv {
     pub model: Option<String>,
 
     /// Enable automatic fallback to specified model when default model is overloaded (only works with --print)
-    ///
-    /// Maps to `OrchestratorConfig::fallback_model`. claude-code accepts this
-    /// flag unconditionally but only HONORS it in `--print`/non-interactive mode
-    /// (`main.tsx:1000` documents "only works with --print"; it is consumed only
-    /// on the print/query path). We mirror that SOFT restriction: parse it always
-    /// (no parse-time `requires` error, matching claude-code), and the honoring is
-    /// gated to print mode by the consumer. When the primary model hits the
-    /// consecutive-529 Opus gate, the turn loop switches to this model
-    /// (`query.ts:894-948`).
+    //
+    // Maps to `OrchestratorConfig::fallback_model`. claude-code accepts this
+    // flag unconditionally but only HONORS it in `--print`/non-interactive mode
+    // (`main.tsx:1000` documents "only works with --print"; it is consumed only
+    // on the print/query path). We mirror that SOFT restriction: parse it always
+    // (no parse-time `requires` error, matching claude-code), and the honoring is
+    // gated to print mode by the consumer. When the primary model hits the
+    // consecutive-529 Opus gate, the turn loop switches to this model
+    // (`query.ts:894-948`).
     #[arg(long = "fallback-model", value_name = "MODEL")]
     pub fallback_model: Option<String>,
 
@@ -105,10 +104,10 @@ pub struct Argv {
     #[arg(long = "max-turns", value_name = "turns", hide = true)]
     pub max_turns: Option<u32>,
 
-    /// Maximum dollar amount to spend on API calls (claude-code
-    /// `--max-budget-usd <amount>`, "only works with --print"). Maps to
-    /// `OrchestratorConfig::max_budget_nano_usd` (× 1e9); unset = no cap. Must be
-    /// a positive number greater than 0 (parity with claude-code's arg parser).
+    /// Maximum dollar amount to spend on API calls (only works with --print).
+    /// Must be a positive number greater than 0.
+    // Maps to `OrchestratorConfig::max_budget_nano_usd` (× 1e9); unset = no cap.
+    // Parity with claude-code's arg parser.
     #[arg(long = "max-budget-usd", value_name = "amount", value_parser = parse_positive_budget_usd)]
     pub max_budget_usd: Option<f64>,
 
@@ -121,10 +120,10 @@ pub struct Argv {
     pub no_stream: bool,
 
     /// Emit machine-readable NDJSON to stdout (one event per line)
-    ///
-    /// LingXi-specific alias for `--output-format json`. The binary equivalent is
-    /// `--output-format json`; `--json` keeps backward compatibility with callers
-    /// that used the LingXi-specific flag before `--output-format` was added.
+    //
+    // LingXi-specific alias for `--output-format json`. The binary equivalent is
+    // `--output-format json`; `--json` keeps backward compatibility with callers
+    // that used the LingXi-specific flag before `--output-format` was added.
     #[arg(long = "json")]
     pub json: bool,
 
@@ -132,19 +131,19 @@ pub struct Argv {
     ///
     /// `text` = plain stdout (default). `json` = same as `--json` (NDJSON per event).
     /// `stream-json` = realtime bidirectional NDJSON I/O protocol (SDK consumers).
-    ///
-    /// NOTE(stream-json): the full bidirectional stream-json I/O subsystem is not
-    /// yet implemented. Parsing succeeds but `stream-json` behaves like `text`
-    /// until the realtime NDJSON I/O subsystem is wired.
+    //
+    // NOTE(stream-json): the full bidirectional stream-json I/O subsystem is not
+    // yet implemented. Parsing succeeds but `stream-json` behaves like `text`
+    // until the realtime NDJSON I/O subsystem is wired.
     // TODO(stream-json): realtime NDJSON I/O subsystem
     #[arg(long = "output-format", value_name = "format", value_parser = ["text", "json", "stream-json"])]
     pub output_format: Option<String>,
 
     /// Input format (only works with --print): "text" (default), or "stream-json" (realtime streaming input)
-    ///
-    /// NOTE(stream-json): the full bidirectional stream-json input subsystem is not
-    /// yet implemented. Parsing succeeds but `stream-json` behaves like `text`
-    /// until the realtime NDJSON I/O subsystem is wired.
+    //
+    // NOTE(stream-json): the full bidirectional stream-json input subsystem is not
+    // yet implemented. Parsing succeeds but `stream-json` behaves like `text`
+    // until the realtime NDJSON I/O subsystem is wired.
     // TODO(stream-json): realtime NDJSON I/O subsystem
     #[arg(long = "input-format", value_name = "format", value_parser = ["text", "stream-json"])]
     pub input_format: Option<String>,
@@ -188,10 +187,10 @@ pub struct Argv {
     pub tools: Option<Vec<String>>,
 
     /// Additional directories to allow tool access to
-    ///
-    /// claude-code `--add-dir <directories...>`. Unioned into the permission
-    /// policy's working-directory set (like `permissions.additionalDirectories`)
-    /// so file tools (Read/Edit/Bash) may operate outside `cwd`.
+    //
+    // claude-code `--add-dir <directories...>`. Unioned into the permission
+    // policy's working-directory set (like `permissions.additionalDirectories`)
+    // so file tools (Read/Edit/Bash) may operate outside `cwd`.
     #[arg(long = "add-dir", value_name = "directories", num_args = 1..)]
     pub add_dir: Option<Vec<PathBuf>>,
 
@@ -208,91 +207,94 @@ pub struct Argv {
     #[arg(long = "verbose")]
     pub verbose: bool,
 
-    /// Minimal mode: skip hooks, LSP, plugin sync...Sets LINGXI_SIMPLE=1
-    ///
-    /// (M3 cc2.1.198) WIRED: `run_cli` exports `LINGXI_SIMPLE=1` (binary
-    /// `process.env.CLAUDE_CODE_SIMPLE="1"` on a pre-`--` `--bare` token) and
-    /// threads `CustomizationGates{bare}` through `resolve_desktop_config` into
-    /// `engine_desktop::build` (skips settings hooks, plugins incl. plugin LSP,
-    /// skill/custom-command dirs, custom agents; LINGXI.md unless `--add-dir`).
+    /// Minimal mode: skip hooks, LSP, plugin sync, attribution, auto-memory,
+    /// background prefetches, keychain reads, and LINGXI.md auto-discovery. Sets
+    /// LINGXI_SIMPLE=1. Anthropic auth is strictly ANTHROPIC_API_KEY or
+    /// apiKeyHelper via --settings (OAuth and keychain are never read).
+    //
+    // WIRED: `run_cli` exports `LINGXI_SIMPLE=1` (binary
+    // `process.env.CLAUDE_CODE_SIMPLE="1"` on a pre-`--` `--bare` token) and
+    // threads `CustomizationGates{bare}` through `resolve_desktop_config` into
+    // `engine_desktop::build` (skips settings hooks, plugins incl. plugin LSP,
+    // skill/custom-command dirs, custom agents; LINGXI.md unless `--add-dir`).
     #[arg(long = "bare")]
     pub bare: bool,
 
     /// Start with all customizations disabled — useful for troubleshooting
-    ///
-    /// (M3 cc2.1.198) WIRED: `run_cli` exports `LINGXI_SAFE_MODE=1` +
-    /// `LINGXI_DISABLE_LINGXI_MDS=1` (binary @223917313 `if(Ql())process.env.
-    /// CLAUDE_CODE_SAFE_MODE="1",process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS=
-    /// "1"`) and threads `CustomizationGates{safe_mode}` into `engine_desktop::
-    /// build` (disables settings hooks, plugins, skills/custom commands, custom
-    /// agents, discovered `.mcp.json` servers — `--mcp-config` servers survive,
-    /// binary `fQ`'s `L2()` — and the LINGXI.md hierarchy).
+    //
+    // WIRED: `run_cli` exports `LINGXI_SAFE_MODE=1` +
+    // `LINGXI_DISABLE_LINGXI_MDS=1` (binary @223917313 `if(Ql())process.env.
+    // CLAUDE_CODE_SAFE_MODE="1",process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS=
+    // "1"`) and threads `CustomizationGates{safe_mode}` into `engine_desktop::
+    // build` (disables settings hooks, plugins, skills/custom commands, custom
+    // agents, discovered `.mcp.json` servers — `--mcp-config` servers survive,
+    // binary `fQ`'s `L2()` — and the LINGXI.md hierarchy).
     #[arg(long = "safe-mode")]
     pub safe_mode: bool,
 
     /// JSON object defining custom agents (e.g. '{"reviewer": {"description":
     /// "Reviews code", "prompt": "You are a code reviewer"}}')
-    ///
-    /// claude-code `--agents <json>` takes EXACTLY ONE value (a JSON object
-    /// string parsed downstream), not a space-separated list.
-    ///
-    /// (M4 cc2.1.198) WIRED: threads raw into `DesktopConfig.cli_agents_json`;
-    /// `engine_desktop::build` parses it with the strict flag-record schema
-    /// (`agent::parse_agents_from_flag_json`, the `QXt` @223080769 port —
-    /// invalid JSON/definitions LOG and yield no agents, never abort) and
-    /// merges the result over dir-loaded agents (`flagSettings` precedence).
-    /// Ignored (warn) in safe mode; survives `--bare`.
+    //
+    // claude-code `--agents <json>` takes EXACTLY ONE value (a JSON object
+    // string parsed downstream), not a space-separated list.
+    //
+    // WIRED: threads raw into `DesktopConfig.cli_agents_json`;
+    // `engine_desktop::build` parses it with the strict flag-record schema
+    // (`agent::parse_agents_from_flag_json`, the `QXt` @223080769 port —
+    // invalid JSON/definitions LOG and yield no agents, never abort) and
+    // merges the result over dir-loaded agents (`flagSettings` precedence).
+    // Ignored (warn) in safe mode; survives `--bare`.
     #[arg(long = "agents", value_name = "json")]
     pub agents: Option<String>,
 
     /// Agent for the current session. Overrides the 'agent' setting.
-    ///
-    /// claude-code `--agent <agent>` takes EXACTLY ONE value.
-    ///
-    /// (M4 cc2.1.198) CARRIED: threads into `DesktopConfig.cli_agent`;
-    /// `engine_desktop::build` resolves it against the final agent catalog
-    /// (binary `dts`: exact agentType, else `…:{name}` FQN suffix) and logs
-    /// the byte-matched `Warning: agent "X" not found …` on a miss. RESIDUAL:
-    /// applying the hit (`xz` → `mainThreadAgentType`) needs a main-thread
-    /// agent runtime lingxi does not have yet.
+    //
+    // claude-code `--agent <agent>` takes EXACTLY ONE value.
+    //
+    // CARRIED: threads into `DesktopConfig.cli_agent`;
+    // `engine_desktop::build` resolves it against the final agent catalog
+    // (binary `dts`: exact agentType, else `…:{name}` FQN suffix) and logs
+    // the byte-matched `Warning: agent "X" not found …` on a miss. RESIDUAL:
+    // applying the hit (`xz` → `mainThreadAgentType`) needs a main-thread
+    // agent runtime lingxi does not have yet.
     #[arg(long = "agent", value_name = "agent")]
     pub agent: Option<String>,
 
     /// Load a plugin from a directory or .zip for this session only
     /// (repeatable: --plugin-dir A --plugin-dir B.zip)
-    ///
-    /// (M4 cc2.1.198) WIRED: repeatable (commander `.option(...)` with an
-    /// array default `[]`); each entry threads into
-    /// `DesktopConfig.cli_plugin_dirs` and loads through the inline-plugin
-    /// path (`EBm` port `plugin::discover_cli_plugin_dirs`): missing path =
-    /// warn + skip, `.zip` extracted (guarded) then loaded like a dir, loaded
-    /// plugins enable through the SAME manager path as marketplace installs.
-    /// Survives `--bare` (its help lists `--plugin-dir` as explicit context);
-    /// not safe mode.
+    //
+    // WIRED: repeatable (commander `.option(...)` with an
+    // array default `[]`); each entry threads into
+    // `DesktopConfig.cli_plugin_dirs` and loads through the inline-plugin
+    // path (`EBm` port `plugin::discover_cli_plugin_dirs`): missing path =
+    // warn + skip, `.zip` extracted (guarded) then loaded like a dir, loaded
+    // plugins enable through the SAME manager path as marketplace installs.
+    // Survives `--bare` (its help lists `--plugin-dir` as explicit context);
+    // not safe mode.
     #[arg(long = "plugin-dir", value_name = "path", action = clap::ArgAction::Append)]
     pub plugin_dir: Vec<PathBuf>,
 
     /// Disable session persistence - sessions will not be saved to disk and cannot be resumed (only works with --print)
-    ///
-    /// (M3 cc2.1.198) WIRED: non-print use hard-errors in `run_cli` (binary
-    /// @223929381 `if(a.sessionPersistence===!1&&!We)return Es("Error: --no-
-    /// session-persistence can only be used with --print mode.")`); the
-    /// accepted print case threads `DesktopConfig.session_persistence: false`
-    /// so `engine_desktop::build` wires NO session `JsonlWriter`.
+    //
+    // WIRED: non-print use hard-errors in `run_cli` (binary
+    // @223929381 `if(a.sessionPersistence===!1&&!We)return Es("Error: --no-
+    // session-persistence can only be used with --print mode.")`); the
+    // accepted print case threads `DesktopConfig.session_persistence: false`
+    // so `engine_desktop::build` wires NO session `JsonlWriter`.
     #[arg(long = "no-session-persistence")]
     pub no_session_persistence: bool,
 
     /// Resume a session linked to a PR by PR number/URL, or open interactive picker
-    ///
-    /// (M4 cc2.1.198) WIRED into the resume pickers: the binary hands the
-    /// picker `filterByPr: rt` (bare flag → `!0` = only PR-linked sessions;
-    /// a value is parsed by `wqc` — leading int, else a
-    /// `/(pull|pull-requests|-\/merge_requests)\/(\d+)/` URL — and filters
-    /// `prNumber === n`; an unparseable value applies NO narrowing). lingxi
-    /// routes `--from-pr` through the same `--resume` pickers with that
-    /// filter (`run::run_from_pr`). RESIDUAL: lingxi session metadata carries
-    /// no `prNumber` yet (session JSONL `pr-link` deferral), so a PR filter
-    /// currently matches zero sessions.
+    //
+    // WIRED into the resume pickers: the binary hands the
+    // picker `filterByPr: rt` (bare flag → `!0` = only PR-linked sessions;
+    // a value is parsed by `wqc` — leading int, else a
+    // `/(pull|pull-requests|-\/merge_requests)\/(\d+)/` URL — and filters
+    // `prNumber === n`; an unparseable value applies NO narrowing). lingxi
+    // routes `--from-pr` through the same `--resume` pickers with that
+    // filter (`run::run_from_pr`). RESIDUAL: lingxi session metadata carries
+    // no `prNumber` yet (session JSONL `pr-link` deferral), so a PR filter
+    // currently matches zero sessions.
     // No `require_equals`: commander's `--from-pr [value]` consumes the next
     // SPACE-separated token as the value (`--from-pr 123`), so we must NOT force
     // the `--from-pr=123` form or `123` would be mis-parsed as the prompt.
@@ -300,15 +302,15 @@ pub struct Argv {
     pub from_pr: Option<String>,
 
     /// Effort level for the current session (low, medium, high, xhigh, max)
-    ///
-    /// (M4 cc2.1.198) WIRED: `run_cli` normalizes via [`Argv::normalized_effort`]
-    /// (the binary's `--effort` argParser `u4i` @ the root option table:
-    /// trim+lowercase, alias `med`→`medium`, must be in `UR = ["low","medium",
-    /// "high","xhigh","max"]`; an unknown value writes `Warning: Unknown
-    /// --effort value '<raw>' — ignoring it and using the default effort.
-    /// Valid values: …` to stderr and IGNORES the flag). The valid level
-    /// threads into `DesktopConfig.initial_effort` → the main-loop requests'
-    /// `output_config.effort`.
+    //
+    // WIRED: `run_cli` normalizes via [`Argv::normalized_effort`]
+    // (the binary's `--effort` argParser `u4i` @ the root option table:
+    // trim+lowercase, alias `med`→`medium`, must be in `UR = ["low","medium",
+    // "high","xhigh","max"]`; an unknown value writes `Warning: Unknown
+    // --effort value '<raw>' — ignoring it and using the default effort.
+    // Valid values: …` to stderr and IGNORES the flag). The valid level
+    // threads into `DesktopConfig.initial_effort` → the main-loop requests'
+    // `output_config.effort`.
     #[arg(long = "effort", value_name = "level")]
     pub effort: Option<String>,
 
@@ -353,20 +355,20 @@ pub struct Argv {
 
     /// Enable prompt suggestions. In print/SDK mode, emits a prompt_suggestion
     /// message after each turn with a predicted next user prompt
-    ///
-    /// VISIBLE in claude-code 2.1.191 with a fixed choices list and preset
-    /// "true": bare `--prompt-suggestions` → "true"; an out-of-choices value
-    /// (e.g. "banana") is HARD-REJECTED. The `value_parser` below mirrors that.
-    ///
-    /// (M4 cc2.1.198) VALIDATED: the binary's argParser returns a BOOLEAN
-    /// (`!Hl(i)` — falsy tokens false/0/no/off → false, the rest true), and a
-    /// TRUTHY value outside `--print` + `--output-format=stream-json` is a
-    /// fatal `Es(...)` (see [`Argv::validate_prompt_suggestions_args`],
-    /// enforced in `run_cli`; verified live: exit 1). RESIDUAL: the actual
-    /// per-turn `prompt_suggestion` stream-json message needs the
-    /// binary's post-turn prediction side-call (`prompt_suggestion_generate`),
-    /// which lingxi's print pipeline does not have — accepted flag is carried
-    /// but no suggestion messages are emitted yet.
+    //
+    // VISIBLE in claude-code 2.1.191 with a fixed choices list and preset
+    // "true": bare `--prompt-suggestions` → "true"; an out-of-choices value
+    // (e.g. "banana") is HARD-REJECTED. The `value_parser` below mirrors that.
+    //
+    // VALIDATED: the binary's argParser returns a BOOLEAN
+    // (`!Hl(i)` — falsy tokens false/0/no/off → false, the rest true), and a
+    // TRUTHY value outside `--print` + `--output-format=stream-json` is a
+    // fatal `Es(...)` (see [`Argv::validate_prompt_suggestions_args`],
+    // enforced in `run_cli`; verified live: exit 1). RESIDUAL: the actual
+    // per-turn `prompt_suggestion` stream-json message needs the
+    // binary's post-turn prediction side-call (`prompt_suggestion_generate`),
+    // which lingxi's print pipeline does not have — accepted flag is carried
+    // but no suggestion messages are emitted yet.
     #[arg(
         long = "prompt-suggestions",
         value_name = "value",
@@ -377,28 +379,28 @@ pub struct Argv {
     pub prompt_suggestions: Option<String>,
 
     /// Validate the final result against this JSON Schema, forcing structured
-    /// output (claude-code `--json-schema <schema>`; only works with `--print`).
-    /// The model is compelled to call a `StructuredOutput` tool whose schema is
-    /// this; the result is validated and retried up to
-    /// `MAX_STRUCTURED_OUTPUT_RETRIES` times. Pass a JSON Schema as a string.
+    /// output (only works with `--print`). The model is compelled to call a
+    /// `StructuredOutput` tool whose schema is this; the result is validated and
+    /// retried up to `MAX_STRUCTURED_OUTPUT_RETRIES` times. Pass a JSON Schema as
+    /// a string.
     #[arg(long = "json-schema", value_name = "schema")]
     pub json_schema: Option<String>,
 
     /// Enable verbose logging to stderr (debug mode) with optional category
     /// filtering (e.g. "api,hooks" or "!1p,!file")
-    ///
-    /// claude-code: `-d, --debug [filter]`. The value is OPTIONAL: bare `-d` /
-    /// `--debug` enables debug mode unfiltered (empty sentinel); `--debug
-    /// api,hooks` carries the category filter. Stored as `Option<String>`:
-    /// `None` = off, `Some("")` = on/unfiltered, `Some(filter)` = on/filtered.
-    /// `debug_enabled()` collapses it back to the old bool for callers that
-    /// only need on/off (e.g. `logging::init`).
-    /// No `require_equals`: commander's `-d, --debug [filter]` consumes the next
-    /// SPACE-separated token as the optional filter (`--debug api,hooks`), and a
-    /// bare `--debug` before a subcommand-name token binds that token as the
-    /// filter exactly as the real binary does (it does NOT route to the
-    /// subcommand and does NOT start a billable turn — the leading `command`
-    /// subcommand resolution only triggers when the FIRST token is the command).
+    //
+    // claude-code: `-d, --debug [filter]`. The value is OPTIONAL: bare `-d` /
+    // `--debug` enables debug mode unfiltered (empty sentinel); `--debug
+    // api,hooks` carries the category filter. Stored as `Option<String>`:
+    // `None` = off, `Some("")` = on/unfiltered, `Some(filter)` = on/filtered.
+    // `debug_enabled()` collapses it back to the old bool for callers that
+    // only need on/off (e.g. `logging::init`).
+    // No `require_equals`: commander's `-d, --debug [filter]` consumes the next
+    // SPACE-separated token as the optional filter (`--debug api,hooks`), and a
+    // bare `--debug` before a subcommand-name token binds that token as the
+    // filter exactly as the real binary does (it does NOT route to the
+    // subcommand and does NOT start a billable turn — the leading `command`
+    // subcommand resolution only triggers when the FIRST token is the command).
     #[arg(short = 'd', long = "debug", value_name = "filter", num_args = 0..=1, default_missing_value = "")]
     pub debug: Option<String>,
 
@@ -407,18 +409,18 @@ pub struct Argv {
     pub no_tui: bool,
 
     /// SECURITY-SENSITIVE: bypass all permission prompts for the session
-    /// (claude-code `--dangerously-skip-permissions`). Resolves to
-    /// `PermissionMode::BypassPermissions` subject to the safety guards
-    /// (root refusal; ant sandbox/no-internet) in `permission::bypass_guard`.
+    // (claude-code `--dangerously-skip-permissions`). Resolves to
+    // `PermissionMode::BypassPermissions` subject to the safety guards
+    // (root refusal; ant sandbox/no-internet) in `permission::bypass_guard`.
     #[arg(long = "dangerously-skip-permissions")]
     pub dangerously_skip_permissions: bool,
 
-    /// Initial permission mode (`--permission-mode <mode>`). claude-code 2.1.191
-    /// commander `.choices(['acceptEdits','auto','bypassPermissions','default',
-    /// 'dontAsk','plan'])` — an out-of-choices value is HARD-REJECTED at parse
-    /// time (exit 1 with an allowed-choices message), so the `value_parser`
-    /// below mirrors that. `auto` is a real choice and resolves to
-    /// `PermissionMode::Auto` downstream.
+    /// Initial permission mode (`--permission-mode <mode>`).
+    // claude-code 2.1.191 commander `.choices(['acceptEdits','auto',
+    // 'bypassPermissions','default','dontAsk','plan'])` — an out-of-choices value
+    // is HARD-REJECTED at parse time (exit 1 with an allowed-choices message), so
+    // the `value_parser` below mirrors that. `auto` is a real choice and resolves
+    // to `PermissionMode::Auto` downstream.
     #[arg(
         long = "permission-mode",
         // lowercase placeholder so the help line and the commander-style
@@ -435,8 +437,8 @@ pub struct Argv {
     // then they parse-and-carry (accepted, inert) so scripts/SDK callers stop
     // breaking on contact. claude-code source: main.tsx flag registration.
     /// Use a specific session ID for the conversation (must be a valid UUID)
-    ///
-    /// claude-code `--session-id <uuid>`. Overrides the generated session id.
+    //
+    // claude-code `--session-id <uuid>`. Overrides the generated session id.
     #[arg(long = "session-id", value_name = "uuid")]
     pub session_id: Option<String>,
 
@@ -505,9 +507,9 @@ pub struct Argv {
     pub file: Option<Vec<String>>,
 
     /// Create a new git worktree for this session (optionally specify a name)
-    ///
-    /// claude-code `-w, --worktree [name]`. Value is OPTIONAL: bare `-w` mints
-    /// an auto-named worktree (empty sentinel); `-w name` names it.
+    //
+    // claude-code `-w, --worktree [name]`. Value is OPTIONAL: bare `-w` mints
+    // an auto-named worktree (empty sentinel); `-w name` names it.
     #[arg(short = 'w', long = "worktree", value_name = "name", num_args = 0..=1, default_missing_value = "")]
     pub worktree: Option<String>,
 
@@ -515,8 +517,8 @@ pub struct Argv {
     /// native panes when available; use --tmux=classic for traditional tmux.
     ///
     /// `--tmux` alone = native (empty sentinel); `--tmux=classic` = classic.
-    /// `require_equals` so the value only binds via `=` (a bare `--tmux` won't
-    /// swallow a following prompt token), matching commander's boolean-ish flag.
+    // `require_equals` so the value only binds via `=` (a bare `--tmux` won't
+    // swallow a following prompt token), matching commander's boolean-ish flag.
     #[arg(long = "tmux", value_name = "mode", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     pub tmux: Option<String>,
 

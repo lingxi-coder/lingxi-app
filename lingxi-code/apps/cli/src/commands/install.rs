@@ -14,14 +14,12 @@
 
 use clap::Args;
 
-/// `install` args — byte-parity with `claude install [options] [target]`.
-///
-/// claude-code:
-/// ```text
-/// Usage: claude install [options] [target]
-/// Options:
-///   --force     Force installation even if already installed
-/// ```
+// `install` args — byte-parity with `claude install [options] [target]`.
+//
+// claude-code:
+//   Usage: claude install [options] [target]
+//   Options:
+//     --force     Force installation even if already installed
 #[derive(Debug, Clone, Args)]
 pub struct Cli {
     /// Force installation even if already installed

@@ -295,21 +295,41 @@ impl DefaultLlmClient {
             .get(&resolved_route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
 
+        // Per-model wire override: GitHub Copilot serves its GPT-5.x / codex
+        // models ONLY via the Responses endpoint, though the provider declares a
+        // single OpenAiChat protocol. When the override fires we swap in a
+        // Responses codec bound to the SAME host (`…/responses`), which the
+        // Copilot bearer already authorizes; `effective_protocol` + `codec` then
+        // flow through encode, the websocket gate, and the returned Route.
+        let effective_protocol = copilot_responses_override(
+            &resolved_route.profile_name,
+            &entry.protocol,
+            &resolved_route.request_model,
+        )
+        .unwrap_or_else(|| entry.protocol.clone());
+        let codec: Box<dyn WireCodec> = if effective_protocol == entry.protocol {
+            entry.codec.clone()
+        } else {
+            // The only override we synthesize is Responses (Copilot GPT-5.x/codex).
+            debug_assert!(matches!(effective_protocol, ProtocolFamily::OpenAiResponses));
+            Box::new(crate::OpenAiResponsesCodec::new(entry.base_url.clone()))
+        };
+
         let provider_request = if request.model == resolved_route.request_model {
-            entry.codec.encode_request(request)?
+            codec.encode_request(request)?
         } else {
             let mut routed_request = request.clone();
             routed_request
                 .model
                 .clone_from(&resolved_route.request_model);
-            entry.codec.encode_request(&routed_request)?
+            codec.encode_request(&routed_request)?
         };
         let mut provider_request = self
             .authenticate_at(entry, &resolved_route.profile_name, provider_request, now)
             .await?;
         if request.stream
             && entry.supports_websockets
-            && matches!(entry.protocol, ProtocolFamily::OpenAiResponses)
+            && matches!(effective_protocol, ProtocolFamily::OpenAiResponses)
         {
             provider_request.stream_transport = ProviderStreamTransport::ResponsesWebSocket;
             provider_request.websocket_connect_timeout_ms = entry.websocket_connect_timeout_ms;
@@ -318,8 +338,8 @@ impl DefaultLlmClient {
         Ok(PreparedLlmCall {
             route: Route {
                 resolved_route,
-                protocol: entry.protocol.clone(),
-                codec: entry.codec.clone(),
+                protocol: effective_protocol,
+                codec,
             },
             provider_request,
         })
@@ -1158,6 +1178,41 @@ pub(crate) fn secs_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     (year, month, day, hour, min, sec)
 }
 
+/// GitHub Copilot serves its GPT-5.x and `codex` models ONLY through the OpenAI
+/// Responses endpoint (`api.githubcopilot.com/responses`); older models use
+/// `/chat/completions`. Our `github-copilot` preset declares a single
+/// `OpenAiChat` protocol for the whole provider, so those newer models 400 with
+/// "model … is not accessible via the /chat/completions endpoint". When we
+/// detect one we route it through a Responses codec bound to the SAME host — the
+/// Copilot bearer authorizes both paths. Mirrors the fix other Copilot gateways
+/// adopted (cherry-studio #13637, opencode #5866): non-`codex` GPT-5+ models
+/// must use `/responses`.
+///
+/// Returns `Some(OpenAiResponses)` only for the `github-copilot` profile on an
+/// `OpenAiChat` route whose model needs Responses; `None` leaves routing intact
+/// (so `openai`/`openrouter`/`deepseek`/etc. are never affected).
+fn copilot_responses_override(
+    profile_name: &str,
+    protocol: &ProtocolFamily,
+    request_model: &str,
+) -> Option<ProtocolFamily> {
+    if profile_name != "github-copilot" || !matches!(protocol, ProtocolFamily::OpenAiChat) {
+        return None;
+    }
+    let model = request_model.to_ascii_lowercase();
+    (model.contains("codex") || is_gpt5_or_newer(&model)).then_some(ProtocolFamily::OpenAiResponses)
+}
+
+/// `true` for `gpt-<major>[…]` with `major >= 5` (`gpt-5`, `gpt-5.5`,
+/// `gpt-5-mini`, `gpt-6`, …); `false` for `gpt-4o`, `gpt-4.1`, non-`gpt-` ids.
+fn is_gpt5_or_newer(model_lower: &str) -> bool {
+    let Some(rest) = model_lower.strip_prefix("gpt-") else {
+        return false;
+    };
+    let major: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    major.parse::<u32>().is_ok_and(|n| n >= 5)
+}
+
 fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, LlmError> {
     match &provider.protocol {
         crate::ProtocolFamily::AnthropicMessages => Ok(Box::new(
@@ -1550,7 +1605,51 @@ pub(crate) fn append_beta(existing: Option<&str>, beta: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::append_beta;
+    use super::{
+        append_beta, copilot_responses_override, is_gpt5_or_newer, ProtocolFamily,
+    };
+
+    #[test]
+    fn gpt5_plus_detection_covers_majors_and_variants() {
+        for yes in ["gpt-5", "gpt-5.5", "gpt-5-mini", "gpt-5.2-codex", "gpt-6", "gpt-10"] {
+            assert!(is_gpt5_or_newer(yes), "{yes} should be gpt-5+");
+        }
+        for no in ["gpt-4o", "gpt-4.1", "gpt-4-turbo", "o3", "claude-opus-4-8", ""] {
+            assert!(!is_gpt5_or_newer(no), "{no} should NOT be gpt-5+");
+        }
+    }
+
+    #[test]
+    fn copilot_override_fires_only_for_copilot_chat_gpt5_and_codex() {
+        let chat = ProtocolFamily::OpenAiChat;
+        // Fires: Copilot + OpenAiChat + gpt-5.x/codex.
+        for m in ["gpt-5.5", "gpt-5-codex", "gpt-5.4-mini"] {
+            assert_eq!(
+                copilot_responses_override("github-copilot", &chat, m),
+                Some(ProtocolFamily::OpenAiResponses),
+                "{m} on copilot should override to Responses"
+            );
+        }
+        // No override: older Copilot model.
+        assert_eq!(
+            copilot_responses_override("github-copilot", &chat, "gpt-4o"),
+            None
+        );
+        // No override: different profile, even for a gpt-5 id.
+        assert_eq!(
+            copilot_responses_override("openrouter", &chat, "gpt-5.5"),
+            None
+        );
+        // No override: already Responses (openai first-party) — nothing to fix.
+        assert_eq!(
+            copilot_responses_override(
+                "github-copilot",
+                &ProtocolFamily::OpenAiResponses,
+                "gpt-5.5"
+            ),
+            None
+        );
+    }
 
     // ---- Task 2: `append_beta` pure-fn unit tests ----
     //

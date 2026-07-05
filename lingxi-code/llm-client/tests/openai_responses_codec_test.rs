@@ -605,7 +605,12 @@ fn reasoning_adds_encrypted_content_include_once() {
 // ── unsupported history blocks ────────────────────────────────────────────────
 
 #[test]
-fn reasoning_history_blocks_are_rejected() {
+fn reasoning_history_blocks_are_skipped_not_rejected() {
+    // A resumed/continued conversation whose history carries a reasoning (or
+    // redacted-thinking) block from a prior reasoning-model turn must ENCODE
+    // fine — the blocks are dropped from the Responses input (we can't faithfully
+    // echo them), not rejected. Regression: gpt-5.5 via Copilot failed "hello"
+    // with "OpenAiResponsesCodec does not encode reasoning blocks yet".
     for block in [
         ContentBlock::Reasoning {
             text: "thought".to_string(),
@@ -615,15 +620,27 @@ fn reasoning_history_blocks_are_rejected() {
             data: "opaque".to_string(),
         },
     ] {
-        let mut request = LlmRequest::new("gpt-5");
-        request.messages.push(Message {
-            role: "assistant".to_string(),
-            content: vec![block],
-        });
-        let err = codec().encode_request(&request).unwrap_err();
+        let mut request = LlmRequest::new("gpt-5").with_user_text("hello");
+        // A prior assistant turn whose content is just a reasoning/thinking block.
+        request.messages.insert(
+            0,
+            Message {
+                role: "assistant".to_string(),
+                content: vec![block],
+            },
+        );
+        let encoded = codec()
+            .encode_request(&request)
+            .expect("reasoning history no longer rejected");
+        let input = encoded.body_json["input"].as_array().expect("input array");
+        // The reasoning/thinking block produced no input item; the user text did.
         assert!(
-            matches!(err, llm_client::LlmError::InvalidRequest { ref message } if message.contains("reasoning")),
-            "got: {err:?}"
+            !input.iter().any(|it| it["type"] == "reasoning"),
+            "reasoning blocks are dropped, not encoded: {input:?}"
+        );
+        assert!(
+            input.iter().any(|it| it["type"] == "message"),
+            "the user turn still encodes: {input:?}"
         );
     }
 }

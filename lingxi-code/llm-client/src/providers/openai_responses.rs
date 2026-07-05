@@ -1037,12 +1037,15 @@ fn reject_unsupported_content_blocks(request: &LlmRequest) -> Result<(), LlmErro
     for message in &request.messages {
         for block in &message.content {
             match block {
-                ContentBlock::Reasoning { .. } | ContentBlock::RedactedThinking { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "OpenAiResponsesCodec does not encode reasoning blocks yet"
-                            .to_string(),
-                    });
-                }
+                // Reasoning / redacted-thinking blocks in the history are SKIPPED
+                // during encode (`encode_message`'s no-op arm), not rejected: we
+                // only captured the summary text on decode (no reasoning-item
+                // `id`/`encrypted_content`), so they cannot be faithfully echoed
+                // back to the Responses API. Reasoning items are optional in the
+                // input, so dropping them keeps the request valid — a switched-to
+                // gpt-5.x model just re-reasons. (Faithful echo, preserving
+                // `encrypted_content` for cross-turn reasoning continuity, is a
+                // follow-up that needs the extra fields on `ContentBlock::Reasoning`.)
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ConnectorText { .. }
                 | ContentBlock::AdvisorToolResult { .. } => {

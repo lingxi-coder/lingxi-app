@@ -288,6 +288,21 @@ impl DefaultLlmClient {
         let resolved_route = self
             .registry
             .resolve_in(&request.model, request.profile.as_deref())?;
+
+        // Soft-degrade `reasoning` rather than hard-failing: it is a best-effort
+        // enhancement driven by the SESSION thinking config, so switching to a
+        // model that doesn't advertise reasoning (e.g. an OpenRouter free model
+        // like `qwen/qwen3-coder:free`) must silently drop it — not break the turn
+        // with "unsupported capability: reasoning". (streaming / tools /
+        // structured_output stay hard errors — they cannot be dropped safely.)
+        let degraded = (request.reasoning.is_some() && !resolved_route.capabilities.reasoning)
+            .then(|| {
+                let mut r = request.clone();
+                r.reasoning = None;
+                r
+            });
+        let request = degraded.as_ref().unwrap_or(request);
+
         validate_capabilities(request, resolved_route.capabilities)?;
 
         let entry = self

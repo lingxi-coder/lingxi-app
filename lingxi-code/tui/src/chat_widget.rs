@@ -108,6 +108,10 @@ pub struct ChatWidget {
     /// Human label for what the turn is currently doing (e.g. `Running Bash`),
     /// set from `ToolUseStart` and shown by the spinner instead of a bare verb.
     activity: Option<String>,
+    /// Running character length of the streamed response this turn (text +
+    /// thinking deltas), reset on `TurnStarted`. Drives the spinner's live token
+    /// estimate (`round(chars / 4)`, claude-code `Spinner.tsx:210`).
+    response_chars: u64,
     /// The per-turn sampled spinner verb (claude-code `useState(() =>
     /// sample(getSpinnerVerbs()))`): drawn once from [`crate::spinner::SPINNER_VERBS`]
     /// on `TurnEvent::TurnStarted` and held for the turn's lifetime — the
@@ -199,6 +203,7 @@ impl ChatWidget {
             current_turn: None,
             turn_started_at: None,
             activity: None,
+            response_chars: 0,
             spinner_verb: spinner::sample_verb(),
             current_todo: None,
             pending_permissions: VecDeque::new(),
@@ -311,6 +316,7 @@ impl ChatWidget {
             TurnEvent::TurnStarted => {
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
+                self.response_chars = 0;
                 // Draw a fresh random verb for this turn (claude-code
                 // `useState(() => sample(getSpinnerVerbs()))` — one verb per
                 // turn, no rotation within it).
@@ -323,6 +329,9 @@ impl ChatWidget {
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
             }
             TurnEvent::TextDelta(delta) => {
+                self.response_chars = self
+                    .response_chars
+                    .saturating_add(delta.chars().count() as u64);
                 let appended = self
                     .transcript
                     .mutate_active(|cell| {
@@ -343,6 +352,9 @@ impl ChatWidget {
                 }
             }
             TurnEvent::ThinkingDelta(delta) => {
+                self.response_chars = self
+                    .response_chars
+                    .saturating_add(delta.chars().count() as u64);
                 // M5 cc2.1.198 thinking streaming: append to the active
                 // ThinkingCell (collapsed by default; Ctrl-O reveals the body),
                 // mirroring the TextDelta path. A non-thinking active cell is
@@ -1482,8 +1494,17 @@ impl ChatWidget {
         let verb = spinner::todo_leader_verb(self.current_todo.as_ref())
             .or_else(|| self.activity.clone())
             .unwrap_or_else(|| self.spinner_verb.to_string());
-        let secs = self.turn_started_at.map_or(0, |t| t.elapsed().as_secs());
-        format!("{} {verb}… ({secs}s · esc to interrupt)", FRAMES[idx])
+        let base = format!("{} {verb}…", FRAMES[idx]);
+        // After SHOW_TOKENS_AFTER_MS, append the live `(<dur> · <↑|↓> <N> tokens)`
+        // counter (claude-code `SpinnerAnimationRow.tsx`). `receiving` (↓) once
+        // any delta/tool has arrived, else requesting (↑). The interrupt hint is
+        // NOT here — it lives in the status row (`status_indicator_line`).
+        let elapsed_ms = self.turn_started_at.map_or(0, |t| t.elapsed().as_millis());
+        let receiving = self.response_chars > 0 || self.activity.is_some();
+        match crate::spinner_status::status_paren(elapsed_ms, self.response_chars, receiving) {
+            Some(paren) => format!("{base} {paren}"),
+            None => base,
+        }
     }
 }
 
@@ -2569,24 +2590,25 @@ mod tests {
         let text = widget.spinner_text();
         let frame = text.chars().next().expect("spinner frame glyph");
         assert!("·✢✳✶✻✽".contains(frame), "unknown frame: {text}");
+        // A fresh turn (< SHOW_TOKENS_AFTER_MS) is just "<frame> <verb>…" — the
+        // timer + token-counter paren only appears after 30s (the interrupt hint
+        // now lives in the status row, not the spinner text).
         let verb = text
-            .split("… (")
-            .next()
-            .and_then(|prefix| prefix.split_once(' '))
-            .map(|(_, verb)| verb)
+            .split_once(' ')
+            .map(|(_, rest)| rest.trim_end_matches('…'))
             .unwrap_or_default();
         assert!(
             spinner::SPINNER_VERBS.contains(&verb),
             "expected a sampled pool verb, got {verb:?} in {text:?}"
         );
-        assert!(text.ends_with("s · esc to interrupt)"), "hint: {text}");
+        assert!(text.ends_with('…'), "fresh-turn spinner has no paren: {text}");
         // ToolUseStart swaps the verb for the activity label.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: protocol::ToolUseId::from("t1"),
             tool: "Edit".to_string(),
             input: serde_json::json!({}),
         });
-        assert!(widget.spinner_text().contains("Editing… ("));
+        assert!(widget.spinner_text().contains("Editing…"));
     }
 
     #[test]
@@ -2616,7 +2638,7 @@ mod tests {
             }),
         });
         assert!(
-            widget.spinner_text().contains("Compiling the project… ("),
+            widget.spinner_text().contains("Compiling the project…"),
             "expected the in-progress todo's activeForm: {}",
             widget.spinner_text()
         );
@@ -2627,7 +2649,7 @@ mod tests {
             tool: "Bash".to_string(),
             input: serde_json::json!({}),
         });
-        assert!(widget.spinner_text().contains("Compiling the project… ("));
+        assert!(widget.spinner_text().contains("Compiling the project…"));
         // `TurnEnded` clears the per-turn todo so a later turn with no
         // `TodoWrite` doesn't keep showing the stale `activeForm`.
         widget.apply_turn_event(TurnEvent::ToolUseResult {

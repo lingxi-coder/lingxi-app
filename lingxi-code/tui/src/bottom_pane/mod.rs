@@ -609,12 +609,13 @@ impl BottomPane {
     fn status_indicator_line(&self) -> Line<'static> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let claude = crate::style_adapter::to_ratatui(self.theme.claude);
-        // The spinner text already carries "esc to interrupt"; Esc while
-        // running interrupts (it does NOT quit), so no "Esc: quit" here.
+        // The spinner text carries the verb + live token counter; the interrupt
+        // hint lives here in the status row (claude-code keeps it in the footer,
+        // not the spinner). Esc while running interrupts (it does NOT quit).
         let mut spans = vec![
             Span::raw("  "),
             Span::styled(self.status.text.clone(), Style::default().fg(claude)),
-            Span::styled("   ·  Ctrl-C: cancel", Style::default().fg(dim)),
+            Span::styled("   ·  esc to interrupt  ·  Ctrl-C: cancel", Style::default().fg(dim)),
         ];
         if let Some(cost) = &self.status.cost {
             spans.push(Span::styled(format!("  ·  {cost}"), Style::default().fg(dim)));

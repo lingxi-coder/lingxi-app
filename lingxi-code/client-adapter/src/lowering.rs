@@ -589,6 +589,7 @@ mod tests {
         let snap = StatusSnapshot {
             session_id: "sess-1".to_string(),
             model: "claude-opus-4-8".to_string(),
+            model_profile: None,
             n_messages: 12,
             total_cost_usd: 1.5,
             input_tokens: 1_000,

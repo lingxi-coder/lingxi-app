@@ -2606,6 +2606,17 @@ impl ConversationOrchestrator {
         Some(t.snapshot().await)
     }
 
+    /// Seed the wired [`cost::CostTracker`]'s cumulative total from a restored
+    /// session (resume). No-op when no tracker is wired. Paired with the CLI
+    /// mount's project-config `lastCost`/`lastSessionId` persistence so a
+    /// `--resume`d session's footer continues from the prior accumulated cost
+    /// instead of resetting to `$0.0000` (claude-code `restoreCostStateForSession`).
+    pub async fn restore_session_cost(&self, total_nano_usd: u64) {
+        if let Some(tracker) = self.cost_tracker.as_ref() {
+            tracker.restore_total_nano_usd(total_nano_usd).await;
+        }
+    }
+
     /// Project the wired [`cost::CostTracker`] state onto the
     /// leaf-friendly [`traits::CostSnapshot`]. Used by both the
     /// trait method `snapshot_cost` and the per-turn end-of-turn emitter

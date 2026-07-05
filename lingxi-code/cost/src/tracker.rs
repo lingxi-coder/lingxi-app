@@ -235,6 +235,20 @@ impl CostTracker {
         self.state.read().await.total_nano_usd
     }
 
+    /// Seed the cumulative cost from a restored session (resume). Mirrors
+    /// claude-code `setCostStateForRestore` (`bootstrap/state.ts`): a resumed
+    /// session must continue from the prior accumulated cost so the footer
+    /// shows the running total instead of `$0.0000`, and subsequent turns add
+    /// on top. Only the money total is restored here (the port's footer /
+    /// status-line cost is derived from it); the per-model token breakdown is
+    /// not yet persisted, so it is left empty (documented parity follow-up).
+    ///
+    /// Does NOT emit on the persist channel — this is a hydrate, not a new
+    /// charge, and the on-resume value is already the persisted truth.
+    pub async fn restore_total_nano_usd(&self, nano_usd: u64) {
+        self.state.write().await.total_nano_usd = nano_usd;
+    }
+
     /// Snapshot the current state. Cloned, safe to inspect off-thread.
     pub async fn snapshot(&self) -> CostState {
         self.state.read().await.clone()
@@ -277,6 +291,44 @@ mod tests {
         let snap = rx.recv().await.unwrap();
         // 1000 * 5000 + 500 * 25000 = 5_000_000 + 12_500_000 = 17_500_000 nano-USD = $0.0175
         assert_eq!(snap.total_nano_usd, 17_500_000);
+    }
+
+    #[tokio::test]
+    async fn restore_seeds_total_and_subsequent_records_add_on_top() {
+        // Resume parity: a restored session continues from the persisted total
+        // and new charges accumulate on top of it (not from zero).
+        let (tx, mut rx) = mpsc::channel(8);
+        let tracker = CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        tracker.restore_total_nano_usd(17_500_000).await; // prior session $0.0175
+        assert_eq!(tracker.total_nano_usd().await, 17_500_000);
+
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        tracker
+            .record_api_response(
+                mr,
+                Usage {
+                    tokens: TokenUsage {
+                        input: 1000,
+                        output: 500,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Duration::from_millis(200),
+                0,
+            )
+            .await;
+        let snap = rx.recv().await.unwrap();
+        // restored 17_500_000 + this turn's 17_500_000 = 35_000_000 nano-USD.
+        assert_eq!(snap.total_nano_usd, 35_000_000);
+        assert_eq!(tracker.total_nano_usd().await, 35_000_000);
     }
 
     #[tokio::test]

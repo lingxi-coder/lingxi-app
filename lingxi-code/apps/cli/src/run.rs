@@ -1496,6 +1496,23 @@ async fn mount_resumed_tui(
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     seed_orchestrator_session(&tui_build.runtime.orchestrator, session_id, &messages).await;
+    // COST seed (resume parity, claude-code `restoreCostStateForSession`): the
+    // freshly-built cost tracker starts at zero, so without this the footer
+    // would show `$0.0000` after resume until the first new turn. Restore the
+    // prior accumulated cost from the project config IF it was saved for THIS
+    // session id (the `run_ratatui` exit path writes it via `saveCurrentSessionCosts`).
+    if let Some(cfg_path) = migrations::global_config::global_config_path() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Some(usd) =
+            crate::session_cost::restore_session_cost_usd(&cfg_path, &cwd, &session_id.to_string())
+        {
+            tui_build
+                .runtime
+                .orchestrator
+                .restore_session_cost(crate::session_cost::usd_to_nano(usd))
+                .await;
+        }
+    }
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
     // launch the ratatui backend with that replayed scrollback. Resume has no
     // SessionRegistration (fresh launches register; resume does not), so no

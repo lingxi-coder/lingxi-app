@@ -74,6 +74,7 @@ pub mod output_adapter;
 pub mod repl;
 pub mod repl_loop;
 pub mod run;
+pub mod session_cost;
 pub mod sigint;
 pub mod stream_json;
 pub mod stream_json_input;

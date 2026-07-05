@@ -1390,6 +1390,48 @@ mod tests {
     }
 
     #[test]
+    fn resume_seeded_transcript_flushes_every_message_to_scrollback() {
+        // Bug 1 (live QA "resume 没有回复所有的messages"): a resumed session
+        // seeds N prior messages as committed cells. The first real frame
+        // (`render_tick`: viewport sizing + flush + draw) must flush ALL of
+        // them into native scrollback AND their text must reach the tty byte
+        // stream — not merely advance the commit cursor.
+        let mut msgs = Vec::new();
+        for i in 0..15 {
+            msgs.push(RenderedMessage::UserText {
+                body: format!("USERMSG{i:02}"),
+                timestamp: 0,
+            });
+            msgs.push(RenderedMessage::AssistantText {
+                body: format!("ASSTMSG{i:02}"),
+                timestamp: 0,
+            });
+        }
+        let total = msgs.len();
+        let mut app = test_app(msgs);
+        let backend = crate::terminal::test_support::TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let mut terminal = crate::terminal::Terminal::with_options(backend).unwrap();
+        app.render_tick(&mut terminal).unwrap();
+        assert_eq!(
+            app.chat_widget.transcript().committed_to_terminal(),
+            total,
+            "every resumed cell must flush on the first frame"
+        );
+        let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        for i in 0..15 {
+            assert!(
+                out.contains(&format!("USERMSG{i:02}")),
+                "resumed user msg {i} never reached the scrollback byte stream"
+            );
+            assert!(
+                out.contains(&format!("ASSTMSG{i:02}")),
+                "resumed assistant msg {i} never reached the scrollback byte stream"
+            );
+        }
+    }
+
+    #[test]
     fn tick_frame_is_bracketed_in_a_synchronized_update() {
         let backend = crate::terminal::test_support::TestWriteBackend::new(80, 24);
         let raw = backend.raw_handle();

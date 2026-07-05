@@ -710,9 +710,16 @@ impl ChatWidget {
     /// launch, so without this a switch left the picker/statusline showing the
     /// OLD model. No-op if `request_model` isn't in the snapshot (then nothing
     /// is marked current, matching an unknown model).
-    fn set_current_model(&mut self, request_model: &str) {
+    ///
+    /// Matches by (model AND `profile`) so a wire id shared across providers
+    /// (e.g. `gpt-5.5` on both OpenAI and GitHub Copilot) only marks the row of
+    /// the ACTUAL switched-to provider — mirrors the launch-time marker in
+    /// `mode.rs`. When `profile` is `None` (resolve-by-id, no provider pinned),
+    /// falls back to matching by model id alone.
+    fn set_current_model(&mut self, request_model: &str, profile: Option<&str>) {
         for m in &mut self.session.models {
-            m.is_current = m.request_model == request_model;
+            m.is_current = m.request_model == request_model
+                && profile.is_none_or(|p| m.profile.as_deref() == Some(p));
         }
     }
 
@@ -1372,8 +1379,9 @@ impl ChatWidget {
                 // Re-point the snapshot's current-model marker so the /model
                 // picker `●`, statusline, and welcome line all follow the switch
                 // (they read `session.models`' `is_current`, frozen at launch
-                // otherwise).
-                self.set_current_model(&request_model);
+                // otherwise). Provider-scoped so a wire id shared across
+                // providers only dots the switched-to provider's row.
+                self.set_current_model(&request_model, profile.as_deref());
                 // Refresh the statusline model + re-arm the pump so the command
                 // reports the new model (claude-code re-runs on model change).
                 let display = self
@@ -2135,6 +2143,59 @@ mod tests {
             current,
             vec!["claude-sonnet-5".to_string()],
             "the `●` current marker follows the switch"
+        );
+    }
+
+    #[test]
+    fn set_current_model_is_provider_scoped_for_shared_wire_ids() {
+        // Live-QA regression: `gpt-5.5` exists under BOTH OpenAI and GitHub
+        // Copilot. Switching to Copilot's gpt-5.5 must dot ONLY the Copilot row
+        // — the after-switch re-point previously matched request_model alone, so
+        // both provider rows lit the `●`.
+        let mut widget = ChatWidget::new(
+            Vec::new(),
+            SessionInfo {
+                models: vec![
+                    ModelRow {
+                        display: "GPT-5.5".into(),
+                        request_model: "gpt-5.5".into(),
+                        profile: Some("openai".into()),
+                        provider_label: "OpenAI".into(),
+                        is_current: false,
+                    },
+                    ModelRow {
+                        display: "GPT-5.5".into(),
+                        request_model: "gpt-5.5".into(),
+                        profile: Some("github-copilot".into()),
+                        provider_label: "GitHub Copilot".into(),
+                        is_current: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        widget.set_current_model("gpt-5.5", Some("github-copilot"));
+        let current: Vec<&str> = widget
+            .session
+            .models
+            .iter()
+            .filter(|m| m.is_current)
+            .map(|m| m.profile.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            current,
+            vec!["github-copilot"],
+            "only the switched-to provider's gpt-5.5 row is current"
+        );
+
+        // Fallback: an unqualified switch (profile None — resolve-by-id) marks
+        // by model id alone, mirroring the launch-time marker in mode.rs.
+        widget.set_current_model("gpt-5.5", None);
+        assert_eq!(
+            widget.session.models.iter().filter(|m| m.is_current).count(),
+            2,
+            "profile-less switch falls back to model-only matching"
         );
     }
 

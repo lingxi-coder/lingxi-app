@@ -421,8 +421,12 @@ enum StopHookDisposition {
     /// TS `query/stopHooks.ts:257-262`), NOT the transcript-only systemMessage.
     Continue(String),
     /// A Stop hook requested `continue: false` — terminate the agent loop
-    /// (TS `query.ts:1278`); the turn ends as `StopHookPrevented`.
-    Prevent,
+    /// (TS `query.ts:1278`); the turn ends as `StopHookPrevented`. The carried
+    /// `String` is the hook's `stopReason` (defaulted to
+    /// `"Stop hook prevented continuation"`, TS `query/stopHooks.ts:271`) —
+    /// persisted as a `hook_stopped_continuation` meta message before the turn
+    /// terminates (FIX C).
+    Prevent(String),
 }
 
 /// Driver control-flow directive produced by `handle_stop_at_end` (hooks B4) so
@@ -3898,7 +3902,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             )
             .await;
         let disposition = if agg.prevent_continuation {
-            StopHookDisposition::Prevent
+            // FIX C: carry the hook's `stopReason` (parsed into `agg.reason`,
+            // `hook_payload.rs:1113`) so `handle_stop_at_end` can persist the
+            // `hook_stopped_continuation` meta message. Default matches TS
+            // `query/stopHooks.ts:271` (`result.stopReason || 'Stop hook prevented
+            // continuation'`).
+            let reason = agg
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Stop hook prevented continuation".to_string());
+            StopHookDisposition::Prevent(reason)
         } else if matches!(agg.decision, Some(hooks::response::HookDecision::Block)) {
             // #2: ANY Block yields Continue — the consecutive-block CAP is no
             // longer the old `!stop_hook_active` boolean (which let a blocking
@@ -3993,7 +4006,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             return StopHookFlow::FallThrough;
         }
         match self.fire_stop_hooks(stop_reason, *stop_hook_active).await {
-            StopHookDisposition::Prevent => {
+            StopHookDisposition::Prevent(reason) => {
+                // FIX C (Stop hook_stopped_continuation): persist the stop-reason
+                // meta message (claude `query/stopHooks.ts:269-280`, an isMeta
+                // `hook_stopped_continuation` attachment) BEFORE terminating so the
+                // transcript records why the Stop hook halted continuation.
+                self.append_stop_hook_stopped_continuation(&reason).await;
                 let cost = self.snapshot_cost_real().await;
                 self.output.emit_end_turn(stop_reason, &cost).await;
                 StopHookFlow::Terminate(ConversationOutcome::StopHookPrevented {
@@ -4463,6 +4481,24 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// other meta appends.
     async fn append_stop_hook_feedback(&self, reason: &str) {
         let content = format!("Stop hook feedback:\n{reason}");
+        let msg = ConversationMessage::user_meta(MessageId::new(), content);
+        {
+            let mut s = self.session.lock().await;
+            s.history.push(msg.clone());
+        }
+        self.persist_message_to_jsonl(&msg).await;
+    }
+
+    /// Append a Stop hook's `preventContinuation` stop-reason as a *meta* user
+    /// message so the transcript records why continuation was halted. Mirrors
+    /// claude-code `query/stopHooks.ts:269-280`: a `hook_stopped_continuation`
+    /// attachment (hookName `Stop`) rendered as
+    /// `<system-reminder>\nStop hook stopped continuation: {stopReason}\n</system-reminder>`
+    /// (isMeta, `utils/messages.ts:4130-4137`). Best-effort persist, exactly like
+    /// [`Self::append_stop_hook_feedback`].
+    async fn append_stop_hook_stopped_continuation(&self, reason: &str) {
+        let content =
+            format!("<system-reminder>\nStop hook stopped continuation: {reason}\n</system-reminder>");
         let msg = ConversationMessage::user_meta(MessageId::new(), content);
         {
             let mut s = self.session.lock().await;
@@ -8017,6 +8053,44 @@ mod turn_recovery_tests {
         Arc::new(exec)
     }
 
+    /// A Stop hook that requests `continue:false` (preventContinuation) with a
+    /// fixed `stopReason` — terminates the agent loop (FIX C).
+    struct PreventStopHandler {
+        reason: Option<String>,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for PreventStopHandler {
+        fn id(&self) -> &str {
+            "prevent-stop"
+        }
+        async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            let response = matches!(event, HookEvent::Stop { .. }).then(|| HookResponse {
+                prevent_continuation: true,
+                reason: self.reason.clone(),
+                ..Default::default()
+            });
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response,
+            }
+        }
+    }
+
+    async fn exec_prevent_stop(reason: Option<String>) -> Arc<HookExecutorImpl> {
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(builtin_hook("prevent-stop", HookEventType::Stop));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(PreventStopHandler { reason }));
+        Arc::new(exec)
+    }
+
     /// Seed a history far past the hard blocking limit. The default model
     /// (`claude-opus-4-8`) is natively 1M as of 2.1.198 (M1b), so the
     /// blocking limit sits just under 1M tokens; 8M chars ≈ 2M tokens
@@ -8586,6 +8660,92 @@ mod turn_recovery_tests {
             nudges, 5,
             "5 recovery nudges expected across the two episodes (2 before + 3 after the reset)"
         );
+    }
+
+    // -------- FIX C — Stop hook_stopped_continuation meta message -----------
+
+    #[tokio::test]
+    async fn fix_c_stop_prevent_continuation_persists_stopped_message() {
+        // Parity with claude-code `query/stopHooks.ts:269-280` — a Stop hook's
+        // `continue:false` (preventContinuation) yields a
+        // `hook_stopped_continuation` attachment (hookName `Stop`), rendered as
+        // an isMeta `<system-reminder>\nStop hook stopped continuation:
+        // {stopReason}\n</system-reminder>` user message before the turn
+        // terminates. Script a single end_turn, then let the Stop hook prevent
+        // continuation.
+        let et = mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        );
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![et])),
+            Arc::new(ToolRegistry::new()),
+            exec_prevent_stop(Some("STOP-CONTINUATION".into())).await,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        let outcome = orch.run_turn("go").await.expect("turn ok");
+        assert!(
+            matches!(outcome, ConversationOutcome::StopHookPrevented { .. }),
+            "continue:false must terminate as StopHookPrevented, got {outcome:?}"
+        );
+
+        // The exact meta message is appended to history (persisted via the same
+        // `persist_message_to_jsonl` path as `append_stop_hook_feedback`).
+        let session = orch.session();
+        let s = session.lock().await;
+        let found = s.history.iter().any(|m| {
+            m.text_content()
+                == "<system-reminder>\nStop hook stopped continuation: STOP-CONTINUATION\n</system-reminder>"
+        });
+        assert!(
+            found,
+            "the Stop hook_stopped_continuation meta message must be in history: {:#?}",
+            s.history
+                .iter()
+                .map(protocol::ConversationMessage::text_content)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn fix_c_stop_prevent_continuation_default_reason() {
+        // No `stopReason` → claude's default `'Stop hook prevented continuation'`
+        // (`query/stopHooks.ts:271`).
+        let et = mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+            }],
+            Some("end_turn"),
+        );
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![et])),
+            Arc::new(ToolRegistry::new()),
+            exec_prevent_stop(None).await,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        orch.run_turn("go").await.expect("turn ok");
+
+        let session = orch.session();
+        let s = session.lock().await;
+        let found = s.history.iter().any(|m| {
+            m.text_content()
+                == "<system-reminder>\nStop hook stopped continuation: Stop hook prevented continuation\n</system-reminder>"
+        });
+        assert!(found, "default stopReason must be used");
     }
 }
 

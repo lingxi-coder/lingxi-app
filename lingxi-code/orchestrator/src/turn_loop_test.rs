@@ -3568,6 +3568,132 @@ mod pre_tool_hook_tests {
         );
     }
 
+    // ----- FIX C: hook_stopped_continuation meta message --------------------
+
+    #[tokio::test]
+    async fn fix_c_pretooluse_prevent_continuation_emits_stopped_message() {
+        // Parity with claude-code `toolExecution.ts:1571-1582` — a PreToolUse
+        // hook's `continue:false` (preventContinuation) yields a
+        // `hook_stopped_continuation` attachment AFTER the tool_result, rendered
+        // as `<system-reminder>\nPreToolUse:{tool} hook stopped continuation:
+        // {stopReason}\n</system-reminder>` (`messages.ts:4130-4137`). The tool
+        // STILL runs (the message is emitted post-execution).
+        let resp = HookResponse {
+            prevent_continuation: true,
+            reason: Some("STOP-NOW".into()),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            pre_hook_executor(resp),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let uses = uses();
+        let tool_use_id = uses[0].0.clone();
+        let (results, prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+        // continue:false still surfaces as prevent_continuation (ends the turn).
+        assert!(prevent, "continue:false surfaces as prevent_continuation");
+        // The tool ran: its original output is the tool_result content.
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(!is_error, "tool ran successfully");
+        assert!(content.contains("ECHOED-OUTPUT"), "tool output preserved");
+        // A SEPARATE stopped-continuation message rides the injected channel,
+        // tagged with this tool's tool_use_id (ordered after the tool_result).
+        assert_eq!(
+            injected.len(),
+            1,
+            "exactly one hook_stopped_continuation message"
+        );
+        let (msg, tagged_tu) = &injected[0];
+        assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
+        match msg {
+            ConversationMessage::User { content, .. } => match content.first() {
+                Some(ContentBlock::Text { text }) => assert_eq!(
+                    text,
+                    "<system-reminder>\nPreToolUse:Echo hook stopped continuation: STOP-NOW\n</system-reminder>"
+                ),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fix_c_pretooluse_prevent_continuation_default_reason() {
+        // No `stopReason` → claude's default `'Execution stopped by hook'`
+        // (`toolExecution.ts:1576`).
+        let resp = HookResponse {
+            prevent_continuation: true,
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            pre_hook_executor(resp),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let (_results, _prevent, injected, _mods) =
+            dispatch_tool_uses_tracked(&orch, &uses(), None)
+                .await
+                .unwrap();
+        assert_eq!(injected.len(), 1);
+        match &injected[0].0 {
+            ConversationMessage::User { content, .. } => match content.first() {
+                Some(ContentBlock::Text { text }) => assert_eq!(
+                    text,
+                    "<system-reminder>\nPreToolUse:Echo hook stopped continuation: Execution stopped by hook\n</system-reminder>"
+                ),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fix_c_posttooluse_prevent_continuation_emits_stopped_message() {
+        // Parity with claude-code `toolHooks.ts:118-130` — a PostToolUse hook's
+        // `continue:false` yields a `hook_stopped_continuation` attachment AFTER
+        // the tool_result, rendered as `<system-reminder>\nPostToolUse:{tool}
+        // hook stopped continuation: {stopReason}\n</system-reminder>`.
+        let resp = HookResponse {
+            prevent_continuation: true,
+            reason: Some("POST-STOP".into()),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            event_hook_executor(HookEventType::PostToolUse, resp),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let uses = uses();
+        let tool_use_id = uses[0].0.clone();
+        let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .unwrap();
+        // The tool ran and its result is unchanged.
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(!is_error, "tool ran successfully");
+        assert!(content.contains("ECHOED-OUTPUT"), "tool output preserved");
+        assert_eq!(
+            injected.len(),
+            1,
+            "exactly one hook_stopped_continuation message"
+        );
+        let (msg, tagged_tu) = &injected[0];
+        assert_eq!(*tagged_tu, tool_use_id, "tagged with the dispatching tool");
+        match msg {
+            ConversationMessage::User { content, .. } => match content.first() {
+                Some(ContentBlock::Text { text }) => assert_eq!(
+                    text,
+                    "<system-reminder>\nPostToolUse:Echo hook stopped continuation: POST-STOP\n</system-reminder>"
+                ),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn hook2_prevent_continuation_ends_the_turn_step() {
         // A turn step that runs a tool whose PreToolUse hook set continue:false

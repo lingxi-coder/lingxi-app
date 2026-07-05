@@ -83,6 +83,118 @@ async fn prepare_returns_route_identity_and_encodes_resolved_request_model() {
     assert_eq!(prepared.provider_request.body_json["model"], "gpt-4o");
 }
 
+#[tokio::test]
+async fn github_copilot_gpt5_and_codex_route_to_responses_endpoint() {
+    // GitHub Copilot serves GPT-5.x / codex models ONLY via `/responses`, but
+    // the provider profile declares one OpenAiChat protocol. The per-model
+    // override must send those models to `…/responses` (same host) while older
+    // models keep `/chat/completions`. Regression for the live-QA
+    // "model gpt-5.5 is not accessible via the /chat/completions endpoint".
+    let model = |display: &str, id: &str| ModelProfile {
+        display_model: display.to_string(),
+        request_model: id.to_string(),
+        billing_model: id.to_string(),
+        aliases: vec![],
+        description: None,
+        capabilities: Capabilities {
+            streaming: true,
+            tools: true,
+            ..Default::default()
+        },
+    };
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAICompatible {
+                name: "github-copilot".to_string(),
+            },
+            profile_name: "github-copilot".to_string(),
+            base_url: "https://api.githubcopilot.com".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![
+                model("GPT-5.5", "gpt-5.5"),
+                model("GPT-5 Codex", "gpt-5-codex"),
+                model("GPT-4o", "gpt-4o"),
+            ],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+        }],
+    };
+    let client = DefaultLlmClient::from_config(config).unwrap();
+
+    for responses_model in ["gpt-5.5", "gpt-5-codex"] {
+        let prepared = client
+            .prepare(&LlmRequest::new(responses_model))
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.route.protocol,
+            ProtocolFamily::OpenAiResponses,
+            "{responses_model} must route via Responses"
+        );
+        assert_eq!(
+            prepared.provider_request.url, "https://api.githubcopilot.com/responses",
+            "{responses_model} must hit /responses"
+        );
+    }
+
+    // Older models keep the chat/completions endpoint.
+    let four = client.prepare(&LlmRequest::new("gpt-4o")).await.unwrap();
+    assert_eq!(four.route.protocol, ProtocolFamily::OpenAiChat);
+    assert_eq!(
+        four.provider_request.url,
+        "https://api.githubcopilot.com/chat/completions"
+    );
+}
+
+#[tokio::test]
+async fn non_copilot_openai_chat_provider_is_never_overridden() {
+    // The override is scoped to the `github-copilot` profile: a GPT-5 id served
+    // by some other OpenAiChat gateway (e.g. openrouter) keeps /chat/completions.
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            profile_name: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "GPT-5.5".to_string(),
+                request_model: "gpt-5.5".to_string(),
+                billing_model: "gpt-5.5".to_string(),
+                aliases: vec![],
+                description: None,
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+        }],
+    };
+    let client = DefaultLlmClient::from_config(config).unwrap();
+    let prepared = client.prepare(&LlmRequest::new("gpt-5.5")).await.unwrap();
+    assert_eq!(prepared.route.protocol, ProtocolFamily::OpenAiChat);
+    assert_eq!(
+        prepared.provider_request.url,
+        "https://openrouter.ai/api/v1/chat/completions"
+    );
+}
+
 #[test]
 fn duplicate_profile_names_are_rejected_during_client_construction() {
     let config = ClientConfig {

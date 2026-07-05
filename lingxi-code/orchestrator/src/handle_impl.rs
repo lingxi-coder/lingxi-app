@@ -224,6 +224,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         StatusSnapshot {
             session_id: s.session_id.to_string(),
             model: s.model.clone(),
+            model_profile: s.model_profile.clone(),
             n_messages: u32::try_from(s.history.len()).unwrap_or(u32::MAX),
             total_cost_usd: cost.total_usd,
             input_tokens: cost.input_tokens,

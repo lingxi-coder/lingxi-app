@@ -2407,6 +2407,34 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             ))
         };
 
+        // FIX C (hook_stopped_continuation, PreToolUse twin): a PreToolUse hook's
+        // `continue:false` (preventContinuation) becomes its OWN meta message —
+        // claude yields it AFTER the tool_result on the SUCCESS path
+        // (`toolExecution.ts:1571-1582`, inside the post-execution try-block),
+        // using `stopReason || 'Execution stopped by hook'` and hookName
+        // `PreToolUse:{tool}`. The tool STILL runs (the pre-hook only OR-folds the
+        // end-turn signal at line ~2363); the message is emitted after that tool's
+        // tool_result, tagged with this tool's `tool_use_id`. Built here alongside
+        // `pre_context_message` but pushed ONLY on the success path below — a
+        // Block/Defer never executes the tool, so claude's post-execution site
+        // never fires there. `pre_agg.reason` carries the parsed `stopReason`
+        // (`hook_payload.rs:1113`). `None` when the hook did not request
+        // preventContinuation (the common case), a strict no-op.
+        let pre_prevent_message: Option<ConversationMessage> = if pre_agg.prevent_continuation {
+            let reason = pre_agg
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Execution stopped by hook".to_string());
+            Some(ConversationMessage::user(
+                MessageId::new(),
+                format!(
+                    "<system-reminder>\nPreToolUse:{name} hook stopped continuation: {reason}\n</system-reminder>"
+                ),
+            ))
+        } else {
+            None
+        };
+
         // #37 `permissionDecision:"defer"` (claude BIN off 202454844): a PreToolUse
         // hook defers a tool to a later interactive resume. Gated to (1) non-
         // interactive mode and (2) a SOLO batch; else warns and falls through.
@@ -2998,6 +3026,32 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // documented residual.
         apply_terminal_sequence(orch, &name, post_agg.terminal_sequence.as_deref()).await;
 
+        // FIX C (hook_stopped_continuation, PostToolUse twin): a PostToolUse
+        // hook's `continue:false` (preventContinuation) becomes its OWN meta
+        // message — claude yields it AFTER the tool_result (`toolHooks.ts:118-130`)
+        // using `stopReason || 'Execution stopped by PostToolUse hook'` and
+        // hookName `PostToolUse:{tool}`, then RETURNS (before any additionalContext),
+        // so we queue it BEFORE the additionalContext loop below. Tagged with this
+        // tool's `tool_use_id`; injected messages are appended after the
+        // tool_result by both drivers, matching claude's ordering. `post_agg.reason`
+        // carries the parsed `stopReason` (`hook_payload.rs:1113`). Strict no-op
+        // when the hook did not request preventContinuation.
+        if post_agg.prevent_continuation {
+            let reason = post_agg
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Execution stopped by PostToolUse hook".to_string());
+            injected_messages.push((
+                ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "<system-reminder>\nPostToolUse:{name} hook stopped continuation: {reason}\n</system-reminder>"
+                    ),
+                ),
+                tool_use_id.clone(),
+            ));
+        }
+
         // HOOK.1 (additionalContext, PostToolUse twin): a PostToolUse hook's
         // `additionalContext` is ALSO a separate `hook_additional_context`
         // attachment in claude-code (`toolHooks.ts:133-143`), injected AFTER the
@@ -3293,6 +3347,17 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // (`toolExecution.ts:845`). `None` (the common no-context case) is a
         // strict no-op.
         if let Some(msg) = pre_context_message {
+            injected_messages.push((msg, tool_use_id.clone()));
+        }
+
+        // FIX C (PreToolUse hook_stopped_continuation): emit the stop-reason meta
+        // AFTER this tool's tool_result, mirroring claude's post-execution push
+        // (`toolExecution.ts:1571`). Ordered after `pre_context_message` so the
+        // relative order matches claude (additionalContext at 846 → stopped at
+        // 1571). Success path only — a Block/Defer `continue`d above without ever
+        // executing the tool, so this site is unreached there. No-op when the
+        // hook did not request preventContinuation.
+        if let Some(msg) = pre_prevent_message {
             injected_messages.push((msg, tool_use_id.clone()));
         }
     }

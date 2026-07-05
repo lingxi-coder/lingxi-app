@@ -509,8 +509,14 @@ pub fn reset_loop_runtime_state() {
 /// state and/or the `CLAUDE_CODE_LOOP_*` env vars. Shared across this crate's
 /// test modules (e.g. `wakeup::tests::sentinel_resolution`) so resolution tests
 /// don't race each other over the globals.
-#[cfg(test)]
-pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
+///
+/// Exposed `pub` (and NOT `#[cfg(test)]`-gated) because after this module was
+/// relocated from `tool-cron` into `cron` to satisfy §8.1 layering, the
+/// `tool-cron` `wakeup::tests` modules reach it cross-crate as
+/// `cron::autonomous_loop::TEST_SERIAL`; a dependency crate is never built with
+/// `cfg(test)`, so the lock must exist in the normal build. It is a zero-cost
+/// `Mutex<()>` static.
+pub static TEST_SERIAL: Mutex<()> = Mutex::new(());
 
 // ── Fire resolvers (binary `nKi` / `sKi` / `J4d`) ────────────────────────────
 

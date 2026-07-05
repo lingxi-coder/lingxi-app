@@ -15,13 +15,17 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
-pub mod autonomous_loop;
 pub mod cron_delete;
 pub mod cron_list;
 pub mod remote_trigger;
 pub mod schedule_cron;
 pub mod wakeup;
-pub use autonomous_loop::{
+// `autonomous_loop` was relocated to the root-level `cron` crate to satisfy
+// §8.1 dependency layering (command-core / tool-task must not depend on this
+// tool crate). It is re-exported here so `tool_cron::autonomous_loop` and every
+// `tool_cron::<Symbol>` path below keep working for existing callers.
+pub use cron::autonomous_loop;
+pub use cron::{
     begin_loop_tick, get_autonomous_loop_preamble, is_autonomous_loop_sentinel,
     is_loop_default_prompt_enabled, is_loop_default_sentinel, is_loop_dynamic_enabled,
     is_loop_file_sentinel, is_loop_keepalive_enabled, is_push_notif_enabled,

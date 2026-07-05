@@ -847,6 +847,7 @@ dependencies = [
  "command-api",
  "compaction",
  "cost",
+ "cron",
  "indexmap",
  "llm-client",
  "orchestrator",
@@ -861,7 +862,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "tool-cron",
  "tracing",
  "traits",
 ]
@@ -1017,6 +1017,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tasks",
+ "telemetry",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5378,6 +5380,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "cron",
  "engine",
  "once_cell",
  "permission",
@@ -5390,7 +5393,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
- "tool-cron",
  "traits",
 ]
 

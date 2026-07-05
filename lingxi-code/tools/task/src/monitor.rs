@@ -120,9 +120,9 @@ The script runs in the same shell environment as Bash. Exit ends the watch (exit
 
 /// Binary `lJr()` (cc_all.txt:504932) — the `Yke()`-gated PushNotification
 /// addendum (leading newline) spliced onto BOTH `description()` and `prompt()`.
-/// Reuses `tool_cron::is_push_notif_enabled` (the exact `Yke()` predicate).
+/// Reuses `cron::is_push_notif_enabled` (the exact `Yke()` predicate).
 fn ljr() -> String {
-    if tool_cron::is_push_notif_enabled() {
+    if cron::is_push_notif_enabled() {
         format!(
             "\nWhen an event lands that the user would want to act on now \u{2014} an error appeared, the status they were waiting on flipped \u{2014} send a {PUSH_NOTIFICATION_NAME}. Not every event is worth a push; the ones that change what they'd do next are."
         )
@@ -445,7 +445,7 @@ mod tests {
         // splice stays absent, matching the binary default. Assert the gate wiring:
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
         assert!(
-            !tool_cron::is_push_notif_enabled(),
+            !cron::is_push_notif_enabled(),
             "Yke needs the setting too"
         );
         let rt = tokio::runtime::Runtime::new().unwrap();

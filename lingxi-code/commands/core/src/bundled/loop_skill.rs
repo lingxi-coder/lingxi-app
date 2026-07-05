@@ -20,7 +20,7 @@
 //! PROMPT/DYNAMIC gates are FLAG-ONLY — the binary `fJr`/`q_e` have no env layer,
 //! so there is no `LINGXI_LOOP_PROMPT`/`_DYNAMIC` env; tests flip the flags
 //! via `telemetry::test_set_flag`.) The flag-on builders live in
-//! [`tool_cron`]'s `autonomous_loop` module (loop.md detection, the preamble, the
+//! [`cron`]'s `autonomous_loop` module (loop.md detection, the preamble, the
 //! sentinels, `logAutonomousLoopActivation`), imported here exactly as the binary
 //! loop command imports `QVe = io(T3e)`. The cloud-offer / push-notification
 //! splices (`zpc`/`Ypc`/`Kpc`) are gated on `tengu_surreal_dali` /
@@ -147,7 +147,7 @@ fn build_prompt(args: &str) -> String {
 use std::sync::OnceLock;
 
 use regex::Regex;
-use tool_cron::{
+use cron::{
     get_autonomous_loop_preamble, is_loop_default_prompt_enabled, is_loop_dynamic_enabled,
     log_autonomous_loop_activation, read_loop_file, LoopFile, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
     AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
@@ -210,12 +210,12 @@ fn remote_confirm_line() -> &'static str {
 
 /// Binary `Kpc()` (cc_all.txt:521844) — the `PushNotification` "send a one-line
 /// outcome before you stop" splice: `return Yke()?" Before you stop, …":""`.
-/// Gated on the shared `Yke()` (`tool_cron::is_push_notif_enabled`), so it is
+/// Gated on the shared `Yke()` (`cron::is_push_notif_enabled`), so it is
 /// structurally 1:1 — it renders "" only because the push-notif flag/setting
 /// default off (no live GrowthBook), matching the shipped binary. Note the
 /// leading space (the binary splices it inline after the step-6 sentence).
 fn push_outcome_line() -> &'static str {
-    if tool_cron::is_push_notif_enabled() {
+    if cron::is_push_notif_enabled() {
         " Before you stop, send a one-line outcome via PushNotification — the user may be away and waiting to hear it's done. Skip this if you're stopping because the user just told you to; they're already here."
     } else {
         ""
@@ -595,7 +595,7 @@ mod tests {
         // a(null, u=false, i="10m") — the autonomous-default cron prompt.
         assert_eq!(build_autonomous(None, false, "10m"), fixture("a_auto_cron"));
         // Sanity: the inlined body IS the binary default preamble (aJr).
-        assert!(build_autonomous(None, false, "10m").ends_with(tool_cron::AUTONOMOUS_LOOP_PREAMBLE));
+        assert!(build_autonomous(None, false, "10m").ends_with(cron::AUTONOMOUS_LOOP_PREAMBLE));
     }
 
     #[test]
@@ -606,7 +606,7 @@ mod tests {
             build_autonomous(None, true, "10m"),
             fixture("a_auto_dynamic")
         );
-        assert!(build_autonomous(None, true, "10m").ends_with(tool_cron::AUTONOMOUS_LOOP_PREAMBLE));
+        assert!(build_autonomous(None, true, "10m").ends_with(cron::AUTONOMOUS_LOOP_PREAMBLE));
     }
 
     #[test]

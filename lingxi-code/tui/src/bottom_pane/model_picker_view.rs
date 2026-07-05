@@ -140,7 +140,16 @@ impl ModelPickerView {
         let widest_model = self
             .rows
             .iter()
-            .map(|r| r.display.chars().count() + 4)
+            .map(|r| {
+                // ` › ● {display}` = display + 4 gutter cols, plus the `· 无思考`
+                // suffix width for a non-thinking row (drawn at render time).
+                let tag = if r.supports_reasoning {
+                    0
+                } else {
+                    crate::session::NON_THINKING_TAG.chars().count()
+                };
+                r.display.chars().count() + 4 + tag
+            })
             .max()
             .unwrap_or(0);
         let widest_header = self
@@ -245,11 +254,21 @@ impl Renderable for ModelPickerView {
             } else {
                 Style::default()
             };
-            // Models are indented one column under their provider header.
-            lines.push(Line::from(Span::styled(
+            // Models are indented one column under their provider header. A
+            // non-thinking model gets a dim `· 无思考` suffix — a SEPARATE dim
+            // span so it doesn't join the row's (bold/reversed) style, and so it
+            // never enters `ModelRow.display` (which the statusline identity reads).
+            let mut spans = vec![Span::styled(
                 format!(" {caret}{marker}{}", row.display),
                 style,
-            )));
+            )];
+            if !row.supports_reasoning {
+                spans.push(Span::styled(
+                    crate::session::NON_THINKING_TAG,
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
         let hint = if self.all_rows.is_empty() {
             "Esc close"
@@ -332,6 +351,7 @@ mod tests {
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
                 is_current: false,
+                supports_reasoning: true,
             },
             ModelRow {
                 display: "Sonnet".into(),
@@ -339,6 +359,7 @@ mod tests {
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
                 is_current: true,
+                supports_reasoning: true,
             },
         ]
     }
@@ -375,6 +396,7 @@ mod tests {
                 profile: Some("glm-coding".into()),
                 provider_label: "GLM (coding)".into(),
                 is_current: false,
+                supports_reasoning: true,
             },
             ModelRow {
                 display: "GPT-5.5".into(),
@@ -382,6 +404,7 @@ mod tests {
                 profile: Some("openai".into()),
                 provider_label: "OpenAI".into(),
                 is_current: true,
+                supports_reasoning: true,
             },
             // Same (provider, display) as the first row — must be de-duped.
             ModelRow {
@@ -390,6 +413,7 @@ mod tests {
                 profile: Some("glm-coding".into()),
                 provider_label: "GLM (coding)".into(),
                 is_current: false,
+                supports_reasoning: true,
             },
         ];
         let p = ModelPickerView::new(rows);
@@ -459,6 +483,7 @@ mod tests {
                 profile: None,
                 provider_label: String::new(),
                 is_current: Some(i) == current,
+                supports_reasoning: true,
             })
             .collect()
     }
@@ -477,6 +502,50 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn non_thinking_model_renders_the_dim_tag_without_polluting_display() {
+        // The `· 无思考` tag is drawn at render time from `supports_reasoning`,
+        // NOT baked into `ModelRow.display` (which the statusline identity reads).
+        let rows = vec![
+            ModelRow {
+                display: "GPT-5.5".into(),
+                request_model: "gpt-5.5".into(),
+                profile: Some("openai".into()),
+                provider_label: "OpenAI".into(),
+                is_current: true,
+                supports_reasoning: true,
+            },
+            ModelRow {
+                display: "Qwen3 Coder (free)".into(),
+                request_model: "qwen/qwen3-coder:free".into(),
+                profile: Some("openrouter".into()),
+                provider_label: "OpenRouter".into(),
+                is_current: false,
+                supports_reasoning: false,
+            },
+        ];
+        let p = ModelPickerView::new(rows);
+        // The stored display of the non-thinking row is CLEAN (no tag) — so the
+        // statusline/welcome identity that read it stay untagged.
+        assert!(
+            p.rows()
+                .iter()
+                .any(|r| r.display == "Qwen3 Coder (free)"),
+            "stored display must not carry the tag"
+        );
+        // But the rendered picker shows the tag on the non-thinking row only.
+        // (ratatui renders wide CJK glyphs across two cells, so the buffer text
+        // has spaces between them — strip spaces before matching.)
+        let text = render_text(&p, Rect::new(0, 0, 60, 20));
+        let packed = text.replace(' ', "");
+        assert!(packed.contains("无思考"), "non-thinking row shows the tag: {text}");
+        assert!(packed.contains("·无思考"), "tag carries the `·` separator: {text}");
+        // The thinking row (GPT-5.5) is NOT tagged — only ONE 无思考 in the view.
+        assert_eq!(packed.matches("无思考").count(), 1, "only the non-thinking row is tagged: {text}");
+        // The clean display name still renders (ASCII, no inter-cell spaces).
+        assert!(text.contains("Qwen3 Coder (free)"), "clean display renders: {text}");
     }
 
     #[test]
@@ -557,6 +626,7 @@ mod tests {
                 profile: None,
                 provider_label: String::new(),
                 is_current: false,
+                supports_reasoning: true,
             })
             .collect();
         // Caps at the 12-row scroll viewport + 1 Search row + 4 chrome.
@@ -601,6 +671,7 @@ mod tests {
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
                 is_current: true,
+                supports_reasoning: true,
             },
             ModelRow {
                 display: "GPT-4o".into(),
@@ -608,6 +679,7 @@ mod tests {
                 profile: Some("openrouter".into()),
                 provider_label: "OpenRouter".into(),
                 is_current: false,
+                supports_reasoning: true,
             },
             ModelRow {
                 display: "Gemini Pro".into(),
@@ -615,6 +687,7 @@ mod tests {
                 profile: Some("openrouter".into()),
                 provider_label: "OpenRouter".into(),
                 is_current: false,
+                supports_reasoning: true,
             },
         ]);
         assert_eq!(p.rows().len(), 3, "all rows before filtering");

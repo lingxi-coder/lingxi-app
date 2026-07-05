@@ -39,7 +39,16 @@ pub struct ModelRow {
     pub provider_label: String,
     /// Whether this row is the currently active model.
     pub is_current: bool,
+    /// Whether this model supports extended thinking. `false` renders a dim
+    /// `· 无思考` picker suffix (a session thinking budget silently won't apply).
+    /// Kept OUT of [`Self::display`] so the statusline / welcome identity — which
+    /// read `display` — stay untagged; the suffix is drawn only in the picker.
+    pub supports_reasoning: bool,
 }
+
+/// The dim suffix the `/model` picker appends to a non-thinking row. Defined
+/// here (not inlined) so the picker render and its width budget agree.
+pub(crate) const NON_THINKING_TAG: &str = " · 无思考";
 
 /// Filter the full captured model catalog down to what the `/model` picker
 /// should show: models of ELIGIBLE providers only, trimmed to each curated
@@ -256,6 +265,7 @@ mod tests {
             profile: (!provider.is_empty()).then(|| provider.to_string()),
             provider_label: provider.to_string(),
             is_current: current,
+            supports_reasoning: true,
         }
     }
 

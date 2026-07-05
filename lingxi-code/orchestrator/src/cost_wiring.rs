@@ -76,7 +76,15 @@ fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderI
 pub(crate) fn model_ref_from_string(model: &str, profile: Option<&str>) -> ModelRef {
     let (profile, bare) = match profile {
         Some(p) => (p.to_string(), model.to_string()),
-        None => llm_client::split_profile_model(model),
+        // No LIVE profile (e.g. a cross-provider `--resume` cleared it): recover
+        // the REAL provider by resolving the bare wire id against the catalog
+        // before falling back to string-parsing (which mis-infers `anthropic`
+        // for every bare non-`claude-` id, misattributing cost + the
+        // `tengu_api_success` provider tag).
+        None => match crate::provider_adapter::provider_for_model(model) {
+            Some(p) => (p, model.to_string()),
+            None => llm_client::split_profile_model(model),
+        },
     };
     let pricing_provider = llm_client::pricing_provider_id_for_profile(
         &profile,
@@ -362,10 +370,14 @@ mod tests {
 
     #[test]
     fn model_ref_strips_prefix_for_priced_lookup() {
-        // No live profile → string-parse fallback: prefix → provider + stripped id.
-        let mr = model_ref_from_string("openai/gpt-4o", None);
+        // No live profile + an UNKNOWN prefixed ref (not in the catalog) →
+        // string-parse fallback: the prefix selects the provider, the remainder
+        // is the stripped local id. (A catalog-KNOWN slashed id like the real
+        // openrouter `openai/gpt-4o` resolves to its actual provider instead —
+        // see `model_ref_recovers_provider_by_id_when_profile_is_none`.)
+        let mr = model_ref_from_string("openai/gpt-4o-unknownsnap", None);
         assert_eq!(mr.provider, ProviderId::OpenAI);
-        assert_eq!(mr.model, "gpt-4o");
+        assert_eq!(mr.model, "gpt-4o-unknownsnap");
         // Anthropic back-compat: bare `claude-*` full string kept as the model id.
         let mr = model_ref_from_string("claude-opus-4-7", None);
         assert_eq!(mr.provider, ProviderId::Anthropic);
@@ -409,6 +421,34 @@ mod tests {
         assert_eq!(
             model_ref_from_string("gemini-2.5-pro", Some("gemini")).provider,
             ProviderId::GoogleGemini
+        );
+    }
+
+    #[test]
+    fn model_ref_recovers_provider_by_id_when_profile_is_none() {
+        // Bug fix: after a cross-provider `--resume` clears model_profile, a bare
+        // non-claude id must still attribute to its REAL provider (resolved from
+        // the catalog), NOT default to Anthropic via split_profile_model.
+        let mr = model_ref_from_string("deepseek-chat", None);
+        assert_eq!(
+            mr.provider,
+            ProviderId::OpenAICompatible {
+                name: "deepseek".to_string()
+            },
+            "bare deepseek id with no profile must resolve to deepseek, not anthropic"
+        );
+
+        // A bare `claude-` id with no profile still resolves to Anthropic
+        // (unique in the catalog / string-parse fallback agree).
+        assert_eq!(
+            model_ref_from_string("claude-opus-4-8", None).provider,
+            ProviderId::Anthropic
+        );
+
+        // A genuinely unknown id falls back to the string-parse default.
+        assert_eq!(
+            model_ref_from_string("totally-unknown-model", None).provider,
+            ProviderId::Anthropic
         );
     }
 

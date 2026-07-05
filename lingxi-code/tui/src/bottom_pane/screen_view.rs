@@ -518,6 +518,7 @@ mod tests {
             profile: None,
             provider_label: "Anthropic".into(),
             is_current: true,
+            supports_reasoning: true,
         };
         let lines = status_lines(&d, Some(&model), true, false, ThemeName::Dark);
         let text = text_of(&lines);

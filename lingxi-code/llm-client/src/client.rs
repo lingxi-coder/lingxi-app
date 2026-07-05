@@ -293,14 +293,33 @@ impl DefaultLlmClient {
         // enhancement driven by the SESSION thinking config, so switching to a
         // model that doesn't advertise reasoning (e.g. an OpenRouter free model
         // like `qwen/qwen3-coder:free`) must silently drop it — not break the turn
-        // with "unsupported capability: reasoning". (streaming / tools /
+        // with "unsupported capability: reasoning". This covers BOTH the top-level
+        // `request.reasoning` field AND any `Reasoning`/`RedactedThinking` blocks
+        // left in message HISTORY from an earlier thinking-capable model —
+        // `validate_capabilities` rejects those blocks independently, so a
+        // mid-conversation downgrade (not just a first turn) must strip them from
+        // the request that gets validated AND encoded. (streaming / tools /
         // structured_output stay hard errors — they cannot be dropped safely.)
-        let degraded = (request.reasoning.is_some() && !resolved_route.capabilities.reasoning)
-            .then(|| {
-                let mut r = request.clone();
-                r.reasoning = None;
-                r
-            });
+        let is_reasoning_block = |b: &crate::ContentBlock| {
+            matches!(
+                b,
+                crate::ContentBlock::Reasoning { .. } | crate::ContentBlock::RedactedThinking { .. }
+            )
+        };
+        let needs_degrade = !resolved_route.capabilities.reasoning
+            && (request.reasoning.is_some()
+                || request
+                    .messages
+                    .iter()
+                    .any(|m| m.content.iter().any(is_reasoning_block)));
+        let degraded = needs_degrade.then(|| {
+            let mut r = request.clone();
+            r.reasoning = None;
+            for m in &mut r.messages {
+                m.content.retain(|b| !is_reasoning_block(b));
+            }
+            r
+        });
         let request = degraded.as_ref().unwrap_or(request);
 
         validate_capabilities(request, resolved_route.capabilities)?;

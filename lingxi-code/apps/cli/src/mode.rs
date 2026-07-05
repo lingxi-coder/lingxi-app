@@ -879,31 +879,25 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         .list_model_listings()
         .await
         .into_iter()
-        .map(|m| {
-            // Flag NON-thinking models with a dim `· 无思考` suffix: most models
-            // support extended thinking, so a session thinking budget silently
-            // does NOT apply to the ~29% that don't — surfacing it here makes that
-            // visible before selecting (the case that reads as "thinking stopped").
-            let display = if m.supports_reasoning {
-                m.display_model
-            } else {
-                format!("{} · 无思考", m.display_model)
-            };
-            ModelRow {
-                // Mark the current row by (model AND provider) so a wire id shared
-                // across providers (e.g. `gpt-5.5` on both OpenAI and Copilot) only
-                // dots the ACTUAL current provider's row. When the current profile
-                // is unknown (None — e.g. resolve-by-id after a cross-provider
-                // resume), fall back to matching by model id alone.
-                is_current: m.request_model == current_model
-                    && current_profile
-                        .as_deref()
-                        .is_none_or(|p| p == m.provider_id),
-                display,
-                request_model: m.request_model,
-                profile: (!m.provider_id.is_empty()).then_some(m.provider_id),
-                provider_label: m.provider_label,
-            }
+        .map(|m| ModelRow {
+            // Mark the current row by (model AND provider) so a wire id shared
+            // across providers (e.g. `gpt-5.5` on both OpenAI and Copilot) only
+            // dots the ACTUAL current provider's row. When the current profile
+            // is unknown (None — e.g. resolve-by-id after a cross-provider
+            // resume), fall back to matching by model id alone.
+            is_current: m.request_model == current_model
+                && current_profile
+                    .as_deref()
+                    .is_none_or(|p| p == m.provider_id),
+            // Keep `display` CLEAN — the `· 无思考` non-thinking tag is drawn at
+            // picker-render time from `supports_reasoning`, NOT baked in here, so
+            // the statusline / welcome identity (which read `display`) stay
+            // untagged for a non-thinking current model.
+            display: m.display_model,
+            request_model: m.request_model,
+            profile: (!m.provider_id.is_empty()).then_some(m.provider_id),
+            provider_label: m.provider_label,
+            supports_reasoning: m.supports_reasoning,
         })
         .collect();
 

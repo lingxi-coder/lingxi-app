@@ -341,8 +341,20 @@ pub(crate) async fn run_ratatui(
     let on_submit = move |prompt: String, cancel: CancellationToken| {
         let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
         let orch = orchestrator.clone();
+        let tx = turn_tx.clone();
         handle.spawn(async move {
-            let _ = orch.run_turn_streaming_with_cancel(&prompt, cancel).await;
+            if let Err(e) = orch.run_turn_streaming_with_cancel(&prompt, cancel).await {
+                // A HARD terminal error (rate limit, auth, model-unavailable, …)
+                // propagates as `Err` WITHOUT being surfaced as an assistant
+                // message or an `emit_end_turn` — unlike a graceful `model_error`,
+                // which the orchestrator renders + ends itself. So the retry loop
+                // could exhaust (e.g. "Retrying… attempt 10/10") and then hang the
+                // spinner forever with no error shown. Surface it as the turn's
+                // reply and end the turn so the spinner + any "Retrying…" status
+                // clear.
+                let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
+                let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+            }
         });
     };
     let on_switch_model = move |model: String, profile: Option<String>| {

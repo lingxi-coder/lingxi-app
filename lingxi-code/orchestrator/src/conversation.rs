@@ -3747,6 +3747,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `"You've hit your … limit · resets …"` copy instead of the generic
     /// `"api call failed: rate limited"`. No-op for non-429 errors and when
     /// the 429 carried no unified headers.
+    /// Text for a graceful `model_error` surface. Verbatim for parity EXCEPT a
+    /// `ModelUnavailable` (a provider 404): enrich it with the model id and a
+    /// `/model` hint so the user knows WHICH model the provider rejected and how
+    /// to switch — the bare "model unavailable" was opaque, especially with a
+    /// stale third-party catalog entry (multi-provider UX).
+    pub(crate) async fn model_error_text(&self, err: &LlmError) -> String {
+        match err {
+            LlmError::ModelUnavailable => {
+                let model = self.session.lock().await.model.clone();
+                format!(
+                    "model unavailable: the provider does not serve '{model}' (HTTP 404). Pick another model with /model."
+                )
+            }
+            other => other.to_string(),
+        }
+    }
+
     fn enrich_api_error(&self, err: OrchestratorError) -> OrchestratorError {
         enrich_rate_limited_error(err, self.api.last_rate_limit_error_message())
     }
@@ -5387,7 +5404,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // surface — so the classifier sees the inner `LlmError`.
                     let env = classify_api_error(&OrchestratorError::Streaming(other.clone()));
                     let id =
-                        crate::turn_loop::surface_model_error(self, &other.to_string(), env).await;
+                        crate::turn_loop::surface_model_error(self, &self.model_error_text(&other).await, env).await;
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("model_error", &cost).await;
                     final_message_id = id;

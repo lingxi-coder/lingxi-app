@@ -228,6 +228,11 @@ pub(crate) async fn run_ratatui(
     let web_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
     let bash_turn_tx = turn_tx.clone();
+    let compact_turn_tx = turn_tx.clone();
+    // (/reload-skills) The SAME shared `Arc<RwLock<CommandRegistry>>` the
+    // dispatcher mutates, handed to the `ChatWidget` so `/reload-skills`
+    // reloads the live registry. Cloned before `tui_build` is consumed.
+    let command_registry = tui_build.runtime.dispatcher.registry();
     // (B4 Task 5 parity) Thread the composition root's shared subscription
     // slot so the widget's rate-limit composer reads the live snapshot at
     // compose time — same wiring as the iocraft `with_subscription` path.
@@ -264,6 +269,13 @@ pub(crate) async fn run_ratatui(
     let connect_handle = handle.clone();
     let bash_handle = handle.clone();
     let summary_orch = orchestrator.clone();
+    // (/compact) A handle + orchestrator clone for the off-loop `force_compact`
+    // effect closure, and a clone threaded into the `ChatWidget` to drive the
+    // read/inject OrchestratorHandle-backed commands. Both taken BEFORE
+    // `on_submit` moves `orchestrator`/`handle` into its closure.
+    let compact_orch = orchestrator.clone();
+    let compact_handle = handle.clone();
+    let widget_orch = orchestrator.clone();
     // (/web async effects) Preload the shared `/web` config snapshot from the
     // real on-disk settings + credential-store presence, mirroring the
     // deleted iocraft `AppState::web_config_snapshot` startup seed. Shared
@@ -386,6 +398,29 @@ pub(crate) async fn run_ratatui(
             });
         });
     };
+    // (/compact async effect) `/compact` returns `ChatOutcome::Compact` from the
+    // blocking ratatui loop; the actual `force_compact()` is a real,
+    // potentially multi-second LLM summarization round-trip whose reqwest/
+    // websocket sockets are registered on THIS runtime. It is spawned onto the
+    // captured handle — never `block_on`'d on the render thread — so it runs on
+    // the correct reactor, never freezes input, and is sequenced off the render
+    // loop (avoiding the whole-history-swap race with an in-flight turn). The
+    // summary (or failure) lands in the transcript via `TurnEvent::SystemNotice`
+    // on the shared `turn_tx`, mirroring `command_core::compact`'s display text.
+    let on_compact = move |_args: String| {
+        let orch = compact_orch.clone();
+        let tx = compact_turn_tx.clone();
+        compact_handle.spawn(async move {
+            let (body, is_error) = match orch.force_compact().await {
+                Ok(_summary) => ("Compacted (ctrl+o to see full summary)".to_string(), false),
+                Err(_e) => ("Error compacting conversation".to_string(), true),
+            };
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                body,
+                is_error,
+            });
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -445,15 +480,27 @@ pub(crate) async fn run_ratatui(
             connect_auth_methods,
             connect_availability,
             Some(shell_expansion),
+            Some(widget_orch),
+            Some(command_registry),
             on_submit,
             on_switch_model,
             on_web_action,
             on_connect_action,
             on_bash,
+            on_compact,
         )
     })
     .await;
     status_pump.abort();
+    // (/stop, and clean shutdown) The render loop has torn down; close the
+    // responses websocket + set `should_exit` on the LIVE handle HERE — on the
+    // OUTER runtime where those sockets are registered — rather than on the
+    // render thread's throwaway `block_on` runtime (a cross-reactor hazard). A
+    // `/stop` reached this path by returning `ChatOutcome::Quit`; this is the
+    // deferred half of its handler's `request_exit()`. Idempotent and harmless
+    // on a normal `/exit`/Ctrl-C quit. The pure `session.lock()` reads below
+    // (cost/session id) are unaffected by the closed websocket.
+    summary_orch.request_exit().await;
     // Resume parity (claude-code `saveCurrentSessionCosts`, fired on process
     // exit): persist this session's accumulated cost to the project config,
     // keyed by (project, session id), so a later `--resume` of THIS session

@@ -66,5 +66,14 @@ command-api = { path = "../command-api" }
 url = "2"
 dirs = "5"
 
+[dev-dependencies]
+# `orchestrator::test_support::MockOrchestratorHandle` — the reusable scripted
+# `OrchestratorHandle` test double the `command_core` handler tests use — drives
+# the behavioral tests for the OrchestratorHandle-backed slash commands. No such
+# mock exists in `tui`/`tui-core`; hand-rolling one would re-implement the
+# trait's ~16 non-defaulted methods. `orchestrator` does not depend on `tui`, so
+# this dev-only edge introduces no dependency cycle.
+orchestrator = { path = "../orchestrator" }
+
 [lints]
 workspace = true

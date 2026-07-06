@@ -54,6 +54,11 @@ pub struct AppCallbacks<'cb> {
     /// command through the sandboxed bash runner (no LLM turn) and folds its
     /// output back via [`TurnEvent::BashOutput`].
     pub on_bash: Box<dyn FnMut(String) + 'cb>,
+    /// Executed on [`ChatOutcome::Compact`]: the caller drives
+    /// `OrchestratorHandle::force_compact` asynchronously on the LIVE engine
+    /// runtime (never on the render thread) and reports the summary back via a
+    /// [`TurnEvent::SystemNotice`]. The `String` is the argument tail.
+    pub on_compact: Box<dyn FnMut(String) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -150,6 +155,12 @@ impl<'cb> RataApp<'cb> {
                     // path; the output returns via `TurnEvent::BashOutput`.
                     ChatOutcome::RunBash(command) => {
                         (self.callbacks.on_bash)(command);
+                    }
+                    // `/compact`: drive `force_compact` off-loop on the live
+                    // engine runtime (never block the render thread); the
+                    // summary returns via `TurnEvent::SystemNotice`.
+                    ChatOutcome::Compact(args) => {
+                        (self.callbacks.on_compact)(args);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -302,11 +313,16 @@ pub fn run_app(
     connect_auth_methods: std::collections::BTreeMap<String, String>,
     connect_availability: std::collections::BTreeMap<String, bool>,
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
+    orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
+    command_registry: Option<
+        std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    >,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
     on_connect_action: impl FnMut(ConnectAction),
     on_bash: impl FnMut(String),
+    on_compact: impl FnMut(String),
 ) -> io::Result<()> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -332,6 +348,7 @@ pub fn run_app(
             on_web_action: Box::new(on_web_action),
             on_connect_action: Box::new(on_connect_action),
             on_bash: Box::new(on_bash),
+            on_compact: Box::new(on_compact),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -351,6 +368,15 @@ pub fn run_app(
     // (no embedder slot) keeps the historical verbatim path.
     if let Some(provider) = shell_expansion {
         app.chat_widget.set_shell_expansion(provider);
+    }
+    // Wire the live engine handle (drives `/context`, `/files`, `/usage`,
+    // `/effort`, `/goal`, `/compact`) and the shared command registry (drives
+    // `/reload-skills`). `None` (tests) keeps those commands graceful no-ops.
+    if let Some(handle) = orchestrator {
+        app.chat_widget.set_orchestrator(handle);
+    }
+    if let Some(registry) = command_registry {
+        app.chat_widget.set_command_registry(registry);
     }
     app.run(&mut terminal)
 }
@@ -396,6 +422,7 @@ mod tests {
                 on_web_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
                 on_bash: Box::new(|_| {}),
+                on_compact: Box::new(|_| {}),
             },
         )
     }

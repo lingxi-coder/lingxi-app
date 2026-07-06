@@ -79,6 +79,15 @@ pub enum ChatOutcome {
     /// turn) and folds the captured output back through
     /// `TurnEvent::BashOutput`.
     RunBash(String),
+    /// `/compact` asked for a forced compaction pass. The caller drives
+    /// [`traits::OrchestratorHandle::force_compact`] — a real multi-second LLM
+    /// summarization round-trip — asynchronously on the LIVE engine runtime
+    /// (correct reactor; never on the render thread's throwaway `block_on`,
+    /// which would freeze input, drive the reqwest/websocket sockets on the
+    /// wrong reactor, and race the turn loop's history swap) and reports the
+    /// summary back through `TurnEvent::SystemNotice`. The `String` is the
+    /// (currently unused) argument tail.
+    Compact(String),
 }
 
 /// Live API retry-backoff status, mirroring Claude Code's `SystemAPIErrorMessage`.
@@ -213,6 +222,32 @@ pub struct ChatWidget {
     /// widget) keeps the historical verbatim path: the RAW template is submitted
     /// and the model re-runs the git commands itself.
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
+    /// Live engine handle (`None` until the embedder wires one via
+    /// [`Self::set_orchestrator`]). Drives the OrchestratorHandle-backed
+    /// read/inject/effect commands (`/context`, `/files`, `/usage`, `/effort`,
+    /// `/goal`, `/compact`). The read/inject ones route through the existing
+    /// `run_core_command` `block_on` bridge (proven-safe: every method they
+    /// call is a pure in-memory `session.lock()` + clone); `/compact`'s real
+    /// network effect goes off-loop via [`ChatOutcome::Compact`] instead.
+    /// `None` (every test widget) makes each of those a graceful
+    /// "unavailable" system line rather than a panic.
+    orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
+    /// The shared slash-command registry (`None` until the embedder wires one
+    /// via [`Self::set_command_registry`]). Drives `/reload-skills`, which
+    /// reloads the SAME `Arc<RwLock<CommandRegistry>>` the headless dispatcher
+    /// mutates (an in-memory + skill-dir fs scan; block_on-safe). Kept separate
+    /// from `orchestrator` because [`command_core::reload_skills::ReloadSkillsHandler`]
+    /// takes the registry, NOT the handle.
+    command_registry:
+        Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
+    /// The ONE persistent `/goal` handler, built off the live handle in
+    /// [`Self::set_orchestrator`] (`None` until then). [`command_core::goal::GoalHandler`]
+    /// keeps the active goal in a handler-local `Arc<Mutex>`, so a fresh
+    /// per-call handler would forget a goal set by an earlier `/goal
+    /// <condition>` — status/clear would always report "No goal set". Storing
+    /// one instance and passing a cheap `.clone()` (shared-`Arc` state) into
+    /// `run_core_command` keeps the goal alive across invocations.
+    goal_handler: Option<command_core::goal::GoalHandler>,
 }
 
 impl ChatWidget {
@@ -249,6 +284,9 @@ impl ChatWidget {
             connect_auth_methods: std::collections::BTreeMap::new(),
             connect_availability: std::collections::BTreeMap::new(),
             shell_expansion: None,
+            orchestrator: None,
+            command_registry: None,
+            goal_handler: None,
         }
     }
 
@@ -265,6 +303,31 @@ impl ChatWidget {
         provider: std::sync::Arc<dyn command_api::ShellExpansionProvider>,
     ) {
         self.shell_expansion = Some(provider);
+    }
+
+    /// Wire the live engine handle the OrchestratorHandle-backed commands
+    /// (`/context`, `/files`, `/usage`, `/effort`, `/goal`, `/compact`) run
+    /// against, and build the ONE persistent `/goal` handler off it (its goal
+    /// state lives in a handler-local `Arc<Mutex>`, so a per-call handler would
+    /// lose it — see the `goal_handler` field). Wired from the CLI `run_app`
+    /// off the engine runtime; `None` (every test widget) keeps those commands
+    /// as graceful no-ops.
+    pub fn set_orchestrator(
+        &mut self,
+        handle: std::sync::Arc<dyn traits::OrchestratorHandle>,
+    ) {
+        self.goal_handler = Some(command_core::goal::GoalHandler::new(handle.clone()));
+        self.orchestrator = Some(handle);
+    }
+
+    /// Wire the shared slash-command registry `/reload-skills` reloads (the
+    /// SAME `Arc<RwLock<CommandRegistry>>` the dispatcher mutates). `None`
+    /// (every test widget) keeps `/reload-skills` a graceful no-op.
+    pub fn set_command_registry(
+        &mut self,
+        registry: std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    ) {
+        self.command_registry = Some(registry);
     }
 
     /// Override where `/export` writes transcripts (tests/embedders; the
@@ -1577,6 +1640,119 @@ impl ChatWidget {
         )
     }
 
+    // ===== OrchestratorHandle-backed commands. The read/inject ones route
+    // through `run_core_command`'s throwaway-`block_on` bridge — PROVEN safe
+    // because every handle method they call is a pure in-memory `session.lock()`
+    // + clone (no network / reactor / timer). Each is a graceful "unavailable"
+    // system line when no handle is wired (`None`, every test widget). =====
+
+    /// `/context`: show the current context-window usage (read-only).
+    pub(crate) fn cmd_context(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self
+                .show_system_text("/context is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command(
+            "context",
+            args,
+            &command_core::context::ContextHandler::new(handle),
+        )
+    }
+
+    /// `/files`: list the files currently in context (read-only).
+    pub(crate) fn cmd_files(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/files is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command("files", args, &command_core::files::FilesHandler::new(handle))
+    }
+
+    /// `/usage`: show the session cost/token usage summary (read-only).
+    pub(crate) fn cmd_usage(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/usage is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command("usage", args, &command_core::usage::UsageHandler::new(handle))
+    }
+
+    /// `/effort`: show or set the model effort level. The set/clear write is a
+    /// direct-fs `settings.json` merge inside the handler (not via the handle);
+    /// it persists a default for NEW sessions, so the live turn's effort is
+    /// unchanged — the same parity limitation as the headless dispatcher.
+    pub(crate) fn cmd_effort(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/effort is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command(
+            "effort",
+            args,
+            &command_core::effort::EffortHandler::new(handle),
+        )
+    }
+
+    /// `/goal`: set, show, or clear a session-scoped stop-gating goal. Uses the
+    /// ONE persistent [`command_core::goal::GoalHandler`] (built in
+    /// [`Self::set_orchestrator`]) so status/clear see a goal set by a prior
+    /// invocation — a fresh per-call handler would forget it (state lives in a
+    /// handler-local `Arc<Mutex>`). The valid-condition arm returns
+    /// `InjectMessage`, which the bridge submits as the next turn; status/clear
+    /// return `Done` text.
+    pub(crate) fn cmd_goal(&mut self, args: &str) -> ChatOutcome {
+        let Some(handler) = self.goal_handler.clone() else {
+            return self.show_system_text("/goal is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command("goal", args, &handler)
+    }
+
+    /// `/reload-skills`: pick up skills added or changed on disk this session,
+    /// reloading them into the shared registry. Guards on the
+    /// `command_registry` field (NOT the orchestrator). Cosmetic parity gap:
+    /// the TUI slash palette is a static [`crate::command::BUILTIN`] table, so
+    /// newly-added skills won't surface as new slash entries even though the
+    /// reported count is truthful.
+    pub(crate) fn cmd_reload_skills(&mut self, args: &str) -> ChatOutcome {
+        let Some(registry) = self.command_registry.clone() else {
+            return self.show_system_text(
+                "/reload-skills is unavailable (no command registry wired)",
+                true,
+            );
+        };
+        self.run_core_command(
+            "reload-skills",
+            args,
+            &command_core::reload_skills::ReloadSkillsHandler::new(registry),
+        )
+    }
+
+    /// `/stop`: stop the session. Shows "Session stopped." then returns
+    /// [`ChatOutcome::Quit`] — the app loop exits ONLY on `Quit` and never
+    /// polls `current_should_exit`, so the plain `Done -> Continue` bridge
+    /// would print the text but keep running. The handler's `request_exit()`
+    /// does websocket-close I/O, so it is NOT run here (that would `block_on` a
+    /// network future on the render thread's throwaway runtime — a
+    /// cross-reactor hazard); the CLI fires `request_exit()` on the LIVE handle
+    /// in its teardown after `run_app` returns. Behaves identically whether or
+    /// not a handle is wired (the quit is handle-independent).
+    pub(crate) fn cmd_stop(&mut self, _args: &str) -> ChatOutcome {
+        self.show_system_text("Session stopped.", false);
+        ChatOutcome::Quit
+    }
+
+    /// `/compact`: run a forced compaction pass. Returns
+    /// [`ChatOutcome::Compact`] so the CLI drives
+    /// [`traits::OrchestratorHandle::force_compact`] — a real multi-second LLM
+    /// round-trip — on the LIVE runtime handle, reporting the summary via
+    /// `TurnEvent::SystemNotice`. It must NOT go through `run_core_command`'s
+    /// throwaway `block_on`: that would freeze the render/input thread for the
+    /// whole call, drive the sockets on the wrong reactor, and race the turn
+    /// loop's whole-history swap. Graceful "unavailable" no-op when unwired.
+    pub(crate) fn cmd_compact(&mut self, args: &str) -> ChatOutcome {
+        if self.orchestrator.is_none() {
+            return self.show_system_text("/compact is unavailable (no engine handle wired)", true);
+        }
+        ChatOutcome::Compact(args.to_string())
+    }
+
     /// The active streaming cell's rendered lines at `width` (empty when
     /// idle) — [`Transcript::visible_live_tail`] under the widget's theme.
     fn live_tail(&self, width: u16) -> Vec<ratatui::text::Line<'static>> {
@@ -2036,6 +2212,147 @@ mod tests {
             body.contains(r#"positional=["fix", "the", "bug"]"#),
             "positional_args whitespace-split: {body}"
         );
+    }
+
+    // ===== OrchestratorHandle-backed commands. Driven by the reusable
+    // `orchestrator::test_support::MockOrchestratorHandle` (a dev-dependency):
+    // its read methods return defaults, which is all `/context` etc. need. =====
+
+    /// A widget with a wired `MockOrchestratorHandle`. The `Arc` is returned too
+    /// so a test can assert against the mock's recorded calls.
+    fn widget_with_orchestrator() -> (
+        ChatWidget,
+        std::sync::Arc<orchestrator::test_support::MockOrchestratorHandle>,
+    ) {
+        let mock = std::sync::Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
+        let mut widget = widget();
+        widget.set_orchestrator(mock.clone());
+        (widget, mock)
+    }
+
+    /// (a) With a live handle wired, a read-only OrchestratorHandle command
+    /// renders its `Done` text into the transcript as a non-error system line.
+    #[test]
+    fn orchestrator_read_command_renders_done_text_when_wired() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        let outcome = widget.cmd_context("");
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert!(
+            systext.body().contains("Context Usage"),
+            "/context rendered its report: {}",
+            systext.body()
+        );
+        assert!(!systext.is_error());
+
+        // /usage on a fresh widget renders its cost/token summary too.
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_usage(""), ChatOutcome::Continue));
+        let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert!(!systext.body().is_empty(), "/usage rendered a summary");
+        assert!(!systext.is_error());
+    }
+
+    /// (b) `/stop` shows "Session stopped." then returns `ChatOutcome::Quit`
+    /// (the plain `Done -> Continue` bridge would leave the TUI running).
+    #[test]
+    fn stop_command_shows_message_and_returns_quit() {
+        let mut widget = widget();
+        let outcome = widget.cmd_stop("");
+        assert!(matches!(outcome, ChatOutcome::Quit), "/stop must quit the app");
+        let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert_eq!(systext.body(), "Session stopped.");
+        assert!(!systext.is_error());
+    }
+
+    /// (d) `/compact` returns `ChatOutcome::Compact(args)` — the CLI drives the
+    /// real `force_compact()` off-loop. Returning the variant (rather than
+    /// running it inline) is exactly what keeps the network call off the render
+    /// thread's `block_on`.
+    #[test]
+    fn compact_command_returns_compact_outcome_off_loop() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        let outcome = widget.cmd_compact("");
+        let ChatOutcome::Compact(args) = outcome else {
+            panic!("/compact must return ChatOutcome::Compact");
+        };
+        assert_eq!(args, "");
+    }
+
+    /// (c) Unwired (`None`, every existing test widget), each new command is a
+    /// graceful no-op: it renders an "unavailable" error line and keeps running
+    /// — never panics. `/stop` is handle-independent, so it still quits.
+    #[test]
+    fn orchestrator_commands_are_graceful_noops_when_unwired() {
+        let commands: &[(&str, fn(&mut ChatWidget, &str) -> ChatOutcome)] = &[
+            ("/context", ChatWidget::cmd_context),
+            ("/files", ChatWidget::cmd_files),
+            ("/usage", ChatWidget::cmd_usage),
+            ("/effort", ChatWidget::cmd_effort),
+            ("/goal", ChatWidget::cmd_goal),
+            ("/reload-skills", ChatWidget::cmd_reload_skills),
+            ("/compact", ChatWidget::cmd_compact),
+        ];
+        for (name, run) in commands {
+            let mut widget = widget();
+            let outcome = run(&mut widget, "");
+            assert!(
+                matches!(outcome, ChatOutcome::Continue),
+                "{name} unwired must Continue (no-op)"
+            );
+            let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+            assert!(systext.is_error(), "{name} unwired renders an error line");
+            assert!(
+                systext.body().contains("unavailable"),
+                "{name} unwired body: {}",
+                systext.body()
+            );
+        }
+        // /stop needs no handle: it quits regardless.
+        let mut widget = widget();
+        assert!(matches!(widget.cmd_stop(""), ChatOutcome::Quit));
+    }
+
+    /// `/goal` keeps its goal across invocations: setting a condition arms a
+    /// turn, and a later status call on the SAME widget reports the active goal.
+    /// A fresh per-call handler would report "No goal set" — this proves the ONE
+    /// persistent `GoalHandler` instance retains its handler-local state.
+    #[test]
+    fn goal_handler_persists_state_across_invocations() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        let outcome = widget.cmd_goal("finish the task");
+        assert!(
+            matches!(outcome, ChatOutcome::Submit(_, _)),
+            "/goal <condition> arms a turn (InjectMessage)"
+        );
+        let outcome = widget.cmd_goal("");
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        // cells: [UserText "/goal finish the task", SystemText status].
+        let status = cell::<crate::history_cell::system::SystemTextCell>(&widget, 1);
+        assert!(
+            status.body().contains("Goal active: finish the task"),
+            "status echoes the persisted goal: {}",
+            status.body()
+        );
+    }
+
+    /// `/reload-skills` reloads the wired shared registry and reports the count.
+    #[test]
+    fn reload_skills_reports_count_when_registry_wired() {
+        let mut widget = widget();
+        let registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+            command_api::CommandRegistry::new(),
+        ));
+        widget.set_command_registry(registry);
+        let outcome = widget.cmd_reload_skills("");
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert!(
+            systext.body().contains("Reloaded skills:"),
+            "reload message: {}",
+            systext.body()
+        );
+        assert!(!systext.is_error());
     }
 
     /// A fake shell-expansion provider for the TUI expansion smoke tests: the

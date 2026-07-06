@@ -5693,6 +5693,7 @@ dependencies = [
  "image 0.25.5",
  "llm-client",
  "memory",
+ "orchestrator",
  "permission",
  "protocol",
  "ratatui",

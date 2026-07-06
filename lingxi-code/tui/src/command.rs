@@ -51,7 +51,12 @@ pub struct SlashCommand {
 ///
 /// Commands the iocraft backend advertised but that have NO data source or
 /// core API on this backend are deliberately NOT registered (never advertise
-/// "not implemented"): `/tasks` (no background-task feed reaches `run_app`).
+/// "not implemented"): `/tasks` (no background-task feed reaches `run_app`),
+/// `/fork` (`fork_conversation` is trait-default `Unimplemented` on the live
+/// `ConversationOrchestrator`, so it would always render "Could not fork
+/// conversation: …"), and `/recap` (no `generate_recap` seam, so it returns
+/// "Couldn't generate a recap" for any conversation past its first turn). Both
+/// stay deferred until an engine composition-root seam lands.
 pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -335,6 +340,79 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_skill_doctor,
+    },
+    // ===== OrchestratorHandle-backed commands (need a live engine handle,
+    // threaded into `ChatWidget` from the CLI `run_app`; a no-op "unavailable"
+    // system line when unwired). =====
+    SlashCommand {
+        name: "/context",
+        aliases: &[],
+        description: "Show current context usage",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_context,
+    },
+    SlashCommand {
+        name: "/files",
+        aliases: &[],
+        description: "List all files currently in context",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_files,
+    },
+    SlashCommand {
+        name: "/usage",
+        aliases: &[],
+        description: "Show current session usage",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_usage,
+    },
+    SlashCommand {
+        name: "/effort",
+        aliases: &[],
+        description: "Set effort level for model usage",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_effort,
+    },
+    SlashCommand {
+        name: "/goal",
+        aliases: &[],
+        description: "Set a goal — keep working until the condition is met",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_goal,
+    },
+    SlashCommand {
+        name: "/reload-skills",
+        aliases: &[],
+        description: "Pick up skills added or changed on disk during this session",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_reload_skills,
+    },
+    SlashCommand {
+        name: "/compact",
+        aliases: &[],
+        description: "Free up context by summarizing the conversation so far",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_compact,
+    },
+    // `/stop` is dispatchable but NOT advertised: claude-code gates it on
+    // `isEnabled: () => LINGXI_SESSION_KIND === "bg"`, and this ratatui path is
+    // always an interactive (never a `bg`) session, so it must never surface in
+    // the completion popup / `/help` — matching the reference's hidden-in-TUI
+    // behavior without runtime-gating the static table. Typing `/stop` still
+    // works (shows "Session stopped." and quits).
+    SlashCommand {
+        name: "/stop",
+        aliases: &[],
+        description: "Stop this background session; transcript and worktree are kept",
+        args: ArgSpec::None,
+        advertised: false,
+        run: ChatWidget::cmd_stop,
     },
 ];
 

@@ -276,7 +276,24 @@ where
         // up to make room.
         if area.bottom() > size.height {
             let scroll_by = area.bottom() - size.height;
-            self.backend.scroll_region_up(0..area.top(), scroll_by)?;
+            // ROOT CAUSE of the reported stray `[`: ratatui's
+            // `CrosstermBackend::scroll_region_up(0..area.top())` emits
+            // `ESC[1;{area.top()}r`. With <= 1 row above the viewport
+            // (`area.top() <= 1`, e.g. a fresh/top-anchored session whose
+            // composer grew to fill the screen) that is a DEGENERATE
+            // `ESC[1;1r` (or `ESC[1;0r`), which iTerm2 mishandles by leaking a
+            // `[` glyph onto the status/composer rows. A 0-/1-row region scroll
+            // is meaningless anyway, so skip it; the viewport still repositions
+            // via `area.y` below. (Requires top < bottom ⇒ `area.top() >= 2`.)
+            //
+            // NOTE: this path can't be ANSI-asserted in-crate — the test
+            // harness's `TestBackend` keeps an in-memory grid and emits NO
+            // escapes for `scroll_region_up` (unlike the `SetScrollRegion` we
+            // own), which is exactly why the earlier `insert_history_lines`-only
+            // fix missed it.
+            if area.top() >= 2 {
+                self.backend.scroll_region_up(0..area.top(), scroll_by)?;
+            }
             area.y = size.height - area.height;
         }
         if area != self.viewport_area {
@@ -602,6 +619,15 @@ struct SetScrollRegion(std::ops::Range<u16>);
 
 impl crossterm::Command for SetScrollRegion {
     fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        // Defense-in-depth: a DECSTBM region REQUIRES top < bottom. A degenerate
+        // region (`start >= end`) emits `ESC[N;Nr`, which iTerm2 mishandles by
+        // leaking a stray `[` glyph onto the following rows (the reported
+        // composer/status artifact). Scrolling a 0-/1-row region is a no-op
+        // anyway, so emit NOTHING for a degenerate range — this backstops every
+        // call site, not just the guarded `insert_history_lines` one.
+        if self.0.start >= self.0.end {
+            return Ok(());
+        }
         write!(f, "\x1b[{};{}r", self.0.start, self.0.end)
     }
 
@@ -1020,6 +1046,24 @@ mod tests {
 
     fn raw_string(raw: &std::rc::Rc<std::cell::RefCell<Vec<u8>>>) -> String {
         String::from_utf8_lossy(&raw.borrow()).into_owned()
+    }
+
+    fn ansi(cmd: &impl crossterm::Command) -> String {
+        let mut s = String::new();
+        cmd.write_ansi(&mut s).unwrap();
+        s
+    }
+
+    #[test]
+    fn set_scroll_region_suppresses_degenerate_ranges() {
+        // A valid region (top < bottom) emits the DECSTBM escape.
+        assert_eq!(ansi(&SetScrollRegion(1..5)), "\x1b[1;5r");
+        // Degenerate regions (top == bottom, or inverted) emit NOTHING — a
+        // `ESC[N;Nr` leaks a stray `[` on iTerm2, and scrolling a 0-row region
+        // is a no-op regardless. Backstops every call site.
+        assert_eq!(ansi(&SetScrollRegion(1..1)), "");
+        assert_eq!(ansi(&SetScrollRegion(0..0)), "");
+        assert_eq!(ansi(&SetScrollRegion(5..2)), "");
     }
 
     // ===== Plan Phase 1 step 6 tests =====

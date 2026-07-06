@@ -188,6 +188,20 @@ pub enum TurnEvent {
         /// Pre-formatted one-line summary, e.g. `"Read(src/main.rs)"`.
         text: String,
     },
+    /// An API request failed with a retry-worthy error and is backing off before
+    /// the next attempt. Rendered as Claude Code's `SystemAPIErrorMessage`:
+    /// `"<message> · Retrying in Ns… (attempt X/Y)"`, with `delay_ms` seeding a
+    /// live countdown. Cleared when the turn produces content or ends.
+    ApiRetry {
+        /// User-facing error text (e.g. `"provider internal error"`).
+        message: String,
+        /// 1-based attempt number about to be retried.
+        attempt: u32,
+        /// Configured retry cap (default 10).
+        max_retries: u32,
+        /// Backoff before the next attempt, in ms (the countdown seed).
+        delay_ms: u64,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on
@@ -220,6 +234,15 @@ impl OutputStream for BridgeOutputStream {
     async fn emit_subagent_activity(&self, text: &str) {
         let _ = self.tx.send(TurnEvent::SubagentActivity {
             text: text.to_string(),
+        });
+    }
+
+    async fn emit_api_retry(&self, message: &str, attempt: u32, max_retries: u32, delay_ms: u64) {
+        let _ = self.tx.send(TurnEvent::ApiRetry {
+            message: message.to_string(),
+            attempt,
+            max_retries,
+            delay_ms,
         });
     }
 

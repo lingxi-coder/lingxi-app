@@ -2242,6 +2242,32 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn bash_compound_deny_on_read_only_subcommand_still_denies() {
+        // The precise ordering guarantee behind the 3d layer's safety: a deny
+        // rule on a command that is ITSELF read-only must still deny the whole
+        // compound. The deny walk matches per-subcommand and runs BEFORE the 3d
+        // read-only / allow composition, so `git log`'s read-only status cannot
+        // rescue it past the user's explicit deny. (The `rm` / `curl` deny tests
+        // above do NOT exercise this — those subcommands aren't read-only, so 3d
+        // rejects them regardless of layer order; only a denied READ-ONLY command
+        // distinguishes "deny ran first" from a layer-reordering regression.)
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(git log:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // read-only `git status` && read-only-BUT-denied `git log`
+        assert!(matches!(
+            p.authorize("Bash", &bash("git status && git log --oneline")),
+            PermissionResult::Deny { .. }
+        ));
+        // reverse order — the denied read-only subcommand is caught either way
+        assert!(matches!(
+            p.authorize("Bash", &bash("git log --oneline || git status")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
     // ── PERM (bash extras): general sed constraints (TS step 5b, all modes) ─
 
     #[test]

@@ -1983,6 +1983,107 @@ mod tests {
         );
     }
 
+    /// A fake shell-expansion provider for the TUI expansion smoke tests: the
+    /// runner echoes a fixed marker for any command, and the gate allows or
+    /// denies. Proves `run_core_command` actually invokes expansion on a
+    /// prompt-type command's `` !`git …` `` body before submitting — without
+    /// touching the host shell.
+    struct FakeExpansionProvider {
+        deny: bool,
+    }
+
+    struct MarkerRunner;
+
+    #[async_trait::async_trait]
+    impl command_api::ShellRunner for MarkerRunner {
+        async fn run(
+            &self,
+            _command: &str,
+            _shell: Option<command_api::FrontmatterShell>,
+        ) -> Result<command_api::ShellOut, command_api::ShellRunError> {
+            Ok(command_api::ShellOut {
+                stdout: "EXPANDED_MARKER".to_string(),
+                stderr: String::new(),
+                interrupted: false,
+            })
+        }
+    }
+
+    struct FixedGate {
+        allow: bool,
+    }
+
+    impl command_api::ShellPermissionGate for FixedGate {
+        fn check(
+            &self,
+            _command: &str,
+            _shell: Option<command_api::FrontmatterShell>,
+        ) -> command_api::ShellPermissionDecision {
+            if self.allow {
+                command_api::ShellPermissionDecision::Allow
+            } else {
+                command_api::ShellPermissionDecision::Deny {
+                    message: Some("denied by test".to_string()),
+                }
+            }
+        }
+    }
+
+    impl command_api::ShellExpansionProvider for FakeExpansionProvider {
+        fn build(
+            &self,
+            _allowed_tools: &[String],
+            _shell: Option<command_api::FrontmatterShell>,
+        ) -> command_api::ShellExpansionCtx {
+            command_api::ShellExpansionCtx {
+                runner: std::sync::Arc::new(MarkerRunner),
+                permission_gate: std::sync::Arc::new(FixedGate { allow: !self.deny }),
+            }
+        }
+    }
+
+    /// (#3) With a wired provider, a prompt-type command's embedded `` !`git …` ``
+    /// patterns are expanded to the runner's output BEFORE submission — the model
+    /// receives real command output, not the literal placeholder — while the
+    /// transcript still shows the compact `/commit` invocation.
+    #[test]
+    fn tui_prompt_command_expands_embedded_shell_before_submit() {
+        let mut widget = widget();
+        widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: false }));
+        let ChatOutcome::Submit(payload, _token) = widget.cmd_commit("") else {
+            panic!("/commit must submit a turn");
+        };
+        assert!(
+            payload.contains("EXPANDED_MARKER"),
+            "embedded !`git …` replaced by runner output: {payload}"
+        );
+        assert!(
+            !payload.contains("!`git status`"),
+            "literal placeholder is gone after expansion: {payload}"
+        );
+        assert_eq!(
+            cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body(),
+            "/commit",
+            "transcript still shows the compact invocation"
+        );
+    }
+
+    /// (#3) A permission-denied embedded command aborts the WHOLE prompt: the
+    /// expansion errors, so nothing is submitted and the failure surfaces as an
+    /// error message (patterns are never left in place / delivered).
+    #[test]
+    fn tui_prompt_command_denied_expansion_does_not_submit() {
+        let mut widget = widget();
+        widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: true }));
+        let outcome = widget.cmd_commit("");
+        assert!(
+            matches!(outcome, ChatOutcome::Continue),
+            "a denied expansion must NOT submit a turn"
+        );
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert!(sys.is_error(), "expansion failure surfaced as an error cell");
+    }
+
     fn submit_command(widget: &mut ChatWidget, cmd: &str) -> ChatOutcome {
         typ(widget, cmd);
         widget.handle_key(press(KeyCode::Enter))

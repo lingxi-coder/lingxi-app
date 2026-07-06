@@ -2054,9 +2054,20 @@ fn anthropic_models_for(
         // picker's Anthropic group alongside Sonnet/Opus/Haiku.
         "claude-fable-5".to_string(),
     ];
-    ids.push(default_model.to_string());
-    if let Some(fb) = fallback_model {
-        ids.push(fb.to_string());
+    // Register the configured default/fallback under the ANTHROPIC profile ONLY
+    // when it actually ROUTES to anthropic (a `claude-*` id, an unqualified
+    // custom id, or an `anthropic/…` ref). A ref qualified for ANOTHER provider
+    // (`openrouter/…`, `github-copilot/…`, `deepseek/…`) must NOT be added here:
+    // doing so put e.g. `meta-llama/llama-3.3-70b-instruct:free` into BOTH the
+    // anthropic AND openrouter model lists, so `--model <that>` failed with a
+    // spurious "ambiguous across profiles: anthropic, openrouter". Push the BARE
+    // model (so `anthropic/claude-x` registers as `claude-x`, not the qualified
+    // ref). `split_profile_model` is the canonical routing split.
+    for m in std::iter::once(default_model).chain(fallback_model) {
+        let (profile, bare) = llm_client::split_profile_model(m);
+        if profile == "anthropic" {
+            ids.push(bare);
+        }
     }
     // Env-configured small-fast / haiku model a `prompt` hook may resolve to
     // (matching `hook_prompt_runner::resolve_model`'s precedence:
@@ -6201,6 +6212,38 @@ mod tests {
         assert!(
             custom.iter().any(|m| m.display_model == "my-custom-model"),
             "configured default must be registered"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_for_excludes_foreign_profile_qualified_default() {
+        // Regression: a default/fallback qualified for ANOTHER provider must NOT
+        // be injected into the anthropic profile — otherwise the same id lives in
+        // both the anthropic and (e.g.) openrouter model lists and `--model
+        // <id>` fails with a spurious "ambiguous across profiles".
+        let m = super::anthropic_models_for(
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+            Some("github-copilot/claude-opus-4.8"),
+        );
+        let ids: Vec<&str> = m.iter().map(|x| x.display_model.as_str()).collect();
+        assert!(
+            !ids.iter().any(|id| id.contains("llama-3.3-70b")),
+            "openrouter model must NOT be in the anthropic profile: {ids:?}"
+        );
+        assert!(
+            !ids.iter().any(|id| id.contains("github-copilot")),
+            "copilot fallback must NOT be in the anthropic profile: {ids:?}"
+        );
+        // The first-party Claude defaults are still present.
+        assert!(ids.contains(&"claude-opus-4-8"), "claude defaults kept: {ids:?}");
+
+        // An `anthropic/…`-qualified default IS registered, as its BARE id.
+        let q = super::anthropic_models_for("anthropic/claude-opus-4-6", None);
+        let qids: Vec<&str> = q.iter().map(|x| x.display_model.as_str()).collect();
+        assert!(qids.contains(&"claude-opus-4-6"), "anthropic-qualified kept bare: {qids:?}");
+        assert!(
+            !qids.iter().any(|id| id.contains('/')),
+            "no profile-qualified id leaks into the model list: {qids:?}"
         );
     }
 

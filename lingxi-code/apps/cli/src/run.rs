@@ -1446,7 +1446,7 @@ async fn resume_resolved_session(
         // re-mounting the chosen session in-process (writer retargeted) until
         // the user quits — never an in-place `resume_session` swap.
         let first = mount_resumed_tui(argv, session_id, messages).await;
-        return drive_tui_switch_loop(argv, first).await;
+        return drive_tui_switch_loop(argv, first, Some(session_id)).await;
     }
 
     sink.text(&format!("Resumed session {session_id}\n")).await;
@@ -1539,29 +1539,81 @@ async fn mount_resumed_tui(
 ///      proven startup resume seam ([`mount_resumed_tui`] →
 ///      `build_runtime_for_tui_inner(argv, Some(id))`), replaying its scrollback.
 ///
-/// A load failure for the switch target cannot fall back to the just-unwound
-/// session (its runtime is gone), so it surfaces the error and exits.
+/// A load failure for the switch TARGET must NOT kill the process: the session
+/// that was just driving the loop is a known-good, resumable file (it was live a
+/// moment ago), so a failed `/resume` re-mounts THAT session instead of exiting
+/// (finding #2). Only if even the fallback re-mount fails — a genuinely
+/// unrecoverable state — does the loop surface the error and exit.
+///
+/// `initial_session_id` is the id of the session that produced `first` (both
+/// mount sites know it); it seeds the fallback so even a FIRST failed switch has
+/// a session to return to.
 pub(crate) async fn drive_tui_switch_loop(
     argv: &Argv,
     first: crate::mode::RunOutcome,
+    initial_session_id: Option<uuid::Uuid>,
 ) -> i32 {
     let mut outcome = first;
+    // The session currently driving the loop — the fallback for a failed switch.
+    let mut current = initial_session_id;
     loop {
         match outcome {
             crate::mode::RunOutcome::Exit(code) => return code,
-            crate::mode::RunOutcome::SwitchTo(session_id) => {
-                let messages = match load_resume_session(session_id).await {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!(
-                            "lingxi-cli: /resume failed to load session {session_id}: {e}"
-                        );
-                        return exit_codes::RUNTIME_ERROR;
+            crate::mode::RunOutcome::SwitchTo(target) => match load_resume_session(target).await {
+                Ok(messages) => {
+                    current = Some(target);
+                    outcome = mount_resumed_tui(argv, target, messages).await;
+                }
+                Err(e) => {
+                    // The outgoing runtime is already unwound, so we cannot just
+                    // continue it — but we CAN re-mount the session it was, which
+                    // reloads cleanly. Never exit on a single failed switch when a
+                    // working session was in progress.
+                    eprintln!("lingxi-cli: couldn't resume {target}: {e}");
+                    match recover_from_failed_switch(current) {
+                        SwitchRecovery::Remount(fallback) => {
+                            eprintln!(
+                                "lingxi-cli: staying in current session {fallback}"
+                            );
+                            match load_resume_session(fallback).await {
+                                Ok(messages) => {
+                                    outcome =
+                                        mount_resumed_tui(argv, fallback, messages).await;
+                                }
+                                Err(e2) => {
+                                    // Double failure: even the known-good session
+                                    // won't reload. Genuinely unrecoverable.
+                                    eprintln!(
+                                        "lingxi-cli: failed to re-mount current session \
+                                         {fallback}: {e2}"
+                                    );
+                                    return exit_codes::RUNTIME_ERROR;
+                                }
+                            }
+                        }
+                        SwitchRecovery::Exit(code) => return code,
                     }
-                };
-                outcome = mount_resumed_tui(argv, session_id, messages).await;
-            }
+                }
+            },
         }
+    }
+}
+
+/// What to do after a `/resume` switch target fails to load, given the session
+/// that was driving the loop. Pure so the "never exit while a session is in
+/// progress" contract (finding #2) is unit-testable without mounting a TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchRecovery {
+    /// Re-mount this known-good session instead of exiting.
+    Remount(uuid::Uuid),
+    /// No session to fall back to (defensive — both mount sites seed one); exit.
+    Exit(i32),
+}
+
+fn recover_from_failed_switch(current: Option<uuid::Uuid>) -> SwitchRecovery {
+    match current {
+        Some(id) => SwitchRecovery::Remount(id),
+        None => SwitchRecovery::Exit(exit_codes::RUNTIME_ERROR),
     }
 }
 
@@ -1884,6 +1936,24 @@ mod tests {
     use session::jsonl::project_dir_name;
     use std::time::{Duration, SystemTime};
     use uuid::Uuid;
+
+    // FIX #2: a failed `/resume` switch must NOT kill a live session. When a
+    // session is in progress the loop re-mounts IT (never exits); only with no
+    // known-good session at all does it exit.
+    #[test]
+    fn failed_switch_remounts_current_session_instead_of_exiting() {
+        let current = Uuid::new_v4();
+        assert_eq!(
+            recover_from_failed_switch(Some(current)),
+            SwitchRecovery::Remount(current),
+            "a working session in progress is re-mounted, not exited"
+        );
+        assert_eq!(
+            recover_from_failed_switch(None),
+            SwitchRecovery::Exit(exit_codes::RUNTIME_ERROR),
+            "only the no-session-at-all case exits"
+        );
+    }
 
     /// Write one valid `<uuid>.jsonl` session file (a single first-user message
     /// in the M5-07/M5-08 on-disk format) into `project_dir`, stamp its mtime,

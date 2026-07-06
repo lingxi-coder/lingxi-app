@@ -173,15 +173,18 @@ pub async fn dispatch(
             // rewrite `status`/`updatedAt`/`statusUpdatedAt` on idle ↔ busy ↔
             // waiting transitions (binary `mvn`, fed by the REPL status
             // effect @222989611).
+            // Capture the freshly-launched session id up front: it seeds the
+            // switch loop's failed-switch fallback (finding #2) so a `/resume` to
+            // an unloadable target re-mounts THIS session instead of exiting.
+            let initial_session_id =
+                tui_build.runtime.orchestrator.current_session_id().await;
             let session_registration = {
-                let session_id =
-                    tui_build.runtime.orchestrator.current_session_id().await;
                 let name = std::env::current_dir()
                     .ok()
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
                 Arc::new(crate::agents_registry::SessionRegistration::register(
                     &crate::run::lingxi_home_dir(),
-                    Some(session_id.to_string()).as_deref(),
+                    Some(initial_session_id.to_string()).as_deref(),
                     name.as_deref(),
                 ))
             };
@@ -198,7 +201,8 @@ pub async fn dispatch(
             // session in-process (writer retargeted) until the user quits. A
             // switch re-mounts WITHOUT re-registering (resume never registers,
             // matching the existing `--resume` behavior).
-            crate::run::drive_tui_switch_loop(argv, outcome).await
+            crate::run::drive_tui_switch_loop(argv, outcome, Some(initial_session_id.as_uuid()))
+                .await
         }
     }
 }
@@ -747,6 +751,20 @@ async fn run_permission_action(
             };
             match remove_permission_update(&update, &paths).await {
                 Ok(removed) => {
+                    // Revoke the live this-session grant too: the Add branch
+                    // pushed allow rules into `session_allow_rules` (the gate's
+                    // step-1 short-circuit), so removing from disk alone would
+                    // leave an added-then-removed rule auto-approving for the
+                    // rest of the session. Drop every session allow rule whose
+                    // VALUE matches (independent of source, so a grant made via
+                    // the AllowAlways dialog is revoked too).
+                    if behavior == PermissionBehavior::Allow {
+                        let target = update.rule.value.clone();
+                        session_allow_rules
+                            .lock()
+                            .await
+                            .retain(|r| r.value != target);
+                    }
                     refresh(&paths);
                     let body = if removed {
                         format!(

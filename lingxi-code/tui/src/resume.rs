@@ -173,7 +173,11 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
         }
         KeyCode::Enter => match state.selected_uuid() {
             Some(uuid) => ResumeOutcome::Resume(uuid),
-            None => ResumeOutcome::Cancel,
+            // Only the true empty-state (no sessions at all) cancels on Enter.
+            // A search query that filters every row to nothing is a no-op —
+            // closing the picker on a stray Enter would lose the user's search.
+            None if state.rows.is_empty() => ResumeOutcome::Cancel,
+            None => ResumeOutcome::Stay,
         },
         KeyCode::Esc => {
             if state.query.is_empty() {
@@ -202,6 +206,10 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
         KeyCode::Char(c)
             if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
         {
+            // Typing filters the list, so reveal the search box + query text
+            // (the "Type to search" footer invites this in list mode; without
+            // this the rows would filter with no visible query).
+            state.in_search_mode = true;
             state.query.push(c);
             state.selected = 0;
             ResumeOutcome::Stay

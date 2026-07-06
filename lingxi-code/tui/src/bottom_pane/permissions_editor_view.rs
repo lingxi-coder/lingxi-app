@@ -14,16 +14,21 @@
 //! impls touch a buffer — so navigation/add/remove are unit-testable exactly
 //! like [`crate::resume::ResumeState`]. An add/remove is emitted as a
 //! [`ViewOutcome::RunPermissionAction`] and the editor STAYS open (the owner
-//! persists off-loop and reports back via `TurnEvent::SystemNotice`); the
-//! in-view buckets update optimistically so the change is visible immediately.
+//! persists off-loop and reports back via `TurnEvent::SystemNotice`). The
+//! in-view list is deliberately NOT mutated optimistically: a rule only
+//! appears/disappears once the write lands and the owner refreshes the shared
+//! snapshot (reflected on the next `/permissions` open), so the editor never
+//! shows a change that failed to persist — the only signal of the outcome is
+//! the `SystemNotice`.
 
 use std::any::Any;
+use std::path::Path;
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use permission::{
     permission_rules_from_settings_json, PermissionBehavior, PermissionPaths, PermissionRule,
-    PermissionRuleSource, PermissionRuleValue, PermissionUpdateDestination,
+    PermissionRuleSource, PermissionUpdateDestination,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -35,22 +40,24 @@ use crate::bottom_pane::dialog_view::centered_rect;
 use crate::bottom_pane::view::{BottomPaneView, PermissionAction, ViewOutcome};
 use crate::renderable::Renderable;
 
-/// A read-only snapshot of the permission rules across the three writable
-/// settings files (user / project / local), used to seed the editor. Built at
-/// startup into a shared slot (like the `/web` config snapshot) and re-read
-/// after each edit so the next `/permissions` open reflects the latest state.
+/// A read-only snapshot of the permission rules used to seed the editor: the
+/// three writable settings files (user / project / local), PLUS the enterprise
+/// managed (policy) tier, which is shown read-only. Built at startup into a
+/// shared slot (like the `/web` config snapshot) and re-read after each edit so
+/// the next `/permissions` open reflects the latest state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionsSnapshot {
-    /// Every rule projected from the user/project/local settings files, each
-    /// tagged with its [`PermissionRuleSource`].
+    /// Every rule projected from the user/project/local settings files and the
+    /// managed tier, each tagged with its [`PermissionRuleSource`].
     pub rules: Vec<PermissionRule>,
 }
 
 impl PermissionsSnapshot {
-    /// Read the three writable settings files (user / project / local) and
-    /// project their `permissions.{allow,deny,ask}` arrays into rules. Tiny
-    /// local files, so a synchronous read is fine. Best-effort: a missing /
-    /// unreadable / malformed file contributes no rules (never panics).
+    /// Read the three writable settings files (user / project / local) AND the
+    /// enterprise-managed (policy) tier, projecting their
+    /// `permissions.{allow,deny,ask}` arrays into rules. Tiny local files, so a
+    /// synchronous read is fine. Best-effort: a missing / unreadable / malformed
+    /// file contributes no rules (never panics).
     #[must_use]
     pub fn load(paths: &PermissionPaths) -> Self {
         let mut rules = Vec::new();
@@ -78,7 +85,52 @@ impl PermissionsSnapshot {
                 rules.append(&mut projected);
             }
         }
+        // Managed (policy) tier: enterprise-managed deny/allow/ask rules the user
+        // cannot edit. Loading them here makes the editor's read-only handling
+        // real (managed rows render dimmed + "(read-only)" and cannot be removed)
+        // AND — the reason it matters — makes managed DENY rules VISIBLE, so a
+        // user can see why an Allow they'd add is silently overridden by policy.
+        // `tui` already depends on `memory`, whose `managed_path()` resolves the
+        // same managed dir the engine's settings watcher reads
+        // (`<managed>/managed-settings.json` + `managed-settings.d/*.json`); no
+        // new plumbing. Best-effort: on most machines the dir is absent → nothing.
+        Self::append_managed_rules(&mut rules, &memory::lingxi_md::hierarchy::managed_path());
         Self { rules }
+    }
+
+    /// Project the managed (policy) settings tier under `managed_dir` into rules
+    /// tagged [`PermissionRuleSource::PolicySettings`] (rendered read-only).
+    /// Mirrors the engine settings watcher's managed tier: the base
+    /// `managed-settings.json` first, then every `*.json` under
+    /// `managed-settings.d/` in alphabetical order (dotfiles skipped). Split out
+    /// (taking the dir explicitly) so it is hermetically unit-testable against a
+    /// temp dir without touching the absolute system managed path.
+    fn append_managed_rules(rules: &mut Vec<PermissionRule>, managed_dir: &Path) {
+        fn read_into(path: &Path, rules: &mut Vec<PermissionRule>) {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                if let Ok(mut projected) =
+                    permission_rules_from_settings_json(&raw, PermissionRuleSource::PolicySettings)
+                {
+                    rules.append(&mut projected);
+                }
+            }
+        }
+        read_into(&managed_dir.join("managed-settings.json"), rules);
+        let drop_in = managed_dir.join("managed-settings.d");
+        if let Ok(rd) = std::fs::read_dir(&drop_in) {
+            let mut names: Vec<std::ffi::OsString> = rd
+                .flatten()
+                .map(|e| e.file_name())
+                .filter(|n| {
+                    let s = n.to_string_lossy();
+                    s.ends_with(".json") && !s.starts_with('.')
+                })
+                .collect();
+            names.sort();
+            for name in names {
+                read_into(&drop_in.join(name), rules);
+            }
+        }
     }
 }
 
@@ -139,18 +191,6 @@ fn source_to_destination(source: PermissionRuleSource) -> Option<PermissionUpdat
     }
 }
 
-/// The source an added rule is tagged with, for its destination file.
-#[must_use]
-fn destination_to_source(dest: PermissionUpdateDestination) -> PermissionRuleSource {
-    match dest {
-        PermissionUpdateDestination::UserSettings => PermissionRuleSource::UserSettings,
-        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::ProjectSettings,
-        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::LocalSettings,
-        PermissionUpdateDestination::Session => PermissionRuleSource::Session,
-        PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
-    }
-}
-
 /// Short human label for a rule's source (the dim `From …` column). Managed /
 /// non-editable sources read read-only.
 #[must_use]
@@ -179,14 +219,16 @@ fn destination_label(dest: PermissionUpdateDestination) -> &'static str {
     }
 }
 
-/// Pure state for the `/permissions` editor: the working rule set (mutated
-/// optimistically on add/remove), the active tab, the selected row, the
-/// type-to-add input buffer, the add destination, and any in-flight
-/// remove-confirmation.
+/// Pure state for the `/permissions` editor: the working rule set (a read-only
+/// projection of the current settings — NOT mutated by add/remove), the active
+/// tab, the selected row, the type-to-add input buffer, the add destination,
+/// and any in-flight remove-confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionsEditorState {
-    /// All rules across sources; add/remove mutate this optimistically so the
-    /// list reflects the edit before the async persist lands.
+    /// All rules across sources, seeded from the snapshot. Add/remove do NOT
+    /// mutate this: the change is only reflected after the async persist lands
+    /// and the shared snapshot is refreshed (next `/permissions` open), so the
+    /// list never shows a change that failed to write.
     rules: Vec<PermissionRule>,
     /// The active bucket tab.
     tab: PermTab,
@@ -301,35 +343,6 @@ impl PermissionsEditorState {
         let dest = source_to_destination(rule.source)?;
         Some((self.selected, rule, dest))
     }
-
-    /// Optimistically add a rule to the working set (deduped on
-    /// behavior+source+wire-string), matching what the async persist will do.
-    fn add_rule(&mut self, rule_str: &str, behavior: PermissionBehavior, source: PermissionRuleSource) {
-        let value = PermissionRuleValue::from_rule_string(rule_str);
-        let wire = value.to_rule_string();
-        let already = self.rules.iter().any(|r| {
-            r.behavior == behavior
-                && r.source == source
-                && r.value.to_rule_string() == wire
-        });
-        if !already {
-            self.rules.push(PermissionRule {
-                value,
-                behavior,
-                source,
-            });
-        }
-    }
-
-    /// Optimistically remove `rule` from the working set.
-    fn remove_rule(&mut self, rule: &PermissionRule) {
-        let wire = rule.value.to_rule_string();
-        self.rules.retain(|r| {
-            !(r.behavior == rule.behavior
-                && r.source == rule.source
-                && r.value.to_rule_string() == wire)
-        });
-    }
 }
 
 /// What [`handle_perm_key`] tells the view to do next.
@@ -385,14 +398,17 @@ pub fn handle_perm_key(state: &mut PermissionsEditorState, key: KeyEvent) -> Per
                 let Some(dest) = source_to_destination(rule.source) else {
                     return PermEditorOutcome::Stay;
                 };
-                let action = PermEditorOutcome::Remove {
+                // Emit the remove ACTION but do NOT drop the row locally: the
+                // list only changes once the async persist confirms + the shared
+                // snapshot refreshes (next open), so a failed write never shows a
+                // phantom removal. Selection may now point past the (still
+                // present) rows only after a real refresh, so clamp defensively.
+                state.clamp_selected();
+                return PermEditorOutcome::Remove {
                     rule: rule.value.to_rule_string(),
                     behavior: rule.behavior,
                     dest,
                 };
-                state.remove_rule(&rule);
-                state.clamp_selected();
-                return action;
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                 state.pending_remove = None;
@@ -433,7 +449,10 @@ pub fn handle_perm_key(state: &mut PermissionsEditorState, key: KeyEvent) -> Per
             if !rule.is_empty() {
                 let behavior = state.tab.behavior();
                 let dest = state.dest;
-                state.add_rule(&rule, behavior, destination_to_source(dest));
+                // Emit the add ACTION and clear the buffer, but do NOT insert the
+                // row locally: it appears only after the persist lands + the
+                // shared snapshot refreshes (next open), so a failed write never
+                // shows a phantom rule.
                 state.input.clear();
                 return PermEditorOutcome::Add {
                     rule,
@@ -501,12 +520,27 @@ impl PermissionsEditorView {
         &self.state
     }
 
+    /// Fixed chrome rows that are ALWAYS on screen, framing the (windowed) rule
+    /// list: tab bar (1) + input line (1) + footer (1) + the optional
+    /// remove-confirm line (0/1). The rule rows share whatever inner height is
+    /// left.
+    fn chrome_rows(&self) -> usize {
+        3 + usize::from(self.state.is_confirming_remove())
+    }
+
+    /// The number of rule-list lines rendered (the actual rows, or the single
+    /// `(no rules)` placeholder line when the tab is empty).
+    fn rule_line_count(&self) -> usize {
+        self.state.rows_for_tab().len().max(1)
+    }
+
     /// The centered dialog rect, shared by [`Renderable::render`] and
     /// [`Renderable::cursor_pos`].
     fn block_rect(&self, area: Rect) -> Rect {
-        let rows = self.state.rows_for_tab().len().max(1);
-        // tab bar + rows + input + footer (+ optional confirm line) + padding.
-        let content_rows = rows + 4 + usize::from(self.state.is_confirming_remove());
+        // tab bar + rule rows + input + footer (+ optional confirm line): the
+        // rendered lines fill the inner area EXACTLY (no phantom padding row), so
+        // the input line lands at a position `cursor_pos` can reproduce.
+        let content_rows = self.rule_line_count() + self.chrome_rows();
         let width = u16::try_from(60usize)
             .unwrap_or(60)
             .min(area.width.saturating_sub(4))
@@ -516,6 +550,24 @@ impl PermissionsEditorView {
             .min(area.height)
             .max(6);
         centered_rect(width, height, area)
+    }
+
+    /// Window the rule rows around `selected` so the selected row and the fixed
+    /// chrome are always visible when the inner area is shorter than the full
+    /// list. Returns `(start, visible)`: render `rule_lines[start..start+visible]`.
+    /// Mirrors [`crate::bottom_pane::resume_picker_view`]'s scroll approach.
+    fn rule_window(&self, inner_height: u16) -> (usize, usize) {
+        let total = self.rule_line_count();
+        let inner = inner_height as usize;
+        // Rows get whatever the chrome leaves; keep at least one so the selected
+        // row is never fully hidden (a tiny overflow is clipped by the paragraph).
+        let visible = inner.saturating_sub(self.chrome_rows()).max(1).min(total);
+        let sel = self.state.selected.min(total.saturating_sub(1));
+        // Keep `selected` in the window: scroll just enough to reveal it, then
+        // clamp so the window never runs past the end of the list.
+        let start = if sel < visible { 0 } else { sel + 1 - visible };
+        let start = start.min(total.saturating_sub(visible));
+        (start, visible)
     }
 }
 
@@ -544,10 +596,14 @@ impl Renderable for PermissionsEditorView {
         }
         lines.push(Line::from(tab_spans));
 
-        // Rows.
+        // Rule rows (or the `(no rules)` placeholder). Build the full list first,
+        // then window it so the selected row + fixed chrome stay visible when the
+        // pane is height-clamped shorter than the list (finding #5: no windowing
+        // previously clipped the selected row/input/footer off-screen).
         let rows = self.state.rows_for_tab();
+        let mut rule_lines: Vec<Line> = Vec::new();
         if rows.is_empty() {
-            lines.push(Line::from(Span::styled(
+            rule_lines.push(Line::from(Span::styled(
                 "  (no rules)",
                 Style::default().add_modifier(Modifier::DIM),
             )));
@@ -564,7 +620,7 @@ impl Renderable for PermissionsEditorView {
                     style = style.add_modifier(Modifier::DIM);
                 }
                 let managed = if removable { "" } else { " (read-only)" };
-                lines.push(Line::from(Span::styled(
+                rule_lines.push(Line::from(Span::styled(
                     format!(
                         "{marker}{}    [{}]{managed}",
                         rule.value.to_rule_string(),
@@ -574,6 +630,9 @@ impl Renderable for PermissionsEditorView {
                 )));
             }
         }
+        let (start, visible) = self.rule_window(inner.height);
+        let end = start.saturating_add(visible).min(rule_lines.len());
+        lines.extend(rule_lines[start..end].iter().cloned());
 
         // Confirm line.
         if self.state.is_confirming_remove() {
@@ -602,8 +661,7 @@ impl Renderable for PermissionsEditorView {
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
-        let rows = self.state.rows_for_tab().len().max(1);
-        let content_rows = rows + 4 + usize::from(self.state.is_confirming_remove());
+        let content_rows = self.rule_line_count() + self.chrome_rows();
         u16::try_from(content_rows + 2).unwrap_or(u16::MAX).max(6)
     }
 
@@ -616,8 +674,18 @@ impl Renderable for PermissionsEditorView {
         if inner.width == 0 || inner.height < 2 {
             return None;
         }
-        // The input line is the second-to-last inner row (footer is last).
-        let input_y = inner.bottom().saturating_sub(2);
+        // Compute the input line's row from the SAME layout `render` uses
+        // (finding #7): tab bar (1) + the windowed rule rows + the optional
+        // confirm line. `render` never left a phantom padding row, so this lands
+        // on the input line (not the footer).
+        let (_, visible) = self.rule_window(inner.height);
+        let confirm = u16::from(self.state.is_confirming_remove());
+        let input_y = inner
+            .top()
+            .saturating_add(1)
+            .saturating_add(u16::try_from(visible).unwrap_or(0))
+            .saturating_add(confirm)
+            .min(inner.bottom().saturating_sub(1));
         let prefix_cols =
             u16::try_from(input_prefix(self.state.dest).chars().count()).unwrap_or(0);
         let typed = u16::try_from(self.state.input.chars().count()).unwrap_or(u16::MAX);
@@ -668,6 +736,9 @@ impl BottomPaneView for PermissionsEditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The editor body no longer constructs `PermissionRuleValue` (add/remove are
+    // pure ACTIONS now — no optimistic mutation), so the type is test-only.
+    use permission::PermissionRuleValue;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -757,13 +828,15 @@ mod tests {
     }
 
     #[test]
-    fn typing_then_enter_adds_a_rule_and_keeps_the_editor_open() {
+    fn typing_then_enter_emits_add_action_without_mutating_the_list() {
         let mut s = state();
+        let before = s.rows_for_tab().len();
         for c in "Bash(npm:*)".chars() {
             assert_eq!(handle_perm_key(&mut s, press(KeyCode::Char(c))), PermEditorOutcome::Stay);
         }
         assert_eq!(s.input(), "Bash(npm:*)");
         let outcome = handle_perm_key(&mut s, press(KeyCode::Enter));
+        // The ADD is emitted as an action for the owner to persist off-loop…
         assert_eq!(
             outcome,
             PermEditorOutcome::Add {
@@ -772,9 +845,12 @@ mod tests {
                 dest: PermissionUpdateDestination::LocalSettings,
             }
         );
-        // Buffer cleared, and the rule appears optimistically in the Allow tab.
+        // …the buffer is cleared, but the list is NOT optimistically mutated: the
+        // rule only appears after the write lands + the snapshot refreshes, so a
+        // failed write never shows a phantom rule (finding #4).
         assert_eq!(s.input(), "");
-        assert!(s
+        assert_eq!(s.rows_for_tab().len(), before, "list not mutated optimistically");
+        assert!(!s
             .rows_for_tab()
             .iter()
             .any(|r| r.value.to_rule_string() == "Bash(npm:*)"));
@@ -793,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_confirms_then_removes_the_selected_rule() {
+    fn enter_confirms_then_emits_remove_action_without_mutating_the_list() {
         let mut s = state();
         // First Enter (empty buffer) arms confirmation.
         assert_eq!(handle_perm_key(&mut s, press(KeyCode::Enter)), PermEditorOutcome::Stay);
@@ -808,14 +884,20 @@ mod tests {
                 dest: PermissionUpdateDestination::LocalSettings,
             }
         );
-        // Optimistically gone; selection clamps to the remaining row.
+        // Confirmation cleared, but the row is NOT dropped locally: it disappears
+        // only after the write lands + the snapshot refreshes, so a failed write
+        // never shows a phantom removal (finding #4).
         assert!(!s.is_confirming_remove());
         let rows: Vec<String> = s
             .rows_for_tab()
             .iter()
             .map(|r| r.value.to_rule_string())
             .collect();
-        assert_eq!(rows, vec!["Edit(src/**)".to_string()]);
+        assert_eq!(
+            rows,
+            vec!["Read".to_string(), "Edit(src/**)".to_string()],
+            "list unchanged until persist confirms"
+        );
     }
 
     #[test]
@@ -902,5 +984,167 @@ mod tests {
         assert!(text.contains("Allow"), "{text}");
         assert!(text.contains("Read"), "{text}");
         assert!(text.contains("New rule"), "{text}");
+    }
+
+    /// Flatten the rendered buffer into newline-joined rows.
+    fn buffer_text(area: Rect, buf: &Buffer) -> String {
+        (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The first buffer row whose text contains `needle`.
+    fn row_containing(area: Rect, buf: &Buffer, needle: &str) -> Option<u16> {
+        (area.top()..area.bottom()).find(|&y| {
+            let row: String = (area.left()..area.right())
+                .map(|x| {
+                    buf.cell(ratatui::layout::Position::new(x, y))
+                        .map_or(" ", ratatui::buffer::Cell::symbol)
+                })
+                .collect();
+            row.contains(needle)
+        })
+    }
+
+    fn many_allow_rules(n: usize) -> PermissionsSnapshot {
+        PermissionsSnapshot {
+            rules: (0..n)
+                .map(|i| {
+                    rule(
+                        &format!("Bash(cmd{i:02}:*)"),
+                        PermissionBehavior::Allow,
+                        PermissionRuleSource::LocalSettings,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    // FIX #3: managed (policySettings) rules load from the managed dir, tagged
+    // read-only.
+    #[test]
+    fn managed_policy_rules_load_read_only_from_the_managed_dir() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        // Unique temp dir (no tempfile dep): pid + atomic counter avoids the
+        // parallel-test `now_millis()` collision trap.
+        let dir = std::env::temp_dir().join(format!(
+            "lingxi-perm-managed-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("managed-settings.json"),
+            r#"{"permissions":{"deny":["Bash(curl:*)"],"allow":["Read"]}}"#,
+        )
+        .unwrap();
+        let drop_in = dir.join("managed-settings.d");
+        std::fs::create_dir_all(&drop_in).unwrap();
+        std::fs::write(
+            drop_in.join("10-extra.json"),
+            r#"{"permissions":{"deny":["Write(/etc/**)"]}}"#,
+        )
+        .unwrap();
+        // A dotfile drop-in is skipped (matches the settings watcher).
+        std::fs::write(
+            drop_in.join(".ignored.json"),
+            r#"{"permissions":{"deny":["ShouldNotLoad"]}}"#,
+        )
+        .unwrap();
+
+        let mut rules = Vec::new();
+        PermissionsSnapshot::append_managed_rules(&mut rules, &dir);
+
+        // Every managed rule is tagged PolicySettings → rendered read-only.
+        assert!(rules
+            .iter()
+            .all(|r| r.source == PermissionRuleSource::PolicySettings));
+        let strs: Vec<String> = rules.iter().map(|r| r.value.to_rule_string()).collect();
+        assert!(strs.contains(&"Bash(curl:*)".to_string()), "{strs:?}");
+        assert!(strs.contains(&"Read".to_string()), "{strs:?}");
+        assert!(
+            strs.contains(&"Write(/etc/**)".to_string()),
+            "drop-in loaded: {strs:?}"
+        );
+        assert!(
+            !strs.contains(&"ShouldNotLoad".to_string()),
+            "dotfile skipped: {strs:?}"
+        );
+
+        // A PolicySettings rule has no writable destination, so the editor's
+        // read-only handling (no remove) stays active for it.
+        assert!(source_to_destination(PermissionRuleSource::PolicySettings).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // FIX #5: a rule list taller than the height-clamped pane windows around the
+    // selection so the selected row + chrome stay on screen.
+    #[test]
+    fn render_windows_the_selected_row_when_height_clamped() {
+        let mut v = PermissionsEditorView::new(many_allow_rules(20));
+        // Select the last row.
+        for _ in 0..19 {
+            v.handle_key(press(KeyCode::Down));
+        }
+        assert_eq!(v.state().selected, 19);
+        // A short pane: the 20 rule rows cannot all fit.
+        let area = Rect::new(0, 0, 72, 10);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let text = buffer_text(area, &buf);
+        // The selected row is windowed into view even though it's far down…
+        assert!(
+            text.contains("Bash(cmd19:*)"),
+            "selected row must be visible:\n{text}"
+        );
+        // …and the fixed chrome (input line + footer) is not clipped off-screen.
+        assert!(text.contains("New rule"), "input line visible:\n{text}");
+        assert!(text.contains("type to add"), "footer visible:\n{text}");
+        // A far-away top row scrolls off when clamped.
+        assert!(
+            !text.contains("Bash(cmd00:*)"),
+            "top row scrolled off:\n{text}"
+        );
+    }
+
+    // FIX #7: the text cursor sits on the input line, not the footer — across a
+    // roomy pane, a clamped/windowed pane, and while confirming a remove (which
+    // adds a chrome line above the input).
+    #[test]
+    fn cursor_row_matches_the_input_line_row() {
+        // Roomy pane.
+        let roomy = PermissionsEditorView::new(snapshot());
+        // Clamped pane (windowed rule list) with the selection at the end.
+        let mut clamped = PermissionsEditorView::new(many_allow_rules(20));
+        for _ in 0..19 {
+            clamped.handle_key(press(KeyCode::Down));
+        }
+        // Confirming a remove (an extra confirm chrome line is present).
+        let mut confirming = PermissionsEditorView::new(snapshot());
+        confirming.handle_key(press(KeyCode::Enter));
+        assert!(confirming.state().is_confirming_remove());
+
+        let cases = [
+            (roomy, Rect::new(0, 0, 72, 16)),
+            (clamped, Rect::new(0, 0, 72, 10)),
+            (confirming, Rect::new(0, 0, 72, 16)),
+        ];
+        for (v, area) in cases {
+            let (_, cy) = v.cursor_pos(area).expect("cursor claimed");
+            let mut buf = Buffer::empty(area);
+            v.render(area, &mut buf);
+            let input_row = row_containing(area, &buf, "New rule").expect("input line rendered");
+            assert_eq!(cy, input_row, "cursor on input line, not footer");
+        }
     }
 }

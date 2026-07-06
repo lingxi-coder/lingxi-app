@@ -1757,6 +1757,17 @@ pub(crate) fn lingxi_home_dir() -> PathBuf {
     )
 }
 
+/// The background-agent daemon runtime dir — where `daemon.lock` + `roster.json`
+/// live. Placed as direct siblings of `jobs/` and `sessions/` under the config
+/// home so the `--bg` writer, the daemon supervisor, and the `agents` reader all
+/// agree on one location (the only hard constraint — divergence would silently
+/// split the lock/roster from the jobs the `agents` command reads). See the
+/// daemon design's `parity_choices` note #1: `config_home` directly (not a
+/// `daemon/` subdir) for simplicity.
+pub(crate) fn daemon_runtime_dir() -> PathBuf {
+    lingxi_home_dir()
+}
+
 /// Resolve the `--resume <ID>` argument into a concrete UUID.
 fn resolve_session_id(arg: &str) -> Result<uuid::Uuid, LoaderError> {
     // Accept both a bare `<uuid>` and the `sess:<uuid>` display form — the

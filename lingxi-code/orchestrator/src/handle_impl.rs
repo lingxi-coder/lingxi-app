@@ -26,10 +26,11 @@ use crate::ConversationOrchestrator;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::process::Command;
 use traits::{
-    AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
-    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
+    AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome, HandleError, HookInfo,
+    McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome, StatusSnapshot,
 };
 
 #[async_trait]
@@ -93,6 +94,118 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // (un-cancelled) token. The REPL/TUI can call
         // `force_compact_with_cancel` directly to provide a Ctrl-C token.
         self.force_compact_with_cancel(tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    /// `/fork` — spawn a DETACHED background agent that inherits the
+    /// conversation. Reads the transcript tail (last assistant message) to build
+    /// the cache-safe fork prefix, then dispatches through the wired
+    /// `SubagentSpawner::spawn_async` (`run_in_background = true`) and returns
+    /// immediately with the spawned agent's synthesized name + id. No turn-loop
+    /// entanglement.
+    ///
+    /// Requires both a wired fork spawner (composition root's
+    /// `BackgroundAgentSpawner`) and a budget enforcer; either missing ⇒ a clear
+    /// `ActionFailed` (the `/fork` handler renders "Could not fork
+    /// conversation: …"). The handler already gates the "no first turn yet"
+    /// case, but this also checks defensively.
+    async fn fork_conversation(&self, directive: &str) -> Result<ForkOutcome, HandleError> {
+        let spawner = self
+            .fork_spawner
+            .as_ref()
+            .ok_or_else(|| HandleError::ActionFailed("fork: no spawner wired".into()))?;
+        let budget = self
+            .fork_budget
+            .clone()
+            .ok_or_else(|| HandleError::ActionFailed("fork: no budget wired".into()))?;
+
+        // The fork prefix is built from the most-recent assistant message.
+        let assistant = {
+            let s = self.session.lock().await;
+            s.history
+                .iter()
+                .rev()
+                .find(|m| matches!(m, protocol::ConversationMessage::Assistant { .. }))
+                .cloned()
+        };
+        let Some(assistant) = assistant else {
+            return Err(HandleError::ActionFailed(
+                "fork: no assistant turn to fork from".into(),
+            ));
+        };
+
+        let fork_msgs = traits::fork_subagent::build_forked_messages(directive, &assistant);
+        // The parent's rendered system-prompt bytes for a cache-identical child
+        // prefix (`None` until the first successful turn).
+        let parent_sys = self.current_turn_system_prompt().await;
+
+        // Synthesize a short, stable display codename. Reused for BOTH the spawn
+        // request's `name` (so the background spawner registers it for
+        // `SendMessage` routing) and the returned `ForkOutcome.name` (rendered
+        // as "⑂ forked {name} ({id-tail})"). AsyncLaunch carries no name.
+        let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
+
+        let request = traits::subagent_spawn::SubagentSpawnRequest {
+            subagent_type: traits::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
+            // NOTE (deliberate deviation from the plan's `String::new()`): the
+            // ONLY wired async spawner — `BackgroundAgentSpawner::spawn_async` —
+            // forwards `prompt` to the backgrounded LocalAgent and IGNORES
+            // `fork_context_messages` (exactly as the existing async fork
+            // template `AgentTool::dispatch_async` does, setting
+            // `fork_context_messages: None` and `prompt: parsed.prompt`). An
+            // empty prompt would therefore spawn a do-nothing agent. Pass the
+            // directive so the background fork actually receives its task.
+            // `fork_context_messages` is still threaded below so a future
+            // spawner that replays the cache-identical prefix works unchanged.
+            prompt: directive.to_string(),
+            context_paths: Vec::new(),
+            description: Some(directive.to_string()),
+            model: None,
+            model_profile: None,
+            run_in_background: true,
+            name: Some(codename.clone()),
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            fork_context_messages: Some(fork_msgs),
+            fork_parent_system_prompt: parent_sys,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: None,
+        };
+
+        let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(self.tools.clone()),
+        );
+        let inherit = traits::subagent_spawn::SubagentInheritance {
+            tool_invoker: invoker,
+            budget,
+        };
+
+        let launch = spawner
+            .spawn_async(request, inherit)
+            .await
+            .map_err(|e| HandleError::ActionFailed(e.to_string()))?;
+
+        Ok(ForkOutcome {
+            name: codename,
+            agent_id: launch.agent_id.to_string(),
+        })
+    }
+
+    /// `/recap` — delegate to the history-inert inherent
+    /// [`ConversationOrchestrator::generate_recap_query`] with a fresh
+    /// (un-cancelled) token. A cancel-carrying caller (future Ctrl-C wiring in
+    /// command dispatch) can call `generate_recap_query` directly. This mirrors
+    /// `force_compact`'s fresh-token delegation to `force_compact_with_cancel`.
+    async fn generate_recap(&self) -> Result<RecapOutcome, HandleError> {
+        self.generate_recap_query(tokio_util::sync::CancellationToken::new())
             .await
     }
 

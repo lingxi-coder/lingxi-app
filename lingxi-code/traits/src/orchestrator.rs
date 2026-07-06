@@ -98,6 +98,24 @@ pub struct ForkOutcome {
     pub agent_id: String,
 }
 
+/// Outcome of an [`OrchestratorHandle::generate_recap`] side query — the
+/// read-only, tool-denied, single-turn recap primitive `/recap` renders.
+///
+/// `Text` carries the model's trimmed recap text (or, when the forked query
+/// itself surfaced an API-error assistant message, that error's own text — the
+/// runner returns it as `final_text` either way, so no branching is needed).
+/// `Cancelled` maps to the fixed `"Recap cancelled."` line. A "no qualifying
+/// turn yet" case is deliberately NOT a variant here: `/recap`'s handler gates
+/// that against [`OrchestratorHandle::conversation_transcript`] BEFORE calling,
+/// and any internal failure surfaces as `Err(HandleError)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecapOutcome {
+    /// The recap text to display (already trimmed).
+    Text(String),
+    /// The caller aborted the recap mid-flight → the fixed cancellation line.
+    Cancelled,
+}
+
 /// Errors surfaced through the orchestrator's public handle.
 ///
 /// Distinct from `orchestrator::OrchestratorError` because the
@@ -789,6 +807,20 @@ pub trait OrchestratorHandle: Send + Sync {
     async fn fork_conversation(&self, directive: &str) -> Result<ForkOutcome, HandleError> {
         let _ = directive;
         Err(HandleError::Unimplemented("fork_conversation".into()))
+    }
+
+    /// Generate a one-line session recap via an isolated, read-only,
+    /// tool-denied, single-turn side query, per `/recap`. Returns the trimmed
+    /// recap text (or [`RecapOutcome::Cancelled`] if aborted mid-flight).
+    ///
+    /// Read-only w.r.t. session state: unlike [`Self::force_compact`] this must
+    /// NOT mutate history / cache (upstream `skipTranscript` / `skipCacheWrite`).
+    ///
+    /// Default returns `Err(HandleError::Unimplemented(..))` so existing handle
+    /// impls (and the test mock) keep compiling; the composition roots override
+    /// it against the real forked-agent side-query runner.
+    async fn generate_recap(&self) -> Result<RecapOutcome, HandleError> {
+        Err(HandleError::Unimplemented("generate_recap".into()))
     }
 
     /// File paths currently tracked in the session's read-file-state cache.

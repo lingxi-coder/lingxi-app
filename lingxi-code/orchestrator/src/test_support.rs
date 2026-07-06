@@ -977,6 +977,23 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     async fn files_in_context(&self) -> Vec<PathBuf> {
         self.files_in_context.lock().unwrap().clone()
     }
+
+    /// Deterministic fork outcome so wired-success tests can assert a real
+    /// render. Note: `/fork`'s handler gates on `conversation_transcript`
+    /// (default empty here) BEFORE calling this, so exercising this override
+    /// end-to-end needs a handle that also reports an assistant turn.
+    async fn fork_conversation(&self, _directive: &str) -> Result<traits::ForkOutcome, HandleError> {
+        Ok(traits::ForkOutcome {
+            name: "mock-fork".to_string(),
+            agent_id: "mock-agent-abcd".to_string(),
+        })
+    }
+
+    /// Deterministic recap text so wired-success tests can assert real output.
+    /// (`/recap`'s handler gates on a qualifying transcript turn before calling.)
+    async fn generate_recap(&self) -> Result<traits::RecapOutcome, HandleError> {
+        Ok(traits::RecapOutcome::Text("mock recap".to_string()))
+    }
 }
 
 // ============================================================================

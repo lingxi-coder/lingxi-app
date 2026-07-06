@@ -7,7 +7,11 @@
 //! `argumentHint:"[hold|tap|off]"`). Description verbatim:
 //! `"Generate a one-line session recap now"`.
 //!
-//! ## Spec (behavior, not yet fully wireable — see GAP below)
+//! ## Spec (behavior)
+//!
+//! (The `generate_recap` `OrchestratorHandle` seam described in the historical
+//! "GAP" note below has since LANDED — `ConversationOrchestrator` overrides it
+//! via `sidequery::ForkedAgentRunner`, so this handler is fully wired.)
 //!
 //! On invocation: (1) check whether the session has had at least one
 //! qualifying turn — an assistant message, or a user compact-summary message
@@ -28,33 +32,33 @@
 //! below) is returned. (6) On any other internal failure, the fixed
 //! [`GENERIC_FAILURE_MESSAGE`].
 //!
-//! ## GAP: no fork-query primitive on `OrchestratorHandle`
+//! ## Wiring: the `generate_recap` seam
 //!
-//! None of the exact needed methods exist yet on `traits::OrchestratorHandle`
-//! (checked `traits/src/orchestrator.rs`). The closest analog is
-//! [`OrchestratorHandle::force_compact`] (used by `commands/core/src/compact.rs`),
-//! which proves LingXi already has real, wired, LLM-driven single-purpose
-//! query infra (`CompactionOrchestrator` / `ForkedAgentRunner`) reachable from
-//! a command handler — but `force_compact` truncates/replaces history, which
-//! `/recap` must NOT do. A new trait method is needed, e.g. `async fn
-//! generate_recap(&self) -> Result<RecapOutcome, HandleError>` (a
-//! `{Ok(String), NoTurn, Aborted, Failed}`-shaped enum), implemented by
-//! forking a single tool-denied, transcript-skipping turn through the same
-//! forked-agent-runner machinery `/compact` uses, returning only the
-//! assistant's concatenated text blocks (trimmed). Adding it is out of scope
-//! here (`traits/` is a shared file this task must not edit); step (1) — the
-//! only half expressible with the CURRENT trait surface — is implemented for
-//! real below, and steps (2)-(4) fall back to the honest
-//! [`GENERIC_FAILURE_MESSAGE`] until `generate_recap` lands. No `AuthHandle`
-//! is needed either way (recap piggybacks on whatever model/session is
-//! already authenticated and configured).
+//! Steps (2)-(6) run through [`OrchestratorHandle::generate_recap`] — a
+//! read-only side query that reuses the SAME single-turn `ForkedAgentRunner`
+//! the autocompactor uses (tool-denied + single-turn + history-inert BY
+//! CONSTRUCTION), so it never truncates/replaces history the way
+//! [`OrchestratorHandle::force_compact`] would. This handler maps its outcome:
+//! `RecapOutcome::Text` → the trimmed recap (items 3+4); `RecapOutcome::Cancelled`
+//! → [`CANCELLED_MESSAGE`] (item 5); `Err(HandleError)` → the honest
+//! [`GENERIC_FAILURE_MESSAGE`] (item 6). Step (1) — the no-qualifying-turn gate
+//! — is still enforced here BEFORE the seam is called (via
+//! [`OrchestratorHandle::conversation_transcript`]), so `NoTurn` is not a
+//! `RecapOutcome` variant. No `AuthHandle` is needed (recap piggybacks on
+//! whatever model/session is already authenticated and configured).
+//!
+//! Cancellation is wired but inert until command dispatch threads a Ctrl-C
+//! token into the handler: the live `generate_recap` always uses a fresh
+//! un-cancelled token, so `RecapOutcome::Cancelled` is currently unreachable via
+//! the palette (the same limitation as `force_compact()` vs
+//! `force_compact_with_cancel`).
 
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use protocol::ConversationMessage;
 use std::sync::Arc;
-use traits::OrchestratorHandle;
+use traits::{OrchestratorHandle, RecapOutcome};
 
 /// Fixed no-arg-invocation display when the session has had zero qualifying
 /// turns yet. Byte-exact from the 2.1.198 binary.
@@ -67,6 +71,13 @@ const NO_TURN_MESSAGE: &str = "Nothing to recap yet — send a message first.";
 /// `generate_recap` primitive described in the module docs lands — an honest
 /// gap marker rather than a fabricated success.
 const GENERIC_FAILURE_MESSAGE: &str = "Couldn't generate a recap. Run with --debug for details.";
+
+/// Fixed display when the recap side query is aborted mid-flight (spec item 5).
+/// Byte-exact from the 2.1.198 binary. Reachable once command dispatch threads
+/// a Ctrl-C token into the handler (today `generate_recap` always uses a fresh
+/// un-cancelled token, so `RecapOutcome::Cancelled` is wired but inert — the
+/// same limitation as `force_compact()` vs `force_compact_with_cancel`).
+const CANCELLED_MESSAGE: &str = "Recap cancelled.";
 
 /// Exact prefix `compaction::prompt::get_compact_user_summary_message` stamps
 /// on the synthetic post-`/compact` continuation user turn (`"This session is
@@ -127,17 +138,32 @@ impl BuiltinCommandHandler for RecapHandler {
             };
         }
 
-        // GAP (see module docs): the isolated, tool-denied, transcript-skipping
-        // fork query has no `OrchestratorHandle` primitive to call yet. Fail
-        // honestly rather than fabricate a recap or silently run a mutating
-        // path (`force_compact` would truncate history, which `/recap` must
-        // never do).
-        telemetry::emit_command_failed(
-            "tengu_command_recap_failed",
-            "no fork-query primitive on OrchestratorHandle yet (see recap.rs module docs)",
-        );
-        CommandResult::Done {
-            display: Some(GENERIC_FAILURE_MESSAGE.to_string()),
+        // Run the isolated, tool-denied, transcript-skipping recap side query
+        // via the `generate_recap` seam (the SAME single-turn forked-agent
+        // runner the autocompactor uses — read-only, so it never mutates
+        // history/cache the way `force_compact` would). Map its outcome:
+        //   Text     → the model's trimmed recap (spec items 3+4)
+        //   Cancelled→ the fixed "Recap cancelled." line (spec item 5)
+        //   Err      → the fixed generic-failure message (spec item 6)
+        match self.handle.generate_recap().await {
+            Ok(RecapOutcome::Text(text)) => {
+                telemetry::emit_command_completed("tengu_command_recap_completed", "ok");
+                CommandResult::Done {
+                    display: Some(text),
+                }
+            }
+            Ok(RecapOutcome::Cancelled) => {
+                telemetry::emit_command_completed("tengu_command_recap_completed", "cancelled");
+                CommandResult::Done {
+                    display: Some(CANCELLED_MESSAGE.to_string()),
+                }
+            }
+            Err(e) => {
+                telemetry::emit_command_failed("tengu_command_recap_failed", &e.to_string());
+                CommandResult::Done {
+                    display: Some(GENERIC_FAILURE_MESSAGE.to_string()),
+                }
+            }
         }
     }
 
@@ -178,13 +204,35 @@ mod tests {
         }
     }
 
-    /// Minimal local stub overriding just `conversation_transcript` — the
-    /// shared `MockOrchestratorHandle` (in `orchestrator::test_support`, a
-    /// shared file out of scope for this task) has no transcript setter, so a
-    /// tiny in-file stub exercises the qualifying-turn gate end-to-end without
-    /// touching it. Every other method is a benign stub; only
-    /// `conversation_transcript` is exercised by `RecapHandler::handle`.
-    struct TranscriptStub(Vec<ConversationMessage>);
+    /// Minimal local stub overriding `conversation_transcript` (the
+    /// qualifying-turn gate's input) + `generate_recap` (the seam the handler
+    /// calls once the gate passes). The shared `MockOrchestratorHandle` has no
+    /// transcript setter, so this tiny in-file stub exercises the whole path
+    /// without touching it. `recap = None` leaves `generate_recap` at its trait
+    /// default (`Unimplemented` → the handler's `Err` → generic-failure) so the
+    /// pre-seam fallback tests keep asserting that branch.
+    struct TranscriptStub {
+        history: Vec<ConversationMessage>,
+        recap: Option<Result<RecapOutcome, traits::HandleError>>,
+    }
+
+    impl TranscriptStub {
+        fn new(history: Vec<ConversationMessage>) -> Self {
+            Self {
+                history,
+                recap: None,
+            }
+        }
+        fn with_recap(
+            history: Vec<ConversationMessage>,
+            recap: Result<RecapOutcome, traits::HandleError>,
+        ) -> Self {
+            Self {
+                history,
+                recap: Some(recap),
+            }
+        }
+    }
 
     #[async_trait]
     impl OrchestratorHandle for TranscriptStub {
@@ -241,7 +289,14 @@ mod tests {
             Vec::new()
         }
         async fn conversation_transcript(&self) -> Vec<ConversationMessage> {
-            self.0.clone()
+            self.history.clone()
+        }
+        async fn generate_recap(&self) -> Result<RecapOutcome, traits::HandleError> {
+            match &self.recap {
+                Some(Ok(outcome)) => Ok(outcome.clone()),
+                Some(Err(e)) => Err(e.clone()),
+                None => Err(traits::HandleError::Unimplemented("stub".into())),
+            }
         }
     }
 
@@ -259,7 +314,10 @@ mod tests {
 
     #[tokio::test]
     async fn no_turn_when_only_plain_user_messages() {
-        let handle = Arc::new(TranscriptStub(vec![user_text("hello"), user_text("world")]));
+        let handle = Arc::new(TranscriptStub::new(vec![
+            user_text("hello"),
+            user_text("world"),
+        ]));
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
@@ -270,12 +328,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qualifying_turn_with_assistant_message_falls_back_to_generic_failure() {
-        // The no-turn gate passes (there IS a qualifying turn), but the
-        // fork-query primitive doesn't exist yet (see module GAP docs) — the
-        // honest fallback is the fixed generic-failure text, never a
-        // fabricated recap.
-        let handle = Arc::new(TranscriptStub(vec![
+    async fn qualifying_turn_with_unwired_recap_falls_back_to_generic_failure() {
+        // The no-turn gate passes (there IS a qualifying turn) and the handler
+        // calls `generate_recap`, but this stub leaves it unwired (`recap: None`
+        // → the trait default `Unimplemented`), so the handler maps the `Err` to
+        // the honest fixed generic-failure text — never a fabricated recap.
+        let handle = Arc::new(TranscriptStub::new(vec![
             user_text("please fix the bug"),
             assistant_text("Fixed it."),
         ]));
@@ -297,7 +355,57 @@ mod tests {
         let summary_text = format!(
             "{COMPACT_SUMMARY_PREFIX}\n\nSummary:\nWe were mid-refactor of the parser."
         );
-        let handle = Arc::new(TranscriptStub(vec![user_text(&summary_text)]));
+        let handle = Arc::new(TranscriptStub::new(vec![user_text(&summary_text)]));
+        let h = RecapHandler::new(handle);
+        match h.handle(&args()).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "Couldn't generate a recap. Run with --debug for details.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn qualifying_turn_wired_recap_renders_text() {
+        // Gate passes AND the seam returns text → the handler renders that
+        // trimmed text verbatim (spec items 3+4).
+        let handle = Arc::new(TranscriptStub::with_recap(
+            vec![user_text("please fix the bug"), assistant_text("Fixed it.")],
+            Ok(RecapOutcome::Text("Fixing the parser; next, run the tests.".to_string())),
+        ));
+        let h = RecapHandler::new(handle);
+        match h.handle(&args()).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "Fixing the parser; next, run the tests.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wired_recap_cancelled_renders_fixed_line() {
+        // The seam reports a mid-flight abort → the fixed cancellation line
+        // (spec item 5).
+        let handle = Arc::new(TranscriptStub::with_recap(
+            vec![assistant_text("Done.")],
+            Ok(RecapOutcome::Cancelled),
+        ));
+        let h = RecapHandler::new(handle);
+        match h.handle(&args()).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "Recap cancelled.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wired_recap_error_renders_generic_failure() {
+        // The seam fails internally → the fixed generic-failure text (spec item 6).
+        let handle = Arc::new(TranscriptStub::with_recap(
+            vec![assistant_text("Done.")],
+            Err(traits::HandleError::ActionFailed("boom".into())),
+        ));
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
@@ -315,12 +423,10 @@ mod tests {
         assert_eq!(h.description(), "Generate a one-line session recap now");
     }
 
-    /// Byte-exact prompt text the forked side-query MUST send once
-    /// `generate_recap` lands (see module GAP docs) — probed from the
-    /// 2.1.198 binary. Kept as a test-only constant (rather than a dead
-    /// production `const`) so it doesn't trip `-D warnings` before it has a
-    /// call site, per the same convention as `release_notes.rs`'s deferred
-    /// `format_release_notes`.
+    /// Byte-exact prompt text the forked side query sends — probed from the
+    /// 2.1.198 binary. The production copy now lives on the impl side
+    /// (`orchestrator::ConversationOrchestrator::RECAP_PROMPT`, `pub(crate)`);
+    /// this byte-audit copy guards against drift in the shipped literal.
     const RECAP_PROMPT: &str = "The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.";
 
     #[test]
@@ -330,11 +436,7 @@ mod tests {
         assert!(RECAP_PROMPT.ends_with("em-dash tangents."));
     }
 
-    /// Byte-exact cancellation text (spec item 5) — also test-only pending
-    /// `generate_recap` (no cancellation signal reaches `BuiltinCommandHandler::handle`
-    /// today; see module GAP docs).
-    const CANCELLED_MESSAGE: &str = "Recap cancelled.";
-
+    /// The production cancellation const (spec item 5) is byte-exact.
     #[test]
     fn cancelled_message_is_byte_exact() {
         assert_eq!(CANCELLED_MESSAGE, "Recap cancelled.");

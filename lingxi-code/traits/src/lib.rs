@@ -88,7 +88,7 @@ pub use orchestrator::{
     CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
     DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpServerInfo, McpStatus,
     MemoryEditorOutcome, ModelListing, OrchestratorHandle, OutputEvent, OutputStream,
-    RateLimitSnapshot, StatusSnapshot, TurnOutcome,
+    RateLimitSnapshot, RecapOutcome, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

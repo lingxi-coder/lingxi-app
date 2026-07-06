@@ -3821,6 +3821,12 @@ pub async fn build(
             // per request inside `reasoning_for_request`.
             .with_session_thinking(llm_client::model::thinking::ThinkingConfig::default()),
     );
+    // `/recap` reuses the SAME single-turn forked runner the autocompact
+    // summarizer uses — CLONE the `Arc` here BEFORE `forked_runner` moves into
+    // the `Autocompactor` below, so recap replays the identical cache-safe
+    // prefix (the same `cache_safe_slot` is already shared with both). Recap
+    // reads the runner read-only; it never mutates history/slot.
+    let recap_runner = forked_runner.clone();
     let autocompactor =
         compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone());
     let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
@@ -4818,6 +4824,14 @@ pub async fn build(
     .with_agent_catalog(agent_catalog)
     .with_compaction(compactor)
     .with_cache_safe_slot(cache_safe_slot)
+    // `/fork` engine seam: hand the orchestrator the background-agent spawner
+    // (`BackgroundAgentSpawner`, built above) + the budget the spawned agent
+    // inherits, so `fork_conversation` can dispatch a detached background agent.
+    .with_fork_spawner(subagent_spawner.clone())
+    .with_fork_budget(budget_enforcer.clone())
+    // `/recap` engine seam: the SAME forked runner the summarizer uses (cloned
+    // above), so recap replays the identical cache-safe prefix, read-only.
+    .with_recap_runner(recap_runner)
     // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
     // LSP registry drains publishDiagnostics into).
     .with_new_diagnostics_source(

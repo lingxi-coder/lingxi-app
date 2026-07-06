@@ -881,6 +881,26 @@ pub struct ConversationOrchestrator {
     /// `None` until the first successful turn / when the turn ran with no system
     /// prompt. Read by the fork dispatch path ONLY; no non-fork tool touches it.
     pub(crate) current_turn_system_prompt: Mutex<Option<String>>,
+    /// `/fork` background-agent spawner. When wired (via
+    /// [`Self::with_fork_spawner`], the composition root's
+    /// `BackgroundAgentSpawner`), [`OrchestratorHandle::fork_conversation`]
+    /// spawns a detached background agent that inherits the conversation.
+    /// `None` (tests / non-desktop roots) ⇒ `fork_conversation` fails with a
+    /// clear `ActionFailed` rather than panicking. Mirrors the existing
+    /// `with_compaction` / `with_cache_safe_slot` Option-field pattern.
+    pub(crate) fork_spawner: Option<Arc<dyn traits::subagent_spawn::SubagentSpawner>>,
+    /// `/fork` budget enforcer inherited by the spawned background agent
+    /// (`SubagentInheritance::budget`). Wired via [`Self::with_fork_budget`].
+    /// `None` ⇒ `fork_conversation` fails gracefully.
+    pub(crate) fork_budget: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
+    /// `/recap` side-query runner — the SAME single-turn
+    /// [`sidequery::ForkedAgentRunner`] the autocompact summarizer uses (cloned
+    /// from the composition root's `forked_runner` before it moves into the
+    /// `Autocompactor`), so recap replays the same cache-safe prefix. Wired via
+    /// [`Self::with_recap_runner`]. `None` ⇒ [`OrchestratorHandle::generate_recap`]
+    /// fails gracefully. Read-only: recap NEVER writes history/slot (skipTranscript
+    /// / skipCacheWrite), unlike `force_compact`.
+    pub(crate) recap_runner: Option<Arc<sidequery::ForkedAgentRunner>>,
     /// Forced permission decisions keyed by `tool_use_id`, consulted ONCE
     /// (removed on read) by the permission gate in
     /// [`crate::turn_loop::dispatch_tool_uses_tracked`]. Populated transiently by
@@ -1221,6 +1241,9 @@ impl ConversationOrchestrator {
             cache_safe_slot: None,
             new_diagnostics_source: None,
             current_turn_system_prompt: Mutex::new(None),
+            fork_spawner: None,
+            fork_budget: None,
+            recap_runner: None,
             orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
@@ -1730,6 +1753,105 @@ impl ConversationOrchestrator {
     pub fn with_cache_safe_slot(mut self, slot: Arc<sidequery::CacheSafeParamsSlot>) -> Self {
         self.cache_safe_slot = Some(slot);
         self
+    }
+
+    /// Attach the `/fork` background-agent spawner (the composition root's
+    /// `BackgroundAgentSpawner`), so [`OrchestratorHandle::fork_conversation`]
+    /// can spawn a detached background agent. Without it, `/fork` fails with a
+    /// clear `ActionFailed`.
+    #[must_use]
+    pub fn with_fork_spawner(
+        mut self,
+        spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner>,
+    ) -> Self {
+        self.fork_spawner = Some(spawner);
+        self
+    }
+
+    /// Attach the budget enforcer a `/fork`-spawned background agent inherits
+    /// (`SubagentInheritance::budget`). Pair with [`Self::with_fork_spawner`].
+    #[must_use]
+    pub fn with_fork_budget(
+        mut self,
+        budget: Arc<dyn traits::budget::BudgetEnforcerHandle>,
+    ) -> Self {
+        self.fork_budget = Some(budget);
+        self
+    }
+
+    /// Attach the `/recap` side-query runner. Pass the SAME
+    /// [`sidequery::ForkedAgentRunner`] `Arc` handed to
+    /// [`compaction::Autocompactor::with_forked_runner`] at the composition root
+    /// (clone it BEFORE that move) so recap replays the identical cache-safe
+    /// prefix the summarizer would. Without it, `/recap` fails gracefully.
+    #[must_use]
+    pub fn with_recap_runner(mut self, runner: Arc<sidequery::ForkedAgentRunner>) -> Self {
+        self.recap_runner = Some(runner);
+        self
+    }
+
+    /// Byte-exact `/recap` prompt (probed from the 2.1.198 binary). Sent as the
+    /// single user turn of the isolated recap side query. Kept in lockstep with
+    /// the byte-audit copy in `command-core`'s `recap.rs` test.
+    pub(crate) const RECAP_PROMPT: &str = "The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.";
+
+    /// Real `/recap` body — a read-only, tool-denied, single-turn side query,
+    /// cancelable via a [`CancellationToken`]. HISTORY-INERT by construction:
+    /// unlike [`Self::force_compact_with_cancel`], it reuses the
+    /// [`sidequery::ForkedAgentRunner`] directly (the SAME single-turn primitive
+    /// the autocompact summarizer uses) and NEVER touches `session.history`,
+    /// `apply_post_compact`, `save_cache_safe_params`, or the pre/post-compact
+    /// hooks. The runner replays `cache_safe_params.fork_context_messages` +
+    /// the recap prompt, exposes no tools, and issues exactly one query.
+    ///
+    /// On cancel returns `Ok(RecapOutcome::Cancelled)` (a fixed-string outcome),
+    /// not `Err`. An empty cache-safe slot (no successful turn recorded yet — a
+    /// resumed session whose transcript loaded but which has run no live turn)
+    /// maps to `Err(ActionFailed)` rather than a panic.
+    pub(crate) async fn generate_recap_query(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<traits::RecapOutcome, traits::HandleError> {
+        let runner = self
+            .recap_runner
+            .clone()
+            .ok_or_else(|| traits::HandleError::ActionFailed("recap unavailable".into()))?;
+        let params = self
+            .cache_safe_slot
+            .as_ref()
+            .ok_or_else(|| traits::HandleError::ActionFailed("recap: no cache-safe slot".into()))?
+            .get_last()
+            .await
+            .ok_or_else(|| {
+                traits::HandleError::ActionFailed("recap: no cache-safe params".into())
+            })?;
+
+        // Fast-path cancel (deterministic even when the runner completes
+        // synchronously, e.g. the stub side-query path), mirroring
+        // `force_compact_with_cancel`.
+        if cancel.is_cancelled() {
+            return Ok(traits::RecapOutcome::Cancelled);
+        }
+
+        let req = sidequery::ForkedAgentRequest {
+            prompt_messages: vec![ConversationMessage::user(
+                MessageId::new(),
+                Self::RECAP_PROMPT.to_string(),
+            )],
+            cache_safe_params: params,
+            fork_label: "recap".into(),
+            query_source: sidequery::QuerySource::Custom("recap".into()),
+            max_output_tokens: Some(256),
+        };
+
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(traits::RecapOutcome::Cancelled),
+            r = runner.run(req) => match r {
+                Ok(res) => Ok(traits::RecapOutcome::Text(res.final_text.trim().to_string())),
+                Err(e) => Err(traits::HandleError::ActionFailed(e.to_string())),
+            }
+        }
     }
 
     /// Wire the passive `<new-diagnostics>` source (the LSP diagnostic registry)

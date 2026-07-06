@@ -37,7 +37,12 @@
 //! `tv()` true via normal dispatch), and gating up-front just avoids a
 //! doomed spawn attempt when the command is invoked directly.
 //!
-//! ## Trait-surface gap (flagged for the integration pass)
+//! ## Trait surface (integration pass — now LANDED)
+//!
+//! The two [`traits::OrchestratorHandle`] methods below are now real:
+//! `is_coordinator_session` (default) + a live `fork_conversation` override on
+//! `ConversationOrchestrator` that spawns the fork via the `SubagentSpawner`.
+//! The historical gap note is retained for design rationale.
 //!
 //! Two [`traits::OrchestratorHandle`] methods this handler calls do not
 //! exist on the trait yet:

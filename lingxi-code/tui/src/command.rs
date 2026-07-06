@@ -51,12 +51,10 @@ pub struct SlashCommand {
 ///
 /// Commands the iocraft backend advertised but that have NO data source or
 /// core API on this backend are deliberately NOT registered (never advertise
-/// "not implemented"): `/tasks` (no background-task feed reaches `run_app`),
-/// `/fork` (`fork_conversation` is trait-default `Unimplemented` on the live
-/// `ConversationOrchestrator`, so it would always render "Could not fork
-/// conversation: …"), and `/recap` (no `generate_recap` seam, so it returns
-/// "Couldn't generate a recap" for any conversation past its first turn). Both
-/// stay deferred until an engine composition-root seam lands.
+/// "not implemented"): `/tasks` (no background-task feed reaches `run_app`).
+/// (`/fork` and `/recap` were previously deferred here; the engine
+/// `fork_conversation` override + `generate_recap` seam now exist, so both are
+/// registered below.)
 pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -383,6 +381,25 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_goal,
+    },
+    SlashCommand {
+        name: "/fork",
+        aliases: &[],
+        description: "Fork the conversation into a background agent",
+        // Optional (NOT Required): a bare `/fork` must reach the handler so it
+        // renders its own "Usage: /fork <directive>" line rather than falling
+        // through as an LLM prompt.
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_fork,
+    },
+    SlashCommand {
+        name: "/recap",
+        aliases: &[],
+        description: "Generate a one-line session recap now",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_recap,
     },
     SlashCommand {
         name: "/reload-skills",

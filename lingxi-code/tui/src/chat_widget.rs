@@ -1659,6 +1659,25 @@ impl ChatWidget {
         )
     }
 
+    /// `/fork`: fork the conversation into a detached background agent (the live
+    /// `fork_conversation` override spawns it via the `SubagentSpawner`). Bare
+    /// `/fork` reaches the handler's "Usage: /fork <directive>" text.
+    pub(crate) fn cmd_fork(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/fork is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command("fork", args, &command_core::fork::ForkHandler::new(handle))
+    }
+
+    /// `/recap`: one-line session recap via the live `generate_recap` isolated,
+    /// tool-denied side query (never mutates the conversation history).
+    pub(crate) fn cmd_recap(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/recap is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command("recap", args, &command_core::recap::RecapHandler::new(handle))
+    }
+
     /// `/files`: list the files currently in context (read-only).
     pub(crate) fn cmd_files(&mut self, args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
@@ -2251,6 +2270,49 @@ mod tests {
         let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
         assert!(!systext.body().is_empty(), "/usage rendered a summary");
         assert!(!systext.is_error());
+    }
+
+    /// `/fork` dispatches to `ForkHandler` with the live handle: bare `/fork`
+    /// reaches the handler's usage text (proving it is NOT `ArgSpec::Required`),
+    /// and a directive reaches the transcript gate (mock has no prior turn).
+    #[test]
+    fn fork_command_wired_to_orchestrator_handle() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_fork(""), ChatOutcome::Continue));
+        assert_eq!(
+            cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body(),
+            "Usage: /fork <directive>",
+        );
+
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_fork("investigate the bug"), ChatOutcome::Continue));
+        assert_eq!(
+            cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body(),
+            "Cannot fork before the first conversation turn",
+        );
+    }
+
+    /// `/recap` dispatches to `RecapHandler` with the live handle (renders text
+    /// via the isolated side query, never panics).
+    #[test]
+    fn recap_command_wired_to_orchestrator_handle() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_recap(""), ChatOutcome::Continue));
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert!(!sys.body().is_empty(), "/recap rendered text via the handler");
+    }
+
+    /// Unwired (no engine handle) → `/fork` and `/recap` are graceful error
+    /// lines, never a panic.
+    #[test]
+    fn fork_recap_unavailable_when_unwired() {
+        let mut w = widget();
+        assert!(matches!(w.cmd_fork("x"), ChatOutcome::Continue));
+        assert!(cell::<crate::history_cell::system::SystemTextCell>(&w, 0).is_error());
+
+        let mut w2 = widget();
+        assert!(matches!(w2.cmd_recap(""), ChatOutcome::Continue));
+        assert!(cell::<crate::history_cell::system::SystemTextCell>(&w2, 0).is_error());
     }
 
     /// (b) `/stop` shows "Session stopped." then returns `ChatOutcome::Quit`

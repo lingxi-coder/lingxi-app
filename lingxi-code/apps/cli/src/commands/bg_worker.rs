@@ -132,11 +132,26 @@ where
     exit_codes::SUCCESS
 }
 
+/// Synthesize the print-shaped [`Argv`] the worker runs the turn with.
+/// `--print`-shaped so the headless deny-on-ask permission default applies (no
+/// interactive prompt is reachable from a detached worker); `background:false`
+/// so it does NOT re-enter the `--bg` dispatch path; and the job's RECORDED
+/// `session_id` is threaded as the runtime's `session_id_override` (init.rs:570)
+/// so the transcript lands in `<sessionId>.jsonl` — the SAME id the job row and
+/// `register_bg` advertise. Omitting it (the earlier bug) minted a fresh id, so
+/// resuming the job's session found no transcript.
+fn worker_argv(spec: &JobSpec) -> Argv {
+    Argv {
+        prompt: Some(spec.prompt.clone()),
+        print: true,
+        background: false,
+        session_id: (!spec.session_id.is_empty()).then(|| spec.session_id.clone()),
+        ..Argv::default()
+    }
+}
+
 /// The production executor: chdir into the job cwd, synthesize a print-shaped
-/// [`Argv`], build the runtime, and run one turn. `--print`-shaped so the
-/// headless deny-on-ask permission default applies (no interactive prompt is
-/// reachable from a detached worker); `background:false` so it does NOT
-/// re-enter the `--bg` dispatch path.
+/// [`Argv`], build the runtime, and run one turn.
 async fn execute_job(spec: JobSpec) -> Result<(), String> {
     // Run the turn in the job's directory (tool + config resolution keys off
     // `std::env::current_dir()`, which `resolve_desktop_config` reads).
@@ -146,12 +161,7 @@ async fn execute_job(spec: JobSpec) -> Result<(), String> {
         }
     }
 
-    let argv = Argv {
-        prompt: Some(spec.prompt.clone()),
-        print: true,
-        background: false,
-        ..Argv::default()
-    };
+    let argv = worker_argv(&spec);
 
     let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
     let adapter: Arc<dyn traits::OutputStream> = Arc::new(SinkAdapter::new(sink));
@@ -206,6 +216,33 @@ mod tests {
             worker_pid: None,
         };
         write_job_state(home, short, &job).unwrap();
+    }
+
+    #[test]
+    fn worker_argv_threads_the_jobs_session_id() {
+        // Regression: the worker must run the turn under the job's RECORDED
+        // session id (→ `session_id_override` → `<sessionId>.jsonl`), not a
+        // freshly-minted one, so the job row / live registration / transcript
+        // all agree and `--resume <sessionId>` finds the turn.
+        let spec = JobSpec {
+            short: "74d8a00f".to_string(),
+            prompt: "say hi".to_string(),
+            cwd: "/tmp/x".to_string(),
+            session_id: "cb1f9d13-20a6-4e53-ad3e-5720d438a5f2".to_string(),
+            name: None,
+        };
+        let argv = worker_argv(&spec);
+        assert_eq!(
+            argv.session_id.as_deref(),
+            Some("cb1f9d13-20a6-4e53-ad3e-5720d438a5f2")
+        );
+        assert!(argv.print && !argv.background);
+        // An empty recorded id falls back to a minted one (None override).
+        let spec_empty = JobSpec {
+            session_id: String::new(),
+            ..spec
+        };
+        assert_eq!(worker_argv(&spec_empty).session_id, None);
     }
 
     #[tokio::test]

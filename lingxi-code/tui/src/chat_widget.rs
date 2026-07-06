@@ -2575,10 +2575,11 @@ mod tests {
         widget.handle_key(press(KeyCode::Enter));
         widget.apply_turn_event(TurnEvent::TurnStarted);
         let width = 80;
-        // Desired height = live tail (the just-opened empty assistant cell
-        // renders its 1-row marker) stacked above the pane's height.
+        // The just-opened empty active assistant cell renders NO tail row (no
+        // stray `●` before content), so the tail height is 0 and the running
+        // pane sits at the top.
         let tail_height = widget.live_tail_height(width);
-        assert_eq!(tail_height, 1, "empty active assistant cell = marker row");
+        assert_eq!(tail_height, 0, "empty active cell renders no tail row");
         // `desired_height` uses the FRESHLY computed running flag (Task 5:
         // height is now running-dependent), not `bottom_pane().desired_height`
         // directly — the pane's own flag only updates inside

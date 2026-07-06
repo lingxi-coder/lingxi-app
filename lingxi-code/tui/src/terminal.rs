@@ -378,13 +378,29 @@ where
         // Confine the scroll region to the rows ABOVE the viewport, put the
         // cursor at its bottom, and write the lines there: only history rows
         // scroll; the viewport stays put.
-        queue!(writer, SetScrollRegion(1..area.top()))?;
-        queue!(writer, MoveTo(0, cursor_top))?;
-        for line in lines {
-            queue!(writer, Print("\r\n"))?;
-            write_history_line(writer, line, wrap_width)?;
+        //
+        // A DECSTBM region requires top < bottom. When there are >= 2 rows above
+        // (`area.top() >= 2`) the region `[1, area.top()]` is valid. But with only
+        // ONE free row above (`area.top() == 1` — e.g. a fresh session's first
+        // history line, viewport just below the top), `SetScrollRegion(1..1)`
+        // emits a DEGENERATE `ESC[1;1r`, which iTerm2 mishandles by leaking a
+        // stray `[` glyph onto the following rows. In that case skip the region
+        // and place the line(s) directly at the single free row.
+        if area.top() >= 2 {
+            queue!(writer, SetScrollRegion(1..area.top()))?;
+            queue!(writer, MoveTo(0, cursor_top))?;
+            for line in lines {
+                queue!(writer, Print("\r\n"))?;
+                write_history_line(writer, line, wrap_width)?;
+            }
+            queue!(writer, ResetScrollRegion)?;
+        } else {
+            queue!(writer, MoveTo(0, cursor_top))?;
+            for line in lines {
+                write_history_line(writer, line, wrap_width)?;
+                queue!(writer, Print("\r\n"))?;
+            }
         }
-        queue!(writer, ResetScrollRegion)?;
         // NB: MoveTo instead of set_cursor_position, so the terminal's
         // last-known cursor position is untouched — inserting history is
         // cursor-position-neutral.

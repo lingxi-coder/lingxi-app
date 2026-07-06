@@ -1434,6 +1434,44 @@ mod tests {
     }
 
     #[test]
+    fn running_render_emits_no_degenerate_scroll_region() {
+        // Regression: inserting the first history line above a top-anchored
+        // viewport (fresh session) produced a DEGENERATE `ESC[1;1r` scroll region
+        // (a 1-row DECSTBM, top == bottom), which iTerm2 mishandled by leaking a
+        // stray `[` glyph onto the status + composer rows. Every emitted scroll
+        // region must have top < bottom.
+        let backend = crate::terminal::test_support::TestWriteBackend::new(80, 24);
+        let raw = backend.raw_handle();
+        let mut terminal = crate::terminal::Terminal::with_options(backend).unwrap();
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "hello");
+        app.on_key(press(KeyCode::Enter));
+        app.apply_turn_event(TurnEvent::TurnStarted);
+        app.render_tick(&mut terminal).unwrap();
+        app.render_tick(&mut terminal).unwrap();
+
+        let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
+        let mut rest = out.as_str();
+        while let Some(i) = rest.find("\x1b[") {
+            rest = &rest[i + 2..];
+            let seq: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == ';')
+                .collect();
+            let terminated_by_r = rest[seq.len()..].starts_with('r');
+            if terminated_by_r {
+                if let Some((top, bottom)) = seq.split_once(';') {
+                    let (top, bottom): (u16, u16) = (top.parse().unwrap(), bottom.parse().unwrap());
+                    assert!(
+                        top < bottom,
+                        "degenerate scroll region ESC[{seq}r (top must be < bottom)"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tick_frame_is_bracketed_in_a_synchronized_update() {
         let backend = crate::terminal::test_support::TestWriteBackend::new(80, 24);
         let raw = backend.raw_handle();
@@ -1513,10 +1551,10 @@ mod tests {
         app.apply_turn_event(TurnEvent::TurnStarted);
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
-        // The live tail (the just-opened active cell's 1-row marker) renders
-        // above the pane since plan Phase 6, so the status row moved to row 1.
-        assert!(rows[1].contains("esc to interrupt"), "status: {}", rows[1]);
-        assert!(rows[1].contains("Ctrl-C: cancel"), "status: {}", rows[1]);
+        // The just-opened active cell is empty → renders NO tail row (no stray
+        // `●` before content), so the status row is the top row (row 0).
+        assert!(rows[0].contains("esc to interrupt"), "status: {}", rows[0]);
+        assert!(rows[0].contains("Ctrl-C: cancel"), "status: {}", rows[0]);
     }
 
     #[test]
@@ -1755,15 +1793,15 @@ mod tests {
         typ(&mut app, "go");
         app.on_key(press(KeyCode::Enter));
         app.apply_turn_event(TurnEvent::TurnStarted);
-        // The just-opened EMPTY assistant cell renders its 1-row marker: the
-        // viewport already grows by one tail row before any delta arrives.
-        // Running pane (5: status + composer 3 + footer) + one tail row.
-        assert_eq!(app.viewport_height(120), 6, "empty active cell marker row");
+        // The just-opened EMPTY assistant cell renders NO tail row (no stray `●`
+        // before content) — the viewport is just the running pane (5: status +
+        // composer 3 + footer). The tail appears once content streams.
+        assert_eq!(app.viewport_height(120), 5, "no tail row until content streams");
         // A long markdown paragraph wraps at 120 columns into several rows.
         let paragraph = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(10);
         app.apply_turn_event(TurnEvent::TextDelta(paragraph));
         let viewport = app.viewport_height(120);
-        assert!(viewport > 6, "wrapped tail grows the viewport: {viewport}");
+        assert!(viewport > 5, "wrapped tail grows the viewport: {viewport}");
         let terminal = draw_viewport_at(&mut app, 120, 40);
         let rows = buffer_rows(&terminal);
         assert_eq!(rows.len(), usize::from(viewport));

@@ -8,8 +8,8 @@ use crate::model::{CommandResult, CommandSource, SlashCommandKind};
 use crate::parser::parse_slash_command;
 use crate::registry::CommandRegistry;
 use crate::shell_expansion::{
-    ShellExpansionCtx, ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError,
-    ShellRunner,
+    execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionProvider, ShellOut,
+    ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
 };
 use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
@@ -109,6 +109,17 @@ pub struct RegistrySlashDispatcher {
     /// via [`Self::with_expansion_hooks`] once the orchestrator's executor
     /// exists.
     expansion_hooks: Option<ExpansionHooks>,
+    /// Embedded-shell-expansion provider (#3). `None` (the default for every
+    /// existing caller — e.g. the bridge-server command router) keeps the
+    /// dispatcher a STRICT no-op: the markdown / plugin arm falls back to the
+    /// [`UnavailableShellRunner`] / [`DenyShellPermissionGate`] stubs and the
+    /// builtin `InjectMessage` arm delivers content verbatim, byte-identical to
+    /// today. When wired via [`Self::with_shell_expansion`], each expansion
+    /// builds a FRESH per-command [`ShellExpansionCtx`] (that command's
+    /// `allowed_tools` injected on top of the base policy) before running
+    /// [`execute_shell_commands_in_prompt`], 1:1 with claude-code's
+    /// `executeShellCommandsInPrompt` at the COMMAND layer.
+    shell_expansion: Option<Arc<dyn ShellExpansionProvider>>,
 }
 
 impl RegistrySlashDispatcher {
@@ -118,7 +129,23 @@ impl RegistrySlashDispatcher {
         Self {
             registry,
             expansion_hooks: None,
+            shell_expansion: None,
         }
+    }
+
+    /// Wire the embedded-shell-expansion provider (#3). After this, expanding a
+    /// markdown / plugin slash command runs its embedded `!`cmd`` / ` ```! `
+    /// bodies through the real host runner + policy-backed gate (that command's
+    /// frontmatter `allowed_tools` injected), and the builtin `InjectMessage`
+    /// commands (`/commit`, `/commit-push-pr`, `/security-review`) expand their
+    /// embedded bodies with their own `allowed_tools`. A strict no-op when
+    /// unset (the default): the stubs deny, and `InjectMessage` content is
+    /// verbatim. MCP-sourced commands are NEVER expanded (claude-code
+    /// `loadedFrom === 'mcp'` carve-out), even when wired.
+    #[must_use]
+    pub fn with_shell_expansion(mut self, provider: Arc<dyn ShellExpansionProvider>) -> Self {
+        self.shell_expansion = Some(provider);
+        self
     }
 
     /// Wire the `UserPromptExpansion` hook (#39): the engine's hook executor
@@ -206,6 +233,10 @@ impl RegistrySlashDispatcher {
                 executor: eh.executor.clone(),
                 context: eh.context.clone(),
             }),
+            // The shell-expansion provider is a single `Arc`; it must travel with
+            // the shared dispatcher so every consumer expands `!`cmd`` bodies
+            // identically.
+            shell_expansion: self.shell_expansion.clone(),
         }
     }
 
@@ -311,9 +342,30 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             SlashCommandKind::Markdown { .. } | SlashCommandKind::Plugin { .. }
         ) {
             drop(reg);
-            let shell_ctx = ShellExpansionCtx {
-                runner: Arc::new(UnavailableShellRunner),
-                permission_gate: Arc::new(DenyShellPermissionGate),
+            // This command's frontmatter allow-list + selected shell (both drive
+            // the real gate). `command` is an owned clone, so this reads after the
+            // registry lock is dropped.
+            let (allowed_tools, fm_shell) = match &command.kind {
+                SlashCommandKind::Markdown { frontmatter, .. }
+                | SlashCommandKind::Plugin { frontmatter, .. } => (
+                    frontmatter.allowed_tools.clone().unwrap_or_default(),
+                    frontmatter.shell,
+                ),
+                _ => (Vec::new(), None),
+            };
+            // Use the real provider when wired AND the command is not MCP-sourced
+            // (claude-code `loadedFrom === 'mcp'` NEVER shell-expands). Otherwise
+            // keep the strict-no-op stubs (byte-identical default): the stub gate
+            // denies any embedded command, but a body with no `!`cmd`` patterns is
+            // returned unchanged regardless, so unwired / MCP behavior is preserved.
+            let shell_ctx = match self.shell_expansion.as_ref() {
+                Some(provider) if !matches!(command.source, CommandSource::Mcp) => {
+                    provider.build(&allowed_tools, fm_shell)
+                }
+                _ => ShellExpansionCtx {
+                    runner: Arc::new(UnavailableShellRunner),
+                    permission_gate: Arc::new(DenyShellPermissionGate),
+                },
             };
             let expand_ctx = ExpandCtx {
                 session_id: "",
@@ -367,7 +419,44 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                 }
             }
             CommandResult::InjectMessage { content } => {
-                SlashDispatchResult::Handled { display: content }
+                // Builtin prompt commands (`/commit`, `/commit-push-pr`,
+                // `/security-review`) carry RAW `!`git …`` / ` ```! ` bodies. When
+                // a shell-expansion provider is wired AND the command is not
+                // MCP-sourced AND the content actually embeds a shell pattern, run
+                // `execute_shell_commands_in_prompt` over it with THIS command's
+                // `allowed_tools` (shell = None → Bash for builtins), 1:1 with
+                // claude-code expanding the body inside `getPromptForCommand`
+                // before it becomes the prompt. On a permission-deny / run failure
+                // the WHOLE expansion aborts (patterns are never left in place) —
+                // surface the error text instead of the unexpanded template. A
+                // strict no-op (verbatim content) when unset / MCP / no patterns.
+                let has_embedded = content.contains("```!") || content.contains("!`");
+                match self.shell_expansion.as_ref() {
+                    Some(provider)
+                        if has_embedded && !matches!(command.source, CommandSource::Mcp) =>
+                    {
+                        let allowed: Vec<String> = handler
+                            .allowed_tools()
+                            .iter()
+                            .map(|s| (*s).to_string())
+                            .collect();
+                        let shell_ctx = provider.build(&allowed, None);
+                        match execute_shell_commands_in_prompt(
+                            &content,
+                            &shell_ctx,
+                            &format!("/{}", command.name),
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(expanded) => SlashDispatchResult::Handled { display: expanded },
+                            Err(e) => SlashDispatchResult::Handled {
+                                display: format!("{} expansion failed: {e}", command.name),
+                            },
+                        }
+                    }
+                    _ => SlashDispatchResult::Handled { display: content },
+                }
             }
             CommandResult::RequestConfirmation { prompt, .. } => {
                 SlashDispatchResult::Handled { display: prompt }
@@ -945,6 +1034,223 @@ mod tests {
         assert!(
             log.lock().unwrap().is_empty(),
             "a builtin handler command must not fire UserPromptExpansion"
+        );
+    }
+
+    // ---- #3 embedded shell-expansion wiring ----
+    //
+    // A wired `ShellExpansionProvider` expands `!`cmd`` bodies in BOTH the
+    // markdown/plugin arm AND the builtin `InjectMessage` arm, injecting that
+    // command's `allowed_tools`; a permission-deny aborts the whole prompt; and
+    // MCP-sourced commands are NEVER handed to the real provider (carve-out).
+    // An UNWIRED dispatcher stays a strict no-op (covered by the markdown/
+    // builtin tests above, which never wire `with_shell_expansion`).
+
+    /// Echoes `OUT[<cmd>]` as stdout for any command.
+    struct EchoShellRunner;
+    #[async_trait]
+    impl ShellRunner for EchoShellRunner {
+        async fn run(
+            &self,
+            command: &str,
+            _shell: Option<crate::FrontmatterShell>,
+        ) -> Result<ShellOut, ShellRunError> {
+            Ok(ShellOut {
+                stdout: format!("OUT[{command}]"),
+                stderr: String::new(),
+                interrupted: false,
+            })
+        }
+    }
+    struct AllowGate;
+    impl ShellPermissionGate for AllowGate {
+        fn check(&self, _c: &str, _s: Option<crate::FrontmatterShell>) -> ShellPermissionDecision {
+            ShellPermissionDecision::Allow
+        }
+    }
+    struct DenyGate;
+    impl ShellPermissionGate for DenyGate {
+        fn check(&self, _c: &str, _s: Option<crate::FrontmatterShell>) -> ShellPermissionDecision {
+            ShellPermissionDecision::Deny {
+                message: Some("not allowed".to_string()),
+            }
+        }
+    }
+    /// Fake provider: records the `allowed_tools` it is built with and returns an
+    /// echo runner behind an allow- or deny-gate.
+    struct FakeProvider {
+        deny: bool,
+        seen_allowed: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+    impl ShellExpansionProvider for FakeProvider {
+        fn build(
+            &self,
+            allowed_tools: &[String],
+            _shell: Option<crate::FrontmatterShell>,
+        ) -> ShellExpansionCtx {
+            self.seen_allowed.lock().unwrap().push(allowed_tools.to_vec());
+            let permission_gate: Arc<dyn ShellPermissionGate> = if self.deny {
+                Arc::new(DenyGate)
+            } else {
+                Arc::new(AllowGate)
+            };
+            ShellExpansionCtx {
+                runner: Arc::new(EchoShellRunner),
+                permission_gate,
+            }
+        }
+    }
+
+    /// A builtin handler returning `InjectMessage` with an embedded `!`cmd`` body
+    /// and a declared allow-list (mirrors `/commit`'s shape).
+    struct EmbeddedInjectHandler;
+    #[async_trait]
+    impl crate::model::BuiltinCommandHandler for EmbeddedInjectHandler {
+        async fn handle(&self, _args: &crate::parser::ParsedSlashCommand) -> CommandResult {
+            CommandResult::InjectMessage {
+                content: "commit: !`git status` now".to_string(),
+            }
+        }
+        fn name(&self) -> &str {
+            "commit"
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn allowed_tools(&self) -> &'static [&'static str] {
+            &["Bash(git status:*)"]
+        }
+    }
+
+    fn markdown_with(source: CommandSource, body: &str, allowed: Option<Vec<String>>) -> CommandRegistry {
+        use crate::model::CommandFrontmatter;
+        let mut reg = CommandRegistry::new();
+        reg.register_command(SlashCommand {
+            name: "demo".to_string(),
+            description: "Demo".to_string(),
+            source,
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from("/x/demo.md"),
+                frontmatter: CommandFrontmatter {
+                    allowed_tools: allowed,
+                    ..CommandFrontmatter::default()
+                },
+                prompt_template: body.to_string(),
+            },
+            ..SlashCommand::default()
+        });
+        reg
+    }
+
+    /// A wired provider expands a markdown command's `!`echo hi`` to the runner's
+    /// stdout, and the frontmatter `allowed_tools` reaches `provider.build`.
+    #[tokio::test]
+    async fn wired_provider_expands_markdown_embedded_shell() {
+        let reg = markdown_with(
+            CommandSource::Project,
+            "before !`echo hi` after",
+            Some(vec!["Bash(echo:*)".to_string()]),
+        );
+        let provider = Arc::new(FakeProvider {
+            deny: false,
+            seen_allowed: std::sync::Mutex::new(Vec::new()),
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_shell_expansion(provider.clone());
+        match d.dispatch("/demo").await {
+            SlashDispatchResult::RunAsTurn { prompt } => {
+                assert_eq!(prompt, "before OUT[echo hi] after");
+            }
+            other => panic!("expected expanded run-as-turn, got {other:?}"),
+        }
+        assert_eq!(
+            provider.seen_allowed.lock().unwrap().as_slice(),
+            &[vec!["Bash(echo:*)".to_string()]],
+            "the frontmatter allow-list must reach the provider"
+        );
+    }
+
+    /// A permission-deny aborts the whole prompt: the markdown arm surfaces the
+    /// byte-exact expansion-failure display (patterns never left in place).
+    #[tokio::test]
+    async fn wired_deny_provider_aborts_markdown_expansion() {
+        let reg = markdown_with(CommandSource::Project, "before !`echo hi` after", None);
+        let provider = Arc::new(FakeProvider {
+            deny: true,
+            seen_allowed: std::sync::Mutex::new(Vec::new()),
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_shell_expansion(provider);
+        match d.dispatch("/demo").await {
+            SlashDispatchResult::Handled { display } => assert_eq!(
+                display,
+                "demo expansion failed: Shell command permission check failed for pattern \"!`echo hi`\": not allowed"
+            ),
+            other => panic!("expected expansion-failed display, got {other:?}"),
+        }
+    }
+
+    /// A wired provider expands a builtin `InjectMessage` body, injecting the
+    /// handler's `allowed_tools`.
+    #[tokio::test]
+    async fn wired_provider_expands_builtin_injectmessage() {
+        let mut reg = CommandRegistry::new();
+        reg.register_builtin_handler(Arc::new(EmbeddedInjectHandler));
+        let provider = Arc::new(FakeProvider {
+            deny: false,
+            seen_allowed: std::sync::Mutex::new(Vec::new()),
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_shell_expansion(provider.clone());
+        match d.dispatch("/commit").await {
+            SlashDispatchResult::Handled { display } => {
+                assert_eq!(display, "commit: OUT[git status] now");
+            }
+            other => panic!("expected expanded InjectMessage, got {other:?}"),
+        }
+        assert_eq!(
+            provider.seen_allowed.lock().unwrap().as_slice(),
+            &[vec!["Bash(git status:*)".to_string()]],
+            "the handler's allow-list must reach the provider"
+        );
+    }
+
+    /// An unwired builtin `InjectMessage` command delivers its RAW `!`cmd``
+    /// template verbatim — strict no-op (no expansion), byte-identical to today.
+    #[tokio::test]
+    async fn unwired_builtin_injectmessage_is_verbatim() {
+        let mut reg = CommandRegistry::new();
+        reg.register_builtin_handler(Arc::new(EmbeddedInjectHandler));
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+        match d.dispatch("/commit").await {
+            SlashDispatchResult::Handled { display } => {
+                assert_eq!(display, "commit: !`git status` now");
+            }
+            other => panic!("expected verbatim InjectMessage, got {other:?}"),
+        }
+    }
+
+    /// MCP carve-out: even with a wired ALLOW provider, an MCP-sourced markdown
+    /// command's body is NEVER handed to the real provider (`loadedFrom==='mcp'`)
+    /// — it falls to the deny stub, so `provider.build` is never called.
+    #[tokio::test]
+    async fn wired_provider_skips_mcp_markdown_expansion() {
+        let reg = markdown_with(CommandSource::Mcp, "x !`echo hi` y", None);
+        let provider = Arc::new(FakeProvider {
+            deny: false,
+            seen_allowed: std::sync::Mutex::new(Vec::new()),
+        });
+        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+            .with_shell_expansion(provider.clone());
+        match d.dispatch("/demo").await {
+            SlashDispatchResult::Handled { display } => {
+                assert!(display.contains("expansion failed"), "got {display:?}");
+            }
+            other => panic!("expected stub-denied MCP expansion, got {other:?}"),
+        }
+        assert!(
+            provider.seen_allowed.lock().unwrap().is_empty(),
+            "the real provider must never be built for an MCP-sourced command"
         );
     }
 }

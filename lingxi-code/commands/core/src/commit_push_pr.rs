@@ -25,6 +25,29 @@ use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 
+/// Per-command allowed-tools for `/commit-push-pr`, verbatim from the TS
+/// `commit-push-pr.ts:10-23` `ALLOWED_TOOLS`. Injected into a fresh per-command
+/// effective policy before the embedded `!`git …`` / `!`gh …`` bodies are
+/// expanded — notably `gh pr view --json number 2>/dev/null || true`
+/// (commit_push_pr.rs:75), which is neither read-only nor auto-safe and relies
+/// on `Bash(gh pr view:*)` being injected here. Surfaced via
+/// [`CommitPushPrHandler::allowed_tools`].
+pub const ALLOWED_TOOLS: &[&str] = &[
+    "Bash(git checkout --branch:*)",
+    "Bash(git checkout -b:*)",
+    "Bash(git add:*)",
+    "Bash(git status:*)",
+    "Bash(git push:*)",
+    "Bash(git commit:*)",
+    "Bash(gh pr create:*)",
+    "Bash(gh pr edit:*)",
+    "Bash(gh pr view:*)",
+    "Bash(gh pr merge:*)",
+    "ToolSearch",
+    "mcp__slack__send_message",
+    "mcp__claude_ai_Slack__slack_send_message",
+];
+
 /// Default branch used by the prompt (matches the TS `contentLength` estimate).
 const DEFAULT_BRANCH: &str = "main";
 
@@ -147,6 +170,10 @@ impl BuiltinCommandHandler for CommitPushPrHandler {
     fn description(&self) -> &str {
         core_description("commit-push-pr")
     }
+
+    fn allowed_tools(&self) -> &'static [&'static str] {
+        ALLOWED_TOOLS
+    }
 }
 
 #[cfg(test)]
@@ -198,5 +225,18 @@ mod tests {
         let h = CommitPushPrHandler::new();
         assert_eq!(h.name(), "commit-push-pr");
         assert_eq!(h.description(), core_description("commit-push-pr"));
+    }
+
+    #[test]
+    fn allowed_tools_match_ts() {
+        // Verbatim from commit-push-pr.ts:10-23 (git checkout/add/status/push/
+        // commit + gh pr create/edit/view/merge + ToolSearch + slack mcp tools).
+        let h = CommitPushPrHandler::new();
+        let tools = h.allowed_tools();
+        assert_eq!(tools.len(), 13);
+        assert_eq!(tools[0], "Bash(git checkout --branch:*)");
+        assert!(tools.contains(&"Bash(gh pr view:*)"));
+        assert!(tools.contains(&"Bash(git push:*)"));
+        assert!(tools.contains(&"ToolSearch"));
     }
 }

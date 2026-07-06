@@ -698,6 +698,11 @@ pub async fn build_mobile_inner(
     // Read(deny) → Grep/Glob search-exclude globs, resolved from the policy below
     // (empty when no Read-deny rule ⇒ unchanged default).
     let mut read_deny_exclude_globs: Vec<String> = Vec::new();
+    // (#3 shell-expansion) Capture the boot `Arc<PermissionPolicy>` before it is
+    // consumed by `PolicyPermissionGate::new`, so `tool_ctx.permission_policy`
+    // shares the SAME base policy the model-facing gate enforces (the prompt
+    // shell-expansion provider reads it as the base for embedded `!`cmd`` bodies).
+    let mut boot_permission_policy: Option<Arc<permission::PermissionPolicy>> = None;
     let perms: Arc<dyn PermissionGate> = {
         let mut rules = Vec::new();
         let mut mode = PermissionMode::Default;
@@ -763,6 +768,9 @@ pub async fn build_mobile_inner(
         // Resolve active Read(deny) rules to search-exclude globs before the
         // policy moves into the gate (same as the desktop composition root).
         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
+        // Share the boot policy into `tool_ctx` for the prompt shell-expansion
+        // gate (clone the `Arc` BEFORE `policy` moves into the gate below).
+        boot_permission_policy = Some(policy.clone());
         Arc::new(permission::PolicyPermissionGate::new(
             policy,
             adapter_gate.clone(),
@@ -895,6 +903,12 @@ pub async fn build_mobile_inner(
         // domain/proxy enforcement the desktop runtime provides).
         sandbox_runner: tool_api::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
+        // (#3 shell-expansion) Share the SAME boot policy the model-facing gate
+        // enforces as the base for embedded `!`cmd`` bodies in prompt commands.
+        // Always `Some` here (the `perms` block above is unconditional).
+        permission_policy: boot_permission_policy
+            .clone()
+            .expect("boot permission policy is built unconditionally above"),
         sandbox_available: false,
         workspace: cwd.clone(),
         platform: if cfg!(target_os = "macos") {
@@ -972,6 +986,14 @@ pub async fn build_mobile_inner(
         )
         .await,
     );
+    // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
+    // `tool_ctx` (carrying the base `permission_policy` + process/sandbox seams)
+    // BEFORE `tool_ctx` is moved into the tool registry below, then chain it onto
+    // the dispatcher so mobile `/commit` … expand their embedded `!`git …``
+    // bodies identically to desktop. Mobile reports `sandbox_available:false`, so
+    // `should_use_sandbox` short-circuits to `NoSandbox` and the expansion runs
+    // via the plain `ProcessRunner` — consistent with mobile's own Bash tool.
+    let shell_expansion_provider = tool_api::build_prompt_shell_provider(&tool_ctx);
     let tools = Arc::new(mobile_tool_registry_with_skill_loader(
         tool_ctx,
         skill_loader,
@@ -1109,7 +1131,10 @@ pub async fn build_mobile_inner(
         false,
     );
     *shared_command_registry.write().await = reg;
-    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry);
+    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry)
+        // (#3) Real embedded-shell expansion for markdown/plugin + builtin
+        // `InjectMessage` prompts. Non-MCP only.
+        .with_shell_expansion(shell_expansion_provider);
 
     // (9) Session lifecycle fires (P0.2 — mobile sibling of `engine_desktop::build`
     //     §7 / §7.1). Fire `SessionStart` then `InstructionsLoaded` now that the

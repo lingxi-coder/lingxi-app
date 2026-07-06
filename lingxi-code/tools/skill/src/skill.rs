@@ -172,233 +172,15 @@ impl SkillLoader for EmptySkillLoader {
     }
 }
 
-/// Embedded-`!command` shell runner adapter for skill bodies.
-///
-/// SKILLEXEC.6: the TS `executeShellCommandsInPrompt`
-/// (`utils/promptShellExecution.ts:115`) routes each embedded command through
-/// `BashTool.call({ command }, context)`. The Rust [`command_api::ShellRunner`]
-/// seam is injected here, wrapping the SAME `ProcessRunner` + `Sandbox` seams the
-/// Rust `BashTool` spawns through (`tools/shell/src/bash.rs`): we build the
-/// foreground `ProcessCommand` like bash's foreground path — resolve the login
-/// shell, prepend the BASH.1 extglob-disable guard, run via `-c -l` — then
-/// construct the `SandboxedCommand` through `Sandbox::bypass_with_audit` and call
-/// `ProcessRunner::run`.
-///
-/// Sandbox parity: before finalizing, this runner performs the SAME
-/// `should_use_sandbox` + `wrap_with_sandbox` decision as `BashTool::call`
-/// (`bash.rs`). The sandbox-decision inputs (`sandbox_available`, `workspace`,
-/// `sandbox_runtime`, `platform`) are captured from the `SkillTool`'s
-/// [`BuiltinToolContext`] at construction (the `command_api::ShellRunner::run`
-/// signature stays `(&self, command, shell)` — the inputs ride on the adapter,
-/// not the call). A skill `!command` has no per-command `dangerouslyDisableSandbox`
-/// flag (it is a Bash-tool *input* field; skill bodies have no such surface), so
-/// we pass `false` for that override — 1:1 with claude-code `shouldUseSandbox.ts`,
-/// which has NO permission-mode, project-trust, or classifier inputs (only host
-/// availability, the `dangerouslyDisableSandbox` override, and the
-/// `excludedCommands` config). The `Sandbox::bypass_with_audit` envelope still finalizes
-/// the (possibly wrapped) command string for `ProcessRunner::run`, matching the
-/// constructor bash uses at its final foreground spawn — the sandboxing is baked
-/// into the wrapped command STRING, not the envelope.
-///
-/// Divergence (documented): the adapter carries no `AnalyticsBus`, so the
-/// `sandbox_refused` / `sandbox_wrap_failed` telemetry events bash emits on the
-/// refuse/wrap-failure branches are skipped here; the failure is still surfaced
-/// as a `command_api::ShellRunError` (the TS `errorMessage(e)` generic path) so
-/// the engine formats `[Error]\n…` and the command does NOT run. The Windows-CMD
-/// `2>nul` rewrite is omitted (bash refuses on Windows outright); the BASH.4
-/// persistent-cwd `pwd -P` readback is omitted (one-shot expansion keeps no
-/// shell-cwd state).
-struct SkillShellRunner {
-    process: Arc<dyn traits::process::ProcessRunner>,
-    sandbox: Arc<dyn traits::sandbox::Sandbox>,
-    workspace: std::path::PathBuf,
-    // ===== Sandbox-decision inputs, captured from the SkillTool's
-    // `BuiltinToolContext` (mirrors what `BashTool::call` reads off `self.ctx`).
-    // 1:1 with claude-code `shouldUseSandbox.ts`, which has NO permission-mode,
-    // project-trust, or classifier inputs — only host availability, the
-    // `dangerouslyDisableSandbox` override, and the `excludedCommands` config.
-    /// Whether the host has a working sandbox backend (`bash.rs`).
-    sandbox_available: bool,
-    /// Sandbox policy runtime config — supplies `excludedCommands` to the
-    /// decision and drives the wrap (`bash.rs`).
-    sandbox_runtime: sandbox::runtime_config::SandboxRuntimeConfig,
-    /// Detected platform — selects the wrap branch (`bash.rs:533`).
-    platform: sandbox::runtime_config::Platform,
-    /// Injected async sandbox seam, threaded from the `SkillTool`'s
-    /// `BuiltinToolContext` so embedded `!command` expansion wraps through the
-    /// same runner the Bash tool uses (default `LegacyWrapRunner` =
-    /// byte-identical to the previous direct `wrap_with_sandbox` call).
-    sandbox_runner: Arc<dyn tool_api::SandboxRunner>,
-}
-
-/// Resolve the login shell exactly like `bash.rs::resolve_shell_path`
-/// (`/bin/zsh` on macOS, `/bin/bash` elsewhere).
-fn resolve_skill_shell_path() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "/bin/zsh"
-    } else {
-        "/bin/bash"
-    }
-}
-
-/// BASH.1 extglob-disable guard, 1:1 with `bash.rs::disable_extglob_command`.
-fn skill_disable_extglob(shell_path: &str) -> Option<String> {
-    if std::env::var("LINGXI_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
-        return Some(
-            "{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true".into(),
-        );
-    }
-    if shell_path.contains("bash") {
-        Some("shopt -u extglob 2>/dev/null || true".into())
-    } else if shell_path.contains("zsh") {
-        Some("setopt NO_EXTENDED_GLOB 2>/dev/null || true".into())
-    } else {
-        None
-    }
-}
-
-#[async_trait]
-impl command_api::ShellRunner for SkillShellRunner {
-    async fn run(
-        &self,
-        command: &str,
-        _shell: Option<command_api::FrontmatterShell>,
-    ) -> Result<command_api::ShellOut, command_api::ShellRunError> {
-        use sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use traits::sandbox::ProcessCommand;
-
-        let shell_path = resolve_skill_shell_path();
-        // BASH.1: prepend the extglob-disable guard INTO the command so it runs
-        // in the same shell that expands the user's globs (mirrors the TS order
-        // `disableExtglob && <cmd>`).
-        let spawn_cmd = match skill_disable_extglob(shell_path) {
-            Some(prefix) => format!("{prefix} && {command}"),
-            None => command.to_string(),
-        };
-
-        // ===== Sandbox decision (mirror of `BashTool::call`) =====
-        // A skill `!command` has NO per-command `dangerouslyDisableSandbox` flag
-        // (that is a Bash-tool *input* field; skill bodies have no such surface),
-        // so we pass `false` for that override and otherwise feed the same inputs
-        // bash does — 1:1 with claude-code `shouldUseSandbox.ts`. `unsandboxed_allowed`
-        // is the canonical `are_unsandboxed_commands_allowed()` accessor.
-        let decision = should_use_sandbox(
-            command,
-            self.sandbox_available,
-            /* dangerously_disable_sandbox */ false,
-            self.sandbox_runtime.are_unsandboxed_commands_allowed(),
-            &self.sandbox_runtime,
-            self.workspace.clone(),
-        );
-        let inner = match decision {
-            // No sandbox: run the (extglob-guarded) command unchanged.
-            SandboxDecision::NoSandbox => spawn_cmd,
-            // Wrap the command string for the sandbox; on failure surface a
-            // `ShellRunError` (the TS `errorMessage(e)` generic path) so the
-            // command does NOT run. Bash splits this into two arms purely to emit
-            // distinct telemetry (`Unsupported` -> `sandbox_refused`,
-            // `SbplWrite` -> `sandbox_wrap_failed`) and to pick `InvalidInput` vs
-            // `Io`; this adapter has no `AnalyticsBus` and a single `ShellRunError`
-            // surface, so both `SandboxWrapError` variants collapse to the same
-            // generic failure (the inner string is preserved verbatim — the same
-            // string bash surfaces). See the struct doc.
-            SandboxDecision::Sandbox { policy: _ } => {
-                // Wrap through the injected async `SandboxRunner` (same seam the
-                // Bash tool uses). The default `LegacyWrapRunner` forwards to the
-                // sync `wrap_with_sandbox` (ignoring `bin_shell`/`cwd`), so this
-                // is byte-identical to the previous direct call.
-                match self
-                    .sandbox_runner
-                    .wrap(
-                        &spawn_cmd,
-                        &self.sandbox_runtime,
-                        self.platform,
-                        Some(shell_path),
-                        Some(self.workspace.as_path()),
-                    )
-                    .await
-                {
-                    Ok(wrapped) => wrapped,
-                    Err(
-                        sandbox::wrap::SandboxWrapError::Unsupported(s)
-                        | sandbox::wrap::SandboxWrapError::SbplWrite(s),
-                    ) => {
-                        return Err(command_api::ShellRunError {
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            interrupted: false,
-                            generic_message: Some(s),
-                        });
-                    }
-                }
-            }
-        };
-
-        let pcmd = ProcessCommand {
-            command: shell_path.to_string(),
-            // BASH.4: login-shell init (`-l` after `-c`), matching the bash
-            // foreground spawn (`bashProvider.ts:201-205`, snapshot path deferred).
-            args: vec!["-c".into(), "-l".into(), inner],
-            cwd: Some(self.workspace.clone()),
-            env: HashMap::new(),
-            timeout: None,
-            stdin: None,
-        };
-        let sandboxed = self
-            .sandbox
-            .bypass_with_audit(pcmd, "skill_shell_expansion");
-        let run_result = self.process.run(&sandboxed).await;
-        // The wrapped command has finished: tear down any per-command sandbox
-        // state. No-op for the default `LegacyWrapRunner`.
-        self.sandbox_runner.cleanup_after_command().await;
-        match run_result {
-            // A timeout maps to the TS interrupted `ShellError` path so the engine
-            // formats "Shell command interrupted …" (mirrors bash's timeout->error).
-            Ok(out) if out.timed_out => Err(command_api::ShellRunError {
-                stdout: out.stdout,
-                stderr: out.stderr,
-                interrupted: true,
-                generic_message: None,
-            }),
-            // Non-zero exit is NOT an error here — TS `BashTool.call` returns
-            // stdout/stderr without throwing on a non-zero status; only an
-            // interruption throws. So every completed run yields `ShellOut`.
-            Ok(out) => Ok(command_api::ShellOut {
-                stdout: out.stdout,
-                stderr: out.stderr,
-                interrupted: false,
-            }),
-            // Spawn / I/O failure -> the TS `errorMessage(e)` generic path
-            // (`[Error]\n{message}`).
-            Err(e) => Err(command_api::ShellRunError {
-                stdout: String::new(),
-                stderr: String::new(),
-                interrupted: false,
-                generic_message: Some(format!("{e}")),
-            }),
-        }
-    }
-}
-
-/// Per-command permission gate for embedded skill `!command`s.
-///
-/// SKILLEXEC.6: TS calls `hasPermissionsToUseTool(shellTool, { command }, …)`
-/// before each command. The Rust `BashTool::check_permissions` is an allow-all
-/// stub (`bash.rs:381-389`), so the parity-faithful gate returns `Allow`,
-/// matching the current Bash bar. (TS merges the skill's `allowedTools` into the
-/// permission context's `alwaysAllowRules.command`; against an allow-all bar that
-/// merge is a no-op, so it is intentionally not replicated here.)
-struct SkillShellPermissionGate;
-
-impl command_api::ShellPermissionGate for SkillShellPermissionGate {
-    fn check(
-        &self,
-        _command: &str,
-        _shell: Option<command_api::FrontmatterShell>,
-    ) -> command_api::ShellPermissionDecision {
-        command_api::ShellPermissionDecision::Allow
-    }
-}
+// SKILLEXEC.6: the embedded-`!command` host runner + permission gate for skill
+// bodies were RELOCATED to `tool_api::prompt_shell` (the former
+// `SkillShellRunner` → `tool_api::PromptShellRunner`) so the dispatcher, the
+// TUI, and this `Skill` tool share ONE real runner + one policy-backed gate.
+// The gate is no longer allow-all: it is now the faithful port of
+// `hasPermissionsToUseTool(BashTool, {command})` (see `PolicyShellPermissionGate`),
+// with the skill's own frontmatter `allowedTools` injected per expansion. This
+// tool builds it via `tool_api::build_prompt_shell_provider(&self.ctx)` at the
+// expansion site below.
 
 /// `SkillTool` — resolves + validates a slash-command skill.
 pub struct SkillTool {
@@ -831,23 +613,15 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
         let mut expanded_prompt = if desc.skip_shell_expansion {
             expanded_prompt
         } else {
-            let shell_ctx = command_api::ShellExpansionCtx {
-                runner: Arc::new(SkillShellRunner {
-                    process: self.ctx.process.clone(),
-                    sandbox: self.ctx.sandbox.clone(),
-                    workspace: self.ctx.workspace.clone(),
-                    // Sandbox-decision inputs, captured at construction so the
-                    // `ShellRunner::run` signature stays unchanged — mirror of
-                    // the fields `BashTool::call` reads off `self.ctx`.
-                    sandbox_available: self.ctx.sandbox_available,
-                    sandbox_runtime: self.ctx.sandbox_runtime.clone(),
-                    platform: self.ctx.platform,
-                    // Thread the injected runner so the child wraps through the
-                    // same seam (default `LegacyWrapRunner` = byte-identical).
-                    sandbox_runner: self.ctx.sandbox_runner.clone(),
-                }),
-                permission_gate: Arc::new(SkillShellPermissionGate),
-            };
+            // Build the shared per-command expansion context: the real host
+            // runner (`tool_api::PromptShellRunner`) + the policy-backed gate
+            // (`PolicyShellPermissionGate`), with THIS skill's frontmatter
+            // `allowed_tools` injected on top of the base policy — 1:1 with
+            // claude-code building a fresh `toolPermissionContext` before
+            // `executeShellCommandsInPrompt`. The `shell` selector drives both the
+            // gate's tool-name choice and the runner's routing.
+            let shell_ctx =
+                tool_api::build_prompt_shell_provider(&self.ctx).build(&desc.allowed_tools, desc.shell);
             match command_api::execute_shell_commands_in_prompt(
                 &expanded_prompt,
                 &shell_ctx,

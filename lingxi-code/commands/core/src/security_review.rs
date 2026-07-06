@@ -15,6 +15,25 @@ use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 
+/// Per-command allowed-tools for `/security-review`, parsed verbatim from the TS
+/// `security-review.ts:7` frontmatter `allowed-tools` line
+/// (`Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git show:*),
+/// Bash(git remote show:*), Read, Glob, Grep, LS, Task`). Injected into a fresh
+/// per-command effective policy before the embedded `!`git …`` bodies are
+/// expanded. Surfaced via [`SecurityReviewHandler::allowed_tools`].
+pub const ALLOWED_TOOLS: &[&str] = &[
+    "Bash(git diff:*)",
+    "Bash(git status:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git remote show:*)",
+    "Read",
+    "Glob",
+    "Grep",
+    "LS",
+    "Task",
+];
+
 /// The injected prompt body — the markdown content of the TS
 /// `SECURITY_REVIEW_MARKDOWN` blob *after* its `---` frontmatter is stripped
 /// (frontmatter carries `allowed-tools`/`description` metadata, not prompt
@@ -238,6 +257,10 @@ impl BuiltinCommandHandler for SecurityReviewHandler {
     fn description(&self) -> &str {
         core_description("security-review")
     }
+
+    fn allowed_tools(&self) -> &'static [&'static str] {
+        ALLOWED_TOOLS
+    }
 }
 
 #[cfg(test)]
@@ -294,5 +317,26 @@ mod tests {
         assert_eq!(h.name(), "security-review");
         // Non-core command: core_description falls back to the v0.6.0 stub.
         assert_eq!(h.description(), core_description("security-review"));
+    }
+
+    #[test]
+    fn allowed_tools_match_ts_frontmatter() {
+        // Verbatim from security-review.ts:7 frontmatter `allowed-tools`.
+        let h = SecurityReviewHandler::new();
+        assert_eq!(
+            h.allowed_tools(),
+            &[
+                "Bash(git diff:*)",
+                "Bash(git status:*)",
+                "Bash(git log:*)",
+                "Bash(git show:*)",
+                "Bash(git remote show:*)",
+                "Read",
+                "Glob",
+                "Grep",
+                "LS",
+                "Task",
+            ]
+        );
     }
 }

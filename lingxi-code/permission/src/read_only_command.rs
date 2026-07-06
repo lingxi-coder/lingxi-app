@@ -16,7 +16,11 @@
 //! The TS read-only allowlist is enormous (~1500 lines of git/gh/docker/ripgrep
 //! per-subcommand flag configs + getopt-aware flag parsing). Porting that whole
 //! machine 1:1 is a separate effort; here we port the BASE [`READONLY_COMMANDS`]
-//! simple-command set + the simple-command regex SHAPE — TS
+//! simple-command set + the simple-command regex SHAPE, PLUS the git slice of
+//! `GIT_READ_ONLY_COMMANDS` (the read-only subcommand allowlist + the
+//! branch/tag/reflog/remote positional-write guard callbacks; see
+//! [`git_subcommand_is_read_only`]). The gh/docker/ripgrep per-flag tables
+//! remain out of scope. TS
 //! `makeRegexForSafeCommand` anchors the base word, then allows a trailing run
 //! of characters that excludes the shell metacharacters (redirection, command
 //! substitution, pipe, brace/paren group, background, list, newline) — plus the
@@ -248,6 +252,16 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     if base == "docker" {
         return matches!(words.next(), Some("ps" | "images"));
     }
+    // `git <subcommand>` — the read-only slice of TS `GIT_READ_ONLY_COMMANDS`
+    // (`utils/shell/readOnlyCommandValidation.ts:107-923`). Delegates to
+    // [`git_subcommand_is_read_only`], which recognises the read-only git
+    // subcommand allowlist and applies the positional-write guard callbacks
+    // (`git branch`/`git tag`/`git reflog`/`git remote`). A bare `git` or any
+    // write subcommand (`commit`/`push`/`add`/`checkout`/…) is NOT read-only.
+    if base == "git" {
+        let rest: Vec<&str> = words.collect();
+        return git_subcommand_is_read_only(&rest);
+    }
     // `echo` with metacharacter-free args is read-only (the TS echo regex; the
     // metachar guard above already rejected the dangerous `` ` ``/`$`/`<>` forms
     // the TS regex excludes).
@@ -276,6 +290,260 @@ fn is_read_only_subcommand(sub: &str) -> bool {
         return !words.any(|w| FIND_DANGEROUS_ACTIONS.contains(&w));
     }
     READONLY_BASE_COMMANDS.contains(&base)
+}
+
+/// Git flags that WRITE to disk regardless of subcommand — the file-output
+/// vector shared by the diff-generating read-only subcommands (`git diff` /
+/// `git log` / `git show` all accept `--output=<file>`). TS omits `--output`
+/// from every subcommand's `safeFlags` allowlist, so validation rejects it;
+/// this port keeps the SAFE-DIRECTION invariant with an explicit denylist
+/// instead of porting the full ~800-line per-flag `safeFlags` machine.
+const GIT_WRITE_FLAGS: &[&str] = &["--output", "--output-directory"];
+
+/// Is `rest` (the tokens after `git`) a read-only git invocation? — the port of
+/// the git slice of TS `GIT_READ_ONLY_COMMANDS`
+/// (`utils/shell/readOnlyCommandValidation.ts:107-923`).
+///
+/// This recognises the read-only git subcommand allowlist (the KEYS of
+/// `GIT_READ_ONLY_COMMANDS`) and applies the four positional-write guard
+/// callbacks (`git branch`/`git tag`/`git reflog`/`git remote`/`git remote
+/// show`). Longer multi-word forms (`git remote show`, `git stash list`, …) are
+/// matched before their one-word prefixes so e.g. `git remote show` wins over
+/// `git remote`.
+///
+/// # Conservative divergence (documented)
+/// The full TS machine additionally validates every flag against a
+/// per-subcommand `safeFlags` allowlist (~800 lines of getopt-aware parsing).
+/// This port does NOT reproduce that whole table; instead it relies on:
+/// * the caller's shell-metacharacter + expansion guards (already run before
+///   this fn), which reject redirection/substitution/`$`-bearing forms;
+/// * the positional-write callbacks below, which reject the branch/tag creation
+///   and reflog/remote write forms (every git write reachable from a read-only
+///   subcommand needs a positional arg the callback catches); and
+/// * the [`GIT_WRITE_FLAGS`] denylist for the one file-write flag (`--output`)
+///   reachable from an otherwise read-only subcommand.
+///
+/// The SAFE DIRECTION is preserved: a git write subcommand (`commit`/`push`/…)
+/// is simply absent from the allowlist → not read-only, and the callbacks +
+/// denylist reject the write forms of the allowlisted subcommands.
+fn git_subcommand_is_read_only(rest: &[&str]) -> bool {
+    let Some(&sub) = rest.first() else {
+        // Bare `git` is not read-only.
+        return false;
+    };
+    // Reject the shared file-write flag regardless of subcommand (SAFE
+    // DIRECTION). TS achieves this by omitting `--output` from every
+    // `safeFlags` map.
+    if rest.iter().any(|a| {
+        let flag = a.split('=').next().unwrap_or(a);
+        GIT_WRITE_FLAGS.contains(&flag)
+    }) {
+        return false;
+    }
+    // Multi-word read-only prefixes — checked BEFORE the one-word forms so the
+    // longer, more specific key matches first (TS orders `git remote show`
+    // before `git remote`).
+    if rest.len() >= 2 {
+        match (rest[0], rest[1]) {
+            // `git remote show <name>` — callback: exactly one alphanumeric
+            // remote name (TS `git remote show` callback, lines 478-487). Args
+            // to the callback are the tokens after `show` (`rest[2..]`).
+            ("remote", "show") => return !git_remote_show_is_dangerous(&rest[2..]),
+            // `git stash list` / `git stash show` — read-only (bare `git stash`
+            // is NOT: it writes the stash).
+            ("stash", "list" | "show") => return true,
+            // `git config --get …` — read-only config read (bare `git config
+            // k v` writes).
+            ("config", "--get") => return true,
+            // `git worktree list` — read-only (bare `git worktree add` writes).
+            ("worktree", "list") => return true,
+            _ => {}
+        }
+    }
+    match sub {
+        // Pure read-only subcommands with no positional-write form.
+        "diff" | "log" | "show" | "shortlog" | "ls-remote" | "status" | "blame" | "ls-files"
+        | "merge-base" | "rev-parse" | "rev-list" | "describe" | "cat-file" | "for-each-ref"
+        | "grep" => true,
+        // `git reflog` — block the write subcommands `expire`/`delete`/`exists`
+        // (TS callback, lines 283-303).
+        "reflog" => !git_reflog_is_dangerous(&rest[1..]),
+        // `git remote` (bare / `-v`) — only `-v`/`--verbose`, no positional
+        // (TS callback, lines 495-501).
+        "remote" => !git_remote_is_dangerous(&rest[1..]),
+        // `git tag` — block tag creation via a positional arg without `-l`
+        // (TS callback, lines 739-805).
+        "tag" => !git_tag_is_dangerous(&rest[1..]),
+        // `git branch` — block branch creation/deletion/rename via a positional
+        // arg without `-l`/a filtering flag (TS callback, lines 851-921).
+        "branch" => !git_branch_is_dangerous(&rest[1..]),
+        // Everything else (`commit`/`push`/`add`/`checkout`/`stash`/`config`/
+        // `worktree`/…) is NOT read-only.
+        _ => false,
+    }
+}
+
+/// `git remote show` positional-write guard — port of the TS callback
+/// (`readOnlyCommandValidation.ts:478-487`). `args` are the tokens after
+/// `git remote show`. Allows an optional `-n`, then exactly ONE remote name
+/// matching `/^[a-zA-Z0-9_-]+$/`; anything else is dangerous.
+fn git_remote_show_is_dangerous(args: &[&str]) -> bool {
+    let positional: Vec<&str> = args.iter().copied().filter(|a| *a != "-n").collect();
+    if positional.len() != 1 {
+        return true;
+    }
+    let name = positional[0];
+    name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// `git remote` positional-write guard — port of the TS callback
+/// (`readOnlyCommandValidation.ts:495-501`). `args` are the tokens after
+/// `git remote`. Only a bare `git remote` or `git remote -v/--verbose` is
+/// read-only; any positional (e.g. `add`/`remove`/`set-url`) is dangerous.
+fn git_remote_is_dangerous(args: &[&str]) -> bool {
+    args.iter().any(|a| *a != "-v" && *a != "--verbose")
+}
+
+/// `git reflog` write-subcommand guard — port of the TS callback
+/// (`readOnlyCommandValidation.ts:283-303`). `args` are the tokens after
+/// `git reflog`. The FIRST non-flag positional is the subcommand: `expire` /
+/// `delete` / `exists` write to `.git/logs/**` and are dangerous; `show` or a
+/// ref name is safe.
+fn git_reflog_is_dangerous(args: &[&str]) -> bool {
+    const DANGEROUS_SUBCOMMANDS: &[&str] = &["expire", "delete", "exists"];
+    for token in args {
+        if token.is_empty() || token.starts_with('-') {
+            continue;
+        }
+        // First non-flag positional decides: dangerous subcommand, or a safe
+        // `show`/ref (after which further positionals are ref args → safe).
+        return DANGEROUS_SUBCOMMANDS.contains(token);
+    }
+    // No positional = bare `git reflog` = safe (shows the reflog).
+    false
+}
+
+/// Does `token` (a `-…` flag) contain a short-flag `l`, marking a list request?
+/// Mirrors the TS short-flag-bundle test (`-li`/`-il` contain `l`) shared by the
+/// `git tag`/`git branch` callbacks.
+fn short_flag_bundle_has_list(token: &str) -> bool {
+    let b = token.as_bytes();
+    b.first() == Some(&b'-')
+        && b.get(1) != Some(&b'-')
+        && token.len() > 2
+        && !token.contains('=')
+        && token[1..].contains('l')
+}
+
+/// `git tag` creation guard — port of the TS callback
+/// (`readOnlyCommandValidation.ts:739-805`). `args` are the tokens after
+/// `git tag`. A positional arg without a preceding `-l`/`--list` is a tag name
+/// to CREATE (writes `.git/refs/tags/…`) → dangerous.
+fn git_tag_is_dangerous(args: &[&str]) -> bool {
+    const FLAGS_WITH_ARGS: &[&str] = &[
+        "--contains",
+        "--no-contains",
+        "--merged",
+        "--no-merged",
+        "--points-at",
+        "--sort",
+        "--format",
+        "-n",
+    ];
+    let mut i = 0;
+    let mut seen_list_flag = false;
+    let mut seen_dash_dash = false;
+    while i < args.len() {
+        let token = args[i];
+        if token.is_empty() {
+            i += 1;
+            continue;
+        }
+        // `--` ends flag parsing; subsequent tokens are positional even if they
+        // start with `-` (`git tag -- -l` CREATES a tag named `-l`).
+        if token == "--" && !seen_dash_dash {
+            seen_dash_dash = true;
+            i += 1;
+            continue;
+        }
+        if !seen_dash_dash && token.starts_with('-') {
+            if token == "--list" || token == "-l" || short_flag_bundle_has_list(token) {
+                seen_list_flag = true;
+            }
+            if token.contains('=') {
+                i += 1;
+            } else if FLAGS_WITH_ARGS.contains(&token) {
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else {
+            // Non-flag positional (or post-`--`). Safe only after `-l`/`--list`
+            // (then it is a match pattern, not a tag name).
+            if !seen_list_flag {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
+/// `git branch` creation/deletion/rename guard — port of the TS callback
+/// (`readOnlyCommandValidation.ts:851-921`). `args` are the tokens after
+/// `git branch`. A positional arg without `-l`/`--list` or a filtering flag is
+/// a branch name to CREATE (or the target of `-d`/`-m`, which also carry a
+/// positional) → dangerous.
+fn git_branch_is_dangerous(args: &[&str]) -> bool {
+    // NOTE `--abbrev` is intentionally NOT here: git does not consume a detached
+    // arg for it (PARSE_OPT_OPTARG), so a following number is a positional the
+    // callback must catch (TS comment, lines 862-865).
+    const FLAGS_WITH_ARGS: &[&str] = &["--contains", "--no-contains", "--points-at", "--sort"];
+    const FLAGS_WITH_OPTIONAL_ARGS: &[&str] = &["--merged", "--no-merged"];
+    let mut i = 0;
+    let mut last_flag = "";
+    let mut seen_list_flag = false;
+    let mut seen_dash_dash = false;
+    while i < args.len() {
+        let token = args[i];
+        if token.is_empty() {
+            i += 1;
+            continue;
+        }
+        if token == "--" && !seen_dash_dash {
+            seen_dash_dash = true;
+            last_flag = "";
+            i += 1;
+            continue;
+        }
+        if !seen_dash_dash && token.starts_with('-') {
+            if token == "--list" || token == "-l" || short_flag_bundle_has_list(token) {
+                seen_list_flag = true;
+            }
+            if token.contains('=') {
+                last_flag = token.split('=').next().unwrap_or("");
+                i += 1;
+            } else if FLAGS_WITH_ARGS.contains(&token) {
+                last_flag = token;
+                i += 2;
+            } else {
+                last_flag = token;
+                i += 1;
+            }
+        } else {
+            // Non-flag positional (or post-`--`). Safe only after `-l`/`--list`
+            // or as the optional arg of `--merged`/`--no-merged`.
+            let last_flag_has_optional_arg = FLAGS_WITH_OPTIONAL_ARGS.contains(&last_flag);
+            if !seen_list_flag && !last_flag_has_optional_arg {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -441,5 +709,118 @@ mod test_quote_aware_expansion {
         // still disqualify it → NOT read-only, matching TS (which catches the
         // parens via COMMAND_SUBSTITUTION_PATTERNS).
         assert!(!command_is_read_only("echo $((1+1))"));
+    }
+}
+
+#[cfg(test)]
+mod test_git_read_only {
+    //! Parity for the git slice of TS `GIT_READ_ONLY_COMMANDS`
+    //! (`utils/shell/readOnlyCommandValidation.ts:107-923`): the read-only
+    //! subcommand allowlist + the positional-write guard callbacks.
+    use super::*;
+
+    #[test]
+    fn embedded_commit_commands_are_read_only() {
+        // The four `!`git …`` bodies embedded in /commit (commit.rs:63-66).
+        assert!(command_is_read_only("git status"));
+        assert!(command_is_read_only("git diff HEAD"));
+        assert!(command_is_read_only("git branch --show-current"));
+        assert!(command_is_read_only("git log --oneline -10"));
+    }
+
+    #[test]
+    fn security_review_and_show_commands_are_read_only() {
+        // Bodies embedded in /security-review (security_review.rs:28-46) and
+        // the required `git show` / `git rev-parse` cases.
+        assert!(command_is_read_only("git show"));
+        assert!(command_is_read_only("git diff --name-only origin/HEAD..."));
+        assert!(command_is_read_only("git log --no-decorate origin/HEAD..."));
+        assert!(command_is_read_only("git diff origin/HEAD..."));
+        assert!(command_is_read_only("git rev-parse"));
+        assert!(command_is_read_only("git rev-parse HEAD"));
+        assert!(command_is_read_only("git rev-parse --show-toplevel"));
+    }
+
+    #[test]
+    fn additional_read_only_subcommands() {
+        assert!(command_is_read_only("git branch"));
+        assert!(command_is_read_only("git branch -a"));
+        assert!(command_is_read_only("git branch --list feature/*"));
+        assert!(command_is_read_only("git branch --merged"));
+        assert!(command_is_read_only("git tag"));
+        assert!(command_is_read_only("git tag -l v1.*"));
+        assert!(command_is_read_only("git reflog"));
+        assert!(command_is_read_only("git reflog show"));
+        assert!(command_is_read_only("git remote"));
+        assert!(command_is_read_only("git remote -v"));
+        assert!(command_is_read_only("git remote show origin"));
+        assert!(command_is_read_only("git stash list"));
+        assert!(command_is_read_only("git stash show"));
+        assert!(command_is_read_only("git config --get user.name"));
+        assert!(command_is_read_only("git worktree list"));
+        assert!(command_is_read_only("git blame src/main.rs"));
+        assert!(command_is_read_only("git ls-files"));
+        assert!(command_is_read_only("git merge-base HEAD main"));
+        assert!(command_is_read_only("git describe --tags"));
+    }
+
+    #[test]
+    fn write_subcommands_are_not_read_only() {
+        // Required negative cases: git commit / push / add.
+        assert!(!command_is_read_only("git commit -m x"));
+        assert!(!command_is_read_only("git push"));
+        assert!(!command_is_read_only("git add ."));
+        assert!(!command_is_read_only("git add -A"));
+        // Other writes.
+        assert!(!command_is_read_only("git checkout main"));
+        assert!(!command_is_read_only("git reset --hard"));
+        assert!(!command_is_read_only("git merge feature"));
+        assert!(!command_is_read_only("git rebase main"));
+        assert!(!command_is_read_only("git pull"));
+        assert!(!command_is_read_only("git fetch"));
+        assert!(!command_is_read_only("git stash"));
+        assert!(!command_is_read_only("git worktree add ../wt"));
+        assert!(!command_is_read_only("git config user.name x"));
+        // Bare `git` is not read-only.
+        assert!(!command_is_read_only("git"));
+    }
+
+    #[test]
+    fn branch_creation_and_mutation_are_not_read_only() {
+        // Positional branch name = creation.
+        assert!(!command_is_read_only("git branch newbranch"));
+        assert!(!command_is_read_only("git branch feature start-point"));
+        // Delete / rename carry a positional the callback catches.
+        assert!(!command_is_read_only("git branch -d old"));
+        assert!(!command_is_read_only("git branch -D old"));
+        assert!(!command_is_read_only("git branch -m old new"));
+        // `git branch -- -l` creates a branch named `-l`.
+        assert!(!command_is_read_only("git branch -- -l"));
+    }
+
+    #[test]
+    fn tag_creation_is_not_read_only() {
+        assert!(!command_is_read_only("git tag v1.0.0"));
+        assert!(!command_is_read_only("git tag -d v1.0.0"));
+        assert!(!command_is_read_only("git tag -- -l"));
+    }
+
+    #[test]
+    fn reflog_and_remote_writes_are_not_read_only() {
+        assert!(!command_is_read_only("git reflog expire --all"));
+        assert!(!command_is_read_only("git reflog delete HEAD@{0}"));
+        assert!(!command_is_read_only("git remote add origin url"));
+        assert!(!command_is_read_only("git remote remove origin"));
+        // `git remote show` requires exactly one alphanumeric name.
+        assert!(!command_is_read_only("git remote show"));
+        assert!(!command_is_read_only("git remote show a b"));
+    }
+
+    #[test]
+    fn output_write_flag_is_not_read_only() {
+        // `--output=<file>` writes a file even on a read-only subcommand.
+        assert!(!command_is_read_only("git diff --output=/tmp/pwned"));
+        assert!(!command_is_read_only("git log --output /tmp/x"));
+        assert!(!command_is_read_only("git show --output=/tmp/x"));
     }
 }

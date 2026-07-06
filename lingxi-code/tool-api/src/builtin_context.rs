@@ -64,6 +64,21 @@ pub struct BuiltinToolContext {
     pub sandbox_runner: Arc<dyn SandboxRunner>,
     /// Active permission mode (M4-02).
     pub permission_mode: PermissionMode,
+    /// The live boot permission policy (rules + mode + roots + working-dirs +
+    /// sandbox-auto-allow config). Shared behind an `Arc` with the orchestrator's
+    /// `PolicyPermissionGate`. The prompt shell-expansion provider
+    /// ([`crate::prompt_shell`]) reads it as the BASE policy for embedded
+    /// `!`cmd`` bodies: it builds a FRESH per-command effective policy = these
+    /// base rules + that command's declared `allowed_tools` (claude-code's
+    /// `alwaysAllowRules.command` injection) before calling
+    /// [`permission::PermissionPolicy::authorize_with_mode`] on each command —
+    /// 1:1 with `hasPermissionsToUseTool(BashTool, {command})`. Defaults to an
+    /// empty [`permission::PermissionMode::Default`] policy at every test /
+    /// non-live construction site (read-only git + auto-safe commands still
+    /// auto-allow via the rule-independent read-only layer); the two live engine
+    /// roots (`engine-desktop` + `engine-mobile`) clone their real boot
+    /// `Arc<PermissionPolicy>` in here.
+    pub permission_policy: Arc<permission::PermissionPolicy>,
     /// Whether the host has a working sandbox backend right now (M4-02).
     pub sandbox_available: bool,
     /// Project workspace path (M4-02).

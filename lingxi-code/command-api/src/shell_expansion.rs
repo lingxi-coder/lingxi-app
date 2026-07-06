@@ -121,6 +121,30 @@ pub struct ShellExpansionCtx {
     pub permission_gate: Arc<dyn ShellPermissionGate>,
 }
 
+/// Factory that builds a per-command [`ShellExpansionCtx`] with that command's
+/// own allowed-tools baked into the permission gate.
+///
+/// Mirrors claude-code building a FRESH `toolPermissionContext` per
+/// `getPromptForCommand` call before running `executeShellCommandsInPrompt`:
+/// each command injects its own `allowedTools` into
+/// `alwaysAllowRules.command` on top of the base policy (e.g. /commit adds
+/// `Bash(git add:*)` / `Bash(git status:*)` / `Bash(git commit:*)`), rather than
+/// mutating the shared boot policy.
+///
+/// Injected as `Arc<dyn ShellExpansionProvider>` so `command-api` stays a leaf:
+/// the concrete provider (holding the live `PermissionPolicy` + runner deps)
+/// lives in `tool-api` and is constructed at each composition root. The
+/// dispatcher / TUI call [`Self::build`] per expansion with the command's
+/// declared allow-list, then run [`execute_shell_commands_in_prompt`] over the
+/// returned context.
+pub trait ShellExpansionProvider: Send + Sync {
+    /// Build a per-command expansion context. `allowed_tools` is that command's
+    /// declared allow-list (e.g. `["Bash(git add:*)", …]`), injected on top of
+    /// the base policy for this expansion only; `shell` is the
+    /// frontmatter-selected shell (`None` → bash; builtins always pass `None`).
+    fn build(&self, allowed_tools: &[String], shell: Option<FrontmatterShell>) -> ShellExpansionCtx;
+}
+
 /// A single extracted shell command: its full matched span (for replacement)
 /// and the trimmed command body.
 #[derive(Debug, Clone, PartialEq, Eq)]

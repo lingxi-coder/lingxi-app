@@ -252,6 +252,10 @@ pub(crate) async fn run_ratatui(
     // (`!` bash mode) Sandboxed bash runner for `!`-prefixed commands, cloned
     // before `tui_build` is consumed — same convention as the clusters above.
     let bash_runner = tui_build.runtime.bash_runner.clone();
+    // (#3 shell-expansion) The shared prompt shell-expansion provider, cloned
+    // before `tui_build` is consumed — threaded into the `ChatWidget` so a typed
+    // `/commit` expands its embedded `!`git …`` bodies before submit.
+    let shell_expansion = tui_build.runtime.shell_expansion.clone();
     let session = build_session_info(orchestrator.as_ref()).await;
     let handle = tokio::runtime::Handle::current();
     let switch_orch = orchestrator.clone();
@@ -440,6 +444,7 @@ pub(crate) async fn run_ratatui(
             Some(web_snapshot),
             connect_auth_methods,
             connect_availability,
+            Some(shell_expansion),
             on_submit,
             on_switch_model,
             on_web_action,

@@ -2165,6 +2165,83 @@ mod tests {
         ));
     }
 
+    // ── compound-command allow composition (TS `.every(allow)`, step 3d) ────
+
+    #[test]
+    fn bash_compound_mixed_rule_and_read_only_allows() {
+        // THE headline regression (Stage 5): a compound whose subcommands are
+        // allowed by DIFFERENT reasons — one by an injected allow RULE, one by
+        // the read-only inference — must be allowed, 1:1 with claude-code's
+        // per-subcommand `.every(_ => _.behavior === 'allow')`. Before the 3d
+        // composition layer, `shell_allow` (all-rule) and `shell_is_read_only`
+        // (all-read-only) each covered only the homogeneous case, so the mixed
+        // compound fell through to a mode ask → the gate denied it → the whole
+        // `/commit-push-pr` expansion aborted.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(gh pr view:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // The literal embedded body from commit_push_pr.rs:75 — a rule-allowed
+        // `gh pr view …` compounded with a read-only `true`.
+        assert!(matches!(
+            p.authorize("Bash", &bash("gh pr view --json number 2>/dev/null || true")),
+            PermissionResult::Allow { .. }
+        ));
+        // Each half in isolation is already allowed (rule-allow / read-only),
+        // pinning the two composed reasons the compound relies on.
+        assert!(matches!(
+            p.authorize("Bash", &bash("gh pr view --json number 2>/dev/null")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("true")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_compound_read_only_then_rule_allows_either_order() {
+        // Order-independent: a read-only `git status` before a rule-allowed
+        // `git commit` also composes to Allow.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(git commit:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("git status && git commit -m x")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_compound_one_uncovered_subcommand_still_asks() {
+        // SAFE DIRECTION: the composition never over-allows — a compound with a
+        // subcommand that is NEITHER rule-allowed NOR read-only still asks, even
+        // when the other subcommand is rule-allowed.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(gh pr view:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("gh pr view --json number || curl https://evil.test")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_compound_deny_subcommand_still_denies() {
+        // A deny rule on one subcommand of a mixed compound still denies (the
+        // deny walk runs before the 3d composition).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(gh pr view:*)"], "deny": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("gh pr view --json number || rm -rf /tmp/x")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
     // ── PERM (bash extras): general sed constraints (TS step 5b, all modes) ─
 
     #[test]

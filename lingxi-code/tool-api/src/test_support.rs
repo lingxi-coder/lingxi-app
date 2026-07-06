@@ -546,6 +546,7 @@ pub fn ctx_for_file_tools(
         sandbox_runtime: SandboxRuntimeConfig::default(),
         sandbox_runner: crate::sandbox_runner::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
+        permission_policy: Arc::new(permission::PermissionPolicy::new(PermissionMode::Default)),
         sandbox_available: false,
         workspace,
         platform: if cfg!(target_os = "macos") {
@@ -605,6 +606,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         sandbox_runtime: SandboxRuntimeConfig::default(),
         sandbox_runner: crate::sandbox_runner::default_sandbox_runner(),
         permission_mode: PermissionMode::Default,
+        permission_policy: Arc::new(permission::PermissionPolicy::new(PermissionMode::Default)),
         sandbox_available: false,
         workspace: PathBuf::from("/tmp"),
         platform: if cfg!(target_os = "macos") {

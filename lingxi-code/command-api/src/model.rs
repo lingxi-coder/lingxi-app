@@ -275,4 +275,16 @@ pub trait BuiltinCommandHandler: Send + Sync {
     fn name(&self) -> &str;
     /// Short user-facing description.
     fn description(&self) -> &str;
+    /// This command's declared allowed-tools (TS `command.allowedTools`), in the
+    /// permission-rule syntax (e.g. `Bash(git add:*)`). Injected on top of the
+    /// base policy for a fresh per-command effective policy before its embedded
+    /// `!`cmd`` shell bodies are expanded (see
+    /// [`crate::shell_expansion::ShellExpansionProvider`]).
+    ///
+    /// Defaults to empty: only the shell-embedding prompt builtins (`/commit`,
+    /// `/commit-push-pr`, `/security-review`) override it, so every other
+    /// handler is unaffected.
+    fn allowed_tools(&self) -> &'static [&'static str] {
+        &[]
+    }
 }

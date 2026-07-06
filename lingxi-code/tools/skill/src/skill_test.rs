@@ -957,7 +957,10 @@ mod tests {
             "runner received the embedded command, got: {}",
             call.command
         );
-        assert_eq!(call.bin_shell.as_deref(), Some(resolve_skill_shell_path()));
+        assert_eq!(
+            call.bin_shell.as_deref(),
+            Some(tool_api::prompt_shell::resolve_shell_path())
+        );
         assert_eq!(call.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
 
         // The runner's wrapped output (sentinel) is what actually got spawned.

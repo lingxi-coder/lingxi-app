@@ -301,6 +301,7 @@ pub fn run_app(
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
     connect_auth_methods: std::collections::BTreeMap<String, String>,
     connect_availability: std::collections::BTreeMap<String, bool>,
+    shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
@@ -345,6 +346,12 @@ pub fn run_app(
     }
     app.chat_widget
         .set_connect_data(connect_auth_methods, connect_availability);
+    // (#3) Wire the prompt shell-expansion provider so `/commit` … expand their
+    // embedded `!`git …`` bodies in `run_core_command` before submit. `None`
+    // (no embedder slot) keeps the historical verbatim path.
+    if let Some(provider) = shell_expansion {
+        app.chat_widget.set_shell_expansion(provider);
+    }
     app.run(&mut terminal)
 }
 

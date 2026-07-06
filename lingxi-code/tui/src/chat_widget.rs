@@ -185,6 +185,16 @@ pub struct ChatWidget {
     /// keyed by profile_name — joined into the `/connect` picker's `✓`
     /// marker. Empty (default) until [`Self::set_connect_data`] wires it.
     connect_availability: std::collections::BTreeMap<String, bool>,
+    /// (#3) The shared prompt shell-expansion provider (`None` until the
+    /// embedder wires one via [`Self::set_shell_expansion`]). When present,
+    /// [`Self::run_core_command`]'s `InjectMessage` arm expands the builtin
+    /// prompt bodies (`/commit`, `/commit-push-pr`, `/security-review`) — running
+    /// their embedded `!`git …`` commands through the real host runner +
+    /// policy-backed gate (that command's `allowed_tools` injected) — BEFORE the
+    /// content is submitted as a turn. `None` (the default for every test
+    /// widget) keeps the historical verbatim path: the RAW template is submitted
+    /// and the model re-runs the git commands itself.
+    shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
 }
 
 impl ChatWidget {
@@ -219,7 +229,23 @@ impl ChatWidget {
             web_snapshot: None,
             connect_auth_methods: std::collections::BTreeMap::new(),
             connect_availability: std::collections::BTreeMap::new(),
+            shell_expansion: None,
         }
+    }
+
+    /// Wire the shared prompt shell-expansion provider (#3). After this, a
+    /// prompt-type builtin whose `InjectMessage` body carries embedded
+    /// `` !`git …` `` / ` ```! ` patterns (`/commit`, `/commit-push-pr`,
+    /// `/security-review`) has those commands expanded through the real host
+    /// runner + policy-backed gate before the content is submitted as a turn —
+    /// 1:1 with claude-code expanding the body inside `getPromptForCommand`. A
+    /// permission-deny / run failure aborts the whole prompt (nothing is
+    /// submitted). Wired from the CLI `run_app` off the engine runtime.
+    pub fn set_shell_expansion(
+        &mut self,
+        provider: std::sync::Arc<dyn command_api::ShellExpansionProvider>,
+    ) {
+        self.shell_expansion = Some(provider);
     }
 
     /// Override where `/export` writes transcripts (tests/embedders; the
@@ -1270,13 +1296,16 @@ impl ChatWidget {
     /// Bridge a `command_core` slash handler into the TUI: invoke the async
     /// handler and map its `CommandResult` to a `ChatOutcome`.
     ///
-    /// Known parity gaps (both self-healing, tracked as follow-ups):
-    /// - Prompt-type handlers that embed `` !`git …` `` placeholders (`/commit`,
-    ///   `/commit-push-pr`, `/security-review`) are delivered verbatim; the host
-    ///   shell-expansion pass (`command_api::shell_expansion`) runs only in the
-    ///   dispatcher, and doing it here would need a `ShellRunner` and a blocking
-    ///   `git` call that would freeze the sync render loop. The model re-runs
-    ///   the git commands itself, so the turn still succeeds.
+    /// Prompt-type handlers that embed `` !`git …` `` placeholders (`/commit`,
+    /// `/commit-push-pr`, `/security-review`) have those commands expanded here
+    /// (#3) through [`Self::shell_expansion`] — the real host runner +
+    /// policy-backed gate, 1:1 with the dispatcher and claude-code's
+    /// `getPromptForCommand`. The expansion runs on the same throwaway
+    /// `block_on` used for the handler, so the sync render loop is not blocked
+    /// beyond that already-blocking call. When no provider is wired (tests) the
+    /// RAW template is submitted verbatim and the model re-runs the git commands.
+    ///
+    /// Known parity gap (self-healing, tracked as a follow-up):
     /// - `/skill-doctor` reports every skill as never-used because
     ///   `command_core::skill_doctor::record_skill_usage` is not yet wired into
     ///   the dispatcher (a shared-crate gap that predates this bridge and is
@@ -1307,7 +1336,37 @@ impl ChatWidget {
             Err(err) => return self.show_system_text(&format!("/{name} failed: {err}"), true),
         };
         match runtime.block_on(handler.handle(&parsed)) {
-            CommandResult::InjectMessage { content } => self.submit_core_prompt(name, args, content),
+            CommandResult::InjectMessage { content } => {
+                // (#3) Expand embedded `!`git …`` / ` ```! ` bodies through the
+                // real host runner + policy-backed gate BEFORE submitting, 1:1
+                // with claude-code expanding the body inside `getPromptForCommand`
+                // (each command injects its own `allowed_tools`; shell = None →
+                // Bash for builtins). A permission-deny / run failure aborts the
+                // WHOLE prompt: surface the error and do NOT submit (patterns are
+                // never left in place). `None` provider (tests / no embedder) or a
+                // body with no embedded pattern keeps the verbatim submit path.
+                let has_embedded = content.contains("```!") || content.contains("!`");
+                match self.shell_expansion.clone() {
+                    Some(provider) if has_embedded => {
+                        let allowed: Vec<String> = handler
+                            .allowed_tools()
+                            .iter()
+                            .map(|s| (*s).to_string())
+                            .collect();
+                        let shell_ctx = provider.build(&allowed, None);
+                        match runtime.block_on(command_api::execute_shell_commands_in_prompt(
+                            &content,
+                            &shell_ctx,
+                            &format!("/{name}"),
+                            None,
+                        )) {
+                            Ok(expanded) => self.submit_core_prompt(name, args, expanded),
+                            Err(e) => self.show_system_text(&format!("/{name} failed: {e}"), true),
+                        }
+                    }
+                    _ => self.submit_core_prompt(name, args, content),
+                }
+            }
             CommandResult::Done { display: Some(text) } => self.show_system_text(&text, false),
             CommandResult::Done { display: None } => ChatOutcome::Continue,
             // Only InjectMessage/Done commands are wired; guard the rest.

@@ -102,6 +102,14 @@ pub struct Runtime {
     /// clone into `tui::session::Runtime::with_bash_runner` so a typed `!command`
     /// runs sandboxed and renders inline with no LLM turn.
     pub bash_runner: std::sync::Arc<dyn tui_core::bash_runner::BashRunner>,
+    /// (#3 shell-expansion) The shared prompt shell-expansion provider, projected
+    /// straight from [`engine_desktop::DesktopRuntime::shell_expansion`]. The TUI
+    /// mount (`run_ratatui` → `run_app`) threads a clone into the `ChatWidget` so
+    /// a typed `/commit` / `/commit-push-pr` / `/security-review` expands its
+    /// embedded `!`git …`` bodies through the real host runner + policy-backed
+    /// gate before submit — mirroring the dispatcher's expansion for non-TUI
+    /// hosts. Built over the SAME `BuiltinToolContext` the model's Bash tool uses.
+    pub shell_expansion: std::sync::Arc<dyn command_api::ShellExpansionProvider>,
     /// (`/connect` Copilot device-flow) GitHub-Copilot OAuth device-flow driver,
     /// projected straight from [`engine_desktop::DesktopRuntime::connect_copilot`].
     /// The TUI mount threads a clone into
@@ -665,6 +673,7 @@ pub async fn build_runtime_from_config(
         http: rt.http,
         structured_output_slot: rt.structured_output_slot,
         bash_runner: rt.bash_runner,
+        shell_expansion: rt.shell_expansion,
         connect_copilot: rt.connect_copilot,
         oauth_connect_driver: rt.oauth_connect_driver,
     })

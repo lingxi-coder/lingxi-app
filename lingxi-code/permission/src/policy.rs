@@ -668,6 +668,29 @@ impl PermissionPolicy {
         if Self::shell_is_read_only(tool_name, input) {
             return allow_read_only();
         }
+        // 3d. COMPOUND-COMMAND ALLOW COMPOSITION (claude-code
+        //     `bashToolHasPermission`'s per-subcommand `.every(_ => _.behavior
+        //     === 'allow')`, `bashPermissions.ts:2239-2385`). TS maps EACH
+        //     subcommand of a compound through `bashToolCheckPermission` and
+        //     allows the whole command iff EVERY subcommand independently reaches
+        //     an `allow` — where a subcommand may allow via an allow RULE (step
+        //     4/5), the `AcceptEdits` mode auto-allow (step 6), OR the read-only
+        //     inference (step 7, `BashTool.isReadOnly`). The two homogeneous
+        //     layers above cover only the all-rule (`shell_allow`, step 3) and
+        //     all-read-only (`shell_is_read_only`, step 3c) cases; a MIXED
+        //     compound — e.g. `gh pr view … || true`, a rule-allowed `gh pr view`
+        //     next to a read-only `true` — matched NEITHER and fell through to
+        //     the mode ask. This layer composes them PER-SUBCOMMAND so the mixed
+        //     compound is allowed, matching TS. ORDER (1:1 with TS): AFTER the
+        //     read-only layer (a fully-read-only command already returned) and
+        //     BEFORE the Plan backstop / mode fallback. Deny/ask rules and the
+        //     dangerous/path/safety/sed guards already ran on the whole command
+        //     above (TS's per-subcommand deny/ask short-circuited via those same
+        //     walks), so only the ALLOW side per subcommand remains to confirm —
+        //     it can never over-allow a writer or a denied subcommand.
+        if let Some(result) = self.shell_compound_allow(tool_name, input, &sources, mode) {
+            return result;
+        }
         // 3b. Plan-mode mutation backstop (claude-code `prepareContextForPlanMode`,
         //     `permissionSetup.ts:1462-1500`). In `Plan` mode, the primary
         //     enforcement is that mutating tools are NOT advertised on the wire
@@ -1204,6 +1227,101 @@ impl PermissionPolicy {
         shell_command::command_from_input(input)
             .is_some_and(crate::read_only_command::command_is_read_only)
     }
+
+    /// Compound-command allow composition (the 3d layer) — claude-code
+    /// `bashToolHasPermission`'s per-subcommand
+    /// `subcommandPermissionDecisions.every(_ => _.behavior === 'allow')`
+    /// (`bashPermissions.ts:2239-2385`). For a shell command that splits into
+    /// MORE THAN ONE subcommand, returns `Some(Allow)` iff EVERY subcommand is
+    /// independently allowable via one of TS `bashToolCheckPermission`'s
+    /// allow-producing steps:
+    /// - a CONTENT allow RULE covering the subcommand
+    ///   ([`shell_command::command_fully_allowed`] per subcommand — roots-gated,
+    ///   mirroring [`Self::shell_allow`]'s gating and matching TS steps 4/5), OR
+    /// - the read-only inference ([`crate::read_only_command::command_is_read_only`]
+    ///   — roots-independent, TS step 7), OR
+    /// - the `AcceptEdits` mode auto-allow (base command in
+    ///   [`ACCEPT_EDITS_ALLOWED_COMMANDS`], TS step 6).
+    ///
+    /// This composes the homogeneous [`Self::shell_allow`] (all-rule) and
+    /// [`Self::shell_is_read_only`] (all-read-only) layers PER-SUBCOMMAND, so a
+    /// MIXED compound (`gh pr view … || true` = rule-allowed `gh pr view` + a
+    /// read-only `true`) is allowed exactly as TS's `.every(allow)` does. Runs
+    /// only for a genuine compound (`subs.len() >= 2`): a single subcommand that
+    /// is rule-allowed / read-only / mode-allowed was already handled by the
+    /// homogeneous layers above, so this never changes single-command outcomes.
+    ///
+    /// SAFE DIRECTION: the deny/ask rule walks and the dangerous-removal /
+    /// path-constraint / bash-safety / sed guards all ran on the whole command
+    /// before this layer (1:1 with TS, whose per-subcommand deny/ask already
+    /// short-circuited through those same walks). A subcommand counted as
+    /// read-only cannot be a writer; a rule-allowed subcommand matched an
+    /// explicit allow rule; an `AcceptEdits`-mode subcommand's base is on the
+    /// narrow allowlist (and a dangerous `rm` / unsafe `sed` already asked
+    /// above). So this can only allow a compound whose every part is genuinely
+    /// safe — it never over-allows.
+    fn shell_compound_allow(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        sources: &[PermissionRuleSource],
+        mode: PermissionMode,
+    ) -> Option<PermissionResult> {
+        if !shell_command::is_shell_tool(tool_name) {
+            return None;
+        }
+        let command = shell_command::command_from_input(input)?;
+        let subs = shell_command::split_command(command);
+        // Only a genuine compound needs composing; single commands were handled
+        // by the homogeneous allow / read-only layers above.
+        if subs.len() < 2 {
+            return None;
+        }
+        // Gather this call's CONTENT allow rules across all sources (mirrors
+        // `shell_allow`'s content aggregation). Roots-gated: shell content
+        // matching is meaningless without roots (as in `shell_allow`), so
+        // without roots the rule-allow arm contributes nothing and each
+        // subcommand must be read-only (or `AcceptEdits`-mode-allowed) — exactly
+        // the behavior of the roots-gated `shell_allow` being skipped.
+        let contents: Vec<&str> = if self.roots.is_some() {
+            let mut v: Vec<&str> = Vec::new();
+            for src in sources {
+                if let Some(rules) = self.allow_rules.get(src) {
+                    for r in rules {
+                        if self.rule_is_available_in_mode(r, mode)
+                            && r.value.tool_name == tool_name
+                            && r.value.rule_content.is_some()
+                        {
+                            if let Some(c) = r.value.rule_content.as_deref() {
+                                v.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+            v
+        } else {
+            Vec::new()
+        };
+        let accept_edits = mode == PermissionMode::AcceptEdits;
+        let all_allowed = subs.iter().all(|sub| {
+            // Allow RULE covering this single subcommand (TS steps 4/5).
+            (!contents.is_empty() && shell_command::command_fully_allowed(&contents, sub))
+                // Read-only inference (TS step 7, roots-independent).
+                || crate::read_only_command::command_is_read_only(sub)
+                // `AcceptEdits` mode auto-allow: base command on the narrow
+                // allowlist (TS step 6). A dangerous `rm` / unsafe `sed` already
+                // asked above, so a surviving allowlisted base is safe to allow.
+                || (accept_edits
+                    && base_command(sub)
+                        .is_some_and(|base| ACCEPT_EDITS_ALLOWED_COMMANDS.contains(&base)))
+        });
+        if all_allowed {
+            Some(allow_compound())
+        } else {
+            None
+        }
+    }
 }
 
 /// Base (first) command word of a subcommand — TS `trimmedCmd.split(/\s+/)[0]`.
@@ -1498,6 +1616,24 @@ fn allow_read_only() -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::Other {
             reason: "Read-only command is allowed".to_string(),
+        },
+        updated_input: None,
+        update_destination: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Compound-command allow grant (claude-code `bashToolHasPermission`'s
+/// `subcommandPermissionDecisions.every(_ => _.behavior === 'allow')` branch,
+/// `bashPermissions.ts:2368-2385`, `decisionReason: { type:
+/// 'subcommandResults', … }`). The port has no `subcommandResults` decision
+/// reason, so this is tagged [`PermissionDecisionReason::Other`] with a
+/// descriptive reason — functionally irrelevant to the gate, which maps every
+/// `Allow` to `Allow` regardless of reason.
+fn allow_compound() -> PermissionResult {
+    PermissionResult::Allow {
+        reason: PermissionDecisionReason::Other {
+            reason: "All subcommands are allowed".to_string(),
         },
         updated_input: None,
         update_destination: None,

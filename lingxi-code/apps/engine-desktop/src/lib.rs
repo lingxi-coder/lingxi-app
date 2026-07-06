@@ -1858,6 +1858,13 @@ pub struct DesktopRuntime {
     /// (`Runtime::with_bash_runner`) so a typed `!ls` runs sandboxed and renders
     /// inline with no LLM turn — never a raw process.
     pub bash_runner: Arc<dyn tui_core::bash_runner::BashRunner>,
+    /// (#3 shell-expansion) The shared prompt shell-expansion provider, built
+    /// over the SAME `BuiltinToolContext` the dispatcher + Bash tool use. The CLI
+    /// threads a clone into `apps/cli`'s `Runtime.shell_expansion` → the ratatui
+    /// TUI's `ChatWidget`, so a typed `/commit` expands its embedded `!`git …``
+    /// bodies through the real host runner + policy-backed gate before submit —
+    /// the same expansion the dispatcher performs for non-TUI hosts.
+    pub shell_expansion: Arc<dyn command_api::ShellExpansionProvider>,
     /// (`/connect` Copilot device-flow) The GitHub-Copilot OAuth device-flow
     /// driver (`EngineCopilotConnect` over `PosixHttp`). The CLI threads a clone
     /// into `tui::session::Runtime::with_copilot_connect_driver` so picking
@@ -3388,6 +3395,13 @@ pub async fn build(
     // threaded into the tool ctx so `Grep`/`Glob` skip denied/sensitive paths.
     // Empty (no enforcement / no Read-deny rule) ⇒ VCS-only behavior unchanged.
     let mut read_deny_exclude_globs: Vec<String> = Vec::new();
+    // (#3 shell-expansion) Capture the boot `Arc<PermissionPolicy>` before it is
+    // consumed by `PolicyPermissionGate::new` so `tool_ctx.permission_policy` can
+    // share the SAME base policy the model-facing gate enforces. The prompt
+    // shell-expansion provider reads it as the base for embedded `!`cmd`` bodies.
+    // `None` only when enforcement is off (no boot policy is built) — the
+    // `tool_ctx` literal then falls back to a Default-mode policy with roots.
+    let mut boot_permission_policy: Option<Arc<permission::PermissionPolicy>> = None;
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         let mut rules = Vec::new();
         let mut mode = permission::PermissionMode::Default;
@@ -3526,6 +3540,9 @@ pub async fn build(
         // tool-wide deny rules (empty otherwise ⇒ no child-pool filtering).
         let _ = subagent_tool_wide_deny_cell.set(policy.tool_wide_deny_names());
         let policy = Arc::new(policy);
+        // Share the boot policy into `tool_ctx` for the prompt shell-expansion
+        // gate (clone the `Arc` BEFORE `policy` moves into the gate below).
+        boot_permission_policy = Some(policy.clone());
         tracing::info!(
             rules = rule_count,
             mode = ?mode,
@@ -4336,6 +4353,25 @@ pub async fn build(
         // `sandbox_runner.reset().await` there for the tidy socket/CA cleanup.
         sandbox_runner: std::sync::Arc::new(sandbox_runtime_runner::SandboxRuntimeRunner::new()),
         permission_mode: cfg.permission_mode,
+        // (#3 shell-expansion) The base policy for embedded `!`cmd`` bodies in
+        // prompt commands (`/commit` …). When enforcement is on this is the SAME
+        // boot `Arc<PermissionPolicy>` the model-facing `PolicyPermissionGate`
+        // enforces (captured above). When enforcement is off no boot policy was
+        // built, so fall back to a Default-mode policy WITH roots (from `cwd`) so
+        // read-only auto-allow AND per-command allowed-tools injection still
+        // content-match — 1:1 with claude-code, which runs the orchestrator gate
+        // regardless of any local enforcement toggle.
+        permission_policy: boot_permission_policy.clone().unwrap_or_else(|| {
+            Arc::new(
+                permission::PermissionPolicy::new(cfg.permission_mode).with_roots(
+                    permission::FsRoots {
+                        cwd: cwd.clone(),
+                        home: dirs::home_dir(),
+                        lingxi_home: cfg.lingxi_home.clone(),
+                    },
+                ),
+            )
+        }),
         sandbox_available,
         workspace: cwd.clone(),
         platform: sandbox_platform,
@@ -4451,6 +4487,13 @@ pub async fn build(
     let bash_runner: Arc<dyn tui_core::bash_runner::BashRunner> = Arc::new(DesktopBashRunner {
         ctx: tool_ctx.clone(),
     });
+    // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
+    // the SAME `tool_ctx` (carrying the base `permission_policy` + sandbox/process
+    // seams) BEFORE `tool_ctx` is moved into `register_desktop_tools` below. One
+    // `Arc<dyn ShellExpansionProvider>` is chained onto the dispatcher (so
+    // `/commit` … expand their embedded `!`git …`` bodies) AND stashed on
+    // `DesktopRuntime.shell_expansion` for the ratatui TUI's `run_core_command`.
+    let shell_expansion_provider = tool_api::build_prompt_shell_provider(&tool_ctx);
     let mut tools_inner = ToolRegistry::new();
     // `RemoteTrigger`'s in-process OAuth resolver, backed by the credential
     // store built at (3). Reads tokens at call-time so the refresh driver wired
@@ -5142,7 +5185,10 @@ pub async fn build(
                 let orch = expansion_ctx_orch.clone();
                 Box::pin(async move { orch.expansion_hook_context().await })
             }),
-        );
+        )
+        // (#3) Real embedded-shell expansion for markdown/plugin `!`cmd`` bodies
+        // AND the builtin `InjectMessage` prompts (`/commit` …). Non-MCP only.
+        .with_shell_expansion(shell_expansion_provider.clone());
 
     // (7) Session lifecycle: fire the `SessionStart` hooks now that the
     //     orchestrator + hook registry are fully wired. claude-code fires the
@@ -5331,6 +5377,7 @@ pub async fn build(
         wakeup_scheduler_cell,
         runtime_spawner: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
         bash_runner,
+        shell_expansion: shell_expansion_provider,
         connect_copilot,
         oauth_connect_driver,
     })

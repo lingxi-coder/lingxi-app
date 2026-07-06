@@ -19,6 +19,17 @@ use command_api::builtin_support::names::core_description;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 
+/// Per-command allowed-tools for `/commit`, verbatim from the TS
+/// `commit.ts:6-10` `ALLOWED_TOOLS`. Injected into a fresh per-command effective
+/// policy before the embedded `!`git …`` bodies are expanded, so `git add` /
+/// `git status` / `git commit` are permitted alongside the read-only git
+/// auto-allow. Surfaced via [`CommitHandler::allowed_tools`].
+pub const ALLOWED_TOOLS: &[&str] = &[
+    "Bash(git add:*)",
+    "Bash(git status:*)",
+    "Bash(git commit:*)",
+];
+
 /// `/commit` handler — returns the commit prompt as `InjectMessage`.
 ///
 /// Handle-free: `/commit` is a static template injection. The next
@@ -48,6 +59,10 @@ impl BuiltinCommandHandler for CommitHandler {
 
     fn description(&self) -> &str {
         core_description("commit")
+    }
+
+    fn allowed_tools(&self) -> &'static [&'static str] {
+        ALLOWED_TOOLS
     }
 }
 
@@ -154,5 +169,15 @@ mod tests {
         let h = CommitHandler::new();
         assert_eq!(h.name(), "commit");
         assert_eq!(h.description(), core_description("commit"));
+    }
+
+    #[test]
+    fn allowed_tools_match_ts() {
+        // Verbatim from commit.ts:6-10.
+        let h = CommitHandler::new();
+        assert_eq!(
+            h.allowed_tools(),
+            &["Bash(git add:*)", "Bash(git status:*)", "Bash(git commit:*)"]
+        );
     }
 }

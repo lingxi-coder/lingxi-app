@@ -762,7 +762,15 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // chain off that single line's uuid (shared parent), matching the
     // non-streaming transcript shape. The per-block split lives ONLY on the
     // streaming drain (`conversation.rs::persist_assistant_per_block`).
-    orch.persist_message_to_jsonl(&assistant_msg).await;
+    //
+    // Persist the FULL BetaMessage envelope (real model + usage + requestId) via
+    // the batched counterpart — NOT the model-less `persist_message_to_jsonl`,
+    // which recorded real replies as `model:"<synthetic>"` with `usage` dropped
+    // (the `--print` / `--bg` mislabel + lost-cost bug). `claude.ts:2571` builds
+    // the merged non-streaming AssistantMessage with `result.model`/`usage`.
+    let request_id = orch.api.last_request_id();
+    orch.persist_assistant_merged(&assistant_msg, Some(&response.usage), request_id.as_deref())
+        .await;
 
     // 4. Emit each Text block to the output stream (whole-body in M5-02;
     //    M5-04 will switch to per-delta).

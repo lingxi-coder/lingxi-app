@@ -3597,6 +3597,71 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         map
     }
 
+    /// Persist a NON-streaming (batched) assistant turn as ONE merged JSONL line
+    /// carrying the full BetaMessage envelope — the real `model` (the live
+    /// session model, same source [`Self::persist_assistant_per_block`] uses),
+    /// the Anthropic `usage` object, and the `requestId`. This is the batched
+    /// counterpart of `persist_assistant_per_block`: claude-code's non-streaming
+    /// handler (`claude.ts:2571`) emits one merged `AssistantMessage` WITH the
+    /// response model/usage, and the batched `run_turn` path must match.
+    ///
+    /// Previously the batched path used the model-less
+    /// [`Self::persist_message_to_jsonl`], so every real `--print` / `--bg`
+    /// reply was recorded as `model:"<synthetic>"` with `usage` dropped (cost
+    /// lost, telemetry/resume mis-attributed) even though the API call
+    /// succeeded. Genuine SYNTHETIC api-error lines still use the model-less
+    /// path (`persist_api_error_message_to_jsonl` / `persist_message_to_jsonl`).
+    pub(crate) async fn persist_assistant_merged(
+        &self,
+        msg: &ConversationMessage,
+        // Typed response usage → the Anthropic `usage` JSON (via
+        // `assistant_usage_value`). `None` writes `usage: null`.
+        usage: Option<&llm_client::Usage>,
+        request_id: Option<&str>,
+    ) {
+        let ConversationMessage::Assistant { id: turn_id, .. } = msg else {
+            // Defensive: non-assistant messages take the plain single-line path.
+            self.persist_message_to_jsonl(msg).await;
+            return;
+        };
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let inner_id = turn_id.as_uuid().to_string();
+        let (session_id_str, model) = {
+            let s = self.session.lock().await;
+            (s.session_id.to_string(), s.model.clone())
+        };
+        let git_branch = self.resolve_git_branch().await;
+        let entrypoint = Some(entrypoint_value());
+        let parent_uuid = self.last_jsonl_uuid.lock().await.clone();
+        let usage_json = usage.map(assistant_usage_value);
+        let jmsg = self.to_jsonl_message_with_inner_id(
+            msg,
+            &session_id_str,
+            parent_uuid,
+            git_branch,
+            entrypoint,
+            None,
+            Some(&inner_id),
+            Some(&model),
+            usage_json.as_ref(),
+            request_id,
+            None,
+        );
+        let line_uuid = jmsg.uuid.clone();
+        match writer.append(&jmsg).await {
+            Ok(()) => {
+                *self.last_jsonl_uuid.lock().await = Some(line_uuid.clone());
+                telemetry::emit_session_appended(&session_id_str, &line_uuid);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "jsonl writer append failed");
+                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+            }
+        }
+    }
+
     /// Construct a new orchestrator with a fresh in-memory session and
     /// the BATCHED API client only — the streaming field is wired with
     /// the [`NoStreamingApiClient`] stub so any `run_turn_streaming`

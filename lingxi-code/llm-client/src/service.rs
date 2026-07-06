@@ -155,6 +155,16 @@ pub enum RequestIdOrigin {
     Client,
 }
 
+/// Whether `model` is an OpenRouter FREE-tier variant (`…:free`), whose 429 is a
+/// shared-quota exhaustion that does NOT clear within the retry-backoff window —
+/// so it fails fast (surfaces the rate limit immediately) instead of burning the
+/// ~160s ladder. PAID models (incl. the user's main provider) and Anthropic keep
+/// Claude Code's parity 429-retry. `:free` is OpenRouter's free-variant suffix
+/// and is unused by other providers, so it targets exactly the flaky free tier.
+fn is_free_tier_model(model: &str) -> bool {
+    model.ends_with(":free")
+}
+
 /// A retry-worthy API failure the [`ApiService`] retry loop is about to back off
 /// on, surfaced to the UI so it can show a Claude-Code-style
 /// "Retrying in Ns… (attempt X/Y)" status during the wait (mirrors
@@ -1584,6 +1594,10 @@ impl ApiService {
             consecutive_overloaded: initial_consecutive_overloaded,
             is_subscriber: sub.is_subscriber,
             is_enterprise: sub.is_enterprise,
+            // Fail FAST on a rate limit from an OpenRouter FREE-tier model (its
+            // 429 is quota exhaustion that won't clear in the backoff window); paid
+            // models + Anthropic keep the parity 429-retry.
+            rate_limit_terminal: is_free_tier_model(&req.model),
             ..RetryState::default()
         };
         // thinking_budget for telemetry: Adaptive → 0, Enabled{b} → b.
@@ -2144,6 +2158,8 @@ impl ApiService {
         let mut state = RetryState {
             is_subscriber: sub.is_subscriber,
             is_enterprise: sub.is_enterprise,
+            // Free-tier rate limits fail fast (see non-stream drive).
+            rate_limit_terminal: is_free_tier_model(&req.model),
             ..RetryState::default()
         };
         // Stream path uses settings-based retry control (same precedence as non-stream).

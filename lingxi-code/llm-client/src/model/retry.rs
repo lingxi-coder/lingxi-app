@@ -175,6 +175,13 @@ pub struct RetryState {
     /// Re-enables 429 retry for subscribers on enterprise plans
     /// (`withRetry.ts:767`).
     pub is_enterprise: bool,
+    /// `true` ⇒ a `RateLimited` (429) is TERMINAL (surfaced immediately, no
+    /// retry). Set for OpenRouter FREE-tier models (`…:free`): their 429 is
+    /// shared-quota exhaustion that does not clear within the retry-backoff
+    /// window, so burning the ~160s ladder just delays the inevitable error.
+    /// `false` (the default) keeps Claude Code's parity 429-retry for Anthropic
+    /// and every PAID model.
+    pub rate_limit_terminal: bool,
 }
 
 /// Consecutive-529 / Opus-fallback policy threaded into [`next_step`].
@@ -457,6 +464,14 @@ pub fn next_step_with_backoff(
         LlmError::RateLimited { retry_after, .. } => {
             // Reset the consecutive-overloaded counter: a rate-limit is not a 529.
             state.consecutive_overloaded = 0;
+
+            // Non-first-party rate limits (e.g. an OpenRouter free-tier quota)
+            // do not clear inside the retry-backoff window — surface them
+            // IMMEDIATELY rather than burning the ~160s ladder on a request that
+            // cannot succeed. Anthropic keeps the parity 429-retry below.
+            if state.rate_limit_terminal {
+                return DriveStep::Terminal;
+            }
 
             // 429 subscriber gate (parity withRetry.ts:767):
             //   retry_429_allowed = !is_subscriber || is_enterprise

@@ -433,6 +433,46 @@ mod next_step_tests {
 
     /// withRetry.ts:767: subscriber non-enterprise 429 → terminal (no retry).
     #[test]
+    fn non_first_party_rate_limit_fails_fast_first_party_still_retries() {
+        // A third-party provider's 429 (e.g. OpenRouter free-tier quota) is
+        // TERMINAL — surfaced immediately, no budget consumed — because it does
+        // not clear within the backoff window. First-party Anthropic keeps the
+        // parity 429-retry.
+        let mut third_party = RetryState {
+            rate_limit_terminal: true,
+            ..RetryState::default()
+        };
+        let ctl = ctl_default();
+        let step = next_step(
+            &mut third_party,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(Duration::from_secs(30)),
+                scope: None,
+            },
+            0,
+        );
+        assert_eq!(step, DriveStep::Terminal, "third-party 429 fails fast");
+        assert_eq!(third_party.attempt, 0, "no budget consumed on fail-fast");
+
+        // Control: first-party (default `rate_limit_terminal: false`) still retries.
+        let mut first_party = RetryState::default();
+        let step2 = next_step(
+            &mut first_party,
+            &ctl,
+            &LlmError::RateLimited {
+                retry_after: Some(Duration::from_secs(1)),
+                scope: None,
+            },
+            0,
+        );
+        assert!(
+            matches!(step2, DriveStep::RetryAfter(_)),
+            "first-party 429 still retries (parity)"
+        );
+    }
+
+    #[test]
     fn subscriber_429_is_terminal() {
         let mut state = RetryState {
             is_subscriber: true,

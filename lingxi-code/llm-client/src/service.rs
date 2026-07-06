@@ -81,6 +81,24 @@ fn reasoning_budget(reasoning: Option<crate::ReasoningConfig>) -> u32 {
     }
 }
 
+/// Bound `max_tokens` so `input_tokens + output` fit `context_window`: reserve
+/// the estimated input plus a small margin, with a floor. Fixes models whose
+/// advertised max-output equals their context window (models.dev has no distinct
+/// output cap — 64 OpenRouter models + gpt-4) from requesting the ENTIRE window
+/// as output, which the endpoint rejects once any input is present. Never raises
+/// `max_tokens`; leaves it unchanged when it already fits.
+fn bound_output_to_context(max_tokens: u32, context_window: u64, input_tokens: u64) -> u32 {
+    /// Headroom below the exact fit (BOS/formatting tokens the estimate misses).
+    const OUTPUT_FIT_MARGIN: u64 = 1024;
+    /// Never cap output below this — a turn must be able to produce something.
+    const MIN_OUTPUT_TOKENS: u64 = 4096;
+    let fit = context_window
+        .saturating_sub(input_tokens)
+        .saturating_sub(OUTPUT_FIT_MARGIN)
+        .max(MIN_OUTPUT_TOKENS);
+    max_tokens.min(u32::try_from(fit).unwrap_or(u32::MAX))
+}
+
 // ── Subscriber state ─────────────────────────────────────────────────────────
 
 /// Subscription flags — gates the 429 retry policy.
@@ -721,6 +739,14 @@ impl ApiService {
         let messages = to_llm_messages(ensure_tool_result_pairing(normalize_messages_for_api(
             strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST),
         )))?;
+        // Estimate the tool-schema input BEFORE `tools` is consumed — the full
+        // agent toolset is ~18k tokens and `approximate_tokens` does not count it.
+        // Used below to bound `max_tokens` against the context window.
+        let tool_input_tokens: u64 = tools
+            .iter()
+            .map(|t| t.to_string().len() as u64)
+            .sum::<u64>()
+            / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN;
         let tool_decls = to_tool_declarations(tools)?;
 
         let mut req = LlmRequest::new(model);
@@ -822,6 +848,20 @@ impl ApiService {
             ))
             .unwrap_or(u32::MAX)
         }));
+
+        // Bound max_tokens so input + output fit the model's context window. Many
+        // non-Claude models advertise output == context (models.dev has no
+        // distinct output cap — e.g. 64 OpenRouter models + gpt-4), so the
+        // max-output above requests the ENTIRE window as output and the endpoint
+        // rejects the turn once ANY input is added — including the ~18k-token tool
+        // schemas that `approximate_tokens` doesn't count. Reserve the estimated
+        // input (system + messages + tools). Claude models (output << context)
+        // are unaffected unless the input is near-full.
+        let context_window = crate::model::context_window::context_window_for_model(model, &[]);
+        let input_est = crate::model::count_tokens::approximate_tokens(&req) + tool_input_tokens;
+        if let Some(mt) = req.max_tokens {
+            req.max_tokens = Some(bound_output_to_context(mt, context_window, input_est));
+        }
 
         // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
         // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-

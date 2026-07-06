@@ -524,6 +524,114 @@ pub fn read_jobs(dir: &Path) -> Vec<(String, JobState)> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Job WRITER (M8 `--bg` dispatch) — the durable `jobs/<short>/state.json`.
+// ---------------------------------------------------------------------------
+
+/// Serializer twin of [`JobState`] (which is `Deserialize`-only). Fields carry
+/// the SAME `#[serde(rename=…)]`/`skip_serializing_if` attrs as the reader and
+/// are declared in the pinned observed key order so the written `state.json` is
+/// key-order-faithful: `state, tempo, name, sessionId, cwd, originCwd,
+/// createdAt, intent, displayIntent, template, respawnFlags, inFlight` followed
+/// by the observed extras `backend, initialPrompt`.
+///
+/// Borrows its string fields so [`dispatch_background`](crate::background_dispatch)
+/// can build one straight off a freshly-minted job without cloning.
+#[derive(Debug, Clone, Serialize)]
+pub struct JobStateWrite<'a> {
+    /// Job lifecycle state — `"working"` for a fresh `--bg` prompt so
+    /// [`build_agents_json`] keeps the workerless row without `--all`.
+    pub state: &'a str,
+    /// Job tempo — `"active"` for a fresh job (MUST NOT be `"blocked"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tempo: Option<&'a str>,
+    /// Display name (absent — the label falls back to `intent`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<&'a str>,
+    /// Session UUID of the (future) worker.
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<&'a str>,
+    /// Worker cwd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<&'a str>,
+    /// Dispatch-origin cwd.
+    #[serde(rename = "originCwd", skip_serializing_if = "Option::is_none")]
+    pub origin_cwd: Option<&'a str>,
+    /// RFC3339-millis-Z creation timestamp (a no-offset stamp makes
+    /// `parse_created_at_ms` degrade to `0`).
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<&'a str>,
+    /// Original dispatch intent (first prompt line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<&'a str>,
+    /// Overridden display intent (absent).
+    #[serde(rename = "displayIntent", skip_serializing_if = "Option::is_none")]
+    pub display_intent: Option<&'a str>,
+    /// Dispatch template (`"bg"` for a `--bg` prompt job — NOT `"exec"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<&'a str>,
+    /// Flags a respawn re-applies (`[]` for a fresh job).
+    #[serde(rename = "respawnFlags")]
+    pub respawn_flags: &'a [String],
+    /// In-flight task counters (absent for a fresh job).
+    #[serde(rename = "inFlight", skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<&'a JobInFlight>,
+    /// Job backend (`"daemon"` so `agents_notify::notify_rows` observes it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<&'a str>,
+    /// First prompt of the job session.
+    #[serde(rename = "initialPrompt", skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<&'a str>,
+}
+
+/// Write `jobs/<short>/state.json` atomically (create the dir, write a
+/// `state.json.tmp.<pid>` sibling, then rename into place — [`read_jobs`]
+/// silently drops a torn `state.json`, so the rename is what makes the row
+/// visible). Compact JSON: the reader ([`serde_json::from_str`]) tolerates
+/// either form and `state.json` files are conventionally unindented.
+pub fn write_job_state(
+    config_home: &Path,
+    short: &str,
+    job: &JobStateWrite,
+) -> std::io::Result<()> {
+    let dir = jobs_dir(config_home).join(short);
+    std::fs::create_dir_all(&dir)?;
+    let body = serde_json::to_string(job)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = dir.join(format!("state.json.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, body.as_bytes())?;
+    let target = dir.join("state.json");
+    match std::fs::rename(&tmp, &target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Mint a fresh 8-char lowercase-hex short id whose `jobs/<short>/` dir does not
+/// already exist (the pinned fixture format, e.g. `bc7c6b33`). Derives the hex
+/// from a v4 UUID.
+#[must_use]
+pub fn mint_short_id(config_home: &Path) -> String {
+    mint_short_id_with(config_home, &mut || {
+        uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+    })
+}
+
+/// [`mint_short_id`] with an injected id generator so the dir-collision retry is
+/// testable without depending on UUID entropy.
+fn mint_short_id_with(config_home: &Path, generate: &mut dyn FnMut() -> String) -> String {
+    let dir = jobs_dir(config_home);
+    loop {
+        let short = generate();
+        if !dir.join(&short).exists() {
+            return short;
+        }
+    }
+}
+
 /// Register the current process in the live-session registry and remove the
 /// record on drop. Best-effort on both sides: registration failure is
 /// swallowed (a session must never die for lack of a registry write), and a
@@ -549,6 +657,41 @@ impl SessionRegistration {
     /// Write `<config-home>/sessions/<pid>.json` for this process.
     #[must_use]
     pub fn register(config_home: &Path, session_id: Option<&str>, name: Option<&str>) -> Self {
+        Self::register_kind(config_home, session_id, name, "interactive", None)
+    }
+
+    /// Register this process as a **background worker** — `kind:"bg"` +
+    /// `jobId:<short>` (vs [`register`](Self::register)'s hardcoded
+    /// `kind:"interactive"`/`jobId:None`). This is the seam the future
+    /// pty-backed worker process calls so `build_agents_json` can match the live
+    /// worker to its `jobs/<short>/state.json` row by `jobId`.
+    ///
+    /// NOTE (daemon coherent minimum): the transient `--bg` CLI process exits
+    /// immediately, so registering `sessions/<cli_pid>.json` here would be pruned
+    /// on the next dead-pid sweep — visibility instead rides on the workerless
+    /// `state:"working"` job row. This method exists as the API the real worker
+    /// will use; the `--bg` dispatcher does not call it.
+    #[must_use]
+    pub fn register_bg(
+        config_home: &Path,
+        session_id: Option<&str>,
+        name: Option<&str>,
+        job_id: &str,
+    ) -> Self {
+        Self::register_kind(config_home, session_id, name, "bg", Some(job_id))
+    }
+
+    /// Shared record-write for [`register`](Self::register) /
+    /// [`register_bg`](Self::register_bg): the only differences are `kind` and
+    /// `jobId`.
+    #[must_use]
+    fn register_kind(
+        config_home: &Path,
+        session_id: Option<&str>,
+        name: Option<&str>,
+        kind: &str,
+        job_id: Option<&str>,
+    ) -> Self {
         let pid = std::process::id();
         let pid = i32::try_from(pid).unwrap_or(i32::MAX);
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -563,8 +706,8 @@ impl SessionRegistration {
             proc_start: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             peer_protocol: Some(1),
-            kind: "interactive".to_string(),
-            job_id: None,
+            kind: kind.to_string(),
+            job_id: job_id.map(str::to_string),
             entrypoint: Some("cli".to_string()),
             name: name.map(str::to_string),
             name_source: name.map(|_| "derived".to_string()),
@@ -968,5 +1111,139 @@ mod tests {
             parse_created_at_ms(jobs[0].1.created_at.as_deref()),
             1_782_444_718_390
         );
+    }
+
+    // ---- job WRITER (`--bg` dispatch) ----------------------------------
+
+    fn fresh_bg_job<'a>(
+        session_id: &'a str,
+        cwd: &'a str,
+        created_at: &'a str,
+        intent: &'a str,
+        prompt: &'a str,
+        respawn: &'a [String],
+    ) -> JobStateWrite<'a> {
+        JobStateWrite {
+            state: "working",
+            tempo: Some("active"),
+            name: None,
+            session_id: Some(session_id),
+            cwd: Some(cwd),
+            origin_cwd: Some(cwd),
+            created_at: Some(created_at),
+            intent: Some(intent),
+            display_intent: None,
+            template: Some("bg"),
+            respawn_flags: respawn,
+            in_flight: None,
+            backend: Some("daemon"),
+            initial_prompt: Some(prompt),
+        }
+    }
+
+    #[test]
+    fn write_job_state_round_trips_through_read_jobs_in_pinned_key_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job(
+            "7169-abcd",
+            "/home/u/proj",
+            "2026-07-04T00:00:00.000Z",
+            "port the daemon",
+            "port the daemon supervisor",
+            &respawn,
+        );
+        write_job_state(home, "bc7c6b33", &job).unwrap();
+
+        // Raw on-disk bytes: pinned key ORDER + the design's pinned substrings.
+        let raw = std::fs::read_to_string(jobs_dir(home).join("bc7c6b33/state.json")).unwrap();
+        assert!(raw.contains(r#""state":"working""#), "{raw}");
+        assert!(raw.contains(r#""template":"bg""#), "{raw}");
+        assert!(raw.contains(r#""backend":"daemon""#), "{raw}");
+        // key order: state before tempo before sessionId before createdAt before
+        // template before respawnFlags.
+        let idx = |k: &str| raw.find(k).unwrap();
+        assert!(idx(r#""state""#) < idx(r#""tempo""#));
+        assert!(idx(r#""tempo""#) < idx(r#""sessionId""#));
+        assert!(idx(r#""sessionId""#) < idx(r#""createdAt""#));
+        assert!(idx(r#""createdAt""#) < idx(r#""template""#));
+        assert!(idx(r#""template""#) < idx(r#""respawnFlags""#));
+
+        // The reader picks it up and merges it into `agents --json`.
+        let jobs = read_jobs(&jobs_dir(home));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, "bc7c6b33");
+        let rows = build_agents_json(&[], &jobs, None, false);
+        assert_eq!(rows.len(), 1, "workerless working row survives default filter");
+        assert_eq!(rows[0]["id"], "bc7c6b33");
+        assert_eq!(rows[0]["state"], "working");
+        assert_eq!(rows[0]["kind"], "background");
+        // Label falls back intent → sanitize_name; startedAt from createdAt ≠ 0.
+        assert_eq!(rows[0]["name"], "port the daemon");
+        assert_ne!(
+            rows[0]["startedAt"].as_i64().unwrap(),
+            0,
+            "RFC3339-millis-Z createdAt parses to a non-zero epoch"
+        );
+    }
+
+    #[test]
+    fn write_job_state_is_atomic_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job("s", "/p", "2026-07-04T00:00:00.000Z", "i", "p", &respawn);
+        write_job_state(home, "aaaa1111", &job).unwrap();
+        // No torn temp file left behind.
+        let dir = jobs_dir(home).join("aaaa1111");
+        assert!(dir.join("state.json").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file renamed away");
+    }
+
+    #[test]
+    fn mint_short_id_is_eight_lowercase_hex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let short = mint_short_id(tmp.path());
+        assert_eq!(short.len(), 8);
+        assert!(
+            short.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "8 lowercase hex: {short}"
+        );
+    }
+
+    #[test]
+    fn mint_short_id_skips_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(jobs_dir(home).join("aaaa1111")).unwrap();
+        // Generator yields the colliding id first (skipped), then a free one.
+        let ids = ["aaaa1111", "bbbb2222"];
+        let mut n = 0usize;
+        let short = mint_short_id_with(home, &mut || {
+            let id = ids[n].to_string();
+            n += 1;
+            id
+        });
+        assert_eq!(short, "bbbb2222");
+    }
+
+    #[test]
+    fn register_bg_carries_kind_and_job_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistration::register_bg(tmp.path(), Some("sid-9"), Some("proj"), "bc7c6b33");
+        let path = sessions_dir(tmp.path()).join(format!("{}.json", std::process::id()));
+        let rec: LiveSessionRecord =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(rec.kind, "bg");
+        assert_eq!(rec.job_id.as_deref(), Some("bc7c6b33"));
+        assert_eq!(rec.session_id.as_deref(), Some("sid-9"));
+        drop(reg);
+        assert!(!path.exists());
     }
 }

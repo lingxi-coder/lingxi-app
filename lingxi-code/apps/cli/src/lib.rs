@@ -58,6 +58,7 @@ pub mod agents_notify;
 pub mod agents_registry;
 pub mod argv;
 pub mod ax_screen_reader;
+pub mod background_dispatch;
 mod bypass_env;
 pub mod commands;
 pub mod control_plane;
@@ -361,6 +362,17 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // `auth` token from being swallowed as a billable chat prompt.
     if let Some(command) = parsed.command.clone() {
         return command.run().await;
+    }
+
+    // (M8 daemon) `--background`/`--bg` dispatch: write the durable job +
+    // roster row and ensure the supervisor daemon, then return — WITHOUT
+    // building the in-process engine/turn. Placed here (after the subcommand
+    // dispatch, before `build_runtime`) so `validate_background_args` (the
+    // `--bg` × `--print` reject above) and `--cwd` are already applied, but no
+    // billable session is constructed. This is the OS-daemon path, distinct
+    // from the in-process `registerAsyncAgent` spawner in engine-desktop.
+    if parsed.background {
+        return crate::background_dispatch::dispatch_background(&parsed).await;
     }
 
     // `--session-id <uuid>` validation (claude-code main.tsx:1276-1300), byte-exact

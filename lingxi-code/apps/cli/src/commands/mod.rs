@@ -22,6 +22,7 @@ use clap::Subcommand;
 pub mod agents;
 pub mod auth;
 pub mod auto_mode;
+pub mod daemon;
 pub mod doctor;
 pub mod gateway;
 pub mod install;
@@ -75,6 +76,9 @@ pub enum Commands {
     /// Check for updates and install if available
     #[command(name = "update", visible_alias = "upgrade")]
     Update(update::Cli),
+    /// Run the background-agent supervisor daemon (internal; spawned by `--bg`).
+    #[command(name = "daemon", hide = true)]
+    Daemon(daemon::Cli),
 }
 
 impl Commands {
@@ -93,6 +97,7 @@ impl Commands {
             Commands::Agents(c) => agents::run(c).await,
             Commands::Ultrareview(c) => ultrareview::run(c).await,
             Commands::Update(c) => update::run(c).await,
+            Commands::Daemon(c) => daemon::run(c).await,
         }
     }
 }

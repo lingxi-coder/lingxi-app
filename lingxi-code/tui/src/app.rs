@@ -25,11 +25,30 @@ use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 
-use crate::bottom_pane::{ConnectAction, WebAction};
+use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
+use crate::bottom_pane::{ConnectAction, PermissionAction, WebAction};
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
 use crate::RataTerminal;
+
+/// How the [`run_app`] event loop exited.
+///
+/// The historical loop only ever ended one way (the user quit), so `run`
+/// returned `io::Result<()>`. `/resume` adds a second, in-band exit: the picker
+/// asks the loop to UNWIND carrying the chosen session uuid so the embedder can
+/// re-mount that session in-process (the JSONL writer is retargeted at build) —
+/// NOT an in-place `resume_session` swap, which would fork the conversation
+/// across files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppExit {
+    /// The user quit (`/exit`, `/stop`, Ctrl-C twice): the embedder tears down.
+    Quit,
+    /// The `/resume` picker resolved to this session uuid: the embedder must
+    /// re-mount that session in-process (writer retargeted via the startup
+    /// resume seam).
+    SwitchSession(uuid::Uuid),
+}
 
 /// The embedding CLI/orchestrator callbacks the event loop executes when the
 /// chat widget returns an app-level [`ChatOutcome`].
@@ -50,6 +69,11 @@ pub struct AppCallbacks<'cb> {
     /// sign-in) asynchronously and reports the result back via a
     /// [`TurnEvent::SystemNotice`].
     pub on_connect_action: Box<dyn FnMut(ConnectAction) + 'cb>,
+    /// Executed on [`ChatOutcome::PermissionAction`]: the caller persists the
+    /// added/removed permission rule to its settings file (and pushes an added
+    /// allow rule into the live `session_allow_rules`) asynchronously and
+    /// reports the result back via a [`TurnEvent::SystemNotice`].
+    pub on_permission_action: Box<dyn FnMut(PermissionAction) + 'cb>,
     /// Executed on [`ChatOutcome::RunBash`]: the caller runs the `!`-prefixed
     /// command through the sandboxed bash runner (no LLM turn) and folds its
     /// output back via [`TurnEvent::BashOutput`].
@@ -110,7 +134,7 @@ impl<'cb> RataApp<'cb> {
     ///
     /// # Errors
     /// Propagates the first terminal IO error.
-    pub fn run(&mut self, terminal: &mut RataTerminal) -> io::Result<()> {
+    pub fn run(&mut self, terminal: &mut RataTerminal) -> io::Result<AppExit> {
         loop {
             while let Ok(event) = self.events_rx.try_recv() {
                 self.apply_turn_event(event);
@@ -132,7 +156,19 @@ impl<'cb> RataApp<'cb> {
                     _ => ChatOutcome::Continue,
                 };
                 match outcome {
-                    ChatOutcome::Quit => return Ok(()),
+                    ChatOutcome::Quit => return Ok(AppExit::Quit),
+                    // `/resume`: the picker resolved a session uuid. UNWIND the
+                    // loop carrying it — the embedder re-mounts that session
+                    // in-process (writer retargeted) rather than swapping the
+                    // live engine in place (which would fork the JSONL file).
+                    ChatOutcome::SwitchSession(uuid) => {
+                        // Switch-safety: cancel any in-flight streaming turn on
+                        // the OUTGOING runtime before unwinding, so a
+                        // half-streamed turn does not keep writing into the
+                        // session file the user just left. No-op when idle.
+                        self.chat_widget.cancel_active_turn();
+                        return Ok(AppExit::SwitchSession(uuid));
+                    }
                     ChatOutcome::Submit(prompt, token) => {
                         (self.callbacks.on_submit)(prompt, token);
                     }
@@ -150,6 +186,12 @@ impl<'cb> RataApp<'cb> {
                     // `WebAction` above.
                     ChatOutcome::ConnectAction(action) => {
                         (self.callbacks.on_connect_action)(action);
+                    }
+                    // A `/permissions` effect: persist the added/removed rule
+                    // off-loop (and push a live allow rule); the result returns
+                    // via `TurnEvent::SystemNotice`, same shape as `WebAction`.
+                    ChatOutcome::PermissionAction(action) => {
+                        (self.callbacks.on_permission_action)(action);
                     }
                     // A `!`-prefixed bash-mode command: run it off the model
                     // path; the output returns via `TurnEvent::BashOutput`.
@@ -310,6 +352,8 @@ pub fn run_app(
     subscription: Option<traits::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
+    permission_snapshot: Option<std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>>,
+    resume_rows: Vec<crate::resume::ResumeRow>,
     connect_auth_methods: std::collections::BTreeMap<String, String>,
     connect_availability: std::collections::BTreeMap<String, bool>,
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
@@ -321,9 +365,10 @@ pub fn run_app(
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
     on_connect_action: impl FnMut(ConnectAction),
+    on_permission_action: impl FnMut(PermissionAction),
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String),
-) -> io::Result<()> {
+) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
     // raw mode itself, so it runs BEFORE the session guard — then the
@@ -347,6 +392,7 @@ pub fn run_app(
             on_switch_model: Box::new(on_switch_model),
             on_web_action: Box::new(on_web_action),
             on_connect_action: Box::new(on_connect_action),
+            on_permission_action: Box::new(on_permission_action),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
         },
@@ -361,6 +407,10 @@ pub fn run_app(
     if let Some(slot) = web_snapshot {
         app.chat_widget.set_web_snapshot(slot);
     }
+    if let Some(slot) = permission_snapshot {
+        app.chat_widget.set_permission_snapshot(slot);
+    }
+    app.chat_widget.set_resume_rows(resume_rows);
     app.chat_widget
         .set_connect_data(connect_auth_methods, connect_availability);
     // (#3) Wire the prompt shell-expansion provider so `/commit` … expand their
@@ -421,6 +471,7 @@ mod tests {
                 on_switch_model: Box::new(|_, _| {}),
                 on_web_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
+                on_permission_action: Box::new(|_| {}),
                 on_bash: Box::new(|_| {}),
                 on_compact: Box::new(|_| {}),
             },

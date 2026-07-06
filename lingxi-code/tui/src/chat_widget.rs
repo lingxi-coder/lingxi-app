@@ -35,8 +35,10 @@ use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 use crate::bottom_pane::permission_view::PermissionView;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
+use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::{
-    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction, WebAction,
+    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction, PermissionAction,
+    WebAction,
 };
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
@@ -74,6 +76,12 @@ pub enum ChatOutcome {
     /// Copilot/OAuth sign-in. The caller runs it asynchronously and reports
     /// the result back through `TurnEvent::SystemNotice`.
     ConnectAction(ConnectAction),
+    /// A `/permissions` view asked the caller to persist an added/removed
+    /// allow/ask/deny rule. The caller runs the settings-file write (and, for
+    /// an added allow rule, the in-memory `session_allow_rules` push for
+    /// this-session effect) asynchronously and reports the result back through
+    /// `TurnEvent::SystemNotice`.
+    PermissionAction(PermissionAction),
     /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
     /// through the sandboxed [`tui_core::bash_runner::BashRunner`] (no LLM
     /// turn) and folds the captured output back through
@@ -88,6 +96,12 @@ pub enum ChatOutcome {
     /// summary back through `TurnEvent::SystemNotice`. The `String` is the
     /// (currently unused) argument tail.
     Compact(String),
+    /// The `/resume` picker resolved to this session uuid. The caller must
+    /// UNWIND the app loop (via `AppExit::SwitchSession`) and re-mount that
+    /// session in-process so the JSONL writer is retargeted to `<uuid>.jsonl` —
+    /// NOT an in-place `resume_session` swap (which would fork the conversation
+    /// across files).
+    SwitchSession(uuid::Uuid),
 }
 
 /// Live API retry-backoff status, mirroring Claude Code's `SystemAPIErrorMessage`.
@@ -204,6 +218,19 @@ pub struct ChatWidget {
     /// closure (CLI `run_ratatui`) updates it in place after a save/test so
     /// the NEXT `/web` open reflects the latest persisted state.
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
+    /// Composition-root-shared `/permissions` rule snapshot slot (`None` until
+    /// the embedder wires one via [`Self::set_permission_snapshot`]). Preloaded
+    /// at startup from the user/project/local settings files and kept current
+    /// by the async `on_permission_action` effect closure after each edit.
+    /// [`Self::cmd_permissions`] reads a clone to seed the editor.
+    permission_snapshot: Option<std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>>,
+    /// Preloaded `/resume` session rows (newest-first), wired at startup via
+    /// [`Self::set_resume_rows`]. Loaded async from disk in the CLI before the
+    /// blocking loop starts (the sync TUI loop can't `.await` a disk scan); kept
+    /// DISTINCT from the startup `--resume` picker path. [`Self::cmd_resume`]
+    /// clones these into the picker. Empty (the default) opens an empty-state
+    /// picker.
+    resume_rows: Vec<crate::resume::ResumeRow>,
     /// Per-provider login-method tag (from the catalog auth strategy), keyed
     /// by profile_name — the real data `/connect`'s picker groups/labels
     /// from. Empty (default) until [`Self::set_connect_data`] wires it.
@@ -281,6 +308,8 @@ impl ChatWidget {
             pending_terminal_sequences: Vec::new(),
             tool_inputs: std::collections::HashMap::new(),
             web_snapshot: None,
+            permission_snapshot: None,
+            resume_rows: Vec::new(),
             connect_auth_methods: std::collections::BTreeMap::new(),
             connect_availability: std::collections::BTreeMap::new(),
             shell_expansion: None,
@@ -804,6 +833,37 @@ impl ChatWidget {
         self.web_snapshot = Some(slot);
     }
 
+    /// Wire the composition root's shared `/permissions` rule snapshot slot,
+    /// preloaded from the user/project/local settings files at startup.
+    /// [`Self::cmd_permissions`] reads a clone of it to seed the editor; the
+    /// async `on_permission_action` effect closure keeps it current across
+    /// adds/removes.
+    pub fn set_permission_snapshot(
+        &mut self,
+        slot: std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>,
+    ) {
+        self.permission_snapshot = Some(slot);
+    }
+
+    /// Wire the preloaded `/resume` session rows (loaded async from disk at
+    /// startup, before the blocking loop). [`Self::cmd_resume`] clones these
+    /// into the picker.
+    pub fn set_resume_rows(&mut self, rows: Vec<crate::resume::ResumeRow>) {
+        self.resume_rows = rows;
+    }
+
+    /// Cancel any in-flight streaming turn (its `CancellationToken`), used when
+    /// the app loop is about to UNWIND for a `/resume` switch so the outgoing
+    /// turn stops streaming into the session file the user just left. Mirrors
+    /// the `Interrupt` handler's token cancel; a no-op when idle. Does NOT push
+    /// the `[Request interrupted by user]` row — the outgoing session is being
+    /// torn down, not returned to.
+    pub fn cancel_active_turn(&mut self) {
+        if let Some(token) = self.current_turn.take() {
+            token.cancel();
+        }
+    }
+
     /// Wire the composition root's real per-provider login-method +
     /// availability maps (derived from the live multi-provider catalog at
     /// startup). [`Self::cmd_connect`] reads clones of both to build the
@@ -1272,6 +1332,33 @@ impl ChatWidget {
             .map(|m| m.lock().unwrap().clone())
             .unwrap_or_default();
         self.bottom_pane.show_web_picker(snapshot);
+        ChatOutcome::Continue
+    }
+
+    /// `/permissions` (alias `/allowed-tools`): open the interactive
+    /// allow/ask/deny rule editor, seeded from the shared snapshot (the
+    /// user/project/local settings files, preloaded at startup and kept current
+    /// by the async `on_permission_action` effect closure). Falls back to an
+    /// empty snapshot when no slot is wired (headless / tests).
+    pub(crate) fn cmd_permissions(&mut self, _args: &str) -> ChatOutcome {
+        let snapshot = self
+            .permission_snapshot
+            .as_ref()
+            .map(|m| m.lock().unwrap().clone())
+            .unwrap_or_default();
+        self.bottom_pane.show_permissions_editor(snapshot);
+        ChatOutcome::Continue
+    }
+
+    /// `/resume [term]` (alias `/continue`): open the interactive session
+    /// picker, seeded from the rows preloaded at startup ([`Self::set_resume_rows`]).
+    /// With a `term` argument the picker opens pre-filtered by title. On `Enter`
+    /// the picker yields [`ChatOutcome::SwitchSession`], which unwinds the app
+    /// loop so the runtime is re-mounted against the chosen session in-process
+    /// (the JSONL writer is retargeted) — never an in-place engine swap.
+    pub(crate) fn cmd_resume(&mut self, args: &str) -> ChatOutcome {
+        self.bottom_pane
+            .show_resume_picker(self.resume_rows.clone(), args.trim());
         ChatOutcome::Continue
     }
 
@@ -1920,6 +2007,10 @@ impl ChatWidget {
             BottomPaneOutcome::PastedImage(path) => self.push_image(&path),
             BottomPaneOutcome::RunWebAction(action) => ChatOutcome::WebAction(action),
             BottomPaneOutcome::RunConnectAction(action) => ChatOutcome::ConnectAction(action),
+            BottomPaneOutcome::RunPermissionAction(action) => {
+                ChatOutcome::PermissionAction(action)
+            }
+            BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
         }
     }
 
@@ -3227,6 +3318,122 @@ mod tests {
         widget.handle_key(press(KeyCode::Esc));
         assert!(widget.bottom_pane().view_stack().is_empty());
         assert_eq!(widget.theme_name(), ThemeName::Light);
+    }
+
+    /// `/permissions` opens the interactive rule editor, and an add keystroke
+    /// round-trips through the view stack to a `ChatOutcome::PermissionAction`
+    /// while KEEPING the editor open (edit-in-place, like a `/web` test).
+    #[test]
+    fn permissions_command_opens_editor_and_add_round_trips_to_chat_outcome() {
+        use crate::bottom_pane::permissions_editor_view::PermissionsEditorView;
+        use crate::bottom_pane::PermissionAction;
+
+        let mut widget = widget();
+        assert!(matches!(
+            submit_command(&mut widget, "/permissions"),
+            ChatOutcome::Continue
+        ));
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<PermissionsEditorView>(),
+            "editor view opened"
+        );
+        // Type a rule and press Enter → PermissionAction(Add), editor stays open.
+        typ(&mut widget, "Bash(npm:*)");
+        let outcome = widget.handle_key(press(KeyCode::Enter));
+        match outcome {
+            ChatOutcome::PermissionAction(PermissionAction::Add {
+                rule,
+                behavior,
+                dest,
+            }) => {
+                assert_eq!(rule, "Bash(npm:*)");
+                assert_eq!(behavior, permission::PermissionBehavior::Allow);
+                assert_eq!(dest, permission::PermissionUpdateDestination::LocalSettings);
+            }
+            _ => panic!("expected ChatOutcome::PermissionAction(Add)"),
+        }
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<PermissionsEditorView>(),
+            "editor stays open after an add"
+        );
+        // Esc closes it.
+        widget.handle_key(press(KeyCode::Esc));
+        assert!(widget.bottom_pane().view_stack().is_empty());
+    }
+
+    /// `/resume` opens the session picker seeded from the preloaded rows, and
+    /// pressing Enter on a row round-trips to `ChatOutcome::SwitchSession(uuid)`
+    /// (the loop-unwinding signal that re-mounts the chosen session).
+    #[test]
+    fn resume_command_opens_picker_and_enter_yields_switch_session() {
+        use crate::bottom_pane::resume_picker_view::ResumePickerView;
+        use crate::resume::ResumeRow;
+
+        let want = uuid::Uuid::new_v4();
+        let rows = vec![ResumeRow {
+            uuid: want,
+            title: "fix the parser".to_string(),
+            metadata_label: "2 minutes ago \u{00b7} 4 messages".to_string(),
+        }];
+
+        let mut widget = widget();
+        widget.set_resume_rows(rows);
+        assert!(matches!(
+            submit_command(&mut widget, "/resume"),
+            ChatOutcome::Continue
+        ));
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<ResumePickerView>(),
+            "resume picker opened"
+        );
+        // Enter on the only row → SwitchSession(uuid), picker closes.
+        match widget.handle_key(press(KeyCode::Enter)) {
+            ChatOutcome::SwitchSession(uuid) => assert_eq!(uuid, want),
+            _ => panic!("expected ChatOutcome::SwitchSession"),
+        }
+        assert!(
+            widget.bottom_pane().view_stack().is_empty(),
+            "picker closes after a pick"
+        );
+    }
+
+    /// `/resume <term>` opens the picker pre-filtered by the argument.
+    #[test]
+    fn resume_command_with_arg_prefilters_the_picker() {
+        use crate::bottom_pane::resume_picker_view::ResumePickerView;
+        use crate::resume::ResumeRow;
+
+        let mut widget = widget();
+        widget.set_resume_rows(vec![
+            ResumeRow {
+                uuid: uuid::Uuid::new_v4(),
+                title: "fix bug".to_string(),
+                metadata_label: String::new(),
+            },
+            ResumeRow {
+                uuid: uuid::Uuid::new_v4(),
+                title: "add feature".to_string(),
+                metadata_label: String::new(),
+            },
+        ]);
+        submit_command(&mut widget, "/resume feature");
+        let picker = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| v.as_any().downcast_ref::<ResumePickerView>())
+            .expect("resume picker active");
+        assert_eq!(picker.state().filtered().len(), 1);
+        assert_eq!(picker.state().filtered()[0].title, "add feature");
     }
 
     #[test]

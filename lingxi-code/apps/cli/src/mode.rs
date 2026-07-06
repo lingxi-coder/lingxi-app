@@ -188,12 +188,17 @@ pub async fn dispatch(
             // FRESH launch: ratatui (`tui-rata`) is the only TUI backend. It
             // drives the live orchestrator directly via `tui_build`'s bridge
             // channel; no replayed scrollback (empty seed).
-            let code = run_ratatui(tui_build, Some(session_registration.clone()), Vec::new()).await;
+            let outcome =
+                run_ratatui(tui_build, Some(session_registration.clone()), Vec::new()).await;
             // Unlink NOW (idempotent with Drop): the status forwarders may still
             // hold `Arc` clones inside detached tasks, and the record must not
             // outlive the interactive session.
             session_registration.deregister();
-            code
+            // Follow an in-session `/resume` switch by re-mounting the chosen
+            // session in-process (writer retargeted) until the user quits. A
+            // switch re-mounts WITHOUT re-registering (resume never registers,
+            // matching the existing `--resume` behavior).
+            crate::run::drive_tui_switch_loop(argv, outcome).await
         }
     }
 }
@@ -210,11 +215,25 @@ pub async fn dispatch(
 /// status effect @222989611): `TurnStarted` → `busy`, `TurnEnded` → `idle`,
 /// a pending permission exchange → `waiting` with `waitingFor: "permission
 /// prompt"` (the binary's dialog-open reason), resolved exchange → `busy`.
+/// How [`run_ratatui`] exited, so the mount caller
+/// ([`crate::run::drive_tui_switch_loop`]) can either finish (returning the
+/// process exit code) or follow an in-session `/resume` switch by re-mounting
+/// the chosen session in-process (writer retargeted) — never an in-place
+/// `resume_session` swap, which would fork the conversation across files.
+pub(crate) enum RunOutcome {
+    /// The TUI exited normally; carry the process exit code.
+    Exit(i32),
+    /// The `/resume` picker resolved to this session uuid; the caller re-mounts
+    /// it in-process via [`crate::run::load_resume_session`] +
+    /// [`crate::run::mount_resumed_tui`].
+    SwitchTo(uuid::Uuid),
+}
+
 pub(crate) async fn run_ratatui(
     tui_build: crate::init::TuiBuild,
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
     resumed_messages: Vec<tui::RenderedMessage>,
-) -> i32 {
+) -> RunOutcome {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
     let (bridge_rx, permission_rx) = match &registration {
         Some(reg) => (
@@ -224,9 +243,15 @@ pub(crate) async fn run_ratatui(
         None => (tui_build.bridge_rx, tui_build.permission_rx),
     };
     let turn_tx = tui_build.turn_tx;
+    // (/permissions) The gate's live allow-rule bucket + the settings-file
+    // roots the interactive editor writes to (same roots the AllowAlways
+    // persist uses). Grabbed before `tui_build` is consumed further below.
+    let permission_paths = tui_build.permission_paths.clone();
+    let session_allow_rules = tui_build.session_allow_rules.clone();
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
+    let permission_turn_tx = turn_tx.clone();
     let bash_turn_tx = turn_tx.clone();
     let compact_turn_tx = turn_tx.clone();
     // (/reload-skills) The SAME shared `Arc<RwLock<CommandRegistry>>` the
@@ -267,6 +292,7 @@ pub(crate) async fn run_ratatui(
     let switch_handle = handle.clone();
     let web_handle = handle.clone();
     let connect_handle = handle.clone();
+    let permission_handle = handle.clone();
     let bash_handle = handle.clone();
     let summary_orch = orchestrator.clone();
     // (/compact) A handle + orchestrator clone for the off-loop `force_compact`
@@ -307,6 +333,23 @@ pub(crate) async fn run_ratatui(
             last_test: None,
         }))
     };
+    // (/permissions) Preload the rule snapshot from the user/project/local
+    // settings files into a shared slot, mirroring the `/web` snapshot above.
+    // `ChatWidget::cmd_permissions` reads a clone to seed the editor; the async
+    // `on_permission_action` effect re-reads disk into this slot after each
+    // edit so the NEXT `/permissions` open is current. Kept DISTINCT from the
+    // startup `--resume` path (this is a settings read, not a session scan).
+    let permission_snapshot = std::sync::Arc::new(std::sync::Mutex::new(
+        tui::bottom_pane::permissions_editor_view::PermissionsSnapshot::load(&permission_paths),
+    ));
+    // (/resume) Preload the recent-session rows for the interactive picker.
+    // This is an ASYNC disk scan (the M5-08 loader), so it MUST run here — the
+    // blocking ratatui loop can't `.await`. The rows go slightly stale as new
+    // sessions are written, exactly like claude-code's snapshot. Kept DISTINCT
+    // from the startup `--resume` picker path (`run_resume_iocraft`): this seeds
+    // the IN-SESSION `/resume` command, which switches the live session by an
+    // in-process re-mount rather than a fresh launch.
+    let resume_rows = crate::run::load_resume_picker_rows().await;
     let current_model = session
         .models
         .iter()
@@ -392,6 +435,24 @@ pub(crate) async fn run_ratatui(
         let tx = connect_turn_tx.clone();
         connect_handle.spawn(async move {
             run_connect_action(action, key_store, oauth, copilot, tx).await;
+        });
+    };
+    // (/permissions async effect) The editor returns a `PermissionAction`
+    // synchronously from the blocking ratatui loop; the settings-file write is
+    // async, so it is spawned onto the captured handle — same shape as
+    // `on_web_action` above. For an ADDED allow rule the effect also pushes
+    // into the gate's live `session_allow_rules` so it takes effect THIS
+    // session (deny/ask are effective-next-load). The result lands in the
+    // transcript via `TurnEvent::SystemNotice`, and the shared snapshot slot is
+    // refreshed so the next `/permissions` open reflects the edit.
+    let permission_snapshot_cb = permission_snapshot.clone();
+    let on_permission_action = move |action: tui::bottom_pane::PermissionAction| {
+        let paths = permission_paths.clone();
+        let allow_rules = session_allow_rules.clone();
+        let tx = permission_turn_tx.clone();
+        let snapshot = permission_snapshot_cb.clone();
+        permission_handle.spawn(async move {
+            run_permission_action(action, paths, allow_rules, tx, snapshot).await;
         });
     };
     // (`!` bash mode) `!command` is submitted synchronously from the blocking
@@ -489,6 +550,8 @@ pub(crate) async fn run_ratatui(
             Some(subscription),
             Some(status_line),
             Some(web_snapshot),
+            Some(permission_snapshot),
+            resume_rows,
             connect_auth_methods,
             connect_availability,
             Some(shell_expansion),
@@ -498,6 +561,7 @@ pub(crate) async fn run_ratatui(
             on_switch_model,
             on_web_action,
             on_connect_action,
+            on_permission_action,
             on_bash,
             on_compact,
         )
@@ -533,7 +597,7 @@ pub(crate) async fn run_ratatui(
         }
     }
     match run_result {
-        Ok(Ok(())) => {
+        Ok(Ok(tui::app::AppExit::Quit)) => {
             // Print the BARE uuid (not the `sess:`-prefixed SessionId Display):
             // it matches the on-disk `<uuid>.jsonl` and what `--resume` resolves
             // to (claude-code uses bare uuids for session ids end-to-end).
@@ -541,15 +605,174 @@ pub(crate) async fn run_ratatui(
             println!(
                 "\nSession {session_uuid} saved. Resume with: lingxi --resume {session_uuid}"
             );
-            exit_codes::SUCCESS
+            RunOutcome::Exit(exit_codes::SUCCESS)
         }
+        // (/resume) The picker resolved a session uuid: hand it up so the mount
+        // caller re-mounts that session in-process. The outgoing session's cost
+        // was already persisted above (that block runs for EVERY exit arm), and
+        // `summary_orch.request_exit()` above closed the outgoing responses
+        // websocket while `RataApp::run` cancelled the outgoing in-flight turn
+        // before unwinding — so the outgoing session is fully wound down. SUPPRESS
+        // the "Session saved" tail here: the process continues into the re-mount,
+        // so that stdout line would otherwise scroll into the next session.
+        Ok(Ok(tui::app::AppExit::SwitchSession(uuid))) => RunOutcome::SwitchTo(uuid),
         Ok(Err(e)) => {
             eprintln!("lingxi-cli: tui-rata session failed: {e}");
-            exit_codes::RUNTIME_ERROR
+            RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
         }
         Err(e) => {
             eprintln!("lingxi-cli: tui-rata task join failed: {e}");
-            exit_codes::RUNTIME_ERROR
+            RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
+        }
+    }
+}
+
+/// Run one `/permissions` [`tui::bottom_pane::PermissionAction`] to
+/// completion: merge the added/removed rule into its destination settings file
+/// via [`permission::persist_permission_update`] /
+/// [`permission::remove_permission_update`], and (for an ADDED allow rule) push
+/// it into the gate's live `session_allow_rules` so it takes effect this
+/// session. The snapshot slot is re-read from disk afterward so the next
+/// `/permissions` open reflects the edit, and the outcome is reported to the
+/// transcript via `TurnEvent::SystemNotice` — mirroring [`run_web_action`]'s
+/// off-loop shape.
+async fn run_permission_action(
+    action: tui::bottom_pane::PermissionAction,
+    paths: permission::PermissionPaths,
+    session_allow_rules: std::sync::Arc<tokio::sync::Mutex<Vec<permission::PermissionRule>>>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+    snapshot: std::sync::Arc<
+        std::sync::Mutex<tui::bottom_pane::permissions_editor_view::PermissionsSnapshot>,
+    >,
+) {
+    use permission::{
+        persist_permission_update, remove_permission_update, PermissionBehavior, PermissionRule,
+        PermissionRuleSource, PermissionRuleValue, PermissionUpdate, PermissionUpdateDestination,
+    };
+    use tui::bottom_pane::permissions_editor_view::PermissionsSnapshot;
+    use tui::bottom_pane::PermissionAction;
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    let behavior_word = |b: PermissionBehavior| match b {
+        PermissionBehavior::Allow => "allow",
+        PermissionBehavior::Deny => "deny",
+        PermissionBehavior::Ask => "ask",
+    };
+    let dest_word = |d: PermissionUpdateDestination| match d {
+        PermissionUpdateDestination::UserSettings => "user settings",
+        PermissionUpdateDestination::ProjectSettings => "project settings",
+        PermissionUpdateDestination::LocalSettings => "local settings",
+        PermissionUpdateDestination::Session => "session",
+        PermissionUpdateDestination::CliArg => "cli",
+    };
+    // The source an added/removed rule is tagged with, for its destination file
+    // (persist keys off `behavior` + `destination`, not `source`; this is for
+    // the live `session_allow_rules` citation on an allow add).
+    let dest_source = |d: PermissionUpdateDestination| match d {
+        PermissionUpdateDestination::UserSettings => PermissionRuleSource::UserSettings,
+        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::ProjectSettings,
+        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::LocalSettings,
+        PermissionUpdateDestination::Session => PermissionRuleSource::Session,
+        PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
+    };
+    let refresh = |paths: &permission::PermissionPaths| {
+        let fresh = PermissionsSnapshot::load(paths);
+        if let Ok(mut slot) = snapshot.lock() {
+            *slot = fresh;
+        }
+    };
+
+    match action {
+        PermissionAction::Add {
+            rule,
+            behavior,
+            dest,
+        } => {
+            let update = PermissionUpdate {
+                rule: PermissionRule {
+                    value: PermissionRuleValue::from_rule_string(&rule),
+                    behavior,
+                    source: dest_source(dest),
+                },
+                destination: dest,
+            };
+            match persist_permission_update(&update, &paths).await {
+                Ok(written) => {
+                    // Live this-session effect for allow rules: mirror the
+                    // AllowAlways dialog's `session_allow_rules` push so the
+                    // rule short-circuits the gate immediately (deny/ask have
+                    // no live bucket → effective-next-load).
+                    if behavior == PermissionBehavior::Allow {
+                        session_allow_rules.lock().await.push(update.rule.clone());
+                    }
+                    refresh(&paths);
+                    let body = if written {
+                        format!(
+                            "✓ Added {rule} to {} rules ({}).",
+                            behavior_word(behavior),
+                            dest_word(dest)
+                        )
+                    } else {
+                        format!(
+                            "{rule} is already in {} rules ({}).",
+                            behavior_word(behavior),
+                            dest_word(dest)
+                        )
+                    };
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body,
+                        is_error: false,
+                    });
+                }
+                Err(e) => {
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("✗ Failed to add permission rule: {e}"),
+                        is_error: true,
+                    });
+                }
+            }
+        }
+        PermissionAction::Remove {
+            rule,
+            behavior,
+            dest,
+        } => {
+            let update = PermissionUpdate {
+                rule: PermissionRule {
+                    value: PermissionRuleValue::from_rule_string(&rule),
+                    behavior,
+                    source: dest_source(dest),
+                },
+                destination: dest,
+            };
+            match remove_permission_update(&update, &paths).await {
+                Ok(removed) => {
+                    refresh(&paths);
+                    let body = if removed {
+                        format!(
+                            "✓ Removed {rule} from {} rules ({}).",
+                            behavior_word(behavior),
+                            dest_word(dest)
+                        )
+                    } else {
+                        format!(
+                            "{rule} was not found in {} rules ({}).",
+                            behavior_word(behavior),
+                            dest_word(dest)
+                        )
+                    };
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body,
+                        is_error: false,
+                    });
+                }
+                Err(e) => {
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("✗ Failed to remove permission rule: {e}"),
+                        is_error: true,
+                    });
+                }
+            }
         }
     }
 }

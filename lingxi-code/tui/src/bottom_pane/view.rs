@@ -12,6 +12,7 @@ use std::any::Any;
 
 use crossterm::event::KeyEvent;
 use permission::gate::PermissionResponse;
+use permission::{PermissionBehavior, PermissionUpdateDestination};
 
 use crate::renderable::Renderable;
 
@@ -52,6 +53,51 @@ pub enum ViewOutcome {
     /// over and the result is reported into the transcript, not back into a
     /// still-open screen.
     RunConnectAction(ConnectAction),
+    /// The view asks the app to run a `/permissions` effect (persist an
+    /// added/removed allow/ask/deny rule to a settings file) on its behalf.
+    /// Like [`Self::RunWebAction`]'s test path, the editor stays OPEN so the
+    /// user can make several edits; the async persist result is reported back
+    /// through `TurnEvent::SystemNotice`.
+    RunPermissionAction(PermissionAction),
+    /// The `/resume` picker resolved to this session uuid. Unlike the off-loop
+    /// effect variants above, this UNWINDS the app loop: the owner
+    /// (`RataApp::run` → `run_app`) returns an `AppExit::SwitchSession(uuid)` so
+    /// the runtime is re-mounted in-process against that session (the JSONL
+    /// writer is retargeted) — NEVER an in-place `resume_session` swap.
+    SwitchSession(uuid::Uuid),
+}
+
+/// An app-level `/permissions` effect a view can request via
+/// [`ViewOutcome::RunPermissionAction`]. The owner runs these asynchronously
+/// (settings-file merge via [`permission::persist_permission_update`] /
+/// [`permission::remove_permission_update`], plus an in-memory
+/// `session_allow_rules` push for an added allow rule so it takes effect this
+/// session) and reports the result back through `TurnEvent::SystemNotice`.
+///
+/// Rule strings are the `"Tool"` / `"Tool(content)"` wire form and are NOT
+/// secret, so the derived `Debug` is fine (unlike [`WebAction`]/[`ConnectAction`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionAction {
+    /// Add `rule` to `permissions.{allow|ask|deny}` (keyed by `behavior`) in
+    /// the `dest` settings file.
+    Add {
+        /// The rule string (`"Bash(npm:*)"`), as typed.
+        rule: String,
+        /// Which permission bucket the rule goes into.
+        behavior: PermissionBehavior,
+        /// Which settings file to persist to (User/Project/Local).
+        dest: PermissionUpdateDestination,
+    },
+    /// Remove `rule` from `permissions.{allow|ask|deny}` (keyed by `behavior`)
+    /// in the `dest` settings file it came from.
+    Remove {
+        /// The rule string to remove.
+        rule: String,
+        /// Which permission bucket the rule lives in.
+        behavior: PermissionBehavior,
+        /// Which settings file the rule came from (User/Project/Local).
+        dest: PermissionUpdateDestination,
+    },
 }
 
 /// An app-level `/connect` effect a view can request via

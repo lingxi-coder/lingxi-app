@@ -1442,7 +1442,11 @@ async fn resume_resolved_session(
     // `--no-tui`) mount the live TUI with the prior conversation replayed (the
     // M5-13 milestone); otherwise fall back to the stdio notice.
     if crate::mode::is_full_tty() && !argv.no_tui {
-        return mount_resumed_tui(argv, session_id, messages).await;
+        // Drive the mount, following any in-session `/resume` switch by
+        // re-mounting the chosen session in-process (writer retargeted) until
+        // the user quits — never an in-place `resume_session` swap.
+        let first = mount_resumed_tui(argv, session_id, messages).await;
+        return drive_tui_switch_loop(argv, first).await;
     }
 
     sink.text(&format!("Resumed session {session_id}\n")).await;
@@ -1482,7 +1486,7 @@ async fn mount_resumed_tui(
     argv: &Argv,
     session_id: uuid::Uuid,
     messages: Vec<JsonlMessage>,
-) -> i32 {
+) -> crate::mode::RunOutcome {
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
@@ -1490,7 +1494,7 @@ async fn mount_resumed_tui(
         Ok(b) => b,
         Err(e) => {
             eprintln!("lingxi-cli: tui init failed: {e}");
-            return exit_codes::RUNTIME_ERROR;
+            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
         }
     };
     // ENGINE seed: replay the transcript into the orchestrator's session so a
@@ -1519,6 +1523,46 @@ async fn mount_resumed_tui(
     // status forwarder is threaded.
     let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
     crate::mode::run_ratatui(tui_build, None, resumed_messages).await
+}
+
+/// Drive a mounted TUI, following any in-session `/resume` switch by re-mounting
+/// the chosen session in-process until the user quits.
+///
+/// This is the seam that makes `/resume` a REAL mid-conversation switch WITHOUT
+/// an in-place `resume_session` swap (which does not retarget the JSONL writer,
+/// so it would fork the conversation across files). Each switch:
+///   1. tears the current runtime down through the normal `run_ratatui` exit —
+///      the outgoing session's cost is persisted and its in-flight turn +
+///      responses websocket are cancelled there (`mode::run_ratatui`), BEFORE
+///      this loop sees the [`crate::mode::RunOutcome::SwitchTo`]; then
+///   2. rebuilds a fresh runtime pinned to the target session file via the SAME
+///      proven startup resume seam ([`mount_resumed_tui`] →
+///      `build_runtime_for_tui_inner(argv, Some(id))`), replaying its scrollback.
+///
+/// A load failure for the switch target cannot fall back to the just-unwound
+/// session (its runtime is gone), so it surfaces the error and exits.
+pub(crate) async fn drive_tui_switch_loop(
+    argv: &Argv,
+    first: crate::mode::RunOutcome,
+) -> i32 {
+    let mut outcome = first;
+    loop {
+        match outcome {
+            crate::mode::RunOutcome::Exit(code) => return code,
+            crate::mode::RunOutcome::SwitchTo(session_id) => {
+                let messages = match load_resume_session(session_id).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!(
+                            "lingxi-cli: /resume failed to load session {session_id}: {e}"
+                        );
+                        return exit_codes::RUNTIME_ERROR;
+                    }
+                };
+                outcome = mount_resumed_tui(argv, session_id, messages).await;
+            }
+        }
+    }
 }
 
 /// Seed an already-built orchestrator's in-memory [`engine::SessionState`] from
@@ -1644,29 +1688,8 @@ async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i32 {
     };
 
     // Map the loader metadata into the picker's lean rows (the picker crate does
-    // not depend on the `session` loader). The dim metadata line is built with
-    // the picker's `relative_time_ago` so it stays byte-identical to the old
-    // iocraft screen: `<relative time ago> · <N> messages`.
-    let now = std::time::SystemTime::now();
-    let picker_rows: Vec<tui::resume::ResumeRow> = rows
-        .iter()
-        .map(|m| {
-            let msgs = if m.message_count == 1 {
-                "1 message".to_string()
-            } else {
-                format!("{} messages", m.message_count)
-            };
-            tui::resume::ResumeRow {
-                uuid: m.uuid,
-                title: m.title.clone(),
-                metadata_label: format!(
-                    "{} \u{00b7} {}",
-                    tui::resume::relative_time_ago(m.modified, now),
-                    msgs
-                ),
-            }
-        })
-        .collect();
+    // not depend on the `session` loader).
+    let picker_rows = map_resume_rows(&rows);
 
     // Blocking terminal IO → off the async runtime, like the chat `run_app`.
     let picked =
@@ -1714,6 +1737,50 @@ async fn load_resume_rows_from(
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.to_path_buf()));
     list_recent_sessions(lingxi_home, &cwd_str, 5, fs).await
+}
+
+/// Map M5-08 loader metadata into the picker's lean [`tui::resume::ResumeRow`]s
+/// (newest-first). The dim metadata line is built with the picker's
+/// `relative_time_ago` so it stays byte-identical to the alt-screen picker:
+/// `<relative time ago> · <N> messages`. Shared by the startup `--resume` picker
+/// ([`run_resume_iocraft`]) and the in-session `/resume` preload
+/// ([`load_resume_picker_rows`]).
+fn map_resume_rows(rows: &[SessionMetadata]) -> Vec<tui::resume::ResumeRow> {
+    let now = std::time::SystemTime::now();
+    rows.iter()
+        .map(|m| {
+            let msgs = if m.message_count == 1 {
+                "1 message".to_string()
+            } else {
+                format!("{} messages", m.message_count)
+            };
+            tui::resume::ResumeRow {
+                uuid: m.uuid,
+                title: m.title.clone(),
+                metadata_label: format!(
+                    "{} \u{00b7} {}",
+                    tui::resume::relative_time_ago(m.modified, now),
+                    msgs
+                ),
+            }
+        })
+        .collect()
+}
+
+/// (in-session `/resume`) Preload the recent-session rows for the interactive
+/// `/resume` bottom-pane picker, mapped from the M5-08 loader. This is the ASYNC
+/// disk scan the blocking ratatui loop cannot run itself, so it is called ONCE
+/// before the loop starts (`mode::run_ratatui`) into a shared slot the widget
+/// reads. Kept DISTINCT from the startup `--resume` picker path
+/// ([`run_resume_iocraft`]): this seeds the LIVE `/resume` command, which
+/// switches the session by an in-process re-mount rather than a fresh launch.
+/// Returns an empty list on any load error (the picker then shows its
+/// empty-state screen), so a scan failure never blocks the mount.
+pub(crate) async fn load_resume_picker_rows() -> Vec<tui::resume::ResumeRow> {
+    match load_resume_rows().await {
+        Ok(rows) => map_resume_rows(&rows),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Load a concrete session by UUID for the `--resume <uuid>` path, using the

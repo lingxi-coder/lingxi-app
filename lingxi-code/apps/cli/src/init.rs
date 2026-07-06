@@ -151,6 +151,19 @@ pub struct TuiBuild {
     /// Threaded into `session::Runtime::with_permission_rx` so the TUI's
     /// permission pump drives the interactive dialog.
     pub permission_rx: tokio::sync::mpsc::Receiver<tui_core::permission_bridge::PermissionExchange>,
+    /// (/permissions) The gate's shared session-scoped allow-rule list. The
+    /// `/permissions` editor pushes an ADDED allow rule here (in addition to
+    /// the disk persist) so it takes effect THIS session — the same in-memory
+    /// bucket the "always allow" dialog appends to
+    /// (`TuiPermissionGate::session_allow_rules`). Deny/ask rules have no live
+    /// bucket, so they are effective-next-load.
+    pub session_allow_rules:
+        std::sync::Arc<tokio::sync::Mutex<Vec<permission::PermissionRule>>>,
+    /// (/permissions) The resolved settings-file roots for the interactive
+    /// editor's disk writes (`permissions.{allow,ask,deny}` in
+    /// user/project/local settings) and its snapshot preload — the SAME paths
+    /// the gate's `AllowAlways` persist uses.
+    pub permission_paths: permission::PermissionPaths,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -735,13 +748,18 @@ pub async fn build_runtime_for_tui_inner(
     let (perm_tx, perm_rx) =
         tokio::sync::mpsc::channel::<tui_core::permission_bridge::PermissionExchange>(16);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    // (/permissions) The interactive editor reuses BOTH the gate's live
+    // allow-rule bucket (for this-session effect of an added allow rule) and
+    // the same settings-file roots the gate persists to. Clone before the
+    // originals move into the gate below.
+    let editor_session_allow_rules = session_allow_rules.clone();
+    let permission_paths = permission::PermissionPaths {
+        lingxi_home: cfg.lingxi_home.clone(),
+        cwd: cfg.cwd.clone(),
+    };
     let gate = std::sync::Arc::new(
-        tui::permission_gate::TuiPermissionGate::new(perm_tx, session_allow_rules).with_persist(
-            permission::PermissionPaths {
-                lingxi_home: cfg.lingxi_home.clone(),
-                cwd: cfg.cwd.clone(),
-            },
-        ),
+        tui::permission_gate::TuiPermissionGate::new(perm_tx, session_allow_rules)
+            .with_persist(permission_paths.clone()),
     );
     cfg.injected_permission_gate =
         Some(gate as std::sync::Arc<dyn permission::gate::PermissionGate>);
@@ -752,6 +770,8 @@ pub async fn build_runtime_for_tui_inner(
         bridge_rx,
         turn_tx,
         permission_rx: perm_rx,
+        session_allow_rules: editor_session_allow_rules,
+        permission_paths,
     })
 }
 

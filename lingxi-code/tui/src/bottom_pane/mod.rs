@@ -24,6 +24,8 @@ pub mod footer;
 pub mod model_picker_view;
 pub mod pending_input_preview;
 pub mod permission_view;
+pub mod permissions_editor_view;
+pub mod resume_picker_view;
 pub mod screen_view;
 pub mod theme_picker_view;
 pub mod view;
@@ -52,7 +54,10 @@ use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
-pub use view::{BottomPaneView, CommandAction, ConnectAction, ViewAction, ViewOutcome, WebAction};
+pub use view::{
+    BottomPaneView, CommandAction, ConnectAction, PermissionAction, ViewAction, ViewOutcome,
+    WebAction,
+};
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
@@ -105,6 +110,16 @@ pub enum BottomPaneOutcome {
     /// cleared by [`ViewStack::apply`] by the time this surfaces (see
     /// [`ViewOutcome::RunConnectAction`]).
     RunConnectAction(ConnectAction),
+    /// A view asks the owner to run a `/permissions` effect (persist an
+    /// added/removed rule) on its behalf. The editor stays OPEN (like a `/web`
+    /// test), so the user can make several edits before closing.
+    RunPermissionAction(PermissionAction),
+    /// The `/resume` picker resolved to this session uuid: the owner must
+    /// UNWIND its loop and re-mount that session in-process (writer retargeted)
+    /// — surfaced up through `ChatOutcome::SwitchSession` → `AppExit`. The
+    /// whole picker view stack has already been cleared by [`ViewStack::apply`]
+    /// by the time this surfaces.
+    SwitchSession(uuid::Uuid),
     /// Ctrl-O: the owner should toggle transcript verbose mode (and reflect
     /// the new state back via [`BottomPane::set_verbose`]).
     ToggleVerbose,
@@ -267,6 +282,33 @@ impl BottomPane {
             .push(Box::new(web_picker_view::WebPickerView::new(snapshot)));
     }
 
+    /// Open the `/permissions` rule editor over `snapshot` (the current
+    /// allow/ask/deny rules across the user/project/local settings files).
+    pub fn show_permissions_editor(
+        &mut self,
+        snapshot: permissions_editor_view::PermissionsSnapshot,
+    ) {
+        self.view_stack.push(Box::new(
+            permissions_editor_view::PermissionsEditorView::new(snapshot),
+        ));
+    }
+
+    /// Open the `/resume` session picker over `rows` (preloaded at startup),
+    /// pre-filtered by `query` when non-empty (the `/resume <term>` argument).
+    /// The picker paints with the pane's active `theme`.
+    pub fn show_resume_picker(
+        &mut self,
+        rows: Vec<crate::resume::ResumeRow>,
+        query: &str,
+    ) {
+        let view = if query.is_empty() {
+            resume_picker_view::ResumePickerView::new(rows, self.theme)
+        } else {
+            resume_picker_view::ResumePickerView::with_query(rows, self.theme, query)
+        };
+        self.view_stack.push(Box::new(view));
+    }
+
     /// Open the `/connect` provider picker over `auth_methods` (per-provider
     /// login method tag) joined with `availability` (which providers already
     /// have a usable credential).
@@ -406,6 +448,10 @@ impl BottomPane {
             ViewOutcome::RunCommand(action) => BottomPaneOutcome::RunCommand(action),
             ViewOutcome::RunWebAction(action) => BottomPaneOutcome::RunWebAction(action),
             ViewOutcome::RunConnectAction(action) => BottomPaneOutcome::RunConnectAction(action),
+            ViewOutcome::RunPermissionAction(action) => {
+                BottomPaneOutcome::RunPermissionAction(action)
+            }
+            ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
         }
     }
 
@@ -927,6 +973,21 @@ impl ViewStack {
                 self.views.clear();
                 ViewOutcome::RunConnectAction(action)
             }
+            // A `/permissions` add/remove keeps the editor OPEN (like a `/web`
+            // test) so the user can make several edits in one session; the
+            // persist result lands in the transcript, and the in-view buckets
+            // already updated optimistically. Only `Esc` (→ `Cancelled`)
+            // closes it.
+            ViewOutcome::RunPermissionAction(action) => {
+                ViewOutcome::RunPermissionAction(action)
+            }
+            // A `/resume` pick CLOSES the whole picker (like `/connect`): the
+            // owner is about to unwind the app loop and re-mount the chosen
+            // session, so there is no live view to return to.
+            ViewOutcome::SwitchSession(uuid) => {
+                self.views.clear();
+                ViewOutcome::SwitchSession(uuid)
+            }
             ViewOutcome::Cancelled => {
                 // A cancelled child pops alone: parents stay open (codex
                 // parity — cancel returns to the parent flow).
@@ -1118,6 +1179,22 @@ mod tests {
             })),
             0,
             "RunConnectAction clears the connect stack"
+        );
+        // A /permissions add/remove keeps the editor open (edit in place).
+        assert_eq!(
+            drive(ViewOutcome::RunPermissionAction(PermissionAction::Add {
+                rule: "Bash(npm:*)".to_string(),
+                behavior: permission::PermissionBehavior::Allow,
+                dest: permission::PermissionUpdateDestination::LocalSettings,
+            })),
+            1,
+            "RunPermissionAction keeps the editor open"
+        );
+        // A /resume pick clears the picker (the owner unwinds + re-mounts).
+        assert_eq!(
+            drive(ViewOutcome::SwitchSession(uuid::Uuid::new_v4())),
+            0,
+            "SwitchSession clears the picker stack"
         );
     }
 

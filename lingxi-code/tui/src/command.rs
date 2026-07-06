@@ -105,6 +105,22 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_connect,
     },
     SlashCommand {
+        name: "/permissions",
+        aliases: &["/allowed-tools"],
+        description: "Manage allow, ask, and deny tool permission rules",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_permissions,
+    },
+    SlashCommand {
+        name: "/resume",
+        aliases: &["/continue"],
+        description: "Resume a previous conversation",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_resume,
+    },
+    SlashCommand {
         name: "/hooks",
         aliases: &[],
         description: "List hooks",
@@ -577,6 +593,15 @@ mod tests {
         assert_eq!(resolve("  /clear  ").expect("trimmed").0.name, "/clear");
         // An alias resolves to its canonical entry.
         assert_eq!(resolve("/quit").expect("alias").0.name, "/exit");
+        // /permissions is registered with its claude-code alias.
+        assert_eq!(resolve("/permissions").expect("registered").0.name, "/permissions");
+        assert_eq!(
+            resolve("/allowed-tools").expect("alias").0.name,
+            "/permissions"
+        );
+        // /resume is registered with its claude-code alias.
+        assert_eq!(resolve("/resume").expect("registered").0.name, "/resume");
+        assert_eq!(resolve("/continue").expect("alias").0.name, "/resume");
     }
 
     #[test]

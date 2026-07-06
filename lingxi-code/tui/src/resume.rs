@@ -210,6 +210,20 @@ pub fn handle_resume_key(state: &mut ResumeState, key: KeyEvent) -> ResumeOutcom
     }
 }
 
+/// The line index (into [`resume_lines`] output) of the SELECTED row's title
+/// line, so a windowed renderer (the bottom-pane `/resume` picker) can scroll
+/// it into view. Kept next to [`resume_lines`] so the two stay in lockstep:
+/// header(1) + optional search box(1) + spacer(1), then two lines per row
+/// (title + dim metadata). Returns `0` for the empty state (no rows).
+#[must_use]
+pub fn selected_title_line_index(state: &ResumeState) -> usize {
+    if state.is_empty() {
+        return 0;
+    }
+    let header = 1 + usize::from(state.in_search_mode) + 1;
+    header + state.selected * 2
+}
+
 /// Build the picker's display lines (header + optional counter/search +
 /// per-row title/metadata + footer). Pure — the render and its snapshot tests
 /// share this. Mirrors the iocraft `ResumeScreen` layout + byte-locked copy.

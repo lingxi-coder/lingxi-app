@@ -3997,4 +3997,28 @@ mod tests {
         );
         assert_eq!(transport.seen_count(), 1, "401 stays terminal, no retry");
     }
+
+    #[test]
+    fn bound_output_to_context_caps_output_to_leave_room_for_input() {
+        // Model whose output == context (e.g. qwen3-coder:free at 262000/262000).
+        // With ~21k input (3.4k text + 17.7k tool schemas) the requested output
+        // must shrink so input + output <= context — previously it stayed 262000
+        // and the endpoint rejected the whole turn ("requested about 283076
+        // tokens … 262000 in the output").
+        let context = 262_000u64;
+        let input = 21_076u64;
+        let capped = bound_output_to_context(262_000, context, input);
+        assert!(
+            u64::from(capped) + input <= context,
+            "input + output must fit the window: {capped} + {input}"
+        );
+        assert!(capped < 262_000, "must be capped below the full window");
+
+        // A model whose output already fits (Claude: 64k output, 200k context,
+        // small input) is left UNCHANGED.
+        assert_eq!(bound_output_to_context(64_000, 200_000, 5_000), 64_000);
+
+        // Never capped below the 4096 floor, even when input nearly fills context.
+        assert_eq!(bound_output_to_context(64_000, 200_000, 199_000), 4_096);
+    }
 }

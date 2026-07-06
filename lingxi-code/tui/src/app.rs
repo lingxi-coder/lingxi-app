@@ -1472,6 +1472,57 @@ mod tests {
     }
 
     #[test]
+    fn full_turn_then_idle_emits_no_degenerate_scroll_region() {
+        // Regression (reported via live iTerm2, screenshot): a stray `[` prefix
+        // persisted on the composer AFTER a completed exchange on a fresh
+        // session. The earlier running-render fix guarded ONE scroll-region site
+        // (`insert_history_lines`), but the reply / turn-end / idle phase still
+        // emitted a degenerate `ESC[N;Nr` from another site. Drive the WHOLE
+        // scenario (fresh session → user msg → streamed reply → turn end → idle
+        // flush) and assert EVERY scroll region has top < bottom.
+        for height in [24u16, 12, 10, 8, 6, 5, 4, 3] {
+            let backend = crate::terminal::test_support::TestWriteBackend::new(80, height);
+            let raw = backend.raw_handle();
+            let mut terminal = crate::terminal::Terminal::with_options(backend).unwrap();
+            let mut app = test_app(Vec::new());
+            // A LONG prompt wraps to several composer rows → grows the bottom
+            // viewport → `set_bottom_viewport_height` → `scroll_region_up`.
+            typ(
+                &mut app,
+                "hello there this is a fairly long line of input that will wrap across several rows",
+            );
+            app.on_key(press(KeyCode::Enter));
+            app.apply_turn_event(TurnEvent::TurnStarted);
+            app.apply_turn_event(TurnEvent::TextDelta(
+                "Hello! How can I help you today?".to_string(),
+            ));
+            app.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+            app.render_tick(&mut terminal).unwrap();
+            app.flush_scrollback(&mut terminal).unwrap();
+            app.render_tick(&mut terminal).unwrap();
+
+            let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
+            let mut rest = out.as_str();
+            while let Some(i) = rest.find("\x1b[") {
+                rest = &rest[i + 2..];
+                let seq: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == ';')
+                    .collect();
+                if rest[seq.len()..].starts_with('r') && seq.contains(';') {
+                    let (top, bottom) = seq.split_once(';').unwrap();
+                    let (top, bottom): (u16, u16) =
+                        (top.parse().unwrap(), bottom.parse().unwrap());
+                    assert!(
+                        top < bottom,
+                        "height {height}: degenerate scroll region ESC[{seq}r (top must be < bottom) — leaks a stray `[` on iTerm2"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tick_frame_is_bracketed_in_a_synchronized_update() {
         let backend = crate::terminal::test_support::TestWriteBackend::new(80, 24);
         let raw = backend.raw_handle();

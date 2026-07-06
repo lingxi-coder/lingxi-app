@@ -1882,6 +1882,48 @@ mod tests {
         assert!(!systext.is_error(), "version output is not an error");
     }
 
+    /// A handler that echoes the `ParsedSlashCommand` the bridge built, so the
+    /// test below can assert argument forwarding end-to-end.
+    struct ArgEchoHandler;
+
+    #[async_trait::async_trait]
+    impl command_api::model::BuiltinCommandHandler for ArgEchoHandler {
+        async fn handle(
+            &self,
+            args: &command_api::parser::ParsedSlashCommand,
+        ) -> command_api::model::CommandResult {
+            command_api::model::CommandResult::Done {
+                display: Some(format!(
+                    "raw=[{}] positional={:?}",
+                    args.raw_args, args.positional_args
+                )),
+            }
+        }
+        fn name(&self) -> &str {
+            "arg-echo"
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+    }
+
+    /// The bridge forwards the argument tail into the handler's
+    /// `ParsedSlashCommand`: `raw_args` verbatim and `positional_args`
+    /// whitespace-split. Locks the plumbing for the arg-taking commands
+    /// (`/commit fix bug`, `/review 123`, `/autocompact 20`).
+    #[test]
+    fn core_bridge_forwards_args_to_handler() {
+        let mut widget = widget();
+        let outcome = widget.run_core_command("arg-echo", "fix the bug", &ArgEchoHandler);
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
+        assert!(body.contains("raw=[fix the bug]"), "raw_args forwarded verbatim: {body}");
+        assert!(
+            body.contains(r#"positional=["fix", "the", "bug"]"#),
+            "positional_args whitespace-split: {body}"
+        );
+    }
+
     fn submit_command(widget: &mut ChatWidget, cmd: &str) -> ChatOutcome {
         typ(widget, cmd);
         widget.handle_key(press(KeyCode::Enter))

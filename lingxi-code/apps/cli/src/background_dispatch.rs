@@ -162,6 +162,8 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         in_flight: None,
         backend: Some("daemon"),
         initial_prompt: argv.prompt.as_deref(),
+        // No live worker yet — the supervisor records the worker pid on spawn.
+        worker_pid: None,
     };
     if let Err(e) = agents_registry::write_job_state(config_home, &short, &job) {
         eprintln!("lingxi-cli: could not write background job: {e}");

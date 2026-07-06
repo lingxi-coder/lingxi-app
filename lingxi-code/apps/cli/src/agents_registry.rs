@@ -172,6 +172,14 @@ pub struct JobState {
     /// (`template==="exec" && respawnFlags.length===0`).
     #[serde(rename = "respawnFlags", default)]
     pub respawn_flags: Vec<String>,
+    /// OS pid of the live worker process executing this job. Recorded by the
+    /// daemon supervisor when it spawns the detached `__bg-run` worker and
+    /// cleared when the job reaches a terminal state. The supervisor's
+    /// cross-restart double-spawn guard reads it: a job whose recorded
+    /// `workerPid` is still alive is not re-spawned. Appended AFTER the pinned
+    /// observed keys (the reader ignores unknown fields, so this is additive).
+    #[serde(rename = "workerPid", default)]
+    pub worker_pid: Option<i32>,
 }
 
 /// `dXc` — sanitize a display name: strip C0/C1 control chars
@@ -582,6 +590,13 @@ pub struct JobStateWrite<'a> {
     /// First prompt of the job session.
     #[serde(rename = "initialPrompt", skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<&'a str>,
+    /// OS pid of the live worker executing this job (recorded by the daemon
+    /// supervisor on spawn; cleared — omitted — when the job reaches a terminal
+    /// state). Serialized LAST so the pinned observed key order (through
+    /// `initialPrompt`) is preserved; `skip_serializing_if` keeps a `None` off
+    /// disk entirely, so a fresh `--bg` job's `state.json` is byte-unchanged.
+    #[serde(rename = "workerPid", skip_serializing_if = "Option::is_none")]
+    pub worker_pid: Option<i32>,
 }
 
 /// Write `jobs/<short>/state.json` atomically (create the dir, write a
@@ -608,6 +623,72 @@ pub fn write_job_state(
             Err(e)
         }
     }
+}
+
+/// Read a SINGLE background job's `jobs/<short>/state.json` into a [`JobState`].
+/// `None` when the dir/file is missing or the JSON is unparseable (the same
+/// tolerance as [`read_jobs`]). The `--bg` worker reads its own job through
+/// this to recover the `initialPrompt`/`cwd`/`sessionId` it must execute.
+#[must_use]
+pub fn read_job(config_home: &Path, short: &str) -> Option<JobState> {
+    let path = jobs_dir(config_home).join(short).join("state.json");
+    let bytes = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<JobState>(&bytes).ok()
+}
+
+/// Read-modify-write `jobs/<short>/state.json` to a new `state`, preserving the
+/// pinned key order (it rebuilds a [`JobStateWrite`] from the existing
+/// [`JobState`] and only overrides `state`/`tempo`/`workerPid`). Used by both:
+///
+/// * the daemon **supervisor**, to record the spawned worker's `workerPid`
+///   while the job stays `state:"working"` (its cross-restart double-spawn
+///   guard), and
+/// * the `__bg-run` **worker**, to stamp the reader-recognized terminal state
+///   (`"done"` on success, `"failed"` on error) and clear `workerPid`.
+///
+/// Terminal states ([`terminal_outcome`] `Some`) force `tempo:"idle"` so
+/// [`job_is_terminal`] reports the job terminal (which requires `tempo !=
+/// "active"`); non-terminal updates keep the existing tempo. `worker_pid`
+/// overwrites the stored value verbatim (`None` clears it).
+///
+/// Errors if the job does not exist (there is nothing to modify).
+pub fn update_job_state(
+    config_home: &Path,
+    short: &str,
+    new_state: &str,
+    worker_pid: Option<i32>,
+) -> std::io::Result<()> {
+    let existing = read_job(config_home, short).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("job {short} has no state.json to update"),
+        )
+    })?;
+    // A terminal outcome must leave tempo != "active" (else `job_is_terminal`
+    // stays false and the row keeps rendering as "working").
+    let tempo: Option<String> = if terminal_outcome(new_state).is_some() {
+        Some("idle".to_string())
+    } else {
+        existing.tempo.clone()
+    };
+    let job = JobStateWrite {
+        state: new_state,
+        tempo: tempo.as_deref(),
+        name: existing.name.as_deref(),
+        session_id: existing.session_id.as_deref(),
+        cwd: existing.cwd.as_deref(),
+        origin_cwd: existing.origin_cwd.as_deref(),
+        created_at: existing.created_at.as_deref(),
+        intent: existing.intent.as_deref(),
+        display_intent: existing.display_intent.as_deref(),
+        template: existing.template.as_deref(),
+        respawn_flags: &existing.respawn_flags,
+        in_flight: existing.in_flight.as_ref(),
+        backend: existing.backend.as_deref(),
+        initial_prompt: existing.initial_prompt.as_deref(),
+        worker_pid,
+    };
+    write_job_state(config_home, short, &job)
 }
 
 /// Mint a fresh 8-char lowercase-hex short id whose `jobs/<short>/` dir does not
@@ -1138,6 +1219,7 @@ mod tests {
             in_flight: None,
             backend: Some("daemon"),
             initial_prompt: Some(prompt),
+            worker_pid: None,
         }
     }
 
@@ -1204,6 +1286,90 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty(), "temp file renamed away");
+    }
+
+    #[test]
+    fn read_job_reads_single_short() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job(
+            "sid-1",
+            "/work",
+            "2026-07-04T00:00:00.000Z",
+            "intent",
+            "do the thing",
+            &respawn,
+        );
+        write_job_state(home, "bc7c6b33", &job).unwrap();
+        let got = read_job(home, "bc7c6b33").expect("job present");
+        assert_eq!(got.state, "working");
+        assert_eq!(got.initial_prompt.as_deref(), Some("do the thing"));
+        assert_eq!(got.cwd.as_deref(), Some("/work"));
+        assert_eq!(got.session_id.as_deref(), Some("sid-1"));
+        assert!(read_job(home, "nope0000").is_none());
+    }
+
+    #[test]
+    fn update_job_state_records_worker_pid_then_marks_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job(
+            "sid-1",
+            "/work",
+            "2026-07-04T00:00:00.000Z",
+            "port the daemon",
+            "port the daemon supervisor",
+            &respawn,
+        );
+        write_job_state(home, "bc7c6b33", &job).unwrap();
+
+        // Supervisor records the spawned worker's pid; state stays "working"
+        // (tempo preserved "active") so the job is NOT terminal yet.
+        update_job_state(home, "bc7c6b33", "working", Some(4242)).unwrap();
+        let mid = read_job(home, "bc7c6b33").unwrap();
+        assert_eq!(mid.state, "working");
+        assert_eq!(mid.tempo.as_deref(), Some("active"));
+        assert_eq!(mid.worker_pid, Some(4242));
+        assert!(!job_is_terminal(&mid), "working job is not terminal");
+        // Pinned fields survive the read-modify-write.
+        assert_eq!(mid.template.as_deref(), Some("bg"));
+        assert_eq!(mid.backend.as_deref(), Some("daemon"));
+        assert_eq!(mid.initial_prompt.as_deref(), Some("port the daemon supervisor"));
+
+        // Worker completes: terminal "done" + tempo forced off "active" + pid
+        // cleared. merged_state now reports the terminal outcome.
+        update_job_state(home, "bc7c6b33", "done", None).unwrap();
+        let done = read_job(home, "bc7c6b33").unwrap();
+        assert_eq!(done.state, "done");
+        assert_ne!(done.tempo.as_deref(), Some("active"));
+        assert_eq!(done.worker_pid, None);
+        assert!(job_is_terminal(&done));
+        assert_eq!(merged_state(&done, None), "done");
+
+        // The pinned prefix key order is still honored on disk.
+        let raw =
+            std::fs::read_to_string(jobs_dir(home).join("bc7c6b33/state.json")).unwrap();
+        let idx = |k: &str| raw.find(k).unwrap();
+        assert!(idx(r#""state""#) < idx(r#""tempo""#));
+        assert!(idx(r#""template""#) < idx(r#""respawnFlags""#));
+
+        // A missing job errors rather than fabricating a row.
+        assert!(update_job_state(home, "missing0", "done", None).is_err());
+    }
+
+    #[test]
+    fn update_job_state_failed_is_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job("s", "/w", "2026-07-04T00:00:00.000Z", "i", "p", &respawn);
+        write_job_state(home, "aaaa1111", &job).unwrap();
+        update_job_state(home, "aaaa1111", "failed", None).unwrap();
+        let f = read_job(home, "aaaa1111").unwrap();
+        assert!(job_is_terminal(&f));
+        assert_eq!(merged_state(&f, None), "failed");
     }
 
     #[test]

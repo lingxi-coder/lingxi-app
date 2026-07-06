@@ -86,7 +86,7 @@ pub use redaction::Redactor;
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
-pub use service::{ApiService, SubscriberState};
+pub use service::{ApiService, RetryInfo, RetryReporter, SubscriberState};
 pub use sse::SseFrameSplitter;
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};
 pub use transport::{

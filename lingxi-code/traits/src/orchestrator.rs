@@ -1092,6 +1092,23 @@ pub trait OutputStream: Send + Sync {
     /// mocks) keep compiling unchanged; the TUI bridge overrides it.
     async fn emit_subagent_activity(&self, _text: &str) {}
 
+    /// Emit a retry-backoff status while an API request is being retried, so the
+    /// UI can show Claude Code's `SystemAPIErrorMessage` line —
+    /// `"<error> · Retrying in Ns… (attempt X/Y)"` — during an otherwise-silent
+    /// backoff. `delay_ms` seeds the live countdown; `attempt`/`max_retries`
+    /// mirror `retryAttempt`/`maxRetries`.
+    ///
+    /// **Default no-op**: sinks that don't render retry status (CLI, mocks) keep
+    /// compiling unchanged; the TUI bridge overrides it.
+    async fn emit_api_retry(
+        &self,
+        _message: &str,
+        _attempt: u32,
+        _max_retries: u32,
+        _delay_ms: u64,
+    ) {
+    }
+
     /// Emit an incremental token-usage update for the latest API call.
     ///
     /// Added by the §0.7 "light up thinking/usage" follow-up. Called from

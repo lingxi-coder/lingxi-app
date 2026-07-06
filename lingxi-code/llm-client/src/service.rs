@@ -155,6 +155,31 @@ pub enum RequestIdOrigin {
     Client,
 }
 
+/// A retry-worthy API failure the [`ApiService`] retry loop is about to back off
+/// on, surfaced to the UI so it can show a Claude-Code-style
+/// "Retrying in Ns… (attempt X/Y)" status during the wait (mirrors
+/// `SystemAPIErrorMessage.tsx`). Emitted once per backoff, before sleeping.
+#[derive(Debug, Clone)]
+pub struct RetryInfo {
+    /// The user-facing error text (e.g. `"provider internal error"`).
+    pub message: String,
+    /// 1-based attempt number about to be retried.
+    pub attempt: u32,
+    /// The configured retry cap (`DEFAULT_MAX_RETRIES` = 10 unless overridden).
+    pub max_retries: u32,
+    /// Backoff before the next attempt, in milliseconds (the countdown seed).
+    pub delay_ms: u64,
+}
+
+/// Sink for retry-status updates emitted by the [`ApiService`] retry loop. The
+/// composition root wires this to the UI output stream so the TUI can render
+/// the retry/backoff status during an otherwise-silent backoff. `report` is
+/// synchronous (fire-and-forget); the wiring bridges to the async UI channel.
+pub trait RetryReporter: Send + Sync {
+    /// Called once per backoff, immediately before the retry sleep.
+    fn report(&self, info: RetryInfo);
+}
+
 /// Production service: drives `DefaultLlmClient` with full retry/rate-limit/betas.
 pub struct ApiService {
     client: Arc<DefaultLlmClient>,
@@ -202,6 +227,11 @@ pub struct ApiService {
     version: String,
     /// Optional analytics bus for telemetry events.
     analytics: Option<Arc<::telemetry::AnalyticsBus>>,
+    /// Optional UI retry-status sink. Set via [`Self::with_retry_reporter`];
+    /// `None` (the default) makes the retry loop silent as before. When set, the
+    /// loop reports each backoff so the TUI can show "Retrying in Ns… (attempt
+    /// X/Y)".
+    retry_reporter: Option<Arc<dyn RetryReporter>>,
     /// Global fallback model, if configured (used by `messages_create_with_fallback`
     /// when no per-model entry exists in `fallback_overrides`).
     fallback_model: Option<String>,
@@ -500,6 +530,7 @@ impl ApiService {
             transport,
             subscriber,
             subscription: None,
+            retry_reporter: None,
             forced_tool_choice: None,
             thinking: crate::model::thinking::ThinkingConfig::default(),
             request_metadata: None,
@@ -557,6 +588,43 @@ impl ApiService {
     /// by `--json-schema` structured output to compel the `StructuredOutput`
     /// tool. Builder-style; `None` (the default) leaves tool choice to the model.
     #[must_use]
+    /// Attach a UI retry-status sink. The retry loop then reports each backoff
+    /// (error text + attempt/max + delay) so the TUI can surface it, matching
+    /// Claude Code's `SystemAPIErrorMessage` retry display.
+    #[must_use]
+    pub fn with_retry_reporter(mut self, reporter: Arc<dyn RetryReporter>) -> Self {
+        self.retry_reporter = Some(reporter);
+        self
+    }
+
+    /// Report a retry backoff to the attached [`RetryReporter`] (no-op if none).
+    /// Called immediately before each retry sleep. `state.attempt` is the
+    /// upcoming attempt number; `ctl.max_retries` the cap.
+    fn report_retry(&self, error: &LlmError, delay: Duration, state: &RetryState, ctl: &RetryControl) {
+        if let Some(reporter) = &self.retry_reporter {
+            reporter.report(RetryInfo {
+                message: error.to_string(),
+                attempt: u32::from(state.attempt),
+                max_retries: ctl.max_retries,
+                delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            });
+        }
+    }
+
+    /// Surface the retry status (if a reporter is attached) then sleep the
+    /// backoff — the single choke point every retry-loop sleep routes through so
+    /// the UI can show "Retrying in Ns… (attempt X/Y)" during the wait.
+    async fn report_and_sleep_retry(
+        &self,
+        error: &LlmError,
+        delay: Duration,
+        state: &RetryState,
+        ctl: &RetryControl,
+    ) {
+        self.report_retry(error, delay, state, ctl);
+        tokio::time::sleep(delay).await;
+    }
+
     pub fn with_forced_tool_choice(mut self, choice: crate::ToolChoice) -> Self {
         self.forced_tool_choice = Some(choice);
         self
@@ -1560,7 +1628,8 @@ impl ApiService {
                         self.settings_backoff_ms,
                     );
                     if let DriveStep::RetryAfter(delay) = step {
-                        tokio::time::sleep(delay).await;
+                        self.report_and_sleep_retry(&transport_err, delay, &state, &retry_control)
+                            .await;
                         continue;
                     }
                     telemetry::emit_failed(
@@ -1682,7 +1751,13 @@ impl ApiService {
                             );
                             match step {
                                 DriveStep::RetryAfter(delay) => {
-                                    tokio::time::sleep(delay).await;
+                                    self.report_and_sleep_retry(
+                                        &effective_err,
+                                        delay,
+                                        &state,
+                                        &retry_control,
+                                    )
+                                    .await;
                                     continue;
                                 }
                                 DriveStep::AdjustMaxTokens(new_max) => {
@@ -2116,7 +2191,8 @@ impl ApiService {
                     );
                     match step {
                         DriveStep::RetryAfter(delay) => {
-                            tokio::time::sleep(delay).await;
+                            self.report_and_sleep_retry(&transport_err, delay, &state, &ctl)
+                                .await;
                             continue;
                         }
                         _ => return Err(transport_err),
@@ -2189,7 +2265,8 @@ impl ApiService {
                             self.settings_backoff_ms,
                         );
                         if let DriveStep::RetryAfter(delay) = step {
-                            tokio::time::sleep(delay).await;
+                            self.report_and_sleep_retry(&effective_err, delay, &state, &ctl)
+                                .await;
                             // Re-prepare on next iteration so headers stay fresh.
                             continue;
                         }

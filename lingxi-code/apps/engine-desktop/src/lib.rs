@@ -2363,6 +2363,25 @@ pub fn session_task_output_dir(cwd: &std::path::Path, session_id: &str) -> std::
 /// Returns [`BuildError`] if the api-client or orchestrator cannot be
 /// constructed (effectively infallible in the current wiring).
 #[allow(clippy::too_many_lines)]
+/// Forwards `llm-client`'s synchronous retry-status reports to the async
+/// session [`OutputStream`] so the TUI can render "Retrying in Ns… (attempt
+/// X/Y)" during a backoff. `report` runs inside the retry loop's tokio context,
+/// so it spawns the async emit (fire-and-forget; retries are seconds apart).
+struct OutputRetryReporter {
+    output: Arc<dyn OutputStream>,
+}
+
+impl llm_client::RetryReporter for OutputRetryReporter {
+    fn report(&self, info: llm_client::RetryInfo) {
+        let output = self.output.clone();
+        tokio::spawn(async move {
+            output
+                .emit_api_retry(&info.message, info.attempt, info.max_retries, info.delay_ms)
+                .await;
+        });
+    }
+}
+
 pub async fn build(
     cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
@@ -2890,7 +2909,13 @@ pub async fn build(
         settings_backoff_ms,
     )
     .with_subscription(subscription.clone())
-    .with_request_metadata(request_metadata);
+    .with_request_metadata(request_metadata)
+    // Surface API retry/backoff status to the UI (Claude Code's
+    // `SystemAPIErrorMessage`): the retry loop reports each backoff and the
+    // adapter forwards it to the session output stream (→ TUI).
+    .with_retry_reporter(std::sync::Arc::new(OutputRetryReporter {
+        output: output.clone(),
+    }));
     // M2 (2.1.198): attach the AWS auth-refresh driver (`ZBd`/`t2d`) when an
     // `awsAuthRefresh` / `awsCredentialExport` command is configured. Resolves
     // the merged settings value + its Project provenance (binary `mqe`: a

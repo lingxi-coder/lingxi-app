@@ -267,6 +267,14 @@ impl AssistantTextCell {
 
 impl StyledCell for AssistantTextCell {
     fn styled_lines(&self, width: usize, theme: &Theme, _verbose: bool) -> Vec<StyledLine> {
+        // The just-opened active cell (before any delta) has an empty body: render
+        // NOTHING. The running spinner is the "thinking" indicator — a bare `●`
+        // tail row here is the stray marker `flush_or_discard_active` guards
+        // against, and it prematurely grows the viewport by a row. Once a delta
+        // arrives the body is non-empty and the `● …` reply renders normally.
+        if self.body.is_empty() {
+            return Vec::new();
+        }
         assistant_lines(&self.body, width, theme)
     }
 }
@@ -522,12 +530,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_assistant_cell_renders_one_bare_marker_row() {
-        // The TurnStarted gotcha: an empty active assistant cell must still
-        // occupy exactly one marker row (layout tests depend on it).
-        let cell = AssistantTextCell::new(String::new());
-        assert_eq!(plain(&cell), vec![ASSISTANT_MARKER.to_string()]);
-        assert_eq!(cell.desired_height(80, RenderMode::default()), 1);
+    fn empty_assistant_cell_renders_nothing_until_content() {
+        // The just-opened active cell (empty body, before any delta) renders NO
+        // rows — the running spinner is the deliberation indicator; a bare `●`
+        // tail here is the stray marker we avoid (and it prematurely grew the
+        // viewport). The marker appears with the first streamed content.
+        let empty = AssistantTextCell::new(String::new());
+        assert!(plain(&empty).is_empty(), "empty active cell renders no rows");
+        assert_eq!(empty.desired_height(80, RenderMode::default()), 0);
+        // Once content arrives, the `● …` reply renders normally.
+        let filled = AssistantTextCell::new("hi".to_string());
+        assert!(plain(&filled)[0].contains("hi"));
+        assert!(plain(&filled)[0].starts_with(ASSISTANT_MARKER));
     }
 
     #[test]

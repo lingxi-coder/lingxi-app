@@ -99,6 +99,11 @@ pub async fn run(_cli: &Cli) -> i32 {
     // it each heartbeat, so shutdown lands within one HEARTBEAT_MS of the signal.
     let stop = Arc::new(AtomicBool::new(false));
     spawn_signal_watch(stop.clone());
+    // Reap exited `__bg-run` worker children so finished workers don't pile up
+    // as `<defunct>` zombies in the daemon's process table (see
+    // [`spawn_child_reaper`]).
+    #[cfg(unix)]
+    spawn_child_reaper(stop.clone());
 
     let stop_for_loop = stop.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -152,6 +157,59 @@ fn spawn_signal_watch(stop: Arc<AtomicBool>) {
         }
         stop.store(true, Ordering::Relaxed);
     });
+}
+
+/// Reap exited worker children so they don't accumulate as zombies.
+///
+/// The daemon spawns detached `__bg-run` workers (see [`RealWorkerSpawner`])
+/// but never `wait(2)`s on them, so each exited worker would linger as a
+/// `<defunct>` zombie in the daemon's process table until the daemon itself
+/// exits. On Linux+macOS setting the `SIGCHLD` disposition to `SIG_IGN` makes
+/// the kernel auto-reap children — but every disposition-setting API
+/// (`nix::sys::signal::{signal, sigaction}`, `libc::signal`) is `unsafe`, and
+/// this crate is `#![forbid(unsafe_code)]`. So we get the same no-zombie
+/// guarantee the safe way: a task that wakes on each `SIGCHLD` and drains every
+/// reapable child with a non-blocking `waitpid(-1, WNOHANG)` loop (the daemon's
+/// only OS children are its workers, so a blanket reap is correct).
+#[cfg(unix)]
+fn spawn_child_reaper(stop: Arc<AtomicBool>) {
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        // If the SIGCHLD stream can't be installed, fall back to relying on the
+        // OS to reap at daemon exit (best-effort, mirrors spawn_signal_watch).
+        let Ok(mut sigchld) = signal(SignalKind::child()) else {
+            return;
+        };
+        loop {
+            // SIGCHLD can coalesce when several workers exit at once, so drain
+            // all currently-reapable children on every wake.
+            reap_exited_children();
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if sigchld.recv().await.is_none() {
+                return;
+            }
+        }
+    });
+}
+
+/// Non-blocking drain of all exited children: `waitpid(-1, WNOHANG)` until it
+/// reports `StillAlive` (nothing more to reap right now) or errors (`ECHILD`
+/// when the daemon has no children). Fully safe — `nix::sys::wait::waitpid` is a
+/// safe wrapper (the `signal` feature already pulls in nix's `process` module).
+#[cfg(unix)]
+fn reap_exited_children() {
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    loop {
+        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+            // Nothing more to reap right now (`StillAlive`) or no children at
+            // all (`Err` = ECHILD, or an interrupted call) → stop draining.
+            Ok(WaitStatus::StillAlive) | Err(_) => break,
+            // Reaped an exited child; keep draining (SIGCHLD can coalesce).
+            Ok(_) => continue,
+        }
+    }
 }
 
 /// The testable supervisor core: `sleep` and `should_stop` are injected so the
@@ -253,6 +311,10 @@ fn heartbeat<PP: ProcProbe, WS: WorkerSpawner>(
 /// worker) and a fresh roster [`WorkerRecord`] (so `retain_adoptable` keeps the
 /// worker listed while alive and reaps it once it exits).
 ///
+/// CRASH HANDLING: a `working` job whose recorded `workerPid` is NO LONGER alive
+/// (the worker died before writing its own terminal state) is marked terminally
+/// `failed` here — never respawned — so it can't wedge in "working" forever.
+///
 /// `runtime_dir` == the config home (`daemon_runtime_dir()`), so the jobs live
 /// at `jobs_dir(runtime_dir)`.
 fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
@@ -271,16 +333,36 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
         if job.state != "working" {
             continue;
         }
-        if claimed.contains(&short) {
-            continue;
-        }
-        // Cross-restart guard: a recorded, still-live worker pid means a worker
-        // is already running this job — adopt (claim) it, don't re-spawn.
+        // OWNED job: it has a recorded worker pid, or we spawned it this
+        // supervisor lifetime (`claimed`). Its next step depends on whether
+        // that worker is still alive.
         if let Some(worker_pid) = job.worker_pid {
+            // Cross-restart guard: a recorded, still-live worker pid means a
+            // worker is already running this job — adopt (claim) it, don't
+            // re-spawn.
             if proc_probe.is_alive(worker_pid) {
                 claimed.insert(short);
                 continue;
             }
+            // The recorded worker DIED without writing a terminal state (the
+            // worker itself writes "done"/"failed"). It crashed — mark the job
+            // terminally `failed` so it doesn't wedge in "working" forever. We
+            // deliberately do NOT auto-respawn: a genuinely-crashing task would
+            // respawn endlessly; a human/retry re-dispatches instead.
+            if let Err(e) = agents_registry::update_job_state(runtime_dir, &short, "failed", None) {
+                tracing::warn!(
+                    "lingxi-cli daemon: could not mark crashed job {short} failed: {e}"
+                );
+            }
+            claimed.remove(&short);
+            continue;
+        }
+        // No recorded worker pid. If we already claimed it this lifetime the
+        // pid simply hasn't been persisted yet (or its write failed) — protect
+        // it from a same-heartbeat double-spawn; we can't probe liveness with
+        // no pid, so leave it working for a later heartbeat to resolve.
+        if claimed.contains(&short) {
+            continue;
         }
 
         match spawner.spawn_worker(&short) {
@@ -792,5 +874,82 @@ mod tests {
         assert_eq!(code, exit_codes::SUCCESS);
         // Despite two heartbeats, the job was spawned exactly once.
         assert_eq!(spawner.spawned, vec!["ffff6666".to_string()]);
+    }
+
+    // ---- crashed-worker recovery (FIX 2) ------------------------------------
+
+    #[test]
+    fn job_whose_worker_died_is_marked_failed_not_respawned() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0001");
+        // Record a worker pid on the job, then let the worker "die": the proc
+        // probe reports it NOT alive and it never wrote a terminal state.
+        agents_registry::update_job_state(&dir, "cafe0001", "working", Some(4321)).unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::new(), // 4321 is NOT alive → crashed
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        // NeverSpawner: a crashed job must be failed, NOT respawned.
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut NeverSpawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+
+        // The stuck job was moved to a terminal `failed` state (worker pid cleared).
+        let job = agents_registry::read_job(&dir, "cafe0001").unwrap();
+        assert_eq!(job.state, "failed", "crashed worker → job marked failed");
+        assert!(
+            agents_registry::job_is_terminal(&job),
+            "failed job is terminal (won't re-render as working)"
+        );
+        assert_eq!(job.worker_pid, None, "stale worker pid cleared");
+    }
+
+    #[test]
+    fn job_with_alive_worker_is_left_untouched_not_failed() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0002");
+        agents_registry::update_job_state(&dir, "cafe0002", "working", Some(7777)).unwrap();
+
+        let mut alive = HashMap::new();
+        alive.insert(7777, true); // the worker is still running
+        let proc = FakeProc {
+            alive,
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        // NeverSpawner: a live worker must be neither respawned nor failed.
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut NeverSpawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+
+        // Left exactly as-is: still working, pid intact, not terminal.
+        let job = agents_registry::read_job(&dir, "cafe0002").unwrap();
+        assert_eq!(job.state, "working", "live worker's job untouched");
+        assert_eq!(job.worker_pid, Some(7777), "live worker pid preserved");
+        assert!(!agents_registry::job_is_terminal(&job));
     }
 }

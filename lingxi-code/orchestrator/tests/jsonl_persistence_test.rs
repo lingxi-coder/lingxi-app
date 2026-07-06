@@ -154,3 +154,68 @@ async fn orchestrator_without_writer_creates_no_file() {
         "orchestrator without writer must not create any files; found {count}"
     );
 }
+
+#[tokio::test]
+async fn batched_run_turn_persists_the_real_model_and_usage_not_synthetic() {
+    // Regression (found via `--bg` / `--print` smoke): the NON-streaming
+    // (batched) `run_turn` path — used by `--print` and the `--bg` daemon
+    // worker — must persist the assistant line as a FULL BetaMessage envelope
+    // carrying the real model + usage, exactly like the streaming path's
+    // `persist_assistant_per_block`. It had regressed to the model-less
+    // `persist_message_to_jsonl`, so every headless reply was recorded as
+    // `model:"<synthetic>"` with `usage` dropped (cost lost, resume/telemetry
+    // mis-attributed) even though the API call succeeded.
+    let dir = tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
+
+    let r1 = mock_message_response(
+        vec![LlmContentBlock::Text {
+            text: "hi there".into(),
+            cache_control: None,
+        }],
+        Some("end_turn"),
+    );
+    let api = Arc::new(MockApiClient::new(vec![r1]));
+    let output = Arc::new(MockOutputStream::new());
+    let hooks = orchestrator::test_support::noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_jsonl_writer(writer);
+
+    let _ = orch.run_turn("hi").await.expect("turn");
+
+    // Inspect the RAW on-disk assistant line's inner BetaMessage.
+    let body = std::fs::read_to_string(&session_path).expect("read session file");
+    let assistant = body
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "assistant")
+        .expect("an assistant line on disk");
+    let inner = &assistant["message"];
+    assert_ne!(
+        inner["model"],
+        serde_json::json!("<synthetic>"),
+        "batched assistant line must carry the REAL model, not the synthetic sentinel: {inner}"
+    );
+    assert!(
+        inner["model"].is_string() && !inner["model"].as_str().unwrap().is_empty(),
+        "assistant line must carry a non-empty model: {inner}"
+    );
+    assert!(
+        inner.get("usage").is_some() && !inner["usage"].is_null(),
+        "batched assistant line must carry `usage` (cost is derived from it): {inner}"
+    );
+}

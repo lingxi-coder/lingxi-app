@@ -657,8 +657,9 @@ mod tests {
         for command in crate::command::advertised() {
             assert!(text.contains(command.name), "{} missing", command.name);
         }
-        // Dead chords from the iocraft help are gone.
+        // Dead chords from the iocraft help are gone. (`/keybindings` was once
+        // a dead chord here but is now a real registry-backed command, so it is
+        // asserted present by the advertised-command sweep above.)
         assert!(!text.contains("for bash mode"));
-        assert!(!text.contains("/keybindings"));
     }
 }

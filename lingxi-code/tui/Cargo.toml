@@ -59,6 +59,10 @@ tool-web = { path = "../tools/web" }
 secret = { path = "../secret" }
 memory = { path = "../memory" }
 command-core = { path = "../commands/core" }
+# The bridge (`ChatWidget::run_core_command`) needs the `BuiltinCommandHandler`
+# trait + `CommandResult`/`ParsedSlashCommand` types to invoke `command-core`
+# handlers directly. Same path-style as the `command-core` entry above.
+command-api = { path = "../command-api" }
 url = "2"
 dirs = "5"
 

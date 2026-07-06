@@ -1257,6 +1257,226 @@ impl ChatWidget {
         self.push_image(args)
     }
 
+    // ===== `command_core` bridge (batch: static-template + read-only handlers)
+    //
+    // A family of registry commands whose logic already lives in
+    // `command_core` as `BuiltinCommandHandler`s. Rather than re-implement each
+    // one against the TUI's launch-time snapshot, the TUI constructs the core
+    // handler and runs it through the shared bridge below. Only handlers whose
+    // `CommandResult` is `InjectMessage` (queue a prompt turn) or `Done`
+    // (render read-only text) — and which construct from bare state — are wired
+    // here; anything needing a live `OrchestratorHandle`/`AuthHandle` stays out.
+
+    /// Bridge a `command_core` slash handler into the TUI: invoke the async
+    /// handler and map its `CommandResult` to a `ChatOutcome`.
+    ///
+    /// Known parity gaps (both self-healing, tracked as follow-ups):
+    /// - Prompt-type handlers that embed `` !`git …` `` placeholders (`/commit`,
+    ///   `/commit-push-pr`, `/security-review`) are delivered verbatim; the host
+    ///   shell-expansion pass (`command_api::shell_expansion`) runs only in the
+    ///   dispatcher, and doing it here would need a `ShellRunner` and a blocking
+    ///   `git` call that would freeze the sync render loop. The model re-runs
+    ///   the git commands itself, so the turn still succeeds.
+    /// - `/skill-doctor` reports every skill as never-used because
+    ///   `command_core::skill_doctor::record_skill_usage` is not yet wired into
+    ///   the dispatcher (a shared-crate gap that predates this bridge and is
+    ///   identical on the desktop/mobile registries).
+    fn run_core_command(
+        &mut self,
+        name: &str,
+        args: &str,
+        handler: &dyn command_api::model::BuiltinCommandHandler,
+    ) -> ChatOutcome {
+        use command_api::model::CommandResult;
+        let parsed = command_api::parser::ParsedSlashCommand {
+            name: name.to_string(),
+            raw_args: args.to_string(),
+            positional_args: args.split_whitespace().map(str::to_string).collect(),
+        };
+        // The TUI event loop is synchronous (off the async runtime, on a
+        // `spawn_blocking` thread), so a throwaway current-thread runtime is
+        // safe. Build it fallibly: a failed runtime must surface a recoverable
+        // error, not unwind the render task and take down the whole session
+        // (mirrors the graceful `.build().map_err(..)` in
+        // `apps/cli/src/commands/plugin_marketplace.rs`).
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => return self.show_system_text(&format!("/{name} failed: {err}"), true),
+        };
+        match runtime.block_on(handler.handle(&parsed)) {
+            CommandResult::InjectMessage { content } => self.submit_core_prompt(name, args, content),
+            CommandResult::Done { display: Some(text) } => self.show_system_text(&text, false),
+            CommandResult::Done { display: None } => ChatOutcome::Continue,
+            // Only InjectMessage/Done commands are wired; guard the rest.
+            CommandResult::EmitEffects { display, .. } => match display {
+                Some(text) => self.show_system_text(&text, false),
+                None => ChatOutcome::Continue,
+            },
+            CommandResult::RequestConfirmation { prompt, .. } => {
+                self.show_system_text(&prompt, false)
+            }
+        }
+    }
+
+    /// Queue a prompt-type slash command's turn. The transcript shows only the
+    /// compact `/name args` invocation the user typed, while the model receives
+    /// the handler's expanded `content` — mirroring claude-code's
+    /// displayed-metadata / hidden-`isMeta` split
+    /// (`processSlashCommand.getMessagesForPromptSlashCommand`). Reusing
+    /// [`Self::submit_prompt`] here would echo the entire template into the
+    /// transcript as if the user had typed it.
+    fn submit_core_prompt(&mut self, name: &str, args: &str, content: String) -> ChatOutcome {
+        let invocation = if args.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {args}")
+        };
+        self.transcript.push_message(RenderedMessage::UserText {
+            body: invocation,
+            timestamp: 0,
+        });
+        let token = CancellationToken::new();
+        self.current_turn = Some(token.clone());
+        ChatOutcome::Submit(content, token)
+    }
+
+    /// Render read-only command output into the transcript as a `system`
+    /// message (the same path `/export` uses). `is_error` renders it in the
+    /// error color.
+    fn show_system_text(&mut self, text: &str, is_error: bool) -> ChatOutcome {
+        self.transcript.push_message(RenderedMessage::SystemText {
+            body: text.to_string(),
+            timestamp: 0,
+            is_error,
+        });
+        ChatOutcome::Continue
+    }
+
+    /// `/init`: inject the LINGXI.md initialization prompt as the next turn.
+    pub(crate) fn cmd_init(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command("init", args, &command_core::init::InitHandler::new())
+    }
+
+    /// `/init-verifiers`: inject the verifier-skill scaffolding prompt.
+    pub(crate) fn cmd_init_verifiers(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "init-verifiers",
+            args,
+            &command_core::init_verifiers::InitVerifiersHandler::new(),
+        )
+    }
+
+    /// `/commit`: inject the git-commit prompt.
+    pub(crate) fn cmd_commit(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command("commit", args, &command_core::commit::CommitHandler::new())
+    }
+
+    /// `/commit-push-pr`: inject the commit-push-PR prompt.
+    pub(crate) fn cmd_commit_push_pr(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "commit-push-pr",
+            args,
+            &command_core::commit_push_pr::CommitPushPrHandler::new(),
+        )
+    }
+
+    /// `/review`: inject the pull-request review prompt.
+    pub(crate) fn cmd_review(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command("review", args, &command_core::review::ReviewHandler::new())
+    }
+
+    /// `/security-review`: inject the security-review prompt.
+    pub(crate) fn cmd_security_review(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "security-review",
+            args,
+            &command_core::security_review::SecurityReviewHandler::new(),
+        )
+    }
+
+    /// `/statusline`: inject the statusline-setup agent prompt.
+    pub(crate) fn cmd_statusline(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "statusline",
+            args,
+            &command_core::statusline::StatuslineHandler::new(),
+        )
+    }
+
+    /// `/insights`: inject the session-analysis report prompt.
+    pub(crate) fn cmd_insights(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "insights",
+            args,
+            &command_core::insights::InsightsHandler::new(),
+        )
+    }
+
+    /// `/version`: show the running version string.
+    pub(crate) fn cmd_version(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "version",
+            args,
+            &command_core::version::VersionHandler::new(),
+        )
+    }
+
+    /// `/release-notes`: show the changelog pointer.
+    pub(crate) fn cmd_release_notes(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "release-notes",
+            args,
+            &command_core::release_notes::ReleaseNotesHandler::new(),
+        )
+    }
+
+    /// `/stickers`: show the sticker-order message.
+    pub(crate) fn cmd_stickers(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "stickers",
+            args,
+            &command_core::stickers::StickersHandler::new(),
+        )
+    }
+
+    /// `/autocompact`: show the (read-only) auto-compact window status.
+    pub(crate) fn cmd_autocompact(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "autocompact",
+            args,
+            &command_core::autocompact::AutocompactHandler::new(),
+        )
+    }
+
+    /// `/keybindings`: open or preview the keybindings configuration.
+    pub(crate) fn cmd_keybindings(&mut self, args: &str) -> ChatOutcome {
+        self.run_core_command(
+            "keybindings",
+            args,
+            &command_core::keybindings::KeybindingsHandler::new(),
+        )
+    }
+
+    /// `/skill-doctor`: report which loaded skills are unused and costing
+    /// context (computed from the launch-time filesystem roots).
+    pub(crate) fn cmd_skill_doctor(&mut self, args: &str) -> ChatOutcome {
+        let cwd = std::path::PathBuf::from(&self.session.doctor.cwd);
+        let lingxi_home = std::path::PathBuf::from(&self.session.doctor.lingxi_home);
+        self.run_core_command(
+            "skill-doctor",
+            args,
+            &command_core::skill_doctor::SkillDoctorHandler::new(
+                cwd,
+                lingxi_home,
+                None,
+                Vec::new(),
+            ),
+        )
+    }
+
     /// The active streaming cell's rendered lines at `width` (empty when
     /// idle) — [`Transcript::visible_live_tail`] under the widget's theme.
     fn live_tail(&self, width: u16) -> Vec<ratatui::text::Line<'static>> {
@@ -1605,6 +1825,61 @@ mod tests {
         for c in s.chars() {
             widget.handle_key(press(KeyCode::Char(c)));
         }
+    }
+
+    /// The TUI event loop (`run_app`) runs inside `tokio::task::spawn_blocking`
+    /// (apps/cli/src/mode.rs), so every `cmd_*` dispatch — including the
+    /// `run_core_command` bridge's `Runtime::block_on` over the async core
+    /// handler — executes on a blocking-pool thread that already has an entered
+    /// runtime context. Reproduce that exact nesting to prove the bridge does
+    /// not hit tokio's "Cannot start a runtime from within a runtime" panic.
+    /// The plain `cmd_*` unit tests run on a bare test thread and would NOT
+    /// catch a nested-runtime regression.
+    #[test]
+    fn core_bridge_block_on_survives_spawn_blocking_context() {
+        let outer = tokio::runtime::Runtime::new().expect("outer runtime");
+        let outcome = outer.block_on(async {
+            tokio::task::spawn_blocking(|| {
+                let mut widget = widget();
+                widget.cmd_version("")
+            })
+            .await
+            .expect("spawn_blocking join")
+        });
+        assert!(matches!(outcome, ChatOutcome::Continue));
+    }
+
+    /// A prompt-type command (InjectMessage): the model receives the handler's
+    /// expanded template, but the transcript shows only the compact `/commit`
+    /// invocation the user typed — not the whole template echoed as a user
+    /// message (claude-code displayed-metadata / hidden-isMeta parity).
+    #[test]
+    fn core_bridge_inject_message_submits_template_but_displays_invocation() {
+        let mut widget = widget();
+        let outcome = widget.cmd_commit("");
+        let ChatOutcome::Submit(payload, _token) = outcome else {
+            panic!("prompt-type command must queue a turn");
+        };
+        // The model payload is the full expanded handler template …
+        assert!(
+            payload.contains("git status"),
+            "model receives the expanded /commit template: {payload}"
+        );
+        // … while the transcript shows only the compact invocation.
+        let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
+        assert_eq!(shown, "/commit", "transcript shows the invocation, not the template");
+    }
+
+    /// A read-only command (Done{display}): output is rendered into the
+    /// transcript as a non-error system message and the loop keeps running.
+    #[test]
+    fn core_bridge_done_renders_system_text() {
+        let mut widget = widget();
+        let outcome = widget.cmd_version("");
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert!(!systext.body().is_empty(), "version output rendered as system text");
+        assert!(!systext.is_error(), "version output is not an error");
     }
 
     fn submit_command(widget: &mut ChatWidget, cmd: &str) -> ChatOutcome {

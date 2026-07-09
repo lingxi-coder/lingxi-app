@@ -103,6 +103,16 @@ pub enum ChatOutcome {
     /// `TurnEvent::SystemNotice`. When on and the active model supports fast
     /// mode (opus-4-7/opus-4-8), subsequent turns send `speed:"fast"`.
     FastMode(Option<bool>),
+    /// `/plan`: enter plan mode, or (when already in plan mode) view the current
+    /// plan. The enter-vs-view decision (a read of the session `plan_mode` flag)
+    /// and, when entering, the flip both run OFF-LOOP via
+    /// `OrchestratorHandle::plan_mode` / `set_plan_mode`; the outcome is reported
+    /// through `TurnEvent::SystemNotice`. Flipping the flag makes the next turn
+    /// run in plan mode (the turn loop reads `session.plan_mode`). The `String`
+    /// is the trimmed argument tail — advisory only: LingXi has no on-disk plan
+    /// store, so a `<description>` is not submitted and `open` does not launch an
+    /// editor.
+    PlanMode(String),
     /// The `/resume` picker resolved to this session uuid. The caller must
     /// UNWIND the app loop (via `AppExit::SwitchSession`) and re-mount that
     /// session in-process so the JSONL writer is retargeted to `<uuid>.jsonl` —
@@ -1975,6 +1985,24 @@ impl ChatWidget {
         }
     }
 
+    /// `/plan`: enter plan mode (the model plans before acting, like the
+    /// `EnterPlanMode` tool), or — when already in plan mode — report the
+    /// current plan. Mirrors claude-code `commands/plan/plan.tsx`. LingXi has NO
+    /// on-disk plan store, so the "view" branch always degrades to the TS
+    /// no-plan message and `/plan open` is a no-op of that same branch. Entering
+    /// flips `SessionState.plan_mode`, which the turn loop honors (routes tool
+    /// checks through `check_in_plan_mode`, sends `permission_mode:"plan"`). The
+    /// read + flip are a session read + mutation, so they run OFF-LOOP
+    /// ([`ChatOutcome::PlanMode`] → `OrchestratorHandle::plan_mode` /
+    /// `set_plan_mode`); the result is reported via `TurnEvent::SystemNotice`.
+    /// Graceful "unavailable" when no handle is wired.
+    pub(crate) fn cmd_plan(&mut self, args: &str) -> ChatOutcome {
+        if self.orchestrator.is_none() {
+            return self.show_system_text("/plan is unavailable (no engine handle wired)", true);
+        }
+        ChatOutcome::PlanMode(args.trim().to_string())
+    }
+
     pub(crate) fn cmd_effort(&mut self, args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/effort is unavailable (no engine handle wired)", true);
@@ -2488,6 +2516,25 @@ mod tests {
         let mut w = widget();
         // No shared cell wired ⇒ graceful "unavailable" system line, no effect.
         assert!(matches!(w.cmd_sandbox(""), ChatOutcome::Continue));
+    }
+
+    #[test]
+    fn cmd_plan_unavailable_without_handle_but_routes_off_loop_when_wired() {
+        // No engine handle ⇒ graceful "unavailable" (Continue), no off-loop effect.
+        let mut w = widget();
+        assert!(matches!(w.cmd_plan(""), ChatOutcome::Continue));
+
+        // Wired ⇒ returns the off-loop PlanMode effect carrying the trimmed arg
+        // (advisory; never falls through as an LLM prompt, never dropped).
+        let (mut w, _mock) = widget_with_orchestrator();
+        let ChatOutcome::PlanMode(a) = w.cmd_plan("build X") else {
+            panic!("expected PlanMode");
+        };
+        assert_eq!(a, "build X");
+        let ChatOutcome::PlanMode(a) = w.cmd_plan("  open ") else {
+            panic!("expected PlanMode");
+        };
+        assert_eq!(a, "open", "arg is trimmed, not dropped");
     }
 
     #[test]

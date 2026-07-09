@@ -651,6 +651,23 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
 
+    /// Read the session's plan-mode flag (`/plan`). When set, the turn loop
+    /// routes tool-permission checks through `check_in_plan_mode` and sends
+    /// `permission_mode: "plan"` in the request body. DEFAULT is `false` so
+    /// existing impls/mocks compile unchanged.
+    async fn plan_mode(&self) -> bool {
+        false
+    }
+
+    /// Enter (`on = true`) / leave (`on = false`) plan mode by flipping
+    /// `SessionState.plan_mode` — the exact bool the `EnterPlanMode`/
+    /// `ExitPlanMode` tools flip. `/plan` only ever enters. DEFAULT is an inert
+    /// no-op so existing impls/mocks compile unchanged.
+    async fn set_plan_mode(&self, on: bool) -> Result<(), HandleError> {
+        let _ = on;
+        Ok(())
+    }
+
     // M5-10 additions:
 
     /// Set the orchestrator's internal `should_exit` flag.

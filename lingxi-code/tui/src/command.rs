@@ -433,6 +433,18 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_fast,
     },
     SlashCommand {
+        name: "/plan",
+        aliases: &[],
+        description: "Enable plan mode or view the current session plan",
+        // Optional (NOT Required): a trailing `open`/`<description>` must reach
+        // the handler (which enters plan mode) rather than falling through as an
+        // LLM prompt. LingXi has no plan store, so the description is not
+        // submitted and `open` does not launch an editor (documented gap).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_plan,
+    },
+    SlashCommand {
         name: "/goal",
         aliases: &[],
         description: "Set a goal — keep working until the condition is met",

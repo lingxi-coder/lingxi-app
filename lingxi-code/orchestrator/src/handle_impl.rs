@@ -255,6 +255,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    async fn plan_mode(&self) -> bool {
+        self.session.lock().await.plan_mode
+    }
+
+    async fn set_plan_mode(&self, on: bool) -> Result<(), HandleError> {
+        self.session.lock().await.plan_mode = on;
+        Ok(())
+    }
+
     async fn request_exit(&self) {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {

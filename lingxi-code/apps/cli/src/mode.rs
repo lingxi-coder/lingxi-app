@@ -266,6 +266,7 @@ pub(crate) async fn run_ratatui(
     let compact_turn_tx = turn_tx.clone();
     let rename_turn_tx = turn_tx.clone();
     let fast_turn_tx = turn_tx.clone();
+    let plan_turn_tx = turn_tx.clone();
     // (/reload-skills) The SAME shared `Arc<RwLock<CommandRegistry>>` the
     // dispatcher mutates, handed to the `ChatWidget` so `/reload-skills`
     // reloads the live registry. Cloned before `tui_build` is consumed.
@@ -317,6 +318,8 @@ pub(crate) async fn run_ratatui(
     let rename_handle = handle.clone();
     let fast_orch = orchestrator.clone();
     let fast_handle = handle.clone();
+    let plan_orch = orchestrator.clone();
+    let plan_handle = handle.clone();
     // (/sandbox) The shared toggle cell threaded into the widget + clones for
     // the off-loop settings-persistence effect (mirrors the sibling triplets).
     let sandbox_toggle = tui_build.runtime.sandbox_toggle.clone();
@@ -566,6 +569,35 @@ pub(crate) async fn run_ratatui(
             });
         });
     };
+    // (/plan async effect) `/plan` returns `ChatOutcome::PlanMode` from the
+    // blocking ratatui loop. The enter-vs-view decision (a read of the session
+    // plan-mode flag) and, when entering, the flip both run off the render
+    // thread on the captured handle (doctrine: session reads + mutations go
+    // off-loop). LingXi has no on-disk plan store, so the "already in plan mode"
+    // branch is a static message (claude-code `plan.tsx` no-plan branch); the
+    // trimmed arg tail is currently advisory (no `<description>` submit / editor
+    // open). The result is reported via `TurnEvent::SystemNotice`.
+    let on_plan_mode = move |_args: String| {
+        let orch = plan_orch.clone();
+        let tx = plan_turn_tx.clone();
+        plan_handle.spawn(async move {
+            let (body, is_error) = if orch.plan_mode().await {
+                (
+                    "Already in plan mode. No plan written yet.".to_string(),
+                    false,
+                )
+            } else {
+                match orch.set_plan_mode(true).await {
+                    Ok(()) => ("Enabled plan mode".to_string(), false),
+                    Err(_e) => ("Error entering plan mode".to_string(), true),
+                }
+            };
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                body,
+                is_error,
+            });
+        });
+    };
     // (/sandbox) The live toggle already flipped in the widget (a lock-free
     // AtomicBool store); this closure only PERSISTS the choice / appends an
     // exclude to the settings files off the render thread, reporting via
@@ -650,6 +682,7 @@ pub(crate) async fn run_ratatui(
             on_compact,
             on_rename,
             on_fast_mode,
+            on_plan_mode,
             on_sandbox_action,
         )
     })

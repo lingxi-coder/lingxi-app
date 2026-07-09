@@ -99,6 +99,13 @@ pub struct AppCallbacks<'cb> {
     /// and reports the applied state through a [`TurnEvent::SystemNotice`]. The
     /// `Option<bool>` is `Some(target)` for `on`/`off`, `None` for toggle.
     pub on_fast_mode: Box<dyn FnMut(Option<bool>) + 'cb>,
+    /// Executed on [`ChatOutcome::PlanMode`]: the caller reads the session's
+    /// plan-mode flag off-loop and, when not already in plan mode, flips it on
+    /// via `OrchestratorHandle::set_plan_mode`; the applied state (or the
+    /// "already in plan mode" view message) returns via a
+    /// [`TurnEvent::SystemNotice`], same shape as `on_fast_mode`. The `String`
+    /// is the trimmed argument tail.
+    pub on_plan_mode: Box<dyn FnMut(String) + 'cb>,
     /// Executed on [`ChatOutcome::SandboxAction`]: the caller persists the
     /// toggled `sandbox.enabled` to user settings, or appends an `exclude`
     /// pattern to local settings, off-loop; the result returns via a
@@ -244,6 +251,13 @@ impl<'cb> RataApp<'cb> {
                     // `TurnEvent::SystemNotice`, same shape as `Compact`.
                     ChatOutcome::FastMode(target) => {
                         (self.callbacks.on_fast_mode)(target);
+                    }
+                    // `/plan`: read + flip the session plan-mode flag off-loop on
+                    // the live engine runtime; the applied state (or view
+                    // message) returns via `TurnEvent::SystemNotice`, same shape
+                    // as `FastMode`.
+                    ChatOutcome::PlanMode(args) => {
+                        (self.callbacks.on_plan_mode)(args);
                     }
                     // `/sandbox`: the live toggle already flipped in the widget;
                     // persist the choice / append an exclude off-loop, result via
@@ -418,6 +432,7 @@ pub fn run_app(
     on_compact: impl FnMut(String),
     on_rename: impl FnMut(String),
     on_fast_mode: impl FnMut(Option<bool>),
+    on_plan_mode: impl FnMut(String),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
@@ -448,6 +463,7 @@ pub fn run_app(
             on_compact: Box::new(on_compact),
             on_rename: Box::new(on_rename),
             on_fast_mode: Box::new(on_fast_mode),
+            on_plan_mode: Box::new(on_plan_mode),
             on_sandbox_action: Box::new(on_sandbox_action),
         },
     );
@@ -536,6 +552,7 @@ mod tests {
                 on_compact: Box::new(|_| {}),
                 on_rename: Box::new(|_| {}),
                 on_fast_mode: Box::new(|_| {}),
+                on_plan_mode: Box::new(|_| {}),
                 on_sandbox_action: Box::new(|_| {}),
             },
         )

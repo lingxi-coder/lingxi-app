@@ -214,15 +214,35 @@ pub(crate) fn group_tool_use_lines(
 /// The collapsed Read/Search fold: a dim `Read/Search (N results)` count
 /// line; verbose expands the per-entry display lines under a `⎿  ` gutter
 /// (tui-core `CollapsedReadSearch.entries` contract: "shown when expanded").
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collapsed_read_search_lines(
+    search_count: u64,
+    read_count: u64,
+    list_count: u64,
+    repl_count: u64,
+    is_active: bool,
+    latest_hint: Option<&str>,
     entries: &[String],
     theme: &Theme,
     verbose: bool,
 ) -> Vec<StyledLine> {
-    let mut out = colored_lines(
-        &format!("Read/Search ({} results)", entries.len()),
-        theme.dim,
+    let summary = tui_core::collapse::search_read_summary_text(
+        search_count,
+        read_count,
+        list_count,
+        repl_count,
+        is_active,
     );
+    let mut out = colored_lines(&summary, theme.dim);
+    // The dim `⎿ <latest read>` hint renders ONLY while the group is active
+    // (CollapsedReadSearchContent.tsx parity).
+    if is_active {
+        if let Some(hint) = latest_hint {
+            out.push(StyledLine {
+                spans: vec![dim_span(format!("  ⎿  {hint}"), theme)],
+            });
+        }
+    }
     if verbose {
         for entry in entries {
             out.push(StyledLine {
@@ -354,20 +374,53 @@ impl StyledCell for GroupedToolUseCell {
 /// — the `Read/Search (N results)` fold of read/search/list runs.
 #[derive(Debug)]
 pub struct CollapsedReadSearchCell {
+    search_count: u64,
+    read_count: u64,
+    list_count: u64,
+    repl_count: u64,
+    is_active: bool,
+    latest_hint: Option<String>,
     entries: Vec<String>,
 }
 
 impl CollapsedReadSearchCell {
-    /// Wrap the fold's per-entry display lines.
+    /// Wrap the fold's counts + verbose entries.
     #[must_use]
-    pub fn new(entries: Vec<String>) -> Self {
-        Self { entries }
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        search_count: u64,
+        read_count: u64,
+        list_count: u64,
+        repl_count: u64,
+        is_active: bool,
+        latest_hint: Option<String>,
+        entries: Vec<String>,
+    ) -> Self {
+        Self {
+            search_count,
+            read_count,
+            list_count,
+            repl_count,
+            is_active,
+            latest_hint,
+            entries,
+        }
     }
 }
 
 impl StyledCell for CollapsedReadSearchCell {
     fn styled_lines(&self, _width: usize, theme: &Theme, verbose: bool) -> Vec<StyledLine> {
-        collapsed_read_search_lines(&self.entries, theme, verbose)
+        collapsed_read_search_lines(
+            self.search_count,
+            self.read_count,
+            self.list_count,
+            self.repl_count,
+            self.is_active,
+            self.latest_hint.as_deref(),
+            &self.entries,
+            theme,
+            verbose,
+        )
     }
 }
 
@@ -612,12 +665,19 @@ mod tests {
 
     #[test]
     fn collapsed_read_search_cell_verbose_expands_entries() {
-        let cell =
-            CollapsedReadSearchCell::new(vec!["Read a.rs".to_string(), "Grep foo".to_string()]);
+        let cell = CollapsedReadSearchCell::new(
+            1,
+            1,
+            0,
+            0,
+            false,
+            None,
+            vec!["Read a.rs".to_string(), "Grep foo".to_string()],
+        );
         assert_eq!(
             plain(&cell, true),
             vec![
-                "Read/Search (2 results)".to_string(),
+                "Searched for 1 pattern, read 1 file".to_string(),
                 "  ⎿  Read a.rs".to_string(),
                 "  ⎿  Grep foo".to_string(),
             ]
@@ -672,11 +732,18 @@ mod tests {
 
     #[test]
     fn collapsed_read_search_cell_renders_dim_count_line() {
-        let cell =
-            CollapsedReadSearchCell::new(vec!["Read a.rs".to_string(), "Grep foo".to_string()]);
+        let cell = CollapsedReadSearchCell::new(
+            1,
+            1,
+            0,
+            0,
+            false,
+            None,
+            vec!["Read a.rs".to_string(), "Grep foo".to_string()],
+        );
         assert_eq!(
             plain(&cell, false),
-            vec!["Read/Search (2 results)".to_string()]
+            vec!["Searched for 1 pattern, read 1 file".to_string()]
         );
         let styled = cell.display_lines(80, &Theme::dark(), RenderMode::default());
         assert_eq!(styled[0].spans[0].style.fg, Some(rata(Theme::dark().dim)));

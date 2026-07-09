@@ -285,6 +285,10 @@ pub enum RenderedMessage {
         group_id: protocol::ToolUseId,
         /// Per-entry display lines, shown when expanded.
         entries: Vec<String>,
+        /// Number of REPL invocations folded (present-tense `REPL'ing`).
+        repl_count: u64,
+        /// The latest read target — the dim `⎿` hint shown ONLY while active.
+        latest_hint: Option<String>,
         /// Team memories recalled (M9-03; data feed wired later).
         mem_read: u64,
         /// Team-memory searches (M9-03; data feed wired later).

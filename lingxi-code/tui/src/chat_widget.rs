@@ -273,6 +273,14 @@ pub struct ChatWidget {
     /// (`old_string`/`new_string`/`file_path`) for the result cell — the same
     /// correlation the resume path does with its `tool_inputs` side-table.
     tool_inputs: std::collections::HashMap<protocol::ToolUseId, serde_json::Value>,
+    /// The open client-side read/search fold (design doc §4). Lives in the
+    /// transcript's active slot while streaming; committed once on a breaker.
+    collapse_group: Option<tui_core::collapse::CollapseGroup>,
+    /// The first folded tool-use id — the committed variant's `group_id`.
+    collapse_group_id: Option<protocol::ToolUseId>,
+    /// Tool-use ids currently absorbed by the open fold — a collapsible result
+    /// for one of these is absorbed (does not break the group).
+    collapse_ids: std::collections::HashSet<protocol::ToolUseId>,
     /// Composition-root-shared `/web` config snapshot slot (`None` until the
     /// embedder wires one via [`Self::set_web_snapshot`]). [`Self::cmd_web`]
     /// reads a clone to seed the picker; the async `on_web_action` effect
@@ -387,6 +395,9 @@ impl ChatWidget {
             status_line: None,
             pending_terminal_sequences: Vec::new(),
             tool_inputs: std::collections::HashMap::new(),
+            collapse_group: None,
+            collapse_group_id: None,
+            collapse_ids: std::collections::HashSet::new(),
             web_snapshot: None,
             permission_snapshot: None,
             plugin_snapshot: None,
@@ -512,6 +523,63 @@ impl ChatWidget {
     /// at every flush point that can fire before any assistant text streams (a
     /// leading tool call, a thinking-first turn, or a tool-only turn), so no
     /// stray bare `●` marker is committed with no body.
+    /// Re-render the open fold into the transcript's active slot (is_active =
+    /// true). Called after every absorbed start/result so the live line updates.
+    fn render_active_collapse(&mut self) {
+        let cell = match &self.collapse_group {
+            Some(group) => RenderedMessage::CollapsedReadSearch {
+                search_count: group.search_count(),
+                read_count: group.read_count(),
+                list_count: group.list_count(),
+                repl_count: group.repl_count(),
+                is_active: true,
+                group_id: self
+                    .collapse_group_id
+                    .clone()
+                    .unwrap_or_else(protocol::ToolUseId::new),
+                latest_hint: group.latest_hint().map(str::to_string),
+                entries: group.entries().to_vec(),
+                mem_read: 0,
+                mem_search: 0,
+                mem_write: 0,
+            },
+            None => return,
+        };
+        self.transcript
+            .set_active(crate::history_cell::cell_for_message(cell));
+    }
+
+    /// Seal the open fold: drop the live active cell and commit the finalized
+    /// (is_active = false) collapsed variant. No-op when no fold is open.
+    fn finalize_collapse_group(&mut self) {
+        let Some(group) = self.collapse_group.take() else {
+            return;
+        };
+        let group_id = self
+            .collapse_group_id
+            .take()
+            .unwrap_or_else(protocol::ToolUseId::new);
+        self.collapse_ids.clear();
+        self.transcript.discard_active();
+        if group.is_empty() {
+            return;
+        }
+        self.transcript
+            .push_message(RenderedMessage::CollapsedReadSearch {
+                search_count: group.search_count(),
+                read_count: group.read_count(),
+                list_count: group.list_count(),
+                repl_count: group.repl_count(),
+                is_active: false,
+                group_id,
+                latest_hint: None,
+                entries: group.entries().to_vec(),
+                mem_read: 0,
+                mem_search: 0,
+                mem_write: 0,
+            });
+    }
+
     fn flush_or_discard_active(&mut self) {
         let empty = self
             .transcript
@@ -542,6 +610,7 @@ impl ChatWidget {
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
             TurnEvent::TurnStarted => {
+                self.finalize_collapse_group();
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
                 self.api_retry = None;
@@ -558,6 +627,7 @@ impl ChatWidget {
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
             }
             TurnEvent::TextDelta(delta) => {
+                self.finalize_collapse_group();
                 // Content arrived → the retried request succeeded; drop any
                 // "Retrying…" status so the normal spinner/stream resumes.
                 self.api_retry = None;
@@ -584,6 +654,7 @@ impl ChatWidget {
                 }
             }
             TurnEvent::ThinkingDelta(delta) => {
+                self.finalize_collapse_group();
                 self.response_chars = self
                     .response_chars
                     .saturating_add(delta.chars().count() as u64);
@@ -631,6 +702,25 @@ impl ChatWidget {
                 // into one active cell and every tool call was invisible.
                 // Remember the input so the paired result can render the
                 // Edit/Write diff (see `ToolUseResult`).
+                // Collapsed read/search fold (client-side streaming accumulator,
+                // design doc §4): a collapsible use is absorbed into the active
+                // fold instead of committing its own ●/⎿ cells.
+                if tui_core::collapse::classify(tool.as_str(), &input).is_collapsible {
+                    if self.collapse_group.is_none() {
+                        self.flush_or_discard_active();
+                        self.collapse_group = Some(tui_core::collapse::CollapseGroup::new());
+                        self.collapse_group_id = Some(id.clone());
+                    }
+                    if let Some(group) = self.collapse_group.as_mut() {
+                        group.absorb_start(&tool, &input);
+                    }
+                    self.collapse_ids.insert(id.clone());
+                    self.tool_inputs.insert(id.clone(), input.clone());
+                    self.render_active_collapse();
+                    return;
+                }
+                // A non-collapsible tool use breaks any open fold.
+                self.finalize_collapse_group();
                 self.flush_or_discard_active();
                 self.tool_inputs.insert(id.clone(), input.clone());
                 self.transcript
@@ -638,6 +728,14 @@ impl ChatWidget {
             }
             TurnEvent::ToolUseResult { id, tool, result } => {
                 self.activity = None;
+                // A result for a folded use is absorbed (keeps the fold active);
+                // any other result breaks a still-open fold.
+                if self.collapse_ids.remove(&id) {
+                    self.tool_inputs.remove(&id);
+                    self.render_active_collapse();
+                    return;
+                }
+                self.finalize_collapse_group();
                 // Recover the originating call's input (for diff tools) from the
                 // side-table, mirroring the resume path's correlation, then
                 // render the `⎿ {summary}` result cell (or an Edit/Write diff).
@@ -657,6 +755,7 @@ impl ChatWidget {
                 });
             }
             TurnEvent::TurnEnded(_) => {
+                self.finalize_collapse_group();
                 self.flush_or_discard_active();
                 self.current_turn = None;
                 self.turn_started_at = None;
@@ -3129,26 +3228,65 @@ mod tests {
         let mut widget = widget();
         submit_command(&mut widget, "run it");
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        // Straight to a tool call — no TextDelta first.
+        // Straight to a tool call — no TextDelta first. A NON-collapsible tool
+        // (`echo` bash — not a read/search command) so it renders its own
+        // ●/⎿ cells rather than folding into a CollapsedReadSearch group.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: protocol::ToolUseId::from("t1"),
-            tool: "Read".to_string(),
-            input: serde_json::json!({ "file_path": "/tmp/x" }),
+            tool: "Bash".to_string(),
+            input: serde_json::json!({ "command": "echo hi" }),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
             id: protocol::ToolUseId::from("t1"),
-            tool: "Read".to_string(),
-            result: serde_json::json!("file body"),
+            tool: "Bash".to_string(),
+            result: serde_json::json!("hi"),
         });
         widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
-        // Exactly: user "run it" · ● Read · ⎿ result — NO empty assistant cell.
+        // Exactly: user "run it" · ● Bash · ⎿ result — NO empty assistant cell.
         assert_eq!(widget.transcript.committed_cells().len(), 3);
-        assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Read");
+        assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Bash");
         assert!(cells(&widget)[2].as_any().downcast_ref::<ToolResultCell>().is_some());
         // The (empty) placeholder must not survive as an assistant cell.
         assert!(cells(&widget)
             .iter()
             .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none()));
+    }
+
+    /// Consecutive read/search tool uses FOLD into a single collapsed cell
+    /// (client-side accumulator) instead of committing a ●/⎿ pair each — the
+    /// user's "collapse consecutive tools to one line" request. A breaker
+    /// (`TurnEnded`) seals the group.
+    #[test]
+    fn consecutive_read_search_tools_fold_into_one_collapsed_cell() {
+        use crate::history_cell::tool::{CollapsedReadSearchCell, ToolUseCell};
+        let mut widget = widget();
+        submit_command(&mut widget, "look");
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        for (id, tool, input) in [
+            ("t1", "Read", serde_json::json!({ "file_path": "/a" })),
+            ("t2", "Grep", serde_json::json!({ "pattern": "foo" })),
+        ] {
+            widget.apply_turn_event(TurnEvent::ToolUseStart {
+                id: protocol::ToolUseId::from(id),
+                tool: tool.to_string(),
+                input,
+            });
+            widget.apply_turn_event(TurnEvent::ToolUseResult {
+                id: protocol::ToolUseId::from(id),
+                tool: tool.to_string(),
+                result: serde_json::json!("ok"),
+            });
+        }
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        // user "look" + ONE folded cell — no per-tool ●/⎿ cells.
+        assert_eq!(widget.transcript.committed_cells().len(), 2);
+        assert!(cells(&widget)[1]
+            .as_any()
+            .downcast_ref::<CollapsedReadSearchCell>()
+            .is_some());
+        assert!(cells(&widget)
+            .iter()
+            .all(|c| c.as_any().downcast_ref::<ToolUseCell>().is_none()));
     }
 
     /// `!`-prefixed bash mode runs the command inline (no LLM turn): it echoes

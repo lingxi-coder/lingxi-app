@@ -240,9 +240,24 @@ pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
         M::GroupedToolUse { tool, entries, .. } => {
             Box::new(tool::GroupedToolUseCell::new(tool, entries))
         }
-        M::CollapsedReadSearch { entries, .. } => {
-            Box::new(tool::CollapsedReadSearchCell::new(entries))
-        }
+        M::CollapsedReadSearch {
+            search_count,
+            read_count,
+            list_count,
+            repl_count,
+            is_active,
+            latest_hint,
+            entries,
+            ..
+        } => Box::new(tool::CollapsedReadSearchCell::new(
+            search_count,
+            read_count,
+            list_count,
+            repl_count,
+            is_active,
+            latest_hint,
+            entries,
+        )),
         M::Shutdown { from, reason, .. } => Box::new(team::ShutdownCell::new(from, reason)),
         M::TaskAssignment {
             subject,
@@ -679,8 +694,10 @@ mod tests {
                 search_count: 0,
                 read_count: 0,
                 list_count: 0,
+                repl_count: 0,
                 is_active: false,
                 group_id: protocol::ToolUseId::new(),
+                latest_hint: None,
                 entries: Vec::new(),
                 mem_read: 0,
                 mem_search: 0,

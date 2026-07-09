@@ -30,6 +30,7 @@ pub mod prompt;
 pub mod read_only;
 pub mod repl;
 pub mod shared;
+pub mod search_read;
 pub mod silent;
 
 pub use bash::BashTool;

@@ -13,6 +13,7 @@ pub mod ask_user_question_bridge;
 pub mod bash_runner;
 pub mod error;
 pub mod key_hint;
+pub mod collapse;
 pub mod message;
 pub mod message_render;
 pub mod multiagent;

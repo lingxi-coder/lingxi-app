@@ -130,9 +130,26 @@ pub fn render_message(
         RenderedMessage::GroupedToolUse { tool, entries, .. } => {
             group_tool_use_lines(tool, entries, theme, verbose)
         }
-        RenderedMessage::CollapsedReadSearch { entries, .. } => {
-            collapsed_read_search_lines(entries, theme, verbose)
-        }
+        RenderedMessage::CollapsedReadSearch {
+            search_count,
+            read_count,
+            list_count,
+            repl_count,
+            is_active,
+            latest_hint,
+            entries,
+            ..
+        } => collapsed_read_search_lines(
+            *search_count,
+            *read_count,
+            *list_count,
+            *repl_count,
+            *is_active,
+            latest_hint.as_deref(),
+            entries,
+            theme,
+            verbose,
+        ),
         RenderedMessage::Attachment { attachment } => attachment_lines(attachment, theme),
         RenderedMessage::Advisor { kind, verbose } => advisor_lines(kind, *verbose, theme),
         RenderedMessage::PlanApproval { kind } => plan_approval_lines(kind, theme),
@@ -616,15 +633,17 @@ mod tests {
                     search_count: 1,
                     read_count: 1,
                     list_count: 0,
+                    repl_count: 0,
                     is_active: false,
                     group_id: protocol::ToolUseId::new(),
+                    latest_hint: None,
                     entries: vec!["Read a.rs".to_string(), "Grep foo".to_string()],
                     mem_read: 0,
                     mem_search: 0,
                     mem_write: 0,
                 },
                 false,
-                Expect::Visible(&["Read/Search", "2"]),
+                Expect::Visible(&["Searched for 1 pattern", "read 1 file"]),
             ),
         ]
     }

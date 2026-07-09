@@ -209,6 +209,29 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
+    /// `/btw` — delegate to the history-inert inherent
+    /// [`ConversationOrchestrator::answer_side_question_query`] with a fresh
+    /// (un-cancelled) token, mirroring `generate_recap`'s delegation.
+    async fn answer_side_question(&self, question: &str) -> Result<RecapOutcome, HandleError> {
+        self.answer_side_question_query(question, tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    /// `/rename <name>` — append a user-set `custom-title` line to this
+    /// session's transcript (1:1 with claude-code `saveCustomTitle`). The
+    /// `sessionId` field is the BARE uuid (the `<uuid>.jsonl` stem the loader
+    /// keys `custom_titles` by). No-op Ok when no writer is wired.
+    async fn rename_session(&self, name: String) -> Result<(), HandleError> {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return Ok(());
+        };
+        let session_id = self.session.lock().await.session_id;
+        writer
+            .append_custom_title(&session_id.as_uuid().to_string(), &name)
+            .await
+            .map_err(|e| HandleError::ActionFailed(e.to_string()))
+    }
+
     async fn snapshot_cost(&self) -> CostSnapshot {
         // M6-06: delegate to the inherent helper that reads from the wired
         // CostTracker. Returns zero-valued snapshot if no tracker is wired
@@ -220,6 +243,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let mut s = self.session.lock().await;
         s.model = model.to_string();
         s.model_profile = profile.map(str::to_string);
+        Ok(())
+    }
+
+    async fn fast_mode(&self) -> bool {
+        self.fast_mode.load(Ordering::SeqCst)
+    }
+
+    async fn set_fast_mode(&self, on: bool) -> Result<(), HandleError> {
+        self.fast_mode.store(on, Ordering::SeqCst);
         Ok(())
     }
 

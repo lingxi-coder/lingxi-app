@@ -113,6 +113,17 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_permissions,
     },
     SlashCommand {
+        name: "/add-dir",
+        aliases: &[],
+        description: "Add a new working directory",
+        // Optional (NOT Required): a bare `/add-dir` reaches the handler so it
+        // renders its own "Usage: /add-dir <path>" line rather than falling
+        // through as an LLM prompt (same rationale as `/fork`).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_add_dir,
+    },
+    SlashCommand {
         name: "/resume",
         aliases: &["/continue"],
         description: "Resume a previous conversation",
@@ -175,6 +186,14 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_stats,
+    },
+    SlashCommand {
+        name: "/diff",
+        aliases: &[],
+        description: "View uncommitted changes and per-turn diffs",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_diff,
     },
     SlashCommand {
         name: "/export",
@@ -348,6 +367,19 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_keybindings,
     },
     SlashCommand {
+        name: "/terminal-setup",
+        aliases: &[],
+        description: "Install Shift+Enter key binding for newlines",
+        args: ArgSpec::None,
+        // Statically advertised, but RUNTIME-hidden by `is_runtime_hidden`
+        // (consulted in `advertised()`) when the active terminal natively
+        // supports CSI-u / the Kitty keyboard protocol — mirroring claude-code's
+        // `isHidden: env.terminal in NATIVE_CSIU_TERMINALS` (index.ts set:
+        // Ghostty/Kitty/iTerm2/WezTerm). Typing it still dispatches.
+        advertised: true,
+        run: ChatWidget::cmd_terminal_setup,
+    },
+    SlashCommand {
         name: "/skill-doctor",
         aliases: &[],
         description: "Show which loaded skills are unused and costing context",
@@ -391,6 +423,16 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_effort,
     },
     SlashCommand {
+        name: "/fast",
+        aliases: &[],
+        description: "Toggle fast mode",
+        // Optional: `on`/`off` set the state; a bare `/fast` toggles it. Reaches
+        // the handler either way rather than falling through as a prompt.
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_fast,
+    },
+    SlashCommand {
         name: "/goal",
         aliases: &[],
         description: "Set a goal — keep working until the condition is met",
@@ -410,12 +452,48 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_fork,
     },
     SlashCommand {
+        name: "/branch",
+        // No `fork` alias: claude gates it on `feature('FORK_SUBAGENT') ? [] :
+        // ['fork']`, and LingXi ships /fork as its own command, so the alias set
+        // is empty (the FORK_SUBAGENT-enabled branch).
+        aliases: &[],
+        description: "Create a branch of the current conversation at this point",
+        // Optional (NOT Required): a bare `/branch` must reach the handler so it
+        // derives the branch name from the first prompt rather than falling
+        // through as an LLM prompt.
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_branch,
+    },
+    SlashCommand {
         name: "/recap",
         aliases: &[],
         description: "Generate a one-line session recap now",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_recap,
+    },
+    SlashCommand {
+        name: "/btw",
+        aliases: &[],
+        description: "Ask a quick side question without interrupting the main conversation",
+        // Optional (NOT Required): a bare `/btw` must reach the handler so it
+        // renders "Usage: /btw <your question>" rather than falling through as
+        // an LLM prompt (same rationale as `/fork`).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_btw,
+    },
+    SlashCommand {
+        name: "/rename",
+        aliases: &[],
+        description: "Rename the current conversation",
+        // Optional (NOT Required): a bare `/rename` must reach the handler so it
+        // renders "Usage: /rename <name>" rather than falling through as an LLM
+        // prompt (auto-name generation is deferred).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_rename,
     },
     SlashCommand {
         name: "/reload-skills",
@@ -451,7 +529,21 @@ pub const BUILTIN: &[SlashCommand] = &[
 
 /// The advertised registry entries in popup/help order.
 pub fn advertised() -> impl Iterator<Item = &'static SlashCommand> {
-    BUILTIN.iter().filter(|command| command.advertised)
+    BUILTIN
+        .iter()
+        .filter(|command| command.advertised && !is_runtime_hidden(command.name))
+}
+
+/// Runtime `isHidden` gate for statically-`advertised` rows whose palette /
+/// `/help` visibility depends on the live environment, mirroring claude-code's
+/// per-command `isHidden` predicate. Currently only `/terminal-setup`, which
+/// claude-code hides when the active terminal already parses CSI-u / the Kitty
+/// keyboard protocol (Ghostty/Kitty/iTerm2/WezTerm) and so needs no Shift+Enter
+/// binding installed. `command_items` / `help_lines` derive from `advertised()`,
+/// so both surfaces honor this gate uniformly.
+#[must_use]
+pub fn is_runtime_hidden(name: &str) -> bool {
+    name == "/terminal-setup" && tui_core::terminal_setup::terminal_natively_supports_csiu()
 }
 
 /// `/exit` (alias `/quit`): exit the app. A free function (not a
@@ -554,7 +646,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         for command in BUILTIN {
-            if command.advertised {
+            if command.advertised && !is_runtime_hidden(command.name) {
                 assert!(
                     help_text.contains(command.name),
                     "{} missing from /help",

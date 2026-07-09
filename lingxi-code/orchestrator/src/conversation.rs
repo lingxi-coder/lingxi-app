@@ -764,6 +764,14 @@ pub struct ConversationOrchestrator {
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
     /// Once `true`, this flag is never cleared (idempotent `/exit`).
     pub(crate) should_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Session-scoped fast-mode toggle (`/fast`). Shared (same `Arc`) with the
+    /// request-building `ProviderApiAdapter` (via [`Self::with_fast_mode`]), so
+    /// flipping it via the handle's `set_fast_mode` makes the next turn send
+    /// `speed:"fast"` when the active model supports it. Wraps `AtomicBool` so
+    /// reads are lock-free (mirrors `should_exit`). Defaults to a private
+    /// always-`false` flag until the composition root shares one with the
+    /// adapter.
+    pub(crate) fast_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Finding #80: once-per-session latch for the refusal→fallback-model swap
     /// (claude-code's `refusalFallbackModelLatch`). Set the first time a turn's
     /// response arrives with `stop_reason == "refusal"` AND
@@ -1224,6 +1232,7 @@ impl ConversationOrchestrator {
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
             cost_tracker: None,
             analytics_bus: None,
@@ -1790,6 +1799,17 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// (`/fast`) Share the session's fast-mode flag with this orchestrator — the
+    /// SAME `Arc<AtomicBool>` the request-building `ProviderApiAdapter` holds, so
+    /// the handle's `set_fast_mode` flip is seen by the adapter on the next
+    /// turn. Without it the flag is a private always-`false` default (no request
+    /// ever carries `speed`).
+    #[must_use]
+    pub fn with_fast_mode(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.fast_mode = flag;
+        self
+    }
+
     /// Byte-exact `/recap` prompt (probed from the 2.1.198 binary). Sent as the
     /// single user turn of the isolated recap side query. Kept in lockstep with
     /// the byte-audit copy in `command-core`'s `recap.rs` test.
@@ -1842,6 +1862,73 @@ impl ConversationOrchestrator {
             fork_label: "recap".into(),
             query_source: sidequery::QuerySource::Custom("recap".into()),
             max_output_tokens: Some(256),
+        };
+
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(traits::RecapOutcome::Cancelled),
+            r = runner.run(req) => match r {
+                Ok(res) => Ok(traits::RecapOutcome::Text(res.final_text.trim().to_string())),
+                Err(e) => Err(traits::HandleError::ActionFailed(e.to_string())),
+            }
+        }
+    }
+
+    /// Byte-faithful `/btw` side-question wrapper, ported verbatim from
+    /// claude-code `utils/sideQuestion.ts`: the `<system-reminder>` that turns
+    /// the shared context into a one-off, tool-less answer. Prepended (with a
+    /// blank line) to the user's question as the single user turn of the
+    /// isolated side query.
+    pub(crate) const SIDE_QUESTION_SYSTEM_REMINDER: &str = "<system-reminder>This is a side question from the user. You must answer this question directly in a single response.\n\nIMPORTANT CONTEXT:\n- You are a separate, lightweight agent spawned to answer this one question\n- The main agent is NOT interrupted - it continues working independently in the background\n- You share the conversation context but are a completely separate instance\n- Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\nCRITICAL CONSTRAINTS:\n- You have NO tools available - you cannot read files, run commands, search, or take any actions\n- This is a one-off response - there will be no follow-up turns\n- You can ONLY provide information based on what you already know from the conversation context\n- NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n- If you don't know the answer, say so - do not offer to look it up or investigate\n\nSimply answer the question with the information you have.</system-reminder>";
+
+    /// Real `/btw` body — the SAME read-only, tool-denied, single-turn,
+    /// HISTORY-INERT side query as [`Self::generate_recap_query`], differing
+    /// ONLY in the prompt (the wrapped side question instead of `RECAP_PROMPT`).
+    /// Reuses the SAME `recap_runner` (the single-turn `ForkedAgentRunner`) and
+    /// `cache_safe_slot`, so it needs no new composition-root wiring. NEVER
+    /// touches `session.history`, cache writes, or the pre/post-compact hooks;
+    /// tool-denial is structural (the single-turn runner exposes no tools).
+    ///
+    /// Empty cache-safe slot (no successful turn yet) maps to `Err(ActionFailed)`
+    /// (the TUI renders "Couldn't answer side question: …") rather than a panic —
+    /// the same limitation as `/recap` (the LingXi single-turn runner requires a
+    /// captured prefix; cc's from-scratch rebuild fallback is not modeled).
+    pub(crate) async fn answer_side_question_query(
+        &self,
+        question: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<traits::RecapOutcome, traits::HandleError> {
+        let runner = self
+            .recap_runner
+            .clone()
+            .ok_or_else(|| traits::HandleError::ActionFailed("side question unavailable".into()))?;
+        let params = self
+            .cache_safe_slot
+            .as_ref()
+            .ok_or_else(|| {
+                traits::HandleError::ActionFailed("side question: no cache-safe slot".into())
+            })?
+            .get_last()
+            .await
+            .ok_or_else(|| {
+                traits::HandleError::ActionFailed(
+                    "side question: no context yet — send a message first".into(),
+                )
+            })?;
+
+        if cancel.is_cancelled() {
+            return Ok(traits::RecapOutcome::Cancelled);
+        }
+
+        let wrapped = format!("{}\n\n{}", Self::SIDE_QUESTION_SYSTEM_REMINDER, question);
+        let req = sidequery::ForkedAgentRequest {
+            prompt_messages: vec![ConversationMessage::user(MessageId::new(), wrapped)],
+            cache_safe_params: params,
+            fork_label: "side_question".into(),
+            query_source: sidequery::QuerySource::Custom("side_question".into()),
+            // Uncapped like cc's `runSideQuestion` (maxTurns=1, no maxTokens):
+            // `None` → the runner's DEFAULT_FORK_MAX_TOKENS.
+            max_output_tokens: None,
         };
 
         tokio::select! {

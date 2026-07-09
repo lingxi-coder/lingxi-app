@@ -2654,6 +2654,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 None,
+                None,
             )
             .await;
 
@@ -2731,6 +2732,7 @@ mod tests {
                 None,
                 Vec::new(),
                 Vec::new(),
+                None,
                 None,
             )
             .await
@@ -3751,6 +3753,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 None,
+                None,
             )
             .await
             .expect("stream open ok");
@@ -3808,6 +3811,7 @@ mod tests {
                 None,
                 Vec::new(),
                 Vec::new(),
+                None,
                 None,
             )
             .await;

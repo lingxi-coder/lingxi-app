@@ -48,6 +48,7 @@ pub mod reload_skills;
 pub mod resume;
 pub mod review;
 pub mod security_review;
+pub mod side_question;
 pub mod skill_doctor;
 pub mod skills;
 pub mod status;

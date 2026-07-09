@@ -14,6 +14,7 @@
 //! See `.omo/plans/2026-07-02-tui-rata-codex-ui-structure-parity.md`.
 #![forbid(unsafe_code)]
 
+pub mod add_dir;
 pub mod agents_screen;
 pub mod app;
 pub mod bottom_pane;
@@ -23,6 +24,7 @@ pub mod command;
 pub mod composer;
 pub mod connect;
 pub mod copy;
+pub mod diff;
 pub mod export;
 pub mod files;
 pub mod history_cell;

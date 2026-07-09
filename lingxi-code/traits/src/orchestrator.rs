@@ -636,6 +636,21 @@ pub trait OrchestratorHandle: Send + Sync {
     /// `None` profile = resolve unscoped (default / legacy behaviour).
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
 
+    /// Read the session's fast-mode flag (`/fast`; the priority `speed:"fast"`
+    /// tier). The DEFAULT is `false` so existing impls/mocks compile unchanged.
+    async fn fast_mode(&self) -> bool {
+        false
+    }
+
+    /// Toggle the session's fast-mode flag (`/fast`). When on, subsequent turns
+    /// send `speed:"fast"` in the request body IF the active model supports it
+    /// (opus-4-7 / opus-4-8). DEFAULT is an inert no-op so existing impls/mocks
+    /// compile unchanged.
+    async fn set_fast_mode(&self, on: bool) -> Result<(), HandleError> {
+        let _ = on;
+        Ok(())
+    }
+
     // M5-10 additions:
 
     /// Set the orchestrator's internal `should_exit` flag.
@@ -821,6 +836,32 @@ pub trait OrchestratorHandle: Send + Sync {
     /// it against the real forked-agent side-query runner.
     async fn generate_recap(&self) -> Result<RecapOutcome, HandleError> {
         Err(HandleError::Unimplemented("generate_recap".into()))
+    }
+
+    /// Answer a one-off side question (`/btw`) via the SAME isolated,
+    /// read-only, tool-denied, single-turn side query `/recap` uses — a
+    /// lightweight agent that shares the parent's cache-safe prompt prefix but
+    /// NEVER appends to the conversation history. Returns the model's trimmed
+    /// answer as [`RecapOutcome::Text`] (or [`RecapOutcome::Cancelled`] if
+    /// aborted). Read-only w.r.t. session state, exactly like
+    /// [`Self::generate_recap`]; the only difference is the prompt (the
+    /// caller's wrapped question instead of the fixed recap prompt).
+    ///
+    /// Default returns `Err(HandleError::Unimplemented(..))` so existing handle
+    /// impls (and the test mock) keep compiling; the composition roots override
+    /// it against the real forked-agent side-query runner.
+    async fn answer_side_question(&self, question: &str) -> Result<RecapOutcome, HandleError> {
+        let _ = question;
+        Err(HandleError::Unimplemented("answer_side_question".into()))
+    }
+
+    /// `/rename`: persist a user-set custom title for the current session by
+    /// appending a `custom-title` entry to the transcript JSONL (1:1 with
+    /// claude-code `saveCustomTitle`). Best-effort; the default returns
+    /// `Unimplemented` so non-persisting handles (the test mock, library
+    /// callers with no writer) keep compiling and degrade gracefully.
+    async fn rename_session(&self, _name: String) -> Result<(), HandleError> {
+        Err(HandleError::Unimplemented("rename_session".into()))
     }
 
     /// File paths currently tracked in the session's read-file-state cache.

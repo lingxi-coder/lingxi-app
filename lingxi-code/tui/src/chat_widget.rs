@@ -96,12 +96,32 @@ pub enum ChatOutcome {
     /// summary back through `TurnEvent::SystemNotice`. The `String` is the
     /// (currently unused) argument tail.
     Compact(String),
+    /// `/fast [on|off]` asked the caller to set (`Some(true|false)`) or toggle
+    /// (`None`, a bare `/fast`) the session's fast-mode flag. The caller flips
+    /// it off-loop via `OrchestratorHandle::set_fast_mode` and reports the
+    /// applied state ("⚡ Fast mode ON" / "Fast mode OFF") through
+    /// `TurnEvent::SystemNotice`. When on and the active model supports fast
+    /// mode (opus-4-7/opus-4-8), subsequent turns send `speed:"fast"`.
+    FastMode(Option<bool>),
     /// The `/resume` picker resolved to this session uuid. The caller must
     /// UNWIND the app loop (via `AppExit::SwitchSession`) and re-mount that
     /// session in-process so the JSONL writer is retargeted to `<uuid>.jsonl` —
     /// NOT an in-place `resume_session` swap (which would fork the conversation
     /// across files).
     SwitchSession(uuid::Uuid),
+    /// `/branch [name]`: fork the conversation into a NEW session at this point
+    /// and SWITCH into it. The widget carries only the optional custom title;
+    /// the CLI (`session::branch::create_branch`) does the transcript copy off
+    /// the render thread and re-mounts the branch in-process via the same
+    /// unwind seam as [`Self::SwitchSession`] (`AppExit::BranchSession` →
+    /// `RunOutcome::BranchFrom` → `mount_resumed_tui`).
+    BranchSession { title: Option<String> },
+    /// `/rename <name>` resolved to this new title. The caller appends the
+    /// `custom-title` JSONL line OFF the render thread (state mutation goes
+    /// off-loop, per doctrine) via `OrchestratorHandle::rename_session`, then
+    /// reports `Session renamed to: <name>` (or a failure) back through
+    /// `TurnEvent::SystemNotice`.
+    RenameSession(String),
 }
 
 /// Live API retry-backoff status, mirroring Claude Code's `SystemAPIErrorMessage`.
@@ -1246,6 +1266,19 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// `/diff`: render uncommitted working-tree changes (`git diff HEAD`) into
+    /// the transcript as read-only system output. Faithful v1 of claude-code's
+    /// interactive `DiffDialog`; a scrollable overlay + per-turn-diff pages are
+    /// deferred. The git call is a local, read-only host subprocess (no engine
+    /// handle, no network, no state mutation), so it runs synchronously on the
+    /// slash path — same class as the filesystem I/O `/export` performs — with
+    /// no off-loop `ChatOutcome` effect.
+    pub(crate) fn cmd_diff(&mut self, _args: &str) -> ChatOutcome {
+        let cwd = std::path::PathBuf::from(&self.session.doctor.cwd);
+        let out = crate::diff::collect_diff(&cwd);
+        self.show_system_text(&out.body, out.is_error)
+    }
+
     /// `/export [filename]`: write the transcript (every committed cell's
     /// copy-friendly raw lines — the raw-scrollback text) to a `.txt` file in
     /// the export dir, echoing the outcome as a `system` message. No arg →
@@ -1348,6 +1381,31 @@ impl ChatWidget {
             .unwrap_or_default();
         self.bottom_pane.show_permissions_editor(snapshot);
         ChatOutcome::Continue
+    }
+
+    /// `/add-dir <path>`: add a working directory to the session's
+    /// `permissions.additionalDirectories`. The path is `~`-expanded, resolved
+    /// against the cwd, normalized, and validated (must exist + be a directory,
+    /// [`crate::add_dir`]); on success the durable settings write is driven
+    /// off-loop via [`ChatOutcome::PermissionAction`] → `run_permission_action`
+    /// (`permission::persist_workspace_directory`), reusing the `/permissions`
+    /// effect channel. Validation errors and a bare-invocation usage line
+    /// render synchronously as system text (1:1 with claude-code's
+    /// `addDirHelpMessage`).
+    pub(crate) fn cmd_add_dir(&mut self, args: &str) -> ChatOutcome {
+        let input = args.trim();
+        if input.is_empty() {
+            return self.show_system_text("Usage: /add-dir <path>", false);
+        }
+        match crate::add_dir::resolve_and_validate(input) {
+            crate::add_dir::AddDirValidation::Success { absolute } => {
+                ChatOutcome::PermissionAction(PermissionAction::AddDirectory {
+                    path: absolute,
+                    dest: permission::PermissionUpdateDestination::LocalSettings,
+                })
+            }
+            other => self.show_system_text(&crate::add_dir::help_message(&other), true),
+        }
     }
 
     /// `/resume [term]` (alias `/continue`): open the interactive session
@@ -1701,6 +1759,18 @@ impl ChatWidget {
         )
     }
 
+    /// `/terminal-setup`: detect the active terminal and install the Shift+Enter
+    /// (Apple Terminal: Option+Enter) newline keybinding by writing the
+    /// terminal's own config, then echo the result. Native-CSI-u terminals
+    /// (Ghostty/Kitty/iTerm2/WezTerm/Warp) get an informational "already
+    /// supported" line; unsupported terminals get setup guidance. Synchronous
+    /// host I/O (no async engine / socket), so — unlike `/compact` — it is safe
+    /// to run inline on the render thread's blocking loop.
+    pub(crate) fn cmd_terminal_setup(&mut self, _args: &str) -> ChatOutcome {
+        let (message, is_error) = tui_core::terminal_setup::run();
+        self.show_system_text(&message, is_error)
+    }
+
     /// `/keybindings`: open or preview the keybindings configuration.
     pub(crate) fn cmd_keybindings(&mut self, args: &str) -> ChatOutcome {
         self.run_core_command(
@@ -1756,6 +1826,19 @@ impl ChatWidget {
         self.run_core_command("fork", args, &command_core::fork::ForkHandler::new(handle))
     }
 
+    /// `/branch [name]`: create a branch of the conversation at this point and
+    /// switch into it. Bare `/branch` derives the branch name from the first
+    /// prompt; a `[name]` argument sets the base title. The transcript copy +
+    /// in-process re-mount happen in the CLI off the render thread — the widget
+    /// only unwinds carrying the optional title (mirrors how `/resume` yields
+    /// `SwitchSession` without touching the engine on the render thread).
+    pub(crate) fn cmd_branch(&mut self, args: &str) -> ChatOutcome {
+        let title = args.trim();
+        ChatOutcome::BranchSession {
+            title: (!title.is_empty()).then(|| title.to_string()),
+        }
+    }
+
     /// `/recap`: one-line session recap via the live `generate_recap` isolated,
     /// tool-denied side query (never mutates the conversation history).
     pub(crate) fn cmd_recap(&mut self, args: &str) -> ChatOutcome {
@@ -1763,6 +1846,47 @@ impl ChatWidget {
             return self.show_system_text("/recap is unavailable (no engine handle wired)", true);
         };
         self.run_core_command("recap", args, &command_core::recap::RecapHandler::new(handle))
+    }
+
+    /// `/btw <question>`: ask a quick side question answered by an isolated,
+    /// tool-denied, single-turn side query that shares the conversation context
+    /// but NEVER enters the LLM history. Delivered through the SAME
+    /// `run_core_command` bridge `/recap` uses (a throwaway `block_on` on the
+    /// render-loop's blocking thread) against the history-inert
+    /// `answer_side_question` seam; the trimmed answer renders as a system line.
+    /// Bare `/btw` shows the usage line; graceful "unavailable" when no engine
+    /// handle is wired.
+    pub(crate) fn cmd_btw(&mut self, args: &str) -> ChatOutcome {
+        if args.trim().is_empty() {
+            return self.show_system_text("Usage: /btw <your question>", false);
+        }
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/btw is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command(
+            "btw",
+            args,
+            &command_core::side_question::SideQuestionHandler::new(handle),
+        )
+    }
+
+    /// `/rename [name]`: persist a user-set title for the current session.
+    /// With a name, returns [`ChatOutcome::RenameSession`] so the CLI appends
+    /// the `custom-title` JSONL line off the render thread (state mutation goes
+    /// off-loop) and echoes the confirmation via `TurnEvent::SystemNotice`,
+    /// mirroring claude-code's `saveCustomTitle` + `onDone("Session renamed
+    /// to: ...")`. Bare `/rename` renders a usage line — auto-name generation
+    /// (claude-code's Haiku side-query) is deferred. Graceful "unavailable"
+    /// no-op when no engine handle is wired.
+    pub(crate) fn cmd_rename(&mut self, args: &str) -> ChatOutcome {
+        if self.orchestrator.is_none() {
+            return self.show_system_text("/rename is unavailable (no engine handle wired)", true);
+        }
+        let name = args.trim();
+        if name.is_empty() {
+            return self.show_system_text("Usage: /rename <name>", true);
+        }
+        ChatOutcome::RenameSession(name.to_string())
     }
 
     /// `/files`: list the files currently in context (read-only).
@@ -1785,6 +1909,37 @@ impl ChatWidget {
     /// direct-fs `settings.json` merge inside the handler (not via the handle);
     /// it persists a default for NEW sessions, so the live turn's effort is
     /// unchanged — the same parity limitation as the headless dispatcher.
+    /// `/fast [on|off]`: toggle fast mode (the priority `speed:"fast"` tier).
+    /// `on`/`off` set the state; a bare `/fast` toggles it. The change is an
+    /// off-loop effect ([`ChatOutcome::FastMode`] →
+    /// `OrchestratorHandle::set_fast_mode`) so the multi-field flag flip never
+    /// blocks the render thread; the applied state is reported via
+    /// `TurnEvent::SystemNotice`. Env-gated: when `LINGXI_DISABLE_FAST_MODE`
+    /// (or `CLAUDE_CODE_DISABLE_FAST_MODE`) is truthy, fast mode is unavailable
+    /// (claude-code `isFastModeEnabled()`) and the command is a no-op line.
+    /// Graceful "unavailable" when no engine handle is wired.
+    pub(crate) fn cmd_fast(&mut self, args: &str) -> ChatOutcome {
+        if self.orchestrator.is_none() {
+            return self.show_system_text("/fast is unavailable (no engine handle wired)", true);
+        }
+        let disabled = std::env::var("LINGXI_DISABLE_FAST_MODE")
+            .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_FAST_MODE"))
+            .map(|v| !v.is_empty() && v != "0" && v != "false")
+            .unwrap_or(false);
+        if disabled {
+            return self.show_system_text("Fast mode is not available", true);
+        }
+        match args.trim().to_ascii_lowercase().as_str() {
+            "on" => ChatOutcome::FastMode(Some(true)),
+            "off" => ChatOutcome::FastMode(Some(false)),
+            "" => ChatOutcome::FastMode(None),
+            other => self.show_system_text(
+                &format!("Unknown /fast argument '{other}'. Usage: /fast [on|off]"),
+                true,
+            ),
+        }
+    }
+
     pub(crate) fn cmd_effort(&mut self, args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/effort is unavailable (no engine handle wired)", true);

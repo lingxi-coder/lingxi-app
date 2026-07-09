@@ -48,6 +48,11 @@ pub enum AppExit {
     /// re-mount that session in-process (writer retargeted via the startup
     /// resume seam).
     SwitchSession(uuid::Uuid),
+    /// `/branch`: fork the current conversation into a new session and switch
+    /// into it. The embedder creates the branch transcript off-loop then
+    /// re-mounts the new session in-process (same unwind path as
+    /// [`Self::SwitchSession`]). Carries the optional `/branch [name]` title.
+    BranchSession { title: Option<String> },
 }
 
 /// The embedding CLI/orchestrator callbacks the event loop executes when the
@@ -83,6 +88,17 @@ pub struct AppCallbacks<'cb> {
     /// runtime (never on the render thread) and reports the summary back via a
     /// [`TurnEvent::SystemNotice`]. The `String` is the argument tail.
     pub on_compact: Box<dyn FnMut(String) + 'cb>,
+    /// Executed on [`ChatOutcome::RenameSession`]: the caller appends the
+    /// `custom-title` line via `OrchestratorHandle::rename_session` off the
+    /// render thread and reports the result back via a
+    /// [`TurnEvent::SystemNotice`]. The `String` is the new title.
+    pub on_rename: Box<dyn FnMut(String) + 'cb>,
+    /// Executed on [`ChatOutcome::FastMode`]: the caller flips the session's
+    /// fast-mode flag off-loop via `OrchestratorHandle::set_fast_mode` (reading
+    /// the current value first when the arg is `None`, a bare `/fast` toggle)
+    /// and reports the applied state through a [`TurnEvent::SystemNotice`]. The
+    /// `Option<bool>` is `Some(target)` for `on`/`off`, `None` for toggle.
+    pub on_fast_mode: Box<dyn FnMut(Option<bool>) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -169,6 +185,13 @@ impl<'cb> RataApp<'cb> {
                         self.chat_widget.cancel_active_turn();
                         return Ok(AppExit::SwitchSession(uuid));
                     }
+                    // `/branch`: same switch-safety as SwitchSession — stop any
+                    // in-flight turn on the OUTGOING runtime before unwinding so
+                    // the embedder can create and mount the branch.
+                    ChatOutcome::BranchSession { title } => {
+                        self.chat_widget.cancel_active_turn();
+                        return Ok(AppExit::BranchSession { title });
+                    }
                     ChatOutcome::Submit(prompt, token) => {
                         (self.callbacks.on_submit)(prompt, token);
                     }
@@ -203,6 +226,18 @@ impl<'cb> RataApp<'cb> {
                     // summary returns via `TurnEvent::SystemNotice`.
                     ChatOutcome::Compact(args) => {
                         (self.callbacks.on_compact)(args);
+                    }
+                    // `/rename`: append the custom-title JSONL line off-loop on
+                    // the live engine runtime; the confirmation returns via
+                    // `TurnEvent::SystemNotice`, same shape as `Compact` above.
+                    ChatOutcome::RenameSession(name) => {
+                        (self.callbacks.on_rename)(name);
+                    }
+                    // `/fast`: flip the session fast-mode flag off-loop on the
+                    // live engine runtime; the applied state returns via
+                    // `TurnEvent::SystemNotice`, same shape as `Compact`.
+                    ChatOutcome::FastMode(target) => {
+                        (self.callbacks.on_fast_mode)(target);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -368,6 +403,8 @@ pub fn run_app(
     on_permission_action: impl FnMut(PermissionAction),
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String),
+    on_rename: impl FnMut(String),
+    on_fast_mode: impl FnMut(Option<bool>),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -395,6 +432,8 @@ pub fn run_app(
             on_permission_action: Box::new(on_permission_action),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
+            on_rename: Box::new(on_rename),
+            on_fast_mode: Box::new(on_fast_mode),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -474,6 +513,8 @@ mod tests {
                 on_permission_action: Box::new(|_| {}),
                 on_bash: Box::new(|_| {}),
                 on_compact: Box::new(|_| {}),
+                on_rename: Box::new(|_| {}),
+                on_fast_mode: Box::new(|_| {}),
             },
         )
     }

@@ -86,6 +86,12 @@ pub struct LlmRequest {
     /// (zero effect on every existing request).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<serde_json::Value>,
+    /// Optional request speed tier (claude-code fast mode). `Some("fast")`
+    /// emits the `speed` body key which lights the fast-mode beta (read back by
+    /// `service::beta_context`); `None` (the default) keeps every existing
+    /// request byte-identical (the field is skipped when serializing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
     /// Optional request metadata. Emitted by the Anthropic codec as the
     /// `metadata` object (claude-code `claude.ts:1699-1728` always sends it).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -38,7 +38,7 @@ use crate::bottom_pane::theme_picker_view::ThemePickerView;
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::{
     BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction, PermissionAction,
-    TaskAction, WebAction,
+    PluginAction, TaskAction, WebAction,
 };
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
@@ -82,6 +82,11 @@ pub enum ChatOutcome {
     /// this-session effect) asynchronously and reports the result back through
     /// `TurnEvent::SystemNotice`.
     PermissionAction(PermissionAction),
+    /// A `/plugin` view asked the caller to toggle the on-disk
+    /// `enabledPlugins` allowlist. The caller runs the settings write
+    /// asynchronously (CLI `plugin_settings::run_enable`/`run_disable`) and
+    /// reports the result back through `TurnEvent::SystemNotice`.
+    PluginAction(PluginAction),
     /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
     /// through the sandboxed [`tui_core::bash_runner::BashRunner`] (no LLM
     /// turn) and folds the captured output back through
@@ -280,6 +285,12 @@ pub struct ChatWidget {
     /// by the async `on_permission_action` effect closure after each edit.
     /// [`Self::cmd_permissions`] reads a clone to seed the editor.
     permission_snapshot: Option<std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>>,
+    /// Preloaded `/plugin` snapshot (installed plugins + enabled state), wired
+    /// via [`Self::set_plugin_snapshot`] and refreshed by the async
+    /// `on_plugin_action` effect after each toggle. [`Self::cmd_plugin`] reads a
+    /// clone to seed the manager. `None` (tests / no engine) → empty manager.
+    plugin_snapshot:
+        Option<std::sync::Arc<std::sync::Mutex<crate::bottom_pane::plugins_view::PluginsSnapshot>>>,
     /// Preloaded `/resume` session rows (newest-first), wired at startup via
     /// [`Self::set_resume_rows`]. Loaded async from disk in the CLI before the
     /// blocking loop starts (the sync TUI loop can't `.await` a disk scan); kept
@@ -378,6 +389,7 @@ impl ChatWidget {
             tool_inputs: std::collections::HashMap::new(),
             web_snapshot: None,
             permission_snapshot: None,
+            plugin_snapshot: None,
             resume_rows: Vec::new(),
             connect_auth_methods: std::collections::BTreeMap::new(),
             connect_availability: std::collections::BTreeMap::new(),
@@ -922,6 +934,15 @@ impl ChatWidget {
         slot: std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>,
     ) {
         self.permission_snapshot = Some(slot);
+    }
+
+    /// Wire the shared `/plugin` snapshot slot (installed plugins + enabled
+    /// state), preloaded + refreshed by the CLI. `None` (tests) → empty manager.
+    pub fn set_plugin_snapshot(
+        &mut self,
+        slot: std::sync::Arc<std::sync::Mutex<crate::bottom_pane::plugins_view::PluginsSnapshot>>,
+    ) {
+        self.plugin_snapshot = Some(slot);
     }
 
     /// Wire the preloaded `/resume` session rows (loaded async from disk at
@@ -1517,6 +1538,32 @@ impl ChatWidget {
         }
         self.bottom_pane.show_tasks(rows);
         ChatOutcome::Continue
+    }
+
+    /// `/plugin` (aliases `/plugins`, `/marketplace`): open the interactive
+    /// plugin manager, seeded from the shared snapshot (installed plugins +
+    /// enabled state, preloaded at startup and refreshed by the async
+    /// `on_plugin_action` effect). Empty manager when no slot is wired.
+    pub(crate) fn cmd_plugin(&mut self, _args: &str) -> ChatOutcome {
+        let snapshot = self
+            .plugin_snapshot
+            .as_ref()
+            .map(|m| m.lock().unwrap().clone())
+            .unwrap_or_default();
+        self.bottom_pane.show_plugins(snapshot);
+        ChatOutcome::Continue
+    }
+
+    /// `/reload-plugins`: activate pending plugin changes in the LIVE session.
+    /// DESIGN-GATED: LingXi materializes plugins once at engine boot and drops
+    /// the PluginManager, so live refresh needs a new engine seam (a follow-up
+    /// `OrchestratorHandle::refresh_plugins`). Until it lands this reports the
+    /// honest restart note.
+    pub(crate) fn cmd_reload_plugins(&mut self, _args: &str) -> ChatOutcome {
+        self.show_system_text(
+            "Plugin changes take effect on restart. In-session /reload-plugins is not yet wired.",
+            false,
+        )
     }
 
     /// `/connect [provider]`: with no argument, open the grouped provider
@@ -2327,6 +2374,7 @@ impl ChatWidget {
                 ChatOutcome::PermissionAction(action)
             }
             BottomPaneOutcome::RunTaskAction(action) => ChatOutcome::TaskAction(action),
+            BottomPaneOutcome::RunPluginAction(action) => ChatOutcome::PluginAction(action),
             BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
         }
     }

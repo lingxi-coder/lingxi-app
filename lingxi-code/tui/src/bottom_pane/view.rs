@@ -64,6 +64,11 @@ pub enum ViewOutcome {
     /// several tasks; the async `TaskRegistryHandle::kill` result is reported
     /// through `TurnEvent::SystemNotice`.
     RunTaskAction(TaskAction),
+    /// A `/plugin` view asked the app to toggle the on-disk
+    /// `settings.enabledPlugins` allowlist. The manager stays OPEN (like the
+    /// `/permissions` editor); the async settings write is reported back
+    /// through `TurnEvent::SystemNotice` and reflected on the next open.
+    RunPluginAction(PluginAction),
     /// The `/resume` picker resolved to this session uuid. Unlike the off-loop
     /// effect variants above, this UNWINDS the app loop: the owner
     /// (`RataApp::run` → `run_app`) returns an `AppExit::SwitchSession(uuid)` so
@@ -125,6 +130,26 @@ pub enum TaskAction {
     Kill {
         /// The `[bartwmd][0-9a-z]{8}` task id to stop.
         task_id: String,
+    },
+}
+
+/// An app-level `/plugin` effect a view can request via
+/// [`ViewOutcome::RunPluginAction`]. The owner runs these asynchronously
+/// (an on-disk `settings.enabledPlugins` read-modify-write via the CLI
+/// `plugin_settings::run_enable`/`run_disable` seam) and reports the result
+/// back through `TurnEvent::SystemNotice`. The plugin id is a non-secret
+/// `plugin` / `plugin@marketplace` string, so the derived `Debug` is fine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginAction {
+    /// Set `enabledPlugins[id] = true` (auto-scope: user).
+    Enable {
+        /// The plugin id (bare name or `name@marketplace`).
+        id: String,
+    },
+    /// Set `enabledPlugins[id] = false` at its holding scope.
+    Disable {
+        /// The plugin id (bare name or `name@marketplace`).
+        id: String,
     },
 }
 

@@ -374,6 +374,32 @@ pub(crate) async fn run_ratatui(
     let permission_snapshot = std::sync::Arc::new(std::sync::Mutex::new(
         tui::bottom_pane::permissions_editor_view::PermissionsSnapshot::load(&permission_paths),
     ));
+    // (/plugin) Preload the installed-plugin list + enabled state for the
+    // interactive manager; the `on_plugin_action` effect refreshes this slot
+    // after each toggle. Scope roots: `home = ~/.lingxi` (user settings),
+    // `cwd` = process dir (project/local settings), `plugins_dir = home/plugins`.
+    let plugin_home = crate::run::lingxi_home_dir();
+    let plugin_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let plugin_dir = plugin_home.join("plugins");
+    let plugin_snapshot = std::sync::Arc::new(std::sync::Mutex::new(
+        load_plugins_snapshot(&plugin_dir, &plugin_home, &plugin_cwd).await,
+    ));
+    let plugin_snapshot_cb = plugin_snapshot.clone();
+    let plugin_effect_home = plugin_home.clone();
+    let plugin_effect_cwd = plugin_cwd.clone();
+    let plugin_effect_dir = plugin_dir.clone();
+    let plugin_handle = handle.clone();
+    let plugin_turn_tx = turn_tx.clone();
+    let on_plugin_action = move |action: tui::bottom_pane::PluginAction| {
+        let slot = plugin_snapshot_cb.clone();
+        let home = plugin_effect_home.clone();
+        let cwd = plugin_effect_cwd.clone();
+        let dir = plugin_effect_dir.clone();
+        let tx = plugin_turn_tx.clone();
+        plugin_handle.spawn(async move {
+            run_plugin_action(action, &dir, &home, &cwd, &slot, tx).await;
+        });
+    };
     // (/resume) Preload the recent-session rows for the interactive picker.
     // This is an ASYNC disk scan (the M5-08 loader), so it MUST run here — the
     // blocking ratatui loop can't `.await`. The rows go slightly stale as new
@@ -694,6 +720,7 @@ pub(crate) async fn run_ratatui(
             Some(status_line),
             Some(web_snapshot),
             Some(permission_snapshot),
+            Some(plugin_snapshot),
             resume_rows,
             connect_auth_methods,
             connect_availability,
@@ -707,6 +734,7 @@ pub(crate) async fn run_ratatui(
             on_web_action,
             on_connect_action,
             on_permission_action,
+            on_plugin_action,
             on_bash,
             on_compact,
             on_rename,
@@ -776,6 +804,104 @@ pub(crate) async fn run_ratatui(
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
         }
     }
+}
+
+/// (`/plugin`) Merged `enabledPlugins` allowlist across the writable settings
+/// scopes (user `~/.lingxi/settings.json` < project `.lingxi/settings.json` <
+/// local `.lingxi/settings.local.json`). A small local reader —
+/// `plugin_settings::read_enabled` is private. A missing / broken file is
+/// skipped (never overwritten; this is a read).
+fn read_merged_enabled_plugins(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> std::collections::BTreeMap<String, bool> {
+    use serde_json::Value;
+    let mut merged = std::collections::BTreeMap::new();
+    let files = [
+        home.join("settings.json"),
+        cwd.join(branding::DOT_DIR).join("settings.json"),
+        cwd.join(branding::DOT_DIR).join("settings.local.json"),
+    ];
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if let Some(Value::Object(ep)) = obj.get("enabledPlugins") {
+            for (k, v) in ep {
+                if let Some(b) = v.as_bool() {
+                    merged.insert(k.clone(), b);
+                }
+            }
+        }
+    }
+    merged
+}
+
+/// (`/plugin`) Build the manager snapshot: every installed plugin
+/// (`plugin::discover_recorded_plugins`) joined with its merged enabled state.
+/// A plugin is "enabled" if its bare name or any `name@marketplace` key is set
+/// true in the merged allowlist.
+async fn load_plugins_snapshot(
+    plugins_dir: &std::path::Path,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> tui::bottom_pane::plugins_view::PluginsSnapshot {
+    use tui::bottom_pane::plugins_view::{PluginRow, PluginsSnapshot};
+    let enabled_map = read_merged_enabled_plugins(home, cwd);
+    let discovered = plugin::discover_recorded_plugins(plugins_dir).await;
+    let plugins = discovered
+        .into_iter()
+        .map(|(_, m, _)| {
+            let name = m.name.clone();
+            let enabled = enabled_map
+                .iter()
+                .any(|(k, v)| *v && (k == &name || k.starts_with(&format!("{name}@"))));
+            PluginRow {
+                id: name.clone(),
+                name,
+                version: m.version,
+                description: m.description,
+                enabled,
+            }
+        })
+        .collect();
+    PluginsSnapshot { plugins }
+}
+
+/// (`/plugin`) Run one toggle to completion off the render loop: flip the
+/// on-disk `enabledPlugins` allowlist via the CLI `plugin_settings` seam, then
+/// refresh the shared snapshot so the next open reflects it. Result via
+/// `TurnEvent::SystemNotice`.
+async fn run_plugin_action(
+    action: tui::bottom_pane::PluginAction,
+    plugins_dir: &std::path::Path,
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    slot: &std::sync::Arc<std::sync::Mutex<tui::bottom_pane::plugins_view::PluginsSnapshot>>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+) {
+    use tui::bottom_pane::PluginAction;
+    let result = match &action {
+        PluginAction::Enable { id } => {
+            crate::commands::plugin_settings::run_enable(id, None, home, cwd)
+        }
+        PluginAction::Disable { id } => {
+            crate::commands::plugin_settings::run_disable(Some(id), None, false, home, cwd)
+        }
+    };
+    let (body, is_error) = match result {
+        Ok(msg) => (msg, false),
+        Err(e) => (e, true),
+    };
+    // Refresh the snapshot so the manager's next open reflects the toggle.
+    let fresh = load_plugins_snapshot(plugins_dir, home, cwd).await;
+    if let Ok(mut guard) = slot.lock() {
+        *guard = fresh;
+    }
+    let _ = turn_tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
 }
 
 /// Run one `/sandbox` [`tui::chat_widget::SandboxAction`] to completion off the

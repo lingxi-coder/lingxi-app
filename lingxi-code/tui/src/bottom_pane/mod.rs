@@ -25,6 +25,7 @@ pub mod model_picker_view;
 pub mod pending_input_preview;
 pub mod permission_view;
 pub mod permissions_editor_view;
+pub mod plugins_view;
 pub mod resume_picker_view;
 pub mod tasks_view;
 pub mod screen_view;
@@ -56,8 +57,8 @@ use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
 pub use view::{
-    BottomPaneView, CommandAction, ConnectAction, PermissionAction, TaskAction, ViewAction,
-    ViewOutcome, WebAction,
+    BottomPaneView, CommandAction, ConnectAction, PermissionAction, PluginAction, TaskAction,
+    ViewAction, ViewOutcome, WebAction,
 };
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
@@ -119,6 +120,9 @@ pub enum BottomPaneOutcome {
     /// OPEN (like `RunPermissionAction`); the kill result is reported into the
     /// transcript.
     RunTaskAction(TaskAction),
+    /// A view asks the owner to run a `/plugin` effect (toggle the on-disk
+    /// `enabledPlugins` allowlist). The manager stays OPEN, like a `/web` test.
+    RunPluginAction(PluginAction),
     /// The `/resume` picker resolved to this session uuid: the owner must
     /// UNWIND its loop and re-mount that session in-process (writer retargeted)
     /// — surfaced up through `ChatOutcome::SwitchSession` → `AppExit`. The
@@ -309,6 +313,13 @@ impl BottomPane {
             .push(Box::new(tasks_view::TasksView::new(rows, self.theme)));
     }
 
+    /// Open the `/plugin` manager over `snapshot` (installed plugins + enabled
+    /// state, resolved by the CLI).
+    pub fn show_plugins(&mut self, snapshot: plugins_view::PluginsSnapshot) {
+        self.view_stack
+            .push(Box::new(plugins_view::PluginsView::new(snapshot)));
+    }
+
     pub fn show_resume_picker(
         &mut self,
         rows: Vec<crate::resume::ResumeRow>,
@@ -465,6 +476,7 @@ impl BottomPane {
                 BottomPaneOutcome::RunPermissionAction(action)
             }
             ViewOutcome::RunTaskAction(action) => BottomPaneOutcome::RunTaskAction(action),
+            ViewOutcome::RunPluginAction(action) => BottomPaneOutcome::RunPluginAction(action),
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
         }
     }
@@ -999,6 +1011,9 @@ impl ViewStack {
             // several tasks can be stopped in one visit; the row was already
             // marked `killed` optimistically. Only `Esc` closes it.
             ViewOutcome::RunTaskAction(action) => ViewOutcome::RunTaskAction(action),
+            // A `/plugin` toggle keeps the manager OPEN (like `/permissions`);
+            // the enabled state reflects on the next open after the async write.
+            ViewOutcome::RunPluginAction(action) => ViewOutcome::RunPluginAction(action),
             // A `/resume` pick CLOSES the whole picker (like `/connect`): the
             // owner is about to unwind the app loop and re-mount the chosen
             // session, so there is no live view to return to.

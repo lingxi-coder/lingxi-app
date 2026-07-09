@@ -526,6 +526,24 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_reload_skills,
     },
     SlashCommand {
+        name: "/plugin",
+        aliases: &["/plugins", "/marketplace"],
+        description: "Manage LingXi plugins",
+        // None: `/plugin` opens the interactive manager; args are ignored (the
+        // arg-driven subcommands live on the `lingxi-cli plugin` CLI surface).
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_plugin,
+    },
+    SlashCommand {
+        name: "/reload-plugins",
+        aliases: &[],
+        description: "Activate pending plugin changes in the current session",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_reload_plugins,
+    },
+    SlashCommand {
         name: "/sandbox",
         aliases: &[],
         description: "Toggle sandbox mode for bash commands",

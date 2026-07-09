@@ -26,7 +26,7 @@ use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
-use crate::bottom_pane::{ConnectAction, PermissionAction, TaskAction, WebAction};
+use crate::bottom_pane::{ConnectAction, PermissionAction, PluginAction, TaskAction, WebAction};
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
@@ -79,6 +79,11 @@ pub struct AppCallbacks<'cb> {
     /// allow rule into the live `session_allow_rules`) asynchronously and
     /// reports the result back via a [`TurnEvent::SystemNotice`].
     pub on_permission_action: Box<dyn FnMut(PermissionAction) + 'cb>,
+    /// Executed on [`ChatOutcome::PluginAction`]: the caller toggles the on-disk
+    /// `enabledPlugins` allowlist (CLI `plugin_settings::run_enable`/
+    /// `run_disable`) asynchronously, refreshes the shared `/plugin` snapshot,
+    /// and reports the result via a [`TurnEvent::SystemNotice`].
+    pub on_plugin_action: Box<dyn FnMut(PluginAction) + 'cb>,
     /// Executed on [`ChatOutcome::RunBash`]: the caller runs the `!`-prefixed
     /// command through the sandboxed bash runner (no LLM turn) and folds its
     /// output back via [`TurnEvent::BashOutput`].
@@ -233,6 +238,12 @@ impl<'cb> RataApp<'cb> {
                     // via `TurnEvent::SystemNotice`, same shape as `WebAction`.
                     ChatOutcome::PermissionAction(action) => {
                         (self.callbacks.on_permission_action)(action);
+                    }
+                    // A `/plugin` toggle: flip the on-disk `enabledPlugins`
+                    // allowlist off-loop + refresh the snapshot; result via
+                    // `TurnEvent::SystemNotice`, same shape as `PermissionAction`.
+                    ChatOutcome::PluginAction(action) => {
+                        (self.callbacks.on_plugin_action)(action);
                     }
                     // A `!`-prefixed bash-mode command: run it off the model
                     // path; the output returns via `TurnEvent::BashOutput`.
@@ -425,6 +436,9 @@ pub fn run_app(
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
     permission_snapshot: Option<std::sync::Arc<std::sync::Mutex<PermissionsSnapshot>>>,
+    plugin_snapshot: Option<
+        std::sync::Arc<std::sync::Mutex<crate::bottom_pane::plugins_view::PluginsSnapshot>>,
+    >,
     resume_rows: Vec<crate::resume::ResumeRow>,
     connect_auth_methods: std::collections::BTreeMap<String, String>,
     connect_availability: std::collections::BTreeMap<String, bool>,
@@ -440,6 +454,7 @@ pub fn run_app(
     on_web_action: impl FnMut(WebAction),
     on_connect_action: impl FnMut(ConnectAction),
     on_permission_action: impl FnMut(PermissionAction),
+    on_plugin_action: impl FnMut(PluginAction),
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String),
     on_rename: impl FnMut(String),
@@ -472,6 +487,7 @@ pub fn run_app(
             on_web_action: Box::new(on_web_action),
             on_connect_action: Box::new(on_connect_action),
             on_permission_action: Box::new(on_permission_action),
+            on_plugin_action: Box::new(on_plugin_action),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
             on_rename: Box::new(on_rename),
@@ -493,6 +509,9 @@ pub fn run_app(
     }
     if let Some(slot) = permission_snapshot {
         app.chat_widget.set_permission_snapshot(slot);
+    }
+    if let Some(slot) = plugin_snapshot {
+        app.chat_widget.set_plugin_snapshot(slot);
     }
     app.chat_widget.set_resume_rows(resume_rows);
     app.chat_widget
@@ -567,6 +586,7 @@ mod tests {
                 on_web_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
                 on_permission_action: Box::new(|_| {}),
+                on_plugin_action: Box::new(|_| {}),
                 on_bash: Box::new(|_| {}),
                 on_compact: Box::new(|_| {}),
                 on_rename: Box::new(|_| {}),

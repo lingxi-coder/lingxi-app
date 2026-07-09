@@ -452,6 +452,20 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_fork,
     },
     SlashCommand {
+        name: "/branch",
+        // No `fork` alias: claude gates it on `feature('FORK_SUBAGENT') ? [] :
+        // ['fork']`, and LingXi ships /fork as its own command, so the alias set
+        // is empty (the FORK_SUBAGENT-enabled branch).
+        aliases: &[],
+        description: "Create a branch of the current conversation at this point",
+        // Optional (NOT Required): a bare `/branch` must reach the handler so it
+        // derives the branch name from the first prompt rather than falling
+        // through as an LLM prompt.
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_branch,
+    },
+    SlashCommand {
         name: "/recap",
         aliases: &[],
         description: "Generate a one-line session recap now",

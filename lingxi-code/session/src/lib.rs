@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_color;
+pub mod branch;
 pub mod filestate;
 pub mod jsonl;
 pub mod metadata;
@@ -22,6 +23,7 @@ pub use agent_color::{agent_color_entry, last_agent_color, save_agent_color};
 pub use metadata::SessionMetadata;
 pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
 pub use storage::{LoadedSession, SessionStorage};
+pub use branch::{create_branch, BranchError, BranchResult};
 pub use transcript::TranscriptEntry;
 
 // New M5-07 surface — distinct name (`JsonlSessionMetadata`) so it does NOT

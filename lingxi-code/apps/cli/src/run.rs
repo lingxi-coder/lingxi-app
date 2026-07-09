@@ -1595,6 +1595,62 @@ pub(crate) async fn drive_tui_switch_loop(
                     }
                 }
             },
+            crate::mode::RunOutcome::BranchFrom { title } => {
+                let Some(source) = current else {
+                    eprintln!("lingxi-cli: cannot branch — no active session");
+                    return exit_codes::RUNTIME_ERROR;
+                };
+                let lingxi_home = lingxi_home_dir();
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let cwd_str = cwd.to_string_lossy().into_owned();
+                let fs: Arc<dyn FileSystem> =
+                    Arc::new(platform_posix::PosixFileSystem::new(cwd.clone()));
+                let mount_target = match session::create_branch(
+                    &lingxi_home,
+                    &cwd_str,
+                    source,
+                    title.as_deref(),
+                    fs,
+                )
+                .await
+                {
+                    Ok(result) => result.new_session_id,
+                    Err(e) => {
+                        // Branch creation failed (e.g. empty transcript); never
+                        // drop the user — re-mount the still-good source session.
+                        eprintln!("lingxi-cli: failed to branch conversation: {e}");
+                        source
+                    }
+                };
+                match load_resume_session(mount_target).await {
+                    Ok(messages) => {
+                        current = Some(mount_target);
+                        outcome = mount_resumed_tui(argv, mount_target, messages).await;
+                    }
+                    Err(e) => {
+                        // The branch (or fallback) target won't load. Fall back to
+                        // the known-good source, mirroring the SwitchTo recovery.
+                        eprintln!("lingxi-cli: couldn't open {mount_target}: {e}");
+                        match recover_from_failed_switch(current) {
+                            SwitchRecovery::Remount(fallback) => {
+                                match load_resume_session(fallback).await {
+                                    Ok(messages) => {
+                                        outcome = mount_resumed_tui(argv, fallback, messages).await;
+                                    }
+                                    Err(e2) => {
+                                        eprintln!(
+                                            "lingxi-cli: failed to re-mount current session \
+                                             {fallback}: {e2}"
+                                        );
+                                        return exit_codes::RUNTIME_ERROR;
+                                    }
+                                }
+                            }
+                            SwitchRecovery::Exit(code) => return code,
+                        }
+                    }
+                }
+            }
         }
     }
 }

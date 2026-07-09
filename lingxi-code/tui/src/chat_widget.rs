@@ -109,6 +109,13 @@ pub enum ChatOutcome {
     /// NOT an in-place `resume_session` swap (which would fork the conversation
     /// across files).
     SwitchSession(uuid::Uuid),
+    /// `/branch [name]`: fork the conversation into a NEW session at this point
+    /// and SWITCH into it. The widget carries only the optional custom title;
+    /// the CLI (`session::branch::create_branch`) does the transcript copy off
+    /// the render thread and re-mounts the branch in-process via the same
+    /// unwind seam as [`Self::SwitchSession`] (`AppExit::BranchSession` →
+    /// `RunOutcome::BranchFrom` → `mount_resumed_tui`).
+    BranchSession { title: Option<String> },
     /// `/rename <name>` resolved to this new title. The caller appends the
     /// `custom-title` JSONL line OFF the render thread (state mutation goes
     /// off-loop, per doctrine) via `OrchestratorHandle::rename_session`, then
@@ -1817,6 +1824,19 @@ impl ChatWidget {
             return self.show_system_text("/fork is unavailable (no engine handle wired)", true);
         };
         self.run_core_command("fork", args, &command_core::fork::ForkHandler::new(handle))
+    }
+
+    /// `/branch [name]`: create a branch of the conversation at this point and
+    /// switch into it. Bare `/branch` derives the branch name from the first
+    /// prompt; a `[name]` argument sets the base title. The transcript copy +
+    /// in-process re-mount happen in the CLI off the render thread — the widget
+    /// only unwinds carrying the optional title (mirrors how `/resume` yields
+    /// `SwitchSession` without touching the engine on the render thread).
+    pub(crate) fn cmd_branch(&mut self, args: &str) -> ChatOutcome {
+        let title = args.trim();
+        ChatOutcome::BranchSession {
+            title: (!title.is_empty()).then(|| title.to_string()),
+        }
     }
 
     /// `/recap`: one-line session recap via the live `generate_recap` isolated,

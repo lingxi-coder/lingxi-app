@@ -48,6 +48,11 @@ pub enum AppExit {
     /// re-mount that session in-process (writer retargeted via the startup
     /// resume seam).
     SwitchSession(uuid::Uuid),
+    /// `/branch`: fork the current conversation into a new session and switch
+    /// into it. The embedder creates the branch transcript off-loop then
+    /// re-mounts the new session in-process (same unwind path as
+    /// [`Self::SwitchSession`]). Carries the optional `/branch [name]` title.
+    BranchSession { title: Option<String> },
 }
 
 /// The embedding CLI/orchestrator callbacks the event loop executes when the
@@ -179,6 +184,13 @@ impl<'cb> RataApp<'cb> {
                         // session file the user just left. No-op when idle.
                         self.chat_widget.cancel_active_turn();
                         return Ok(AppExit::SwitchSession(uuid));
+                    }
+                    // `/branch`: same switch-safety as SwitchSession — stop any
+                    // in-flight turn on the OUTGOING runtime before unwinding so
+                    // the embedder can create and mount the branch.
+                    ChatOutcome::BranchSession { title } => {
+                        self.chat_widget.cancel_active_turn();
+                        return Ok(AppExit::BranchSession { title });
                     }
                     ChatOutcome::Submit(prompt, token) => {
                         (self.callbacks.on_submit)(prompt, token);

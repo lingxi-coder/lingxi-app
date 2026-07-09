@@ -823,6 +823,15 @@ pub trait OrchestratorHandle: Send + Sync {
         Err(HandleError::Unimplemented("generate_recap".into()))
     }
 
+    /// `/rename`: persist a user-set custom title for the current session by
+    /// appending a `custom-title` entry to the transcript JSONL (1:1 with
+    /// claude-code `saveCustomTitle`). Best-effort; the default returns
+    /// `Unimplemented` so non-persisting handles (the test mock, library
+    /// callers with no writer) keep compiling and degrade gracefully.
+    async fn rename_session(&self, _name: String) -> Result<(), HandleError> {
+        Err(HandleError::Unimplemented("rename_session".into()))
+    }
+
     /// File paths currently tracked in the session's read-file-state cache.
     ///
     /// Backs `/files`, which renders each path relative to the cwd (cwd comes

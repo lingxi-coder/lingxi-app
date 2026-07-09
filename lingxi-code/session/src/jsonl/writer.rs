@@ -93,4 +93,87 @@ impl JsonlWriter {
             .await?;
         Ok(())
     }
+
+    /// Append a user-set `custom-title` metadata line for `session_id` — the
+    /// `/rename` write path, 1:1 with claude-code `saveCustomTitle`'s
+    /// `appendEntryToFile(path, { type: 'custom-title', customTitle, sessionId })`.
+    ///
+    /// `session_id` MUST be the BARE session uuid (the `<uuid>.jsonl` file stem),
+    /// NOT the `sess:`-prefixed `SessionId` display form — the loader keys the
+    /// `custom_titles` map by file stem (`loader.rs`), so a prefixed id would
+    /// never match on read. Same lock / dir-mode / file-mode contract as
+    /// [`Self::append`].
+    pub async fn append_custom_title(
+        &self,
+        session_id: &str,
+        custom_title: &str,
+    ) -> Result<(), WriterError> {
+        let value = serde_json::json!({
+            "type": "custom-title",
+            "customTitle": custom_title,
+            "sessionId": session_id,
+        });
+        let line = serde_json::to_string(&value)?;
+        let _g = self.lock.lock().await;
+        let path_str = self.path.to_str().expect("session paths are UTF-8");
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    std::fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(parent)
+                        .map_err(|e| FsError::Io(e.to_string()))?;
+                }
+                #[cfg(not(unix))]
+                std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
+            }
+        }
+        let mut payload = String::with_capacity(line.len() + 1);
+        payload.push_str(&line);
+        payload.push('\n');
+        self.fs
+            .append_file_with_mode(path_str, &payload, 0o600)
+            .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `/rename` write path emits a `custom-title` line whose `sessionId`
+    /// is the BARE uuid passed in (the `<uuid>.jsonl` stem the loader keys
+    /// `custom_titles` by) and whose `customTitle` round-trips verbatim.
+    #[tokio::test]
+    async fn append_custom_title_writes_parseable_line() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-title-{}-{}",
+            std::process::id(),
+            "abc"
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let session_path = tmp.join(format!("{session_id}.jsonl"));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(session_path.clone(), fs);
+
+        writer
+            .append_custom_title(session_id, "My Title")
+            .await
+            .expect("append custom title");
+
+        let raw = std::fs::read_to_string(&session_path).expect("read back");
+        let value: serde_json::Value =
+            serde_json::from_str(raw.trim()).expect("line parses as json");
+        assert_eq!(value["type"], "custom-title");
+        assert_eq!(value["customTitle"], "My Title");
+        assert_eq!(value["sessionId"], session_id);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

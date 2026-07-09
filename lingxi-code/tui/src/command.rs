@@ -450,6 +450,17 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_recap,
     },
     SlashCommand {
+        name: "/rename",
+        aliases: &[],
+        description: "Rename the current conversation",
+        // Optional (NOT Required): a bare `/rename` must reach the handler so it
+        // renders "Usage: /rename <name>" rather than falling through as an LLM
+        // prompt (auto-name generation is deferred).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_rename,
+    },
+    SlashCommand {
         name: "/reload-skills",
         aliases: &[],
         description: "Pick up skills added or changed on disk during this session",

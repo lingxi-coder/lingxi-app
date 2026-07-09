@@ -258,6 +258,7 @@ pub(crate) async fn run_ratatui(
     let permission_turn_tx = turn_tx.clone();
     let bash_turn_tx = turn_tx.clone();
     let compact_turn_tx = turn_tx.clone();
+    let rename_turn_tx = turn_tx.clone();
     // (/reload-skills) The SAME shared `Arc<RwLock<CommandRegistry>>` the
     // dispatcher mutates, handed to the `ChatWidget` so `/reload-skills`
     // reloads the live registry. Cloned before `tui_build` is consumed.
@@ -305,6 +306,8 @@ pub(crate) async fn run_ratatui(
     // `on_submit` moves `orchestrator`/`handle` into its closure.
     let compact_orch = orchestrator.clone();
     let compact_handle = handle.clone();
+    let rename_orch = orchestrator.clone();
+    let rename_handle = handle.clone();
     let widget_orch = orchestrator.clone();
     // (/web async effects) Preload the shared `/web` config snapshot from the
     // real on-disk settings + credential-store presence, mirroring the
@@ -498,6 +501,26 @@ pub(crate) async fn run_ratatui(
             });
         });
     };
+    // (/rename async effect) `/rename <name>` returns `ChatOutcome::RenameSession`
+    // from the blocking ratatui loop; the custom-title JSONL append is a state
+    // mutation, so it runs off the render thread on the captured handle (doctrine:
+    // side-effects go off-loop). The confirmation (or failure) lands in the
+    // transcript via `TurnEvent::SystemNotice`, mirroring claude-code's
+    // `onDone("Session renamed to: ${newName}")`.
+    let on_rename = move |name: String| {
+        let orch = rename_orch.clone();
+        let tx = rename_turn_tx.clone();
+        rename_handle.spawn(async move {
+            let (body, is_error) = match orch.rename_session(name.clone()).await {
+                Ok(()) => (format!("Session renamed to: {name}"), false),
+                Err(_e) => ("Error renaming session".to_string(), true),
+            };
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                body,
+                is_error,
+            });
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -568,6 +591,7 @@ pub(crate) async fn run_ratatui(
             on_permission_action,
             on_bash,
             on_compact,
+            on_rename,
         )
     })
     .await;

@@ -83,6 +83,11 @@ pub struct AppCallbacks<'cb> {
     /// runtime (never on the render thread) and reports the summary back via a
     /// [`TurnEvent::SystemNotice`]. The `String` is the argument tail.
     pub on_compact: Box<dyn FnMut(String) + 'cb>,
+    /// Executed on [`ChatOutcome::RenameSession`]: the caller appends the
+    /// `custom-title` line via `OrchestratorHandle::rename_session` off the
+    /// render thread and reports the result back via a
+    /// [`TurnEvent::SystemNotice`]. The `String` is the new title.
+    pub on_rename: Box<dyn FnMut(String) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -203,6 +208,12 @@ impl<'cb> RataApp<'cb> {
                     // summary returns via `TurnEvent::SystemNotice`.
                     ChatOutcome::Compact(args) => {
                         (self.callbacks.on_compact)(args);
+                    }
+                    // `/rename`: append the custom-title JSONL line off-loop on
+                    // the live engine runtime; the confirmation returns via
+                    // `TurnEvent::SystemNotice`, same shape as `Compact` above.
+                    ChatOutcome::RenameSession(name) => {
+                        (self.callbacks.on_rename)(name);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -368,6 +379,7 @@ pub fn run_app(
     on_permission_action: impl FnMut(PermissionAction),
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String),
+    on_rename: impl FnMut(String),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -395,6 +407,7 @@ pub fn run_app(
             on_permission_action: Box::new(on_permission_action),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
+            on_rename: Box::new(on_rename),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -474,6 +487,7 @@ mod tests {
                 on_permission_action: Box::new(|_| {}),
                 on_bash: Box::new(|_| {}),
                 on_compact: Box::new(|_| {}),
+                on_rename: Box::new(|_| {}),
             },
         )
     }

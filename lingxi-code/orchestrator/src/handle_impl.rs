@@ -209,6 +209,21 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
+    /// `/rename <name>` — append a user-set `custom-title` line to this
+    /// session's transcript (1:1 with claude-code `saveCustomTitle`). The
+    /// `sessionId` field is the BARE uuid (the `<uuid>.jsonl` stem the loader
+    /// keys `custom_titles` by). No-op Ok when no writer is wired.
+    async fn rename_session(&self, name: String) -> Result<(), HandleError> {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return Ok(());
+        };
+        let session_id = self.session.lock().await.session_id;
+        writer
+            .append_custom_title(&session_id.as_uuid().to_string(), &name)
+            .await
+            .map_err(|e| HandleError::ActionFailed(e.to_string()))
+    }
+
     async fn snapshot_cost(&self) -> CostSnapshot {
         // M6-06: delegate to the inherent helper that reads from the wired
         // CostTracker. Returns zero-valued snapshot if no tracker is wired

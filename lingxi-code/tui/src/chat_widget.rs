@@ -102,6 +102,12 @@ pub enum ChatOutcome {
     /// NOT an in-place `resume_session` swap (which would fork the conversation
     /// across files).
     SwitchSession(uuid::Uuid),
+    /// `/rename <name>` resolved to this new title. The caller appends the
+    /// `custom-title` JSONL line OFF the render thread (state mutation goes
+    /// off-loop, per doctrine) via `OrchestratorHandle::rename_session`, then
+    /// reports `Session renamed to: <name>` (or a failure) back through
+    /// `TurnEvent::SystemNotice`.
+    RenameSession(String),
 }
 
 /// Live API retry-backoff status, mirroring Claude Code's `SystemAPIErrorMessage`.
@@ -1813,6 +1819,25 @@ impl ChatWidget {
             return self.show_system_text("/recap is unavailable (no engine handle wired)", true);
         };
         self.run_core_command("recap", args, &command_core::recap::RecapHandler::new(handle))
+    }
+
+    /// `/rename [name]`: persist a user-set title for the current session.
+    /// With a name, returns [`ChatOutcome::RenameSession`] so the CLI appends
+    /// the `custom-title` JSONL line off the render thread (state mutation goes
+    /// off-loop) and echoes the confirmation via `TurnEvent::SystemNotice`,
+    /// mirroring claude-code's `saveCustomTitle` + `onDone("Session renamed
+    /// to: ...")`. Bare `/rename` renders a usage line — auto-name generation
+    /// (claude-code's Haiku side-query) is deferred. Graceful "unavailable"
+    /// no-op when no engine handle is wired.
+    pub(crate) fn cmd_rename(&mut self, args: &str) -> ChatOutcome {
+        if self.orchestrator.is_none() {
+            return self.show_system_text("/rename is unavailable (no engine handle wired)", true);
+        }
+        let name = args.trim();
+        if name.is_empty() {
+            return self.show_system_text("Usage: /rename <name>", true);
+        }
+        ChatOutcome::RenameSession(name.to_string())
     }
 
     /// `/files`: list the files currently in context (read-only).

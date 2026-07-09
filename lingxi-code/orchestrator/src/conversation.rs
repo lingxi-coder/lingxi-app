@@ -1854,6 +1854,73 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Byte-faithful `/btw` side-question wrapper, ported verbatim from
+    /// claude-code `utils/sideQuestion.ts`: the `<system-reminder>` that turns
+    /// the shared context into a one-off, tool-less answer. Prepended (with a
+    /// blank line) to the user's question as the single user turn of the
+    /// isolated side query.
+    pub(crate) const SIDE_QUESTION_SYSTEM_REMINDER: &str = "<system-reminder>This is a side question from the user. You must answer this question directly in a single response.\n\nIMPORTANT CONTEXT:\n- You are a separate, lightweight agent spawned to answer this one question\n- The main agent is NOT interrupted - it continues working independently in the background\n- You share the conversation context but are a completely separate instance\n- Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\nCRITICAL CONSTRAINTS:\n- You have NO tools available - you cannot read files, run commands, search, or take any actions\n- This is a one-off response - there will be no follow-up turns\n- You can ONLY provide information based on what you already know from the conversation context\n- NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n- If you don't know the answer, say so - do not offer to look it up or investigate\n\nSimply answer the question with the information you have.</system-reminder>";
+
+    /// Real `/btw` body — the SAME read-only, tool-denied, single-turn,
+    /// HISTORY-INERT side query as [`Self::generate_recap_query`], differing
+    /// ONLY in the prompt (the wrapped side question instead of `RECAP_PROMPT`).
+    /// Reuses the SAME `recap_runner` (the single-turn `ForkedAgentRunner`) and
+    /// `cache_safe_slot`, so it needs no new composition-root wiring. NEVER
+    /// touches `session.history`, cache writes, or the pre/post-compact hooks;
+    /// tool-denial is structural (the single-turn runner exposes no tools).
+    ///
+    /// Empty cache-safe slot (no successful turn yet) maps to `Err(ActionFailed)`
+    /// (the TUI renders "Couldn't answer side question: …") rather than a panic —
+    /// the same limitation as `/recap` (the LingXi single-turn runner requires a
+    /// captured prefix; cc's from-scratch rebuild fallback is not modeled).
+    pub(crate) async fn answer_side_question_query(
+        &self,
+        question: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<traits::RecapOutcome, traits::HandleError> {
+        let runner = self
+            .recap_runner
+            .clone()
+            .ok_or_else(|| traits::HandleError::ActionFailed("side question unavailable".into()))?;
+        let params = self
+            .cache_safe_slot
+            .as_ref()
+            .ok_or_else(|| {
+                traits::HandleError::ActionFailed("side question: no cache-safe slot".into())
+            })?
+            .get_last()
+            .await
+            .ok_or_else(|| {
+                traits::HandleError::ActionFailed(
+                    "side question: no context yet — send a message first".into(),
+                )
+            })?;
+
+        if cancel.is_cancelled() {
+            return Ok(traits::RecapOutcome::Cancelled);
+        }
+
+        let wrapped = format!("{}\n\n{}", Self::SIDE_QUESTION_SYSTEM_REMINDER, question);
+        let req = sidequery::ForkedAgentRequest {
+            prompt_messages: vec![ConversationMessage::user(MessageId::new(), wrapped)],
+            cache_safe_params: params,
+            fork_label: "side_question".into(),
+            query_source: sidequery::QuerySource::Custom("side_question".into()),
+            // Uncapped like cc's `runSideQuestion` (maxTurns=1, no maxTokens):
+            // `None` → the runner's DEFAULT_FORK_MAX_TOKENS.
+            max_output_tokens: None,
+        };
+
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(traits::RecapOutcome::Cancelled),
+            r = runner.run(req) => match r {
+                Ok(res) => Ok(traits::RecapOutcome::Text(res.final_text.trim().to_string())),
+                Err(e) => Err(traits::HandleError::ActionFailed(e.to_string())),
+            }
+        }
+    }
+
     /// Wire the passive `<new-diagnostics>` source (the LSP diagnostic registry)
     /// so each turn surfaces newly-reported LSP diagnostics to the model. See
     /// [`Self::new_diagnostics_source`] / [`Self::new_diagnostics_reminder_message`].

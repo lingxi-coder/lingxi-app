@@ -450,6 +450,17 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_recap,
     },
     SlashCommand {
+        name: "/btw",
+        aliases: &[],
+        description: "Ask a quick side question without interrupting the main conversation",
+        // Optional (NOT Required): a bare `/btw` must reach the handler so it
+        // renders "Usage: /btw <your question>" rather than falling through as
+        // an LLM prompt (same rationale as `/fork`).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_btw,
+    },
+    SlashCommand {
         name: "/rename",
         aliases: &[],
         description: "Rename the current conversation",

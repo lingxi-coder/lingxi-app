@@ -1821,6 +1821,28 @@ impl ChatWidget {
         self.run_core_command("recap", args, &command_core::recap::RecapHandler::new(handle))
     }
 
+    /// `/btw <question>`: ask a quick side question answered by an isolated,
+    /// tool-denied, single-turn side query that shares the conversation context
+    /// but NEVER enters the LLM history. Delivered through the SAME
+    /// `run_core_command` bridge `/recap` uses (a throwaway `block_on` on the
+    /// render-loop's blocking thread) against the history-inert
+    /// `answer_side_question` seam; the trimmed answer renders as a system line.
+    /// Bare `/btw` shows the usage line; graceful "unavailable" when no engine
+    /// handle is wired.
+    pub(crate) fn cmd_btw(&mut self, args: &str) -> ChatOutcome {
+        if args.trim().is_empty() {
+            return self.show_system_text("Usage: /btw <your question>", false);
+        }
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/btw is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command(
+            "btw",
+            args,
+            &command_core::side_question::SideQuestionHandler::new(handle),
+        )
+    }
+
     /// `/rename [name]`: persist a user-set title for the current session.
     /// With a name, returns [`ChatOutcome::RenameSession`] so the CLI appends
     /// the `custom-title` JSONL line off the render thread (state mutation goes

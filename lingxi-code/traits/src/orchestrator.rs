@@ -823,6 +823,23 @@ pub trait OrchestratorHandle: Send + Sync {
         Err(HandleError::Unimplemented("generate_recap".into()))
     }
 
+    /// Answer a one-off side question (`/btw`) via the SAME isolated,
+    /// read-only, tool-denied, single-turn side query `/recap` uses — a
+    /// lightweight agent that shares the parent's cache-safe prompt prefix but
+    /// NEVER appends to the conversation history. Returns the model's trimmed
+    /// answer as [`RecapOutcome::Text`] (or [`RecapOutcome::Cancelled`] if
+    /// aborted). Read-only w.r.t. session state, exactly like
+    /// [`Self::generate_recap`]; the only difference is the prompt (the
+    /// caller's wrapped question instead of the fixed recap prompt).
+    ///
+    /// Default returns `Err(HandleError::Unimplemented(..))` so existing handle
+    /// impls (and the test mock) keep compiling; the composition roots override
+    /// it against the real forked-agent side-query runner.
+    async fn answer_side_question(&self, question: &str) -> Result<RecapOutcome, HandleError> {
+        let _ = question;
+        Err(HandleError::Unimplemented("answer_side_question".into()))
+    }
+
     /// `/rename`: persist a user-set custom title for the current session by
     /// appending a `custom-title` entry to the transcript JSONL (1:1 with
     /// claude-code `saveCustomTitle`). Best-effort; the default returns

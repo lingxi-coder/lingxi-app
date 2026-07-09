@@ -209,6 +209,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
+    /// `/btw` — delegate to the history-inert inherent
+    /// [`ConversationOrchestrator::answer_side_question_query`] with a fresh
+    /// (un-cancelled) token, mirroring `generate_recap`'s delegation.
+    async fn answer_side_question(&self, question: &str) -> Result<RecapOutcome, HandleError> {
+        self.answer_side_question_query(question, tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
     /// `/rename <name>` — append a user-set `custom-title` line to this
     /// session's transcript (1:1 with claude-code `saveCustomTitle`). The
     /// `sessionId` field is the BARE uuid (the `<uuid>.jsonl` stem the loader

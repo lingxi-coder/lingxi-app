@@ -98,6 +98,54 @@ fn native_csiu_display_name(terminal: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The 2.1.205 `get description()` display-name map (includes Warp AND
+/// Windows Terminal, unlike the two CSI-u maps above).
+fn check_setup_display_name(terminal: &str) -> Option<&'static str> {
+    match terminal {
+        "ghostty" => Some("Ghostty"),
+        "kitty" => Some("Kitty"),
+        "iTerm.app" => Some("iTerm2"),
+        "WezTerm" => Some("WezTerm"),
+        "WarpTerminal" => Some("Warp"),
+        "windows-terminal" => Some("Windows Terminal"),
+        _ => None,
+    }
+}
+
+/// `/terminal-setup`'s live palette description — 1:1 port of claude-code
+/// 2.1.205's `get description()` (branch order preserved; 2.1.205 dropped the
+/// old `isHidden` CSI-u gate in favor of this per-terminal text):
+/// 1. Apple Terminal → the Option+Enter variant.
+/// 2. Terminals with native Shift+Enter → "Check terminal setup (…)".
+/// 3. Running under the iTerm2 app bundle but a nested/undetected terminal
+///    (tmux/screen; the literal `"iTerm.app"` arm is unreachable after branch
+///    2 — dead in the reference too, kept for fidelity) → clipboard-access
+///    variant.
+/// 4. Everything else → the install variant.
+#[must_use]
+pub fn dynamic_description() -> String {
+    let terminal = detect_terminal();
+    if terminal.as_deref() == Some("Apple_Terminal") {
+        return "Enable Option+Enter key binding for newlines and visual bell".to_string();
+    }
+    if let Some(label) = terminal.as_deref().and_then(check_setup_display_name) {
+        return format!("Check terminal setup (Shift+Enter is natively supported in {label})");
+    }
+    let bundle_is_iterm = std::env::var("__CFBundleIdentifier")
+        .ok()
+        .as_deref()
+        == Some("com.googlecode.iterm2");
+    if bundle_is_iterm
+        && matches!(
+            terminal.as_deref(),
+            Some("iTerm.app") | Some("tmux") | Some("screen") | None
+        )
+    {
+        return "Enable iTerm2 clipboard access for /copy".to_string();
+    }
+    "Install Shift+Enter key binding for newlines".to_string()
+}
+
 /// Port of `shouldOfferTerminalSetup()`: which terminals this command can
 /// actually configure. Note claude-code's `&&`-binds-tighter precedence:
 /// `(darwin && Apple_Terminal) || vscode || cursor || windsurf || alacritty || zed`.
@@ -512,6 +560,41 @@ mod tests {
             let (msg, is_err) = run();
             assert!(msg.contains("natively supported in iTerm2"));
             assert!(!is_err);
+        });
+    }
+
+    #[test]
+    fn dynamic_description_branches_per_terminal() {
+        with_terminal(Some("Apple_Terminal"), || {
+            assert_eq!(
+                dynamic_description(),
+                "Enable Option+Enter key binding for newlines and visual bell"
+            );
+        });
+        with_terminal(Some("iTerm.app"), || {
+            assert_eq!(
+                dynamic_description(),
+                "Check terminal setup (Shift+Enter is natively supported in iTerm2)"
+            );
+        });
+        with_terminal(Some("WarpTerminal"), || {
+            assert_eq!(
+                dynamic_description(),
+                "Check terminal setup (Shift+Enter is natively supported in Warp)"
+            );
+        });
+        with_terminal(Some("tmux"), || {
+            // Not under the iTerm2 bundle in the test env ⇒ install variant.
+            assert_eq!(
+                dynamic_description(),
+                "Install Shift+Enter key binding for newlines"
+            );
+        });
+        with_terminal(Some("tmux"), || {
+            std::env::set_var("__CFBundleIdentifier", "com.googlecode.iterm2");
+            let desc = dynamic_description();
+            std::env::remove_var("__CFBundleIdentifier");
+            assert_eq!(desc, "Enable iTerm2 clipboard access for /copy");
         });
     }
 

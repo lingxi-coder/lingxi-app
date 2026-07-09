@@ -31,23 +31,126 @@ pub struct CompletionItem {
     pub desc: String,
 }
 
-/// The advertised registry commands whose name starts with `prefix` (a
-/// `/`-led token), as completion items — derived from the single
-/// [`crate::command::BUILTIN`] registry (plan Phase 8). Empty when `prefix`
-/// is not a command fragment.
+/// The registry commands matching `prefix` (a `/`-led token), as completion
+/// items — derived from the single [`crate::command::BUILTIN`] registry (plan
+/// Phase 8). Empty when `prefix` is not a command fragment.
+///
+/// Ordering and matching are a port of claude-code 2.1.205's
+/// `generateCommandSuggestions`:
+/// - bare `/` lists every advertised command **alphabetically**;
+/// - a query ranks candidates exact-name > exact-alias > prefix-name (shorter
+///   first) > prefix-alias (shorter first) > fuzzy, with the tie-break falling
+///   back to alphabetical (the reference tie-breaks on Fuse score + usage;
+///   deterministic alphabetical stands in for that fuzzy-score tail);
+/// - fuzzy candidacy is name/alias substring or description word-prefix (a
+///   deterministic stand-in for the reference's Fuse.js index over the same
+///   keys);
+/// - a hidden command surfaces when its exact name is typed (the reference's
+///   `hiddenExact` rule);
+/// - the matched alias is shown in parens only when the user typed it
+///   (`findMatchedAlias`), e.g. `/quit` → `/exit (quit)`.
 #[must_use]
 pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
     if !prefix.starts_with('/') {
         return Vec::new();
     }
-    crate::command::advertised()
-        .filter(|command| command.name.starts_with(prefix))
-        .map(|command| CompletionItem {
-            label: command.name.to_string(),
-            insert: command.name.to_string(),
-            desc: command.description.to_string(),
+    let rest = &prefix[1..];
+    // `hasCommandArgs`: once arguments are being typed there are no command
+    // suggestions.
+    if rest.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = rest.to_lowercase();
+
+    // Bare "/": every advertised command, alphabetically.
+    if query.is_empty() {
+        let mut commands: Vec<_> = crate::command::advertised().collect();
+        commands.sort_by_key(|command| command.name);
+        return commands.into_iter().map(|c| item(c, None)).collect();
+    }
+
+    // Strip the leading slash from a registry name/alias for matching.
+    let bare = |name: &str| name[1..].to_lowercase();
+
+    // `hiddenExact`: an unadvertised command typed out in full surfaces —
+    // unless a visible command shares the name (impossible in one registry,
+    // kept as a guard for parity with the reference).
+    let hidden_exact = crate::command::BUILTIN
+        .iter()
+        .filter(|c| !c.advertised || crate::command::is_runtime_hidden(c.name))
+        .find(|c| bare(c.name) == query);
+
+    // Candidates: advertised commands the reference's Fuse index would match —
+    // name/alias substring, name-part prefix, or description word prefix.
+    let mut candidates: Vec<_> = crate::command::advertised()
+        .filter(|c| {
+            bare(c.name).contains(&query)
+                || c.aliases.iter().any(|a| bare(a).contains(&query))
+                || bare(c.name)
+                    .split(['-', '_', ':'])
+                    .any(|part| part.starts_with(&query))
+                || c.describe()
+                    .to_lowercase()
+                    .split_whitespace()
+                    .any(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric()).starts_with(&query))
         })
-        .collect()
+        .collect();
+
+    // Rank tiers (the reference comparator, minus the Fuse-score tail).
+    let tier = |c: &crate::command::SlashCommand| -> (u8, usize) {
+        let name = bare(c.name);
+        if name == query {
+            return (0, 0);
+        }
+        if c.aliases.iter().any(|a| bare(a) == query) {
+            return (1, 0);
+        }
+        if name.starts_with(&query) {
+            return (2, name.len());
+        }
+        if let Some(alias) = c
+            .aliases
+            .iter()
+            .filter(|a| bare(a).starts_with(&query))
+            .min_by_key(|a| a.len())
+        {
+            return (3, alias.len());
+        }
+        (4, 0)
+    };
+    candidates.sort_by(|a, b| tier(a).cmp(&tier(b)).then(a.name.cmp(b.name)));
+
+    let mut items: Vec<CompletionItem> = candidates
+        .into_iter()
+        .map(|c| {
+            // Show the alias in parens only when the user typed it.
+            let matched_alias = c
+                .aliases
+                .iter()
+                .find(|a| bare(a).starts_with(&query))
+                .map(|a| &a[1..]);
+            item(c, matched_alias)
+        })
+        .collect();
+    if let Some(hidden) = hidden_exact {
+        if !items.iter().any(|i| i.insert == hidden.name) {
+            items.insert(0, item(hidden, None));
+        }
+    }
+    items
+}
+
+/// Build one popup row (claude-code `createCommandSuggestionItem`).
+fn item(command: &crate::command::SlashCommand, matched_alias: Option<&str>) -> CompletionItem {
+    let label = match matched_alias {
+        Some(alias) => format!("{} ({alias})", command.name),
+        None => command.name.to_string(),
+    };
+    CompletionItem {
+        label,
+        insert: command.name.to_string(),
+        desc: command.describe(),
+    }
 }
 
 /// A completion popup over a candidate list.
@@ -196,22 +299,24 @@ mod tests {
     fn completion_navigation_clamps_at_edges_by_design() {
         // Plan Phase 12 decision: clamp-at-edges is the deliberate LingXi
         // navigation behavior (no wrap-around) across dialog/picker/completion.
-        let total = crate::command::advertised().count();
+        // The bare-"/" popup lists advertised commands alphabetically
+        // (claude-code order).
+        let mut names: Vec<_> = crate::command::advertised().map(|c| c.name).collect();
+        names.sort_unstable();
+        let total = names.len();
         let mut p = CompletionView::new(command_items("/")).unwrap();
         assert_eq!(p.selected(), 0);
         p.prev(); // clamps at 0 — does NOT wrap to the last item
         assert_eq!(p.selected(), 0);
         p.next();
         assert_eq!(p.selected(), 1);
-        let second = crate::command::advertised().nth(1).unwrap().name;
-        assert_eq!(p.selected_insert(), second);
+        assert_eq!(p.selected_insert(), names[1]);
         // Walk past the end: the highlight clamps on the last item.
         for _ in 0..total {
             p.next();
         }
         assert_eq!(p.selected(), total - 1);
-        let last = crate::command::advertised().last().unwrap().name;
-        assert_eq!(p.selected_insert(), last);
+        assert_eq!(p.selected_insert(), names[total - 1]);
     }
 
     #[test]
@@ -287,8 +392,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Complete"), "{text}");
-        assert!(text.contains("› /model"), "highlighted match: {text}");
-        assert!(text.contains("/mcp"), "{text}");
+        // Prefix matches rank shorter-name first: /mcp is highlighted.
+        assert!(text.contains("› /mcp"), "highlighted match: {text}");
+        assert!(text.contains("/model"), "{text}");
         // Everything the popup drew sits strictly above the composer rows.
         let composer_rows: String = (composer.top()..screen.bottom())
             .map(|y| {

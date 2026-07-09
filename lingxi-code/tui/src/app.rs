@@ -965,9 +965,10 @@ mod tests {
         let mut app = test_app(Vec::new());
         app.on_key(press(KeyCode::Char('/')));
         assert!(app.chat_widget.bottom_pane().completion().is_some());
-        typ(&mut app, "m"); // "/m" narrows to /model + /mcp
+        typ(&mut app, "m"); // "/m" narrows to the m-matching commands
         let p = app.chat_widget.bottom_pane().completion().unwrap();
-        assert_eq!(p.selected_insert(), "/model");
+        // Prefix matches rank shorter-name first (claude-code comparator).
+        assert_eq!(p.selected_insert(), "/mcp");
         // A space ends the command token and closes the popup.
         typ(&mut app, " x");
         assert!(app.chat_widget.bottom_pane().completion().is_none());
@@ -1294,17 +1295,9 @@ mod tests {
     #[test]
     fn slash_doctor_and_mcp_open_screen_views() {
         let mut app = test_app(Vec::new());
-        assert!(matches!(
-            submit_command(&mut app, "/doctor"),
-            ChatOutcome::Continue
-        ));
-        assert!(app
-            .chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ScreenView>());
-        app.on_key(press(KeyCode::Esc)); // close /doctor
-        assert!(app.chat_widget.bottom_pane().view_stack().is_empty());
+        // `/doctor` was removed in claude-code 2.1.205 (it lives on as a
+        // bundled skill): it no longer resolves as a slash command.
+        assert!(crate::command::resolve("/doctor").is_none());
         assert!(matches!(
             submit_command(&mut app, "/mcp"),
             ChatOutcome::Continue
@@ -2181,7 +2174,8 @@ mod tests {
         assert!(!rows[2].contains('└'), "composer bottom padding: {}", rows[2]);
         // The popup box (6-item window) sits directly beneath the composer.
         assert!(rows[3].contains("Complete"), "popup title: {}", rows[3]);
-        assert!(rows[4].contains("› /help"), "first item: {}", rows[4]);
+        // Alphabetical popup order (claude-code): /add-dir sorts first.
+        assert!(rows[4].contains("› /add-dir"), "first item: {}", rows[4]);
         assert!(rows[10].starts_with('└'), "popup bottom: {}", rows[10]);
     }
 
@@ -2266,7 +2260,8 @@ mod tests {
         let terminal = draw_viewport(&mut app);
         let rows = buffer_rows(&terminal);
         assert!(rows[1].starts_with("› /"), "composer above: {}", rows[1]);
-        assert!(rows[4].contains("› /help"), "items visible: {}", rows[4]);
+        // Alphabetical popup order (claude-code): /add-dir sorts first.
+        assert!(rows[4].contains("› /add-dir"), "items visible: {}", rows[4]);
         // No row mixes popup chrome with the composer row.
         assert!(
             !rows[1].contains("Complete"),

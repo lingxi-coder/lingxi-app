@@ -750,8 +750,14 @@ impl BottomPane {
                     self.composer.complete_at(at, &insert);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
-                } else if self.composer.text() == insert {
-                    // Buffer already IS the highlighted command → let Enter run it.
+                } else if self.composer.text() == insert
+                    || crate::command::resolve(&self.composer.text())
+                        .is_some_and(|(cmd, _)| cmd.name == insert)
+                {
+                    // Buffer already IS the highlighted command — by name or in
+                    // full as one of its aliases (`/quit` highlights `/exit
+                    // (quit)`) → let Enter run it (claude-code runs the typed
+                    // alias rather than rewriting the buffer).
                     None
                 } else {
                     // Partial/different `/command` → commit it + close the popup.
@@ -1918,10 +1924,11 @@ mod tests {
         let mut pane = pane();
         typ(&mut pane, "/m");
         let popup = pane.completion().expect("popup open");
-        assert_eq!(popup.selected_insert(), "/model");
+        // Prefix matches rank shorter-name first (claude-code comparator).
+        assert_eq!(popup.selected_insert(), "/mcp");
         // Tab replaces the whole buffer for a /command.
         let _ = pane.handle_key(key(KeyCode::Tab));
-        assert_eq!(pane.composer().text(), "/model");
+        assert_eq!(pane.composer().text(), "/mcp");
     }
 
     #[test]
@@ -1936,7 +1943,7 @@ mod tests {
         typ(&mut pane, "/m");
         assert_eq!(
             pane.completion().expect("popup open").selected_insert(),
-            "/model"
+            "/mcp"
         );
         let outcome = pane.handle_key(key(KeyCode::Enter));
         assert!(
@@ -1945,7 +1952,7 @@ mod tests {
         );
         assert_eq!(
             pane.composer().text(),
-            "/model",
+            "/mcp",
             "the highlighted command is committed into the buffer"
         );
         assert!(
@@ -1958,11 +1965,11 @@ mod tests {
     fn bare_slash_opens_completion_listing_the_whole_registry() {
         // Plan Phase 12 step 1: command completion is sourced from the ONE
         // command registry — a bare "/" lists every advertised command in
-        // registry order, and navigation clamps at the list edges (the
-        // deliberate LingXi behavior, plan Phase 12 step 4).
+        // claude-code's alphabetical popup order, and navigation clamps at the
+        // list edges (the deliberate LingXi behavior, plan Phase 12 step 4).
         let mut pane = pane();
         typ(&mut pane, "/");
-        let first = crate::command::advertised().next().unwrap().name;
+        let first = crate::command::advertised().map(|c| c.name).min().unwrap();
         assert_eq!(
             pane.completion().expect("popup open").selected_insert(),
             first
@@ -1974,7 +1981,7 @@ mod tests {
         }
         let popup = pane.completion().expect("popup still open");
         assert_eq!(popup.selected(), total - 1, "clamped at the last item");
-        let last = crate::command::advertised().last().unwrap().name;
+        let last = crate::command::advertised().map(|c| c.name).max().unwrap();
         assert_eq!(popup.selected_insert(), last);
         // Tab completes the highlighted registry command into the buffer.
         let _ = pane.handle_key(key(KeyCode::Tab));
@@ -2378,12 +2385,12 @@ mod tests {
         typ(&mut pane, "/");
         assert!(pane.completion().is_some());
         assert_eq!(pane.desired_height(80), 11, "composer 3 + full popup 8");
-        // "/m" narrows to 3 items (/model, /mcp, /memory): the pane shrinks
-        // with the popup (3 + 2 borders = 5 popup rows) instead of keeping a
+        // "/memo" narrows to a single item (/memory): the pane shrinks with
+        // the popup (1 + 2 borders = 3 popup rows) instead of keeping a
         // fixed +8.
-        typ(&mut pane, "m");
-        assert_eq!(pane.completion().unwrap().desired_height(), 5);
-        assert_eq!(pane.desired_height(80), 8, "composer 3 + filtered popup 5");
+        typ(&mut pane, "memo");
+        assert_eq!(pane.completion().unwrap().desired_height(), 3);
+        assert_eq!(pane.desired_height(80), 6, "composer 3 + filtered popup 3");
     }
 
     #[test]
@@ -2420,12 +2427,12 @@ mod tests {
         // directly beneath the composer.
         assert!(buffer_row(&buf, 3).contains("Complete"), "popup title row");
         assert!(
-            buffer_row(&buf, 4).contains("› /help"),
+            buffer_row(&buf, 4).contains("› /add-dir"),
             "first item highlighted: {}",
             buffer_row(&buf, 4)
         );
         assert!(
-            buffer_row(&buf, 9).contains("/connect"),
+            buffer_row(&buf, 9).contains("/clear"),
             "sixth item visible: {}",
             buffer_row(&buf, 9)
         );

@@ -477,6 +477,9 @@ impl ChatWidget {
     /// `/sandbox` flips sandboxing for the live session. `None` keeps `/sandbox`
     /// a graceful "unavailable" no-op.
     pub fn set_sandbox_toggle(&mut self, toggle: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        // Also registered with the command registry: the completion popup's
+        // `/sandbox` row shows live state (and hides when never wired).
+        crate::command::register_sandbox_toggle(toggle.clone());
         self.sandbox_toggle = Some(toggle);
     }
 
@@ -1424,13 +1427,6 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/doctor`: open the diagnostics screen.
-    pub(crate) fn cmd_doctor(&mut self, _args: &str) -> ChatOutcome {
-        self.bottom_pane
-            .show_view(Box::new(ScreenView::doctor(&self.session.doctor)));
-        ChatOutcome::Continue
-    }
-
     /// `/mcp`: open the MCP servers listing.
     pub(crate) fn cmd_mcp(&mut self, _args: &str) -> ChatOutcome {
         self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
@@ -1511,30 +1507,6 @@ impl ChatWidget {
             self.transcript.verbose(),
             &self.session.doctor.lingxi_home,
             &self.session.doctor.cwd,
-        );
-        self.bottom_pane.show_view(Box::new(view));
-        ChatOutcome::Continue
-    }
-
-    /// `/stats`: open the session statistics screen (live widget state:
-    /// duration, prompt/reply counts, transcript size, current model).
-    pub(crate) fn cmd_stats(&mut self, _args: &str) -> ChatOutcome {
-        use crate::history_cell::message::{AssistantTextCell, UserTextCell};
-        let cells = self.transcript.committed_cells();
-        let prompts = cells
-            .iter()
-            .filter(|c| c.as_any().downcast_ref::<UserTextCell>().is_some())
-            .count();
-        let replies = cells
-            .iter()
-            .filter(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_some())
-            .count();
-        let view = ScreenView::stats(
-            self.start.elapsed().as_secs(),
-            prompts,
-            replies,
-            cells.len(),
-            self.session.models.iter().find(|m| m.is_current),
         );
         self.bottom_pane.show_view(Box::new(view));
         ChatOutcome::Continue
@@ -2001,20 +1973,6 @@ impl ChatWidget {
         self.run_core_command("init", args, &command_core::init::InitHandler::new())
     }
 
-    /// `/init-verifiers`: inject the verifier-skill scaffolding prompt.
-    pub(crate) fn cmd_init_verifiers(&mut self, args: &str) -> ChatOutcome {
-        self.run_core_command(
-            "init-verifiers",
-            args,
-            &command_core::init_verifiers::InitVerifiersHandler::new(),
-        )
-    }
-
-    /// `/commit`: inject the git-commit prompt.
-    pub(crate) fn cmd_commit(&mut self, args: &str) -> ChatOutcome {
-        self.run_core_command("commit", args, &command_core::commit::CommitHandler::new())
-    }
-
     /// `/commit-push-pr`: inject the commit-push-PR prompt.
     pub(crate) fn cmd_commit_push_pr(&mut self, args: &str) -> ChatOutcome {
         self.run_core_command(
@@ -2258,14 +2216,6 @@ impl ChatWidget {
             return self.show_system_text("Usage: /rename <name>", true);
         }
         ChatOutcome::RenameSession(name.to_string())
-    }
-
-    /// `/files`: list the files currently in context (read-only).
-    pub(crate) fn cmd_files(&mut self, args: &str) -> ChatOutcome {
-        let Some(handle) = self.orchestrator.clone() else {
-            return self.show_system_text("/files is unavailable (no engine handle wired)", true);
-        };
-        self.run_core_command("files", args, &command_core::files::FilesHandler::new(handle))
     }
 
     /// `/usage`: show the session cost/token usage summary (read-only).
@@ -2951,24 +2901,28 @@ mod tests {
     }
 
     /// A prompt-type command (InjectMessage): the model receives the handler's
-    /// expanded template, but the transcript shows only the compact `/commit`
-    /// invocation the user typed — not the whole template echoed as a user
-    /// message (claude-code displayed-metadata / hidden-isMeta parity).
+    /// expanded template, but the transcript shows only the compact
+    /// `/commit-push-pr` invocation the user typed — not the whole template
+    /// echoed as a user message (claude-code displayed-metadata /
+    /// hidden-isMeta parity).
     #[test]
     fn core_bridge_inject_message_submits_template_but_displays_invocation() {
         let mut widget = widget();
-        let outcome = widget.cmd_commit("");
+        let outcome = widget.cmd_commit_push_pr("");
         let ChatOutcome::Submit(payload, _, _token) = outcome else {
             panic!("prompt-type command must queue a turn");
         };
         // The model payload is the full expanded handler template …
         assert!(
             payload.contains("git status"),
-            "model receives the expanded /commit template: {payload}"
+            "model receives the expanded /commit-push-pr template: {payload}"
         );
         // … while the transcript shows only the compact invocation.
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
-        assert_eq!(shown, "/commit", "transcript shows the invocation, not the template");
+        assert_eq!(
+            shown, "/commit-push-pr",
+            "transcript shows the invocation, not the template"
+        );
     }
 
     /// A read-only command (Done{display}): output is rendered into the
@@ -3140,7 +3094,6 @@ mod tests {
     fn orchestrator_commands_are_graceful_noops_when_unwired() {
         let commands: &[(&str, fn(&mut ChatWidget, &str) -> ChatOutcome)] = &[
             ("/context", ChatWidget::cmd_context),
-            ("/files", ChatWidget::cmd_files),
             ("/usage", ChatWidget::cmd_usage),
             ("/effort", ChatWidget::cmd_effort),
             ("/goal", ChatWidget::cmd_goal),
@@ -3276,8 +3229,8 @@ mod tests {
     fn tui_prompt_command_expands_embedded_shell_before_submit() {
         let mut widget = widget();
         widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: false }));
-        let ChatOutcome::Submit(payload, _, _token) = widget.cmd_commit("") else {
-            panic!("/commit must submit a turn");
+        let ChatOutcome::Submit(payload, _, _token) = widget.cmd_commit_push_pr("") else {
+            panic!("/commit-push-pr must submit a turn");
         };
         assert!(
             payload.contains("EXPANDED_MARKER"),
@@ -3289,7 +3242,7 @@ mod tests {
         );
         assert_eq!(
             cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body(),
-            "/commit",
+            "/commit-push-pr",
             "transcript still shows the compact invocation"
         );
     }
@@ -3301,7 +3254,7 @@ mod tests {
     fn tui_prompt_command_denied_expansion_does_not_submit() {
         let mut widget = widget();
         widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: true }));
-        let outcome = widget.cmd_commit("");
+        let outcome = widget.cmd_commit_push_pr("");
         assert!(
             matches!(outcome, ChatOutcome::Continue),
             "a denied expansion must NOT submit a turn"
@@ -4272,53 +4225,34 @@ mod tests {
 
     #[test]
     fn slash_stats_opens_session_stats_view_with_real_counts() {
+        // claude-code 2.1.205 removed the standalone `/stats` screen: the name
+        // survives only as a `/usage` alias (with `/cost`), and `/usage`
+        // gracefully no-ops here without an engine handle.
         let mut widget = ChatWidget::new(
-            vec![
-                RenderedMessage::UserText {
-                    body: "hi".to_string(),
-                    timestamp: 0,
-                },
-                RenderedMessage::AssistantText {
-                    body: "hello".to_string(),
-                    timestamp: 0,
-                },
-                RenderedMessage::SystemText {
-                    body: "note".to_string(),
-                    timestamp: 0,
-                    is_error: false,
-                },
-            ],
+            vec![RenderedMessage::UserText {
+                body: "hi".to_string(),
+                timestamp: 0,
+            }],
             SessionInfo::default(),
+        );
+        assert_eq!(
+            crate::command::resolve("/stats").expect("alias").0.name,
+            "/usage"
+        );
+        assert_eq!(
+            crate::command::resolve("/cost").expect("alias").0.name,
+            "/usage"
         );
         assert!(matches!(
             submit_command(&mut widget, "/stats"),
             ChatOutcome::Continue
         ));
-        let stats = widget
-            .bottom_pane()
-            .view_stack()
-            .active()
-            .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
-            .expect("stats screen open");
-        let text = stats.body_text();
-        assert!(text.contains("This session"), "{text}");
-        // 1 user prompt, 1 assistant reply, 3 committed cells.
-        let count_of = |label: &str| {
-            text.lines()
-                .find(|l| l.contains(label))
-                .unwrap_or_else(|| panic!("no {label} row:\n{text}"))
-                .rsplit(' ')
-                .next()
-                .unwrap()
-                .to_string()
-        };
-        assert_eq!(count_of("Prompts sent"), "1", "{text}");
-        assert_eq!(count_of("Replies received"), "1", "{text}");
-        assert_eq!(count_of("Transcript cells"), "3", "{text}");
-        assert!(text.contains("Counts cover this session only."), "{text}");
-        assert_eq!(widget.transcript().committed_cells().len(), 3, "no dump");
-        widget.handle_key(press(KeyCode::Esc));
-        assert!(widget.bottom_pane().view_stack().is_empty());
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&widget, 1);
+        assert!(
+            sys.body().contains("/usage is unavailable"),
+            "alias routes to /usage: {}",
+            sys.body()
+        );
     }
 
     #[test]

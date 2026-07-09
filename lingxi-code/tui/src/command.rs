@@ -13,6 +13,12 @@
 //! runs the entry's dispatch fn — there is no hard-coded command `match` in
 //! the app. Unknown commands resolve to `None` and fall through as a normal
 //! prompt (locked behavior).
+//!
+//! Registry metadata (names, aliases, descriptions, argument hints,
+//! visibility) tracks claude-code 2.1.205's command table byte-for-byte
+//! (LingXi branding substituted where the reference says "Claude Code"),
+//! including its `get description()` dynamic descriptions
+//! ([`SlashCommand::dynamic_description`]).
 
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 
@@ -35,33 +41,56 @@ pub struct SlashCommand {
     /// Alternate names that dispatch identically (`/quit` → `/exit`).
     pub aliases: &'static [&'static str],
     /// One-line description (the completion popup's right column and the
-    /// `/help` screen's command listing).
+    /// `/help` screen's command listing). Ignored when
+    /// [`Self::dynamic_description`] is set — read via [`Self::describe`].
     pub description: &'static str,
+    /// claude-code `get description()` parity: commands whose description is
+    /// computed from live state (`/fast`, `/sandbox`, `/terminal-setup`).
+    /// `None` = static [`Self::description`].
+    pub dynamic_description: Option<fn() -> String>,
+    /// claude-code `argumentHint` (e.g. `"<path>"`, `"[on|off]"`); `""` when
+    /// the command takes no hinted arguments.
+    pub hint: &'static str,
     /// How the command treats trailing argument text.
     pub args: ArgSpec,
-    /// Whether the command is advertised in the completion popup + `/help`.
+    /// Whether the command is advertised in the completion popup + `/help`
+    /// (claude-code `isHidden: false`). Hidden commands still dispatch, and
+    /// surface in the popup when their exact name is typed (claude-code's
+    /// `hiddenExact` rule).
     pub advertised: bool,
     /// The handler run on the widget when the command matches. Receives the
     /// trimmed argument tail (`""` when absent).
     pub run: fn(&mut ChatWidget, &str) -> ChatOutcome,
 }
 
-/// Every slash command the ratatui backend handles. Order is the completion
-/// popup order and the `/help` listing order.
+impl SlashCommand {
+    /// The live one-line description: the `dynamic_description` product when
+    /// present (claude-code `get description()`), else the static text.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        self.dynamic_description
+            .map_or_else(|| self.description.to_string(), |f| f())
+    }
+}
+
+/// Every slash command the ratatui backend handles, tracking claude-code
+/// 2.1.205's registry. Table order is stable/curated; the completion popup
+/// sorts advertised entries alphabetically at render time (claude-code
+/// `generateCommandSuggestions` sorts builtins with `localeCompare`), and the
+/// `/help` listing keeps table order.
 ///
-/// Commands the iocraft backend advertised but that have NO data source or
-/// core API on this backend are deliberately NOT registered (never advertise
-/// "not implemented"). `/tasks` was previously dropped for lack of a feed; it
-/// now reads the live `TaskRegistry` (`ChatWidget::set_task_registry`) and IS
-/// registered below.
-/// (`/fork` and `/recap` were previously deferred here; the engine
-/// `fork_conversation` override + `generate_recap` seam now exist, so both are
-/// registered below.)
+/// Commands claude-code 2.1.205 dropped are dropped here too (`/doctor` — now
+/// a bundled skill, `/files`, `/commit`, `/init-verifiers`); `/stats` and
+/// `/cost` live on as `/usage` aliases, `/vim` as a hidden
+/// moved-to-`/config` redirect. `/web`, `/connect`, and `/image` are
+/// deliberate LingXi divergences (multi-provider support).
 pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
         aliases: &[],
-        description: "Show shortcuts and commands",
+        description: "Show help and available commands",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_help,
@@ -69,23 +98,19 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/model",
         aliases: &[],
-        description: "Switch the active model",
+        description: "Set the AI model for LingXi",
+        dynamic_description: None,
+        hint: "<model>",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_model,
     },
     SlashCommand {
-        name: "/doctor",
-        aliases: &[],
-        description: "Show diagnostics",
-        args: ArgSpec::None,
-        advertised: true,
-        run: ChatWidget::cmd_doctor,
-    },
-    SlashCommand {
         name: "/mcp",
         aliases: &[],
-        description: "List MCP servers",
+        description: "Manage MCP servers",
+        dynamic_description: None,
+        hint: "[reconnect|enable|disable [<server>|all]]",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_mcp,
@@ -94,6 +119,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/web",
         aliases: &[],
         description: "Configure web search",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_web,
@@ -102,6 +129,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/connect",
         aliases: &[],
         description: "Connect a model provider",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_connect,
@@ -109,7 +138,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/permissions",
         aliases: &["/allowed-tools"],
-        description: "Manage allow, ask, and deny tool permission rules",
+        description: "Manage allow and deny tool permission rules",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_permissions,
@@ -118,6 +149,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/add-dir",
         aliases: &[],
         description: "Add a new working directory",
+        dynamic_description: None,
+        hint: "<path>",
         // Optional (NOT Required): a bare `/add-dir` reaches the handler so it
         // renders its own "Usage: /add-dir <path>" line rather than falling
         // through as an LLM prompt (same rationale as `/fork`).
@@ -127,8 +160,10 @@ pub const BUILTIN: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/rewind",
-        aliases: &["/checkpoint"],
+        aliases: &["/checkpoint", "/undo"],
         description: "Restore the code and/or conversation to a previous point",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_rewind,
@@ -137,6 +172,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/resume",
         aliases: &["/continue"],
         description: "Resume a previous conversation",
+        dynamic_description: None,
+        hint: "[conversation id or search term]",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_resume,
@@ -144,7 +181,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/tasks",
         aliases: &["/bashes"],
-        description: "List and manage background tasks",
+        description: "View and manage everything running in the background",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_tasks,
@@ -152,7 +191,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/hooks",
         aliases: &[],
-        description: "List hooks",
+        description: "View hook configurations for tool events",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_hooks,
@@ -160,7 +201,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/agents",
         aliases: &[],
-        description: "List agents",
+        description: "(removed) Ask LingXi to create/manage subagents, or edit .lingxi/agents/",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_agents,
@@ -169,6 +212,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/skills",
         aliases: &[],
         description: "List available skills",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_skills,
@@ -176,7 +221,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/memory",
         aliases: &[],
-        description: "Show LINGXI.md memory files",
+        description: "Open a memory file in your editor",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_memory,
@@ -184,31 +231,29 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/status",
         aliases: &[],
-        description: "Show the session status",
+        description: "Show LingXi status including version, model, account, API connectivity, and tool statuses",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_status,
     },
     SlashCommand {
         name: "/config",
-        aliases: &[],
-        description: "Show settings (read-only)",
+        aliases: &["/settings"],
+        description: "Open settings",
+        dynamic_description: None,
+        hint: "[key=value]",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_config,
     },
     SlashCommand {
-        name: "/stats",
-        aliases: &[],
-        description: "Show session statistics",
-        args: ArgSpec::None,
-        advertised: true,
-        run: ChatWidget::cmd_stats,
-    },
-    SlashCommand {
         name: "/diff",
         aliases: &[],
         description: "View uncommitted changes and per-turn diffs",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_diff,
@@ -216,7 +261,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/export",
         aliases: &[],
-        description: "Export the conversation to a file",
+        description: "Export the current conversation to a file or clipboard",
+        dynamic_description: None,
+        hint: "[filename]",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_export,
@@ -224,7 +271,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/copy",
         aliases: &[],
-        description: "Copy the last response to the clipboard",
+        description: "Copy LingXi's last response to clipboard (or /copy N for the Nth-latest)",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_copy,
@@ -232,7 +281,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/theme",
         aliases: &[],
-        description: "Change the color theme",
+        description: "Change the theme",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_theme,
@@ -240,31 +291,45 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/color",
         aliases: &[],
-        description: "Set the session accent color",
+        description: "Set the prompt bar color for this session",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_color,
     },
+    // claude-code 2.1.205 replaced `/vim` with a hidden moved-to-`/config`
+    // redirect (`lBd("vim", "Editor mode")`): unadvertised, and running it is
+    // handled by `cmd_vim` (which still toggles until `/config` gains
+    // key=value editing — tracked R2 work).
     SlashCommand {
         name: "/vim",
         aliases: &[],
-        description: "Toggle vim editing mode",
+        description: "Editor mode moved to /config",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
-        advertised: true,
+        advertised: false,
         run: ChatWidget::cmd_vim,
     },
     SlashCommand {
         name: "/clear",
-        aliases: &[],
-        description: "Clear the conversation",
-        args: ArgSpec::None,
+        aliases: &["/reset", "/new"],
+        description: "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+        dynamic_description: None,
+        hint: "[name]",
+        // Optional: claude-code names the fresh session with the tail; the
+        // clear must dispatch either way rather than fall through as a prompt.
+        args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_clear,
     },
     SlashCommand {
         name: "/exit",
         aliases: &["/quit"],
-        description: "Exit LingXi",
+        description: "Exit the CLI",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: cmd_exit,
@@ -273,6 +338,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/image",
         aliases: &[],
         description: "Attach an image file by path",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Required,
         advertised: false,
         run: ChatWidget::cmd_image,
@@ -284,30 +351,18 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/init",
         aliases: &[],
         description: "Initialize a new LINGXI.md file with codebase documentation",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_init,
     },
     SlashCommand {
-        name: "/init-verifiers",
-        aliases: &[],
-        description: "Create verifier skill(s) for automated verification of code changes",
-        args: ArgSpec::None,
-        advertised: true,
-        run: ChatWidget::cmd_init_verifiers,
-    },
-    SlashCommand {
-        name: "/commit",
-        aliases: &[],
-        description: "Create a git commit",
-        args: ArgSpec::Optional,
-        advertised: true,
-        run: ChatWidget::cmd_commit,
-    },
-    SlashCommand {
         name: "/commit-push-pr",
         aliases: &[],
         description: "Commit, push, and open a PR",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_commit_push_pr,
@@ -315,7 +370,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/review",
         aliases: &[],
-        description: "Review a pull request",
+        description: "Review a GitHub pull request; for your working diff use /code-review",
+        dynamic_description: None,
+        hint: "[pr number]",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_review,
@@ -324,6 +381,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/security-review",
         aliases: &[],
         description: "Complete a security review of the pending changes on the current branch",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_security_review,
@@ -332,6 +391,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/statusline",
         aliases: &[],
         description: "Set up LingXi's status line UI",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_statusline,
@@ -340,22 +401,30 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/insights",
         aliases: &[],
         description: "Generate a report analyzing your LingXi sessions",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_insights,
     },
+    // Hidden in claude-code 2.1.205 (`isHidden: true`): dispatchable, shown
+    // in the popup only when fully typed.
     SlashCommand {
         name: "/version",
         aliases: &[],
-        description: "Print version information",
+        description: "Show this session's version (autoupdate may have a newer one)",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
-        advertised: true,
+        advertised: false,
         run: ChatWidget::cmd_version,
     },
     SlashCommand {
         name: "/release-notes",
         aliases: &[],
         description: "View release notes",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_release_notes,
@@ -364,6 +433,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/stickers",
         aliases: &[],
         description: "Order LingXi stickers",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_stickers,
@@ -371,7 +442,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/autocompact",
         aliases: &[],
-        description: "Configure the auto-compact window size",
+        description: "Set how full the context gets before auto-summarizing",
+        dynamic_description: None,
+        hint: "[auto|<tokens>]",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_autocompact,
@@ -379,7 +452,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/keybindings",
         aliases: &[],
-        description: "Open or create your keybindings configuration file",
+        description: "Open your keyboard shortcuts file",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_keybindings,
@@ -388,12 +463,11 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/terminal-setup",
         aliases: &[],
         description: "Install Shift+Enter key binding for newlines",
+        // claude-code 2.1.205 no longer hides this row on CSI-u terminals; the
+        // description itself is computed per-terminal (`get description()`).
+        dynamic_description: Some(desc_terminal_setup),
+        hint: "",
         args: ArgSpec::None,
-        // Statically advertised, but RUNTIME-hidden by `is_runtime_hidden`
-        // (consulted in `advertised()`) when the active terminal natively
-        // supports CSI-u / the Kitty keyboard protocol — mirroring claude-code's
-        // `isHidden: env.terminal in NATIVE_CSIU_TERMINALS` (index.ts set:
-        // Ghostty/Kitty/iTerm2/WezTerm). Typing it still dispatches.
         advertised: true,
         run: ChatWidget::cmd_terminal_setup,
     },
@@ -401,6 +475,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/skill-doctor",
         aliases: &[],
         description: "Show which loaded skills are unused and costing context",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_skill_doctor,
@@ -411,23 +487,19 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/context",
         aliases: &[],
-        description: "Show current context usage",
+        description: "Visualize current context usage as a colored grid",
+        dynamic_description: None,
+        hint: "[all]",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_context,
     },
     SlashCommand {
-        name: "/files",
-        aliases: &[],
-        description: "List all files currently in context",
-        args: ArgSpec::None,
-        advertised: true,
-        run: ChatWidget::cmd_files,
-    },
-    SlashCommand {
         name: "/usage",
-        aliases: &[],
-        description: "Show current session usage",
+        aliases: &["/cost", "/stats"],
+        description: "Show session cost, plan usage, and activity stats",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_usage,
@@ -436,6 +508,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/effort",
         aliases: &[],
         description: "Set effort level for model usage",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_effort,
@@ -443,7 +517,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/fast",
         aliases: &[],
-        description: "Toggle fast mode",
+        description: "Toggle fast mode (Opus 4.8)",
+        dynamic_description: None,
+        hint: "[on|off]",
         // Optional: `on`/`off` set the state; a bare `/fast` toggles it. Reaches
         // the handler either way rather than falling through as a prompt.
         args: ArgSpec::Optional,
@@ -454,6 +530,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/plan",
         aliases: &[],
         description: "Enable plan mode or view the current session plan",
+        dynamic_description: None,
+        hint: "[open|share|<description>]",
         // Optional (NOT Required): a trailing `open`/`<description>` must reach
         // the handler (which enters plan mode) rather than falling through as an
         // LLM prompt. LingXi has no plan store, so the description is not
@@ -465,7 +543,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/goal",
         aliases: &[],
-        description: "Set a goal — keep working until the condition is met",
+        description: "Set a goal LingXi checks before stopping",
+        dynamic_description: None,
+        hint: "[<condition> | clear]",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_goal,
@@ -473,7 +553,9 @@ pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/fork",
         aliases: &[],
-        description: "Fork the conversation into a background agent",
+        description: "Spawn a background agent that inherits the full conversation",
+        dynamic_description: None,
+        hint: "<directive>",
         // Optional (NOT Required): a bare `/fork` must reach the handler so it
         // renders its own "Usage: /fork <directive>" line rather than falling
         // through as an LLM prompt.
@@ -488,6 +570,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         // is empty (the FORK_SUBAGENT-enabled branch).
         aliases: &[],
         description: "Create a branch of the current conversation at this point",
+        dynamic_description: None,
+        hint: "[name]",
         // Optional (NOT Required): a bare `/branch` must reach the handler so it
         // derives the branch name from the first prompt rather than falling
         // through as an LLM prompt.
@@ -499,6 +583,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/recap",
         aliases: &[],
         description: "Generate a one-line session recap now",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_recap,
@@ -507,6 +593,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/btw",
         aliases: &[],
         description: "Ask a quick side question without interrupting the main conversation",
+        dynamic_description: None,
+        hint: "<question>",
         // Optional (NOT Required): a bare `/btw` must reach the handler so it
         // renders "Usage: /btw <your question>" rather than falling through as
         // an LLM prompt (same rationale as `/fork`).
@@ -516,8 +604,10 @@ pub const BUILTIN: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/rename",
-        aliases: &[],
+        aliases: &["/name"],
         description: "Rename the current conversation",
+        dynamic_description: None,
+        hint: "[name]",
         // Optional (NOT Required): a bare `/rename` must reach the handler so it
         // renders "Usage: /rename <name>" rather than falling through as an LLM
         // prompt (auto-name generation is deferred).
@@ -529,6 +619,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/reload-skills",
         aliases: &[],
         description: "Pick up skills added or changed on disk during this session",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_reload_skills,
@@ -537,6 +629,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/plugin",
         aliases: &["/plugins", "/marketplace"],
         description: "Manage LingXi plugins",
+        dynamic_description: None,
+        hint: "",
         // None: `/plugin` opens the interactive manager; args are ignored (the
         // arg-driven subcommands live on the `lingxi-cli plugin` CLI surface).
         args: ArgSpec::None,
@@ -547,6 +641,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/reload-plugins",
         aliases: &[],
         description: "Activate pending plugin changes in the current session",
+        dynamic_description: None,
+        hint: "[--force]",
         args: ArgSpec::None,
         advertised: true,
         run: ChatWidget::cmd_reload_plugins,
@@ -555,6 +651,11 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/sandbox",
         aliases: &[],
         description: "Toggle sandbox mode for bash commands",
+        // claude-code renders live sandbox state (glyph + enabled/disabled +
+        // "(⏎ to configure)"); hidden entirely when the platform can't sandbox
+        // (see `is_runtime_hidden`).
+        dynamic_description: Some(desc_sandbox),
+        hint: "exclude \"command pattern\"",
         // Optional (NOT None): a bare `/sandbox` toggles; `exclude "..."` and an
         // unknown subcommand must also reach the handler for their echoes.
         args: ArgSpec::Optional,
@@ -565,6 +666,8 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/compact",
         aliases: &[],
         description: "Free up context by summarizing the conversation so far",
+        dynamic_description: None,
+        hint: "<optional custom summarization instructions>",
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_compact,
@@ -579,13 +682,16 @@ pub const BUILTIN: &[SlashCommand] = &[
         name: "/stop",
         aliases: &[],
         description: "Stop this background session; transcript and worktree are kept",
+        dynamic_description: None,
+        hint: "",
         args: ArgSpec::None,
         advertised: false,
         run: ChatWidget::cmd_stop,
     },
 ];
 
-/// The advertised registry entries in popup/help order.
+/// The advertised registry entries in table order (callers that need
+/// claude-code's alphabetical popup order sort at render time).
 pub fn advertised() -> impl Iterator<Item = &'static SlashCommand> {
     BUILTIN
         .iter()
@@ -593,15 +699,56 @@ pub fn advertised() -> impl Iterator<Item = &'static SlashCommand> {
 }
 
 /// Runtime `isHidden` gate for statically-`advertised` rows whose palette /
-/// `/help` visibility depends on the live environment, mirroring claude-code's
-/// per-command `isHidden` predicate. Currently only `/terminal-setup`, which
-/// claude-code hides when the active terminal already parses CSI-u / the Kitty
-/// keyboard protocol (Ghostty/Kitty/iTerm2/WezTerm) and so needs no Shift+Enter
-/// binding installed. `command_items` / `help_lines` derive from `advertised()`,
-/// so both surfaces honor this gate uniformly.
+/// `/help` visibility depends on the environment, mirroring claude-code's
+/// per-command `isHidden` predicate. Currently only `/sandbox`, which
+/// claude-code hides when the platform cannot sandbox
+/// (`!Mo.isSupportedPlatform()` — sandboxing is macOS seatbelt + Linux bwrap).
+/// Deliberately build-static (NOT keyed on [`register_sandbox_toggle`]) so
+/// popup/help listings are deterministic. `command_items` / `help_lines`
+/// derive from `advertised()`, so both surfaces honor this gate uniformly.
 #[must_use]
 pub fn is_runtime_hidden(name: &str) -> bool {
-    name == "/terminal-setup" && tui_core::terminal_setup::terminal_natively_supports_csiu()
+    name == "/sandbox" && !cfg!(any(target_os = "macos", target_os = "linux"))
+}
+
+/// The live sandbox on/off cell, shared with the widget the CLI wires via
+/// `ChatWidget::set_sandbox_toggle` (which registers it here for the popup's
+/// state-dependent `/sandbox` row). `None` = sandboxing unsupported/unwired.
+fn sandbox_toggle() -> Option<&'static std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    SANDBOX_TOGGLE.get()
+}
+
+static SANDBOX_TOGGLE: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
+/// Register the live sandbox toggle for `/sandbox`'s dynamic description and
+/// visibility gate. Idempotent (first registration wins — one CLI wiring per
+/// process).
+pub fn register_sandbox_toggle(toggle: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let _ = SANDBOX_TOGGLE.set(toggle);
+}
+
+/// `/sandbox` dynamic description — claude-code 2.1.205:
+/// `${glyph} sandbox enabled|disabled[…flags] (⏎ to configure)` with the
+/// figures `tick`/`circle` glyph by state (`warning` on dependency errors —
+/// LingXi doesn't model dependency checks or the auto-allow/fallback/managed
+/// flags yet, so those segments are omitted until the R2 behavior pass).
+fn desc_sandbox() -> String {
+    let enabled = sandbox_toggle()
+        .map(|t| t.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false);
+    let (glyph, state) = if enabled {
+        ("\u{2714}", "sandbox enabled")
+    } else {
+        ("\u{25EF}", "sandbox disabled")
+    };
+    format!("{glyph} {state} (\u{23CE} to configure)")
+}
+
+/// `/terminal-setup` dynamic description — claude-code 2.1.205
+/// `get description()` (per-terminal branch order preserved).
+fn desc_terminal_setup() -> String {
+    tui_core::terminal_setup::dynamic_description()
 }
 
 /// `/exit` (alias `/quit`): exit the app. A free function (not a
@@ -657,7 +804,7 @@ mod tests {
                 command.name
             );
             assert!(
-                !command.description.trim().is_empty(),
+                !command.describe().trim().is_empty(),
                 "{} has no description",
                 command.name
             );
@@ -686,12 +833,19 @@ mod tests {
         }
 
         // Completion metadata derives from the registry: bare "/" lists every
-        // advertised command in registry order with its description.
+        // advertised command ALPHABETICALLY (claude-code sorts builtin popup
+        // rows with localeCompare) with its live description.
         let items = command_items("/");
         assert_eq!(items.len(), advertised().count());
-        for (item, command) in items.iter().zip(advertised()) {
+        let mut expected: Vec<_> = advertised().collect();
+        expected.sort_by_key(|command| command.name);
+        for (item, command) in items.iter().zip(expected) {
             assert_eq!(item.insert, command.name);
-            assert_eq!(item.desc, command.description);
+            // Dynamic descriptions read live global state that parallel tests
+            // mutate (the sandbox toggle) — only static text is compared.
+            if command.dynamic_description.is_none() {
+                assert_eq!(item.desc, command.describe());
+            }
         }
 
         // Help metadata derives from the registry: every advertised command
@@ -710,14 +864,19 @@ mod tests {
                     "{} missing from /help",
                     command.name
                 );
-                assert!(
-                    help_text.contains(command.description),
-                    "{} description missing from /help",
-                    command.name
-                );
+                // Dynamic descriptions can change between help_lines() and
+                // here (parallel tests mutate the sandbox toggle) — only
+                // static text is asserted verbatim.
+                if command.dynamic_description.is_none() {
+                    assert!(
+                        help_text.contains(&command.describe()),
+                        "{} description missing from /help",
+                        command.name
+                    );
+                }
             } else {
                 assert!(
-                    !help_text.contains(command.name),
+                    !help_text.contains(&format!("{} ", command.name)),
                     "unadvertised {} leaked into /help",
                     command.name
                 );
@@ -725,11 +884,23 @@ mod tests {
         }
     }
 
-    /// Deliberately dropped commands stay dropped: the iocraft backend's
-    /// `/tasks` has no data source on this backend, so it must not be
-    /// registered (plan Phase 8 step 4: never advertise "not implemented").
-    /// `/tasks` now reads the live `TaskRegistry`, so it IS registered (with
-    /// its claude-code `/bashes` alias).
+    /// Deliberately dropped commands stay dropped: claude-code 2.1.205 removed
+    /// `/doctor` (now a bundled skill), `/files`, `/commit`, and
+    /// `/init-verifiers`; `/stats` and `/cost` survive only as `/usage`
+    /// aliases.
+    #[test]
+    fn commands_dropped_in_2_1_205_are_not_registered() {
+        for gone in ["/doctor", "/files", "/commit", "/init-verifiers"] {
+            assert!(
+                resolve(gone).is_none(),
+                "{gone} should not resolve (removed in claude-code 2.1.205)"
+            );
+        }
+        // `/stats` and `/cost` now route to `/usage`.
+        assert_eq!(resolve("/stats").expect("alias").0.name, "/usage");
+        assert_eq!(resolve("/cost").expect("alias").0.name, "/usage");
+    }
+
     #[test]
     fn tasks_command_is_registered_with_its_alias() {
         assert_eq!(resolve("/tasks").expect("registered").0.name, "/tasks");
@@ -755,6 +926,12 @@ mod tests {
         // /resume is registered with its claude-code alias.
         assert_eq!(resolve("/resume").expect("registered").0.name, "/resume");
         assert_eq!(resolve("/continue").expect("alias").0.name, "/resume");
+        // 2.1.205 alias additions.
+        assert_eq!(resolve("/undo").expect("alias").0.name, "/rewind");
+        assert_eq!(resolve("/reset").expect("alias").0.name, "/clear");
+        assert_eq!(resolve("/new").expect("alias").0.name, "/clear");
+        assert_eq!(resolve("/settings").expect("alias").0.name, "/config");
+        assert_eq!(resolve("/name").expect("alias").0.name, "/rename");
     }
 
     #[test]
@@ -775,5 +952,32 @@ mod tests {
         assert!(resolve("/frobnicate").is_none());
         assert!(resolve("help").is_none());
         assert!(resolve("").is_none());
+    }
+
+    /// Dynamic descriptions (claude-code `get description()`): `/sandbox`
+    /// reflects the registered toggle's live state; `/terminal-setup` reflects
+    /// the detected terminal.
+    #[test]
+    fn dynamic_descriptions_reflect_live_state() {
+        let sandbox = BUILTIN.iter().find(|c| c.name == "/sandbox").unwrap();
+        // Unregistered (or registered-off) reads as disabled...
+        let before = sandbox.describe();
+        assert!(before.ends_with("(\u{23CE} to configure)"), "{before}");
+        // ...and once a toggle is wired the row un-hides and tracks its state.
+        // (The registry cell is a process-wide OnceLock; a parallel widget
+        // test may have registered its own Arc first and may keep flipping it,
+        // so the exact-state assertions only run when OUR Arc won the race.)
+        let ours = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        register_sandbox_toggle(ours.clone());
+        assert!(!is_runtime_hidden("/sandbox"));
+        if SANDBOX_TOGGLE.get().is_some_and(|live| std::sync::Arc::ptr_eq(live, &ours)) {
+            ours.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(sandbox.describe(), "\u{2714} sandbox enabled (\u{23CE} to configure)");
+            ours.store(false, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(sandbox.describe(), "\u{25EF} sandbox disabled (\u{23CE} to configure)");
+        }
+
+        let ts = BUILTIN.iter().find(|c| c.name == "/terminal-setup").unwrap();
+        assert!(!ts.describe().is_empty());
     }
 }

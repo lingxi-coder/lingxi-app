@@ -764,6 +764,14 @@ pub struct ConversationOrchestrator {
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
     /// Once `true`, this flag is never cleared (idempotent `/exit`).
     pub(crate) should_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Session-scoped fast-mode toggle (`/fast`). Shared (same `Arc`) with the
+    /// request-building `ProviderApiAdapter` (via [`Self::with_fast_mode`]), so
+    /// flipping it via the handle's `set_fast_mode` makes the next turn send
+    /// `speed:"fast"` when the active model supports it. Wraps `AtomicBool` so
+    /// reads are lock-free (mirrors `should_exit`). Defaults to a private
+    /// always-`false` flag until the composition root shares one with the
+    /// adapter.
+    pub(crate) fast_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Finding #80: once-per-session latch for the refusal→fallback-model swap
     /// (claude-code's `refusalFallbackModelLatch`). Set the first time a turn's
     /// response arrives with `stop_reason == "refusal"` AND
@@ -1224,6 +1232,7 @@ impl ConversationOrchestrator {
             git_branch_cache: Mutex::new(None),
             current_prompt_id: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refusal_fallback_latched: std::sync::atomic::AtomicBool::new(false),
             cost_tracker: None,
             analytics_bus: None,
@@ -1787,6 +1796,17 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_recap_runner(mut self, runner: Arc<sidequery::ForkedAgentRunner>) -> Self {
         self.recap_runner = Some(runner);
+        self
+    }
+
+    /// (`/fast`) Share the session's fast-mode flag with this orchestrator — the
+    /// SAME `Arc<AtomicBool>` the request-building `ProviderApiAdapter` holds, so
+    /// the handle's `set_fast_mode` flip is seen by the adapter on the next
+    /// turn. Without it the flag is a private always-`false` default (no request
+    /// ever carries `speed`).
+    #[must_use]
+    pub fn with_fast_mode(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.fast_mode = flag;
         self
     }
 

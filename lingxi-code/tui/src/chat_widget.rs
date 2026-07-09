@@ -96,6 +96,13 @@ pub enum ChatOutcome {
     /// summary back through `TurnEvent::SystemNotice`. The `String` is the
     /// (currently unused) argument tail.
     Compact(String),
+    /// `/fast [on|off]` asked the caller to set (`Some(true|false)`) or toggle
+    /// (`None`, a bare `/fast`) the session's fast-mode flag. The caller flips
+    /// it off-loop via `OrchestratorHandle::set_fast_mode` and reports the
+    /// applied state ("⚡ Fast mode ON" / "Fast mode OFF") through
+    /// `TurnEvent::SystemNotice`. When on and the active model supports fast
+    /// mode (opus-4-7/opus-4-8), subsequent turns send `speed:"fast"`.
+    FastMode(Option<bool>),
     /// The `/resume` picker resolved to this session uuid. The caller must
     /// UNWIND the app loop (via `AppExit::SwitchSession`) and re-mount that
     /// session in-process so the JSONL writer is retargeted to `<uuid>.jsonl` —
@@ -1882,6 +1889,37 @@ impl ChatWidget {
     /// direct-fs `settings.json` merge inside the handler (not via the handle);
     /// it persists a default for NEW sessions, so the live turn's effort is
     /// unchanged — the same parity limitation as the headless dispatcher.
+    /// `/fast [on|off]`: toggle fast mode (the priority `speed:"fast"` tier).
+    /// `on`/`off` set the state; a bare `/fast` toggles it. The change is an
+    /// off-loop effect ([`ChatOutcome::FastMode`] →
+    /// `OrchestratorHandle::set_fast_mode`) so the multi-field flag flip never
+    /// blocks the render thread; the applied state is reported via
+    /// `TurnEvent::SystemNotice`. Env-gated: when `LINGXI_DISABLE_FAST_MODE`
+    /// (or `CLAUDE_CODE_DISABLE_FAST_MODE`) is truthy, fast mode is unavailable
+    /// (claude-code `isFastModeEnabled()`) and the command is a no-op line.
+    /// Graceful "unavailable" when no engine handle is wired.
+    pub(crate) fn cmd_fast(&mut self, args: &str) -> ChatOutcome {
+        if self.orchestrator.is_none() {
+            return self.show_system_text("/fast is unavailable (no engine handle wired)", true);
+        }
+        let disabled = std::env::var("LINGXI_DISABLE_FAST_MODE")
+            .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_FAST_MODE"))
+            .map(|v| !v.is_empty() && v != "0" && v != "false")
+            .unwrap_or(false);
+        if disabled {
+            return self.show_system_text("Fast mode is not available", true);
+        }
+        match args.trim().to_ascii_lowercase().as_str() {
+            "on" => ChatOutcome::FastMode(Some(true)),
+            "off" => ChatOutcome::FastMode(Some(false)),
+            "" => ChatOutcome::FastMode(None),
+            other => self.show_system_text(
+                &format!("Unknown /fast argument '{other}'. Usage: /fast [on|off]"),
+                true,
+            ),
+        }
+    }
+
     pub(crate) fn cmd_effort(&mut self, args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/effort is unavailable (no engine handle wired)", true);

@@ -259,6 +259,7 @@ pub(crate) async fn run_ratatui(
     let bash_turn_tx = turn_tx.clone();
     let compact_turn_tx = turn_tx.clone();
     let rename_turn_tx = turn_tx.clone();
+    let fast_turn_tx = turn_tx.clone();
     // (/reload-skills) The SAME shared `Arc<RwLock<CommandRegistry>>` the
     // dispatcher mutates, handed to the `ChatWidget` so `/reload-skills`
     // reloads the live registry. Cloned before `tui_build` is consumed.
@@ -308,6 +309,8 @@ pub(crate) async fn run_ratatui(
     let compact_handle = handle.clone();
     let rename_orch = orchestrator.clone();
     let rename_handle = handle.clone();
+    let fast_orch = orchestrator.clone();
+    let fast_handle = handle.clone();
     let widget_orch = orchestrator.clone();
     // (/web async effects) Preload the shared `/web` config snapshot from the
     // real on-disk settings + credential-store presence, mirroring the
@@ -521,6 +524,36 @@ pub(crate) async fn run_ratatui(
             });
         });
     };
+    // (/fast async effect) `/fast [on|off]` returns `ChatOutcome::FastMode` from
+    // the blocking ratatui loop; the flag flip (and, for a bare `/fast`, the
+    // read of the current value) runs off the render thread on the captured
+    // handle (doctrine: side-effects go off-loop). The applied state is reported
+    // via `TurnEvent::SystemNotice`. `None` = toggle; `Some(target)` = set.
+    let on_fast_mode = move |target: Option<bool>| {
+        let orch = fast_orch.clone();
+        let tx = fast_turn_tx.clone();
+        fast_handle.spawn(async move {
+            let desired = match target {
+                Some(v) => v,
+                None => !orch.fast_mode().await,
+            };
+            let (body, is_error) = match orch.set_fast_mode(desired).await {
+                Ok(()) => (
+                    if desired {
+                        "\u{26a1} Fast mode ON".to_string()
+                    } else {
+                        "Fast mode OFF".to_string()
+                    },
+                    false,
+                ),
+                Err(_e) => ("Error toggling fast mode".to_string(), true),
+            };
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                body,
+                is_error,
+            });
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -592,6 +625,7 @@ pub(crate) async fn run_ratatui(
             on_bash,
             on_compact,
             on_rename,
+            on_fast_mode,
         )
     })
     .await;

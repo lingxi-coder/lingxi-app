@@ -2979,12 +2979,16 @@ pub async fn build(
     // (M4 cc2.1.198) `--effort <level>` — the CLI-validated initial effort
     // rides the MAIN loop's requests as `output_config.effort` (binary session
     // state `thinkingConfig: SF(a.effort)`); `None` keeps bodies unchanged.
+    // (/fast) One shared fast-mode flag cloned into BOTH the request-building
+    // adapter (which reads it per-turn to send `speed:"fast"`) and the
+    // orchestrator (whose `set_fast_mode` handle flips it). Same `Arc`, so a
+    // live `/fast` toggle is seen by the adapter on the next turn. Defaults
+    // `false`, so request bodies stay byte-identical until toggled.
+    let fast_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let provider_adapter = Arc::new(
-        ProviderApiAdapter::new(Arc::new(service_built)).with_initial_effort(
-            cfg.initial_effort
-                .clone()
-                .map(serde_json::Value::String),
-        ),
+        ProviderApiAdapter::new(Arc::new(service_built))
+            .with_initial_effort(cfg.initial_effort.clone().map(serde_json::Value::String))
+            .with_fast_mode(fast_flag.clone()),
     );
     let provider_adapter_handle = provider_adapter.clone();
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
@@ -4809,6 +4813,9 @@ pub async fn build(
     // `JsonlWriter` (wired just above) persists to, so the hook payload path and
     // the on-disk transcript agree. Without this every PreToolUse /
     // PostToolBatch / lifecycle hook fired with an empty path.
+    // (/fast) Share the same fast-mode flag the adapter reads, so the
+    // `set_fast_mode` handle flips the value the next request-build sees.
+    .with_fast_mode(fast_flag.clone())
     .with_config_home(cfg.lingxi_home.clone())
     // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
     // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).

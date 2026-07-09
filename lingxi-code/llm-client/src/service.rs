@@ -2478,9 +2478,13 @@ impl ApiService {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         effort: Option<serde_json::Value>,
+        speed: Option<String>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let mut req = self.build_request(model, profile, system, messages, tools, true, None)?;
         req.effort = effort;
+        // (fast mode) `Some("fast")` from the main loop lights the fast-mode
+        // beta via `beta_context`; `None` keeps the body byte-identical.
+        req.speed = speed;
         self.drive_stream(req).await
     }
 

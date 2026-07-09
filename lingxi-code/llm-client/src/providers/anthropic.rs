@@ -257,6 +257,11 @@ fn base_body(request: &LlmRequest) -> Result<serde_json::Map<String, Value>, Llm
             oc.insert("effort".to_string(), effort.clone());
         }
     }
+    if let Some(speed) = &request.speed {
+        // claude-code fast mode: the top-level `speed` body key (read back by
+        // `service::beta_context` to add the fast-mode beta). First-party only.
+        body.insert("speed".to_string(), Value::String(speed.clone()));
+    }
     Ok(body)
 }
 
@@ -828,5 +833,24 @@ mod effort_codec_tests {
         // Unset ⇒ no output_config from effort (zero effect on existing requests).
         let body = base_body(&req_with_effort(None)).unwrap();
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn fast_mode_speed_emitted_as_top_level_key() {
+        // `/fast` ON: the request carries `speed:"fast"` (read back by
+        // `service::beta_context` to light the fast-mode beta).
+        let req = LlmRequest {
+            model: "claude-opus-4-8".into(),
+            speed: Some("fast".into()),
+            ..Default::default()
+        };
+        let body = base_body(&req).unwrap();
+        assert_eq!(body["speed"], json!("fast"));
+        // Unset ⇒ no `speed` key (byte-identical to a pre-fast-mode request).
+        let req = LlmRequest {
+            model: "claude-opus-4-8".into(),
+            ..Default::default()
+        };
+        assert!(base_body(&req).unwrap().get("speed").is_none());
     }
 }

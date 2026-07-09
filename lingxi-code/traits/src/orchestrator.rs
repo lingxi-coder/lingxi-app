@@ -636,6 +636,21 @@ pub trait OrchestratorHandle: Send + Sync {
     /// `None` profile = resolve unscoped (default / legacy behaviour).
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError>;
 
+    /// Read the session's fast-mode flag (`/fast`; the priority `speed:"fast"`
+    /// tier). The DEFAULT is `false` so existing impls/mocks compile unchanged.
+    async fn fast_mode(&self) -> bool {
+        false
+    }
+
+    /// Toggle the session's fast-mode flag (`/fast`). When on, subsequent turns
+    /// send `speed:"fast"` in the request body IF the active model supports it
+    /// (opus-4-7 / opus-4-8). DEFAULT is an inert no-op so existing impls/mocks
+    /// compile unchanged.
+    async fn set_fast_mode(&self, on: bool) -> Result<(), HandleError> {
+        let _ = on;
+        Ok(())
+    }
+
     // M5-10 additions:
 
     /// Set the orchestrator's internal `should_exit` flag.

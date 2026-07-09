@@ -423,6 +423,16 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_effort,
     },
     SlashCommand {
+        name: "/fast",
+        aliases: &[],
+        description: "Toggle fast mode",
+        // Optional: `on`/`off` set the state; a bare `/fast` toggles it. Reaches
+        // the handler either way rather than falling through as a prompt.
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_fast,
+    },
+    SlashCommand {
         name: "/goal",
         aliases: &[],
         description: "Set a goal — keep working until the condition is met",

@@ -246,6 +246,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    async fn fast_mode(&self) -> bool {
+        self.fast_mode.load(Ordering::SeqCst)
+    }
+
+    async fn set_fast_mode(&self, on: bool) -> Result<(), HandleError> {
+        self.fast_mode.store(on, Ordering::SeqCst);
+        Ok(())
+    }
+
     async fn request_exit(&self) {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {

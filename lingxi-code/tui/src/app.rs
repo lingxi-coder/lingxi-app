@@ -88,6 +88,12 @@ pub struct AppCallbacks<'cb> {
     /// render thread and reports the result back via a
     /// [`TurnEvent::SystemNotice`]. The `String` is the new title.
     pub on_rename: Box<dyn FnMut(String) + 'cb>,
+    /// Executed on [`ChatOutcome::FastMode`]: the caller flips the session's
+    /// fast-mode flag off-loop via `OrchestratorHandle::set_fast_mode` (reading
+    /// the current value first when the arg is `None`, a bare `/fast` toggle)
+    /// and reports the applied state through a [`TurnEvent::SystemNotice`]. The
+    /// `Option<bool>` is `Some(target)` for `on`/`off`, `None` for toggle.
+    pub on_fast_mode: Box<dyn FnMut(Option<bool>) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -214,6 +220,12 @@ impl<'cb> RataApp<'cb> {
                     // `TurnEvent::SystemNotice`, same shape as `Compact` above.
                     ChatOutcome::RenameSession(name) => {
                         (self.callbacks.on_rename)(name);
+                    }
+                    // `/fast`: flip the session fast-mode flag off-loop on the
+                    // live engine runtime; the applied state returns via
+                    // `TurnEvent::SystemNotice`, same shape as `Compact`.
+                    ChatOutcome::FastMode(target) => {
+                        (self.callbacks.on_fast_mode)(target);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -380,6 +392,7 @@ pub fn run_app(
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String),
     on_rename: impl FnMut(String),
+    on_fast_mode: impl FnMut(Option<bool>),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -408,6 +421,7 @@ pub fn run_app(
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
             on_rename: Box::new(on_rename),
+            on_fast_mode: Box::new(on_fast_mode),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -488,6 +502,7 @@ mod tests {
                 on_bash: Box::new(|_| {}),
                 on_compact: Box::new(|_| {}),
                 on_rename: Box::new(|_| {}),
+                on_fast_mode: Box::new(|_| {}),
             },
         )
     }

@@ -98,6 +98,15 @@ pub enum PermissionAction {
         /// Which settings file the rule came from (User/Project/Local).
         dest: PermissionUpdateDestination,
     },
+    /// Add `path` to `permissions.additionalDirectories` in the `dest` settings
+    /// file (the `/add-dir` command). Reuses the `/permissions` off-loop effect
+    /// channel; the write goes through `permission::persist_workspace_directory`.
+    AddDirectory {
+        /// Absolute, normalized directory path to add.
+        path: String,
+        /// Which settings file to persist to.
+        dest: PermissionUpdateDestination,
+    },
 }
 
 /// An app-level `/connect` effect a view can request via

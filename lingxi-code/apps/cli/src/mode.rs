@@ -792,6 +792,33 @@ async fn run_permission_action(
                 }
             }
         }
+        // `/add-dir <path>`: add a working directory to the destination
+        // settings file's `permissions.additionalDirectories` via the shared
+        // `permission::persist_workspace_directory` seam (idempotent). Reuses
+        // this off-loop effect channel rather than adding a new callback. The
+        // shared `PermissionsSnapshot` tracks only allow/ask/deny rules (not
+        // directories), so no `refresh(&paths)` is needed here.
+        PermissionAction::AddDirectory { path, dest } => {
+            match permission::persist_workspace_directory(&path, true, dest, &paths).await {
+                Ok(written) => {
+                    let body = if written {
+                        format!(
+                            "\u{2713} Added {path} as a working directory ({}). \u{b7} /permissions to manage",
+                            dest_word(dest)
+                        )
+                    } else {
+                        format!("{path} is already a working directory ({}).", dest_word(dest))
+                    };
+                    let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error: false });
+                }
+                Err(e) => {
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body: format!("\u{2717} Failed to add working directory: {e}"),
+                        is_error: true,
+                    });
+                }
+            }
+        }
     }
 }
 

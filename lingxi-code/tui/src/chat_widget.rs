@@ -1363,6 +1363,31 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// `/add-dir <path>`: add a working directory to the session's
+    /// `permissions.additionalDirectories`. The path is `~`-expanded, resolved
+    /// against the cwd, normalized, and validated (must exist + be a directory,
+    /// [`crate::add_dir`]); on success the durable settings write is driven
+    /// off-loop via [`ChatOutcome::PermissionAction`] → `run_permission_action`
+    /// (`permission::persist_workspace_directory`), reusing the `/permissions`
+    /// effect channel. Validation errors and a bare-invocation usage line
+    /// render synchronously as system text (1:1 with claude-code's
+    /// `addDirHelpMessage`).
+    pub(crate) fn cmd_add_dir(&mut self, args: &str) -> ChatOutcome {
+        let input = args.trim();
+        if input.is_empty() {
+            return self.show_system_text("Usage: /add-dir <path>", false);
+        }
+        match crate::add_dir::resolve_and_validate(input) {
+            crate::add_dir::AddDirValidation::Success { absolute } => {
+                ChatOutcome::PermissionAction(PermissionAction::AddDirectory {
+                    path: absolute,
+                    dest: permission::PermissionUpdateDestination::LocalSettings,
+                })
+            }
+            other => self.show_system_text(&crate::add_dir::help_message(&other), true),
+        }
+    }
+
     /// `/resume [term]` (alias `/continue`): open the interactive session
     /// picker, seeded from the rows preloaded at startup ([`Self::set_resume_rows`]).
     /// With a `term` argument the picker opens pre-filtered by title. On `Enter`

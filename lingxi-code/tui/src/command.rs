@@ -113,6 +113,17 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_permissions,
     },
     SlashCommand {
+        name: "/add-dir",
+        aliases: &[],
+        description: "Add a new working directory",
+        // Optional (NOT Required): a bare `/add-dir` reaches the handler so it
+        // renders its own "Usage: /add-dir <path>" line rather than falling
+        // through as an LLM prompt (same rationale as `/fork`).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_add_dir,
+    },
+    SlashCommand {
         name: "/resume",
         aliases: &["/continue"],
         description: "Resume a previous conversation",

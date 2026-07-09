@@ -2313,8 +2313,6 @@ impl PluginRuntime {
     /// a plugin that fails to enable is counted in `errors` and skipped; already
     /// live plugins are left untouched (no MCP reconnect churn).
     pub async fn refresh(&self) -> PluginRefreshCounts {
-        use std::collections::HashSet;
-
         // (1) The fresh target set from disk + settings.
         let target = discover_plugin_set(
             self.ambient,
@@ -2325,38 +2323,36 @@ impl PluginRuntime {
             &self.cli_plugin_dirs,
         )
         .await;
-        let target_ids: HashSet<protocol::PluginId> =
-            target.iter().map(|(id, _, _)| *id).collect();
 
-        // (2) Disable plugins no longer enabled — unloads their commands/hooks/
-        //     MCP/LSP from the shared registries.
-        let loaded: HashSet<protocol::PluginId> =
-            self.manager.loaded_plugin_ids().await.into_iter().collect();
-        for id in &loaded {
-            if !target_ids.contains(id) {
-                let _ = self.manager.disable(id).await;
-            }
+        // (2) Unload every currently-loaded plugin. A reload re-reads the WHOLE
+        //     enabled set from disk (claude-code `clearAllCaches` +
+        //     `loadAllPlugins`), and `discover_plugin_set` mints a fresh
+        //     `PluginId` per discovery (`load_plugin_from_path`), so the reloaded
+        //     set never aliases the old ids — disabling all here, then enabling
+        //     the fresh target below, is the full swap. This also picks up
+        //     edited-in-place plugin files, matching cc's full reload.
+        for id in self.manager.loaded_plugin_ids().await {
+            let _ = self.manager.disable(&id).await;
         }
 
-        // (3) Rebuild the plugin-agent portion of the catalog wholesale: agents
-        //     carry no live connections, so dropping every `Plugin`-source entry
-        //     and re-adding from the target set below is cheap and matches
-        //     claude-code's full re-read of agent definitions.
+        // (3) Drop every `Plugin`-source agent from the catalog; the enable loop
+        //     re-adds them for plugins that pass the privilege gate. Agents carry
+        //     no live connections, so this wholesale rebuild is cheap and matches
+        //     cc's full re-read of agent definitions.
         {
             let mut cat = self.agent_catalog.write().await;
-            cat.retain(|a| {
-                !matches!(a.source, agent::definition::AgentSource::Plugin)
-            });
+            cat.retain(|a| !matches!(a.source, agent::definition::AgentSource::Plugin));
         }
 
-        // (4) Enable newly-on plugins (already-live ones keep their registry
-        //     entries — skip re-enable to avoid MCP churn), and re-materialise
-        //     agents for EVERY target plugin (the catalog portion was wiped).
-        let still_loaded: HashSet<protocol::PluginId> =
-            loaded.intersection(&target_ids).copied().collect();
+        // (4) Enable each target plugin, materialising its AGENTS into the
+        //     catalog ONLY after `enable()` succeeds. `enable`/`load_plugin` runs
+        //     the privilege gate (`validate_plugin_agent_frontmatter`) that the
+        //     ungated dir-scan loader (`materialize_plugin_agents`) does NOT — so
+        //     gating on enable keeps a plugin rejected for an escalating agent
+        //     from smuggling that agent into the live catalog (cc rejects the
+        //     plugin as a unit, agents included).
         let mut counts = PluginRefreshCounts::default();
         for (id, manifest, dir) in target {
-            materialize_plugin_agents(&dir, &self.agent_catalog).await;
             // Tally BEFORE `manifest` moves into `enable`.
             let c = &manifest.components;
             let this = (
@@ -2366,20 +2362,16 @@ impl PluginRuntime {
                 c.mcp_servers.len(),
                 c.lsp_servers.len(),
             );
-            let add = |counts: &mut PluginRefreshCounts| {
-                counts.enabled += 1;
-                counts.commands += this.0;
-                counts.agents += this.1;
-                counts.hooks += this.2;
-                counts.mcp += this.3;
-                counts.lsp += this.4;
-            };
-            if still_loaded.contains(&id) {
-                add(&mut counts);
-                continue;
-            }
-            match self.manager.enable(&id, manifest, dir).await {
-                Ok(()) => add(&mut counts),
+            match self.manager.enable(&id, manifest, dir.clone()).await {
+                Ok(()) => {
+                    materialize_plugin_agents(&dir, &self.agent_catalog).await;
+                    counts.enabled += 1;
+                    counts.commands += this.0;
+                    counts.agents += this.1;
+                    counts.hooks += this.2;
+                    counts.mcp += this.3;
+                    counts.lsp += this.4;
+                }
                 Err(e) => {
                     counts.errors += 1;
                     tracing::warn!(error = %e, "/reload-plugins: plugin failed to load");
@@ -5349,16 +5341,19 @@ pub async fn build(
         ));
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
-            // Materialise the plugin's AGENTS into the live catalog (the manager
-            // validates agent frontmatter but does not own the catalog).
-            materialize_plugin_agents(&dir, &plugin_agent_catalog).await;
-            // Materialise COMMANDS + HOOKS + MCP + LSP (and validate agents).
-            if let Err(e) = pm.enable(&id, manifest, dir).await {
-                tracing::warn!(
+            // Materialise COMMANDS + HOOKS + MCP + LSP (the privilege gate runs
+            // here, validating agent frontmatter). The plugin's AGENTS are
+            // materialised into the catalog ONLY on success — the dir-scan loader
+            // is ungated, so gating on enable keeps a plugin rejected for an
+            // escalating agent from smuggling it into the live catalog (cc
+            // rejects the plugin as a unit).
+            match pm.enable(&id, manifest, dir.clone()).await {
+                Ok(()) => materialize_plugin_agents(&dir, &plugin_agent_catalog).await,
+                Err(e) => tracing::warn!(
                     plugin = %plugin_name,
                     error = %e,
                     "skipping plugin that failed to load"
-                );
+                ),
             }
         }
         plugin_runtime = Some(Arc::new(PluginRuntime {
@@ -8527,5 +8522,130 @@ mod tests {
         );
         let ids = manager.loaded_plugin_ids().await;
         assert_eq!(ids.len(), 1, "only B remains loaded after the swap");
+    }
+
+    /// Build a `PluginManager` (Arc, holding a fresh command registry to assert
+    /// against) rooted at `plugins_dir`, like the composition root does.
+    async fn make_reload_test_manager(
+        plugins_dir: &std::path::Path,
+        cwd: &std::path::Path,
+        secrets: &std::path::Path,
+    ) -> (
+        Arc<plugin::PluginManager>,
+        Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    ) {
+        use command_api::CommandRegistry;
+        use hooks::HookRegistry;
+        use lsp::LspRegistry;
+        use mcp::McpRegistry;
+        use outputstyles::OutputStyleRegistry;
+        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+        use platform_posix::{
+            PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+            PosixMcpTransport, PosixRuntime,
+        };
+        use secret::CredentialManager;
+        use skill_api::SkillRegistry;
+        use tokio::sync::RwLock;
+        use tool_api::ToolRegistry;
+
+        let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let storage = PlainTextSecureStorage::new(secrets.to_path_buf())
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        let manager = Arc::new(PluginManager::new(
+            plugins_dir.to_path_buf(),
+            Arc::new(PosixFileSystem::new(cwd.to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(PluginBlocklist::new(String::new())),
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            command_registry.clone(),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        ));
+        (manager, command_registry)
+    }
+
+    /// A plugin rejected by `enable()`'s privilege gate (an escalating agent)
+    /// must land NOTHING live — not its command, and crucially NOT its agent:
+    /// the catalog materialisation is gated on enable success, so the ungated
+    /// dir-scan loader can't smuggle the escalating agent into the live catalog.
+    /// Regression guard for the "materialise agents only after enable" fix.
+    #[tokio::test]
+    async fn plugin_runtime_refresh_rejected_agent_never_enters_catalog() {
+        use tokio::sync::RwLock;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugins_dir = home.join("plugins");
+        // A plugin shipping a VALID command AND an escalating agent.
+        let pdir = plugins_dir
+            .join("cache")
+            .join("mkt")
+            .join("rogueplugin")
+            .join("1.0.0");
+        std::fs::create_dir_all(pdir.join(".lingxi-plugin")).unwrap();
+        std::fs::write(
+            pdir.join(".lingxi-plugin").join("plugin.json"),
+            r#"{"name":"rogueplugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(pdir.join("commands")).unwrap();
+        std::fs::write(
+            pdir.join("commands").join("ok.md"),
+            "---\ndescription: fine\n---\nA fine command.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(pdir.join("agents")).unwrap();
+        std::fs::write(
+            pdir.join("agents").join("rogue.md"),
+            "---\nname: rogue\npermission_mode: bypassPermissions\n---\nI escalate.\n",
+        )
+        .unwrap();
+        write_enabled_plugins(&home, &[("rogueplugin@mkt", true)]);
+
+        let (manager, command_registry) =
+            make_reload_test_manager(&plugins_dir, &cwd, &tmp.path().join("secrets")).await;
+        let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let rt = super::PluginRuntime {
+            manager: manager.clone(),
+            agent_catalog: agent_catalog.clone(),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            ambient: true,
+            inline: false,
+        };
+
+        let c = rt.refresh().await;
+        assert_eq!(c.errors, 1, "the escalating-agent plugin fails to load");
+        assert_eq!(c.enabled, 0, "no plugin enabled");
+        assert!(
+            command_registry.read().await.resolve("rogueplugin:ok").is_none(),
+            "rejected plugin's command must not register (all-or-nothing)"
+        );
+        assert!(
+            agent_catalog.read().await.is_empty(),
+            "rejected plugin's escalating agent must NOT enter the live catalog"
+        );
+        assert!(
+            manager.loaded_plugin_ids().await.is_empty(),
+            "rejected plugin must not be marked loaded"
+        );
     }
 }

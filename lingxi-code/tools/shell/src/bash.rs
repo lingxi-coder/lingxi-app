@@ -1015,10 +1015,13 @@ impl Tool for BashTool {
         // `None` mirrors the binary's `Dh(undefined)` → LONG. BOTH variants are
         // driven by the live sandbox runtime config on this context (the SHORT
         // `qUp` calls the SAME `yXa()`/`sandbox_section`).
+        // (/sandbox) Use the effective config so the prompt reflects the live
+        // toggle (the frozen config until `/sandbox` flips the shared cell).
+        let sandbox_runtime = self.ctx.effective_sandbox_runtime();
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            crate::prompt::simple_prompt_concise(&self.ctx.sandbox_runtime)
+            crate::prompt::simple_prompt_concise(&sandbox_runtime)
         } else {
-            crate::prompt::simple_prompt(&self.ctx.sandbox_runtime)
+            crate::prompt::simple_prompt(&sandbox_runtime)
         }
     }
 
@@ -1123,12 +1126,19 @@ impl Tool for BashTool {
         // `unsandboxed_allowed` is `SandboxManager.areUnsandboxedCommandsAllowed()`,
         // mapped to the canonical `are_unsandboxed_commands_allowed()` accessor (the
         // same mapping used by the BASH.6 prompt section).
+        // (/sandbox) Resolve the effective sandbox config ONCE for this command:
+        // the frozen `sandbox_runtime` with `enabled` overridden by the live
+        // `/sandbox` toggle cell when wired. This is THE read that makes the
+        // toggle affect the wrap decision (`should_use_sandbox` keys off
+        // `cfg.enabled`); the excluded-commands / allow-unsandboxed values are
+        // unchanged, so they stay consistent with the frozen config.
+        let sandbox_runtime = self.ctx.effective_sandbox_runtime();
         let decision = should_use_sandbox(
             &cmd_str,
             self.ctx.sandbox_available,
             dangerously_disable_sandbox,
-            self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
-            &self.ctx.sandbox_runtime,
+            sandbox_runtime.are_unsandboxed_commands_allowed(),
+            &sandbox_runtime,
             self.ctx.workspace.clone(),
         );
 
@@ -1166,7 +1176,7 @@ impl Tool for BashTool {
                     .sandbox_runner
                     .wrap(
                         &spawn_cmd,
-                        &self.ctx.sandbox_runtime,
+                        &sandbox_runtime,
                         self.ctx.platform,
                         Some(&shell),
                         Some(self.ctx.workspace.as_path()),

@@ -122,6 +122,26 @@ pub enum ChatOutcome {
     /// reports `Session renamed to: <name>` (or a failure) back through
     /// `TurnEvent::SystemNotice`.
     RenameSession(String),
+    /// A `/sandbox` effect: persist the toggled `sandbox.enabled` (SetEnabled)
+    /// to user settings, or append an `exclude` pattern to local settings
+    /// (Exclude). Run off-loop by the CLI; the result returns via
+    /// `TurnEvent::SystemNotice`, same shape as `PermissionAction`. The live
+    /// session flip already happened in `cmd_sandbox` via the shared toggle.
+    SandboxAction(SandboxAction),
+}
+
+/// A `/sandbox` off-loop effect handed to the embedder via
+/// [`ChatOutcome::SandboxAction`].
+#[derive(Debug, Clone)]
+pub enum SandboxAction {
+    /// Persist the toggled `sandbox.enabled` value to the user settings file.
+    /// The widget has already flipped the live session's shared toggle cell;
+    /// this makes the choice stick for future sessions (claude-code parity).
+    SetEnabled(bool),
+    /// `/sandbox exclude "<pattern>"`: append the dequoted pattern to
+    /// `sandbox.excludedCommands` in the local settings file (mirrors
+    /// claude-code `addToExcludedCommands`).
+    Exclude(String),
 }
 
 /// Live API retry-backoff status, mirroring Claude Code's `SystemAPIErrorMessage`.
@@ -279,6 +299,12 @@ pub struct ChatWidget {
     /// `None` (every test widget) makes each of those a graceful
     /// "unavailable" system line rather than a panic.
     orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
+    /// Composition-root-shared sandbox-enabled cell (also held by the bash
+    /// tool's `BuiltinToolContext::sandbox_enabled_override`). `/sandbox` flips
+    /// it for the live session so the next bash command sandboxes (or not)
+    /// accordingly. `None` (tests / no engine) makes `/sandbox` a graceful
+    /// "unavailable" no-op.
+    sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The shared slash-command registry (`None` until the embedder wires one
     /// via [`Self::set_command_registry`]). Drives `/reload-skills`, which
     /// reloads the SAME `Arc<RwLock<CommandRegistry>>` the headless dispatcher
@@ -334,6 +360,7 @@ impl ChatWidget {
             connect_availability: std::collections::BTreeMap::new(),
             shell_expansion: None,
             orchestrator: None,
+            sandbox_toggle: None,
             command_registry: None,
             goal_handler: None,
         }
@@ -367,6 +394,14 @@ impl ChatWidget {
     ) {
         self.goal_handler = Some(command_core::goal::GoalHandler::new(handle.clone()));
         self.orchestrator = Some(handle);
+    }
+
+    /// Wire the composition-root's shared sandbox-enabled cell (the same
+    /// `Arc<AtomicBool>` the bash tool reads via `sandbox_enabled_override`), so
+    /// `/sandbox` flips sandboxing for the live session. `None` keeps `/sandbox`
+    /// a graceful "unavailable" no-op.
+    pub fn set_sandbox_toggle(&mut self, toggle: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.sandbox_toggle = Some(toggle);
     }
 
     /// Wire the shared slash-command registry `/reload-skills` reloads (the
@@ -1999,6 +2034,50 @@ impl ChatWidget {
         ChatOutcome::Quit
     }
 
+    /// `/sandbox [exclude "<pattern>"]`: toggle sandbox mode for bash commands.
+    /// Bare `/sandbox` flips the live shared toggle (read by the bash tool via
+    /// `effective_sandbox_runtime`) and echoes the new status, then persists
+    /// via `SandboxAction::SetEnabled`. `exclude` routes an off-loop settings
+    /// write. Reactor-free: the `AtomicBool` store is a non-blocking, local
+    /// write, so the live flip is safe on the render thread; the bash tool reads
+    /// it on its NEXT command.
+    pub(crate) fn cmd_sandbox(&mut self, args: &str) -> ChatOutcome {
+        let args = args.trim();
+        // `/sandbox exclude "<pattern>"`
+        if let Some(rest) = args.strip_prefix("exclude") {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return self.show_system_text(
+                    "Error: Please provide a command pattern to exclude (e.g., /sandbox exclude \"npm run test:*\")",
+                    true,
+                );
+            }
+            // Strip a single surrounding pair of quotes (claude-code's
+            // /^["']|["']$/g cleanup).
+            let clean = rest.trim_matches(|c| c == '"' || c == '\'').to_string();
+            return ChatOutcome::SandboxAction(SandboxAction::Exclude(clean));
+        }
+        // Unknown non-empty subcommand.
+        if !args.is_empty() {
+            return self.show_system_text(
+                &format!("Error: Unknown subcommand \"{args}\". Available subcommand: exclude"),
+                true,
+            );
+        }
+        // Bare `/sandbox`: flip the live toggle.
+        let Some(toggle) = self.sandbox_toggle.clone() else {
+            return self.show_system_text(
+                "/sandbox is unavailable (sandboxing is not supported on this platform)",
+                true,
+            );
+        };
+        use std::sync::atomic::Ordering;
+        let now = !toggle.load(Ordering::Relaxed);
+        toggle.store(now, Ordering::Relaxed);
+        self.show_system_text(if now { "sandbox enabled" } else { "sandbox disabled" }, false);
+        ChatOutcome::SandboxAction(SandboxAction::SetEnabled(now))
+    }
+
     /// `/compact`: run a forced compaction pass. Returns
     /// [`ChatOutcome::Compact`] so the CLI drives
     /// [`traits::OrchestratorHandle::force_compact`] — a real multi-second LLM
@@ -2402,6 +2481,46 @@ mod tests {
             .expect("spawn_blocking join")
         });
         assert!(matches!(outcome, ChatOutcome::Continue));
+    }
+
+    #[test]
+    fn cmd_sandbox_is_unavailable_without_a_toggle() {
+        let mut w = widget();
+        // No shared cell wired ⇒ graceful "unavailable" system line, no effect.
+        assert!(matches!(w.cmd_sandbox(""), ChatOutcome::Continue));
+    }
+
+    #[test]
+    fn cmd_sandbox_flips_the_wired_cell_and_asks_to_persist() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut w = widget();
+        let cell = std::sync::Arc::new(AtomicBool::new(false));
+        w.set_sandbox_toggle(cell.clone());
+        // Bare /sandbox flips false→true, echoes, and requests SetEnabled(true).
+        let ChatOutcome::SandboxAction(a) = w.cmd_sandbox("") else {
+            panic!("expected SandboxAction");
+        };
+        assert!(matches!(a, SandboxAction::SetEnabled(true)));
+        assert!(cell.load(Ordering::Relaxed), "the live cell flipped to true");
+        // A second call flips back to false.
+        let ChatOutcome::SandboxAction(a) = w.cmd_sandbox("") else {
+            panic!("expected SandboxAction");
+        };
+        assert!(matches!(a, SandboxAction::SetEnabled(false)));
+        assert!(!cell.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cmd_sandbox_exclude_dequotes_and_unknown_subcommand_errors() {
+        let mut w = widget();
+        // `exclude "<pat>"` strips one surrounding quote pair (no toggle needed).
+        let ChatOutcome::SandboxAction(a) = w.cmd_sandbox("exclude \"npm run test:*\"") else {
+            panic!("expected SandboxAction");
+        };
+        assert!(matches!(a, SandboxAction::Exclude(ref p) if p == "npm run test:*"));
+        // Empty exclude + an unknown subcommand render error lines, no effect.
+        assert!(matches!(w.cmd_sandbox("exclude"), ChatOutcome::Continue));
+        assert!(matches!(w.cmd_sandbox("bogus"), ChatOutcome::Continue));
     }
 
     /// A prompt-type command (InjectMessage): the model receives the handler's

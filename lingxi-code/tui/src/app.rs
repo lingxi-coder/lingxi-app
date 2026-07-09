@@ -99,6 +99,12 @@ pub struct AppCallbacks<'cb> {
     /// and reports the applied state through a [`TurnEvent::SystemNotice`]. The
     /// `Option<bool>` is `Some(target)` for `on`/`off`, `None` for toggle.
     pub on_fast_mode: Box<dyn FnMut(Option<bool>) + 'cb>,
+    /// Executed on [`ChatOutcome::SandboxAction`]: the caller persists the
+    /// toggled `sandbox.enabled` to user settings, or appends an `exclude`
+    /// pattern to local settings, off-loop; the result returns via a
+    /// [`TurnEvent::SystemNotice`] (same shape as `on_permission_action`). The
+    /// live session flip already happened in the widget via the shared cell.
+    pub on_sandbox_action: Box<dyn FnMut(crate::chat_widget::SandboxAction) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -238,6 +244,12 @@ impl<'cb> RataApp<'cb> {
                     // `TurnEvent::SystemNotice`, same shape as `Compact`.
                     ChatOutcome::FastMode(target) => {
                         (self.callbacks.on_fast_mode)(target);
+                    }
+                    // `/sandbox`: the live toggle already flipped in the widget;
+                    // persist the choice / append an exclude off-loop, result via
+                    // `TurnEvent::SystemNotice`.
+                    ChatOutcome::SandboxAction(action) => {
+                        (self.callbacks.on_sandbox_action)(action);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -393,6 +405,7 @@ pub fn run_app(
     connect_availability: std::collections::BTreeMap<String, bool>,
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
     orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
+    sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     command_registry: Option<
         std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     >,
@@ -405,6 +418,7 @@ pub fn run_app(
     on_compact: impl FnMut(String),
     on_rename: impl FnMut(String),
     on_fast_mode: impl FnMut(Option<bool>),
+    on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -434,6 +448,7 @@ pub fn run_app(
             on_compact: Box::new(on_compact),
             on_rename: Box::new(on_rename),
             on_fast_mode: Box::new(on_fast_mode),
+            on_sandbox_action: Box::new(on_sandbox_action),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -463,6 +478,12 @@ pub fn run_app(
     // `/reload-skills`). `None` (tests) keeps those commands graceful no-ops.
     if let Some(handle) = orchestrator {
         app.chat_widget.set_orchestrator(handle);
+    }
+    // `/sandbox`: wire the shared bash-sandbox toggle cell (the same one the
+    // bash tool reads). `None` (tests / unsupported host) keeps `/sandbox` a
+    // graceful "unavailable" no-op.
+    if let Some(toggle) = sandbox_toggle {
+        app.chat_widget.set_sandbox_toggle(toggle);
     }
     if let Some(registry) = command_registry {
         app.chat_widget.set_command_registry(registry);
@@ -515,6 +536,7 @@ mod tests {
                 on_compact: Box::new(|_| {}),
                 on_rename: Box::new(|_| {}),
                 on_fast_mode: Box::new(|_| {}),
+                on_sandbox_action: Box::new(|_| {}),
             },
         )
     }

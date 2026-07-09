@@ -317,6 +317,12 @@ pub(crate) async fn run_ratatui(
     let rename_handle = handle.clone();
     let fast_orch = orchestrator.clone();
     let fast_handle = handle.clone();
+    // (/sandbox) The shared toggle cell threaded into the widget + clones for
+    // the off-loop settings-persistence effect (mirrors the sibling triplets).
+    let sandbox_toggle = tui_build.runtime.sandbox_toggle.clone();
+    let sandbox_paths = permission_paths.clone();
+    let sandbox_handle = handle.clone();
+    let sandbox_turn_tx = turn_tx.clone();
     let widget_orch = orchestrator.clone();
     // (/web async effects) Preload the shared `/web` config snapshot from the
     // real on-disk settings + credential-store presence, mirroring the
@@ -560,6 +566,17 @@ pub(crate) async fn run_ratatui(
             });
         });
     };
+    // (/sandbox) The live toggle already flipped in the widget (a lock-free
+    // AtomicBool store); this closure only PERSISTS the choice / appends an
+    // exclude to the settings files off the render thread, reporting via
+    // `TurnEvent::SystemNotice` — same off-loop shape as `on_permission_action`.
+    let on_sandbox_action = move |action: tui::chat_widget::SandboxAction| {
+        let paths = sandbox_paths.clone();
+        let tx = sandbox_turn_tx.clone();
+        sandbox_handle.spawn(async move {
+            run_sandbox_action(action, paths, tx).await;
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -622,6 +639,7 @@ pub(crate) async fn run_ratatui(
             connect_availability,
             Some(shell_expansion),
             Some(widget_orch),
+            Some(sandbox_toggle),
             Some(command_registry),
             on_submit,
             on_switch_model,
@@ -632,6 +650,7 @@ pub(crate) async fn run_ratatui(
             on_compact,
             on_rename,
             on_fast_mode,
+            on_sandbox_action,
         )
     })
     .await;
@@ -694,6 +713,94 @@ pub(crate) async fn run_ratatui(
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
         }
     }
+}
+
+/// Run one `/sandbox` [`tui::chat_widget::SandboxAction`] to completion off the
+/// render loop: persist the toggled `sandbox.enabled` into the USER settings
+/// file, or append an `exclude` pattern to `sandbox.excludedCommands` in the
+/// LOCAL settings file (claude-code `addToExcludedCommands`). The live session's
+/// bash sandboxing was already flipped by the widget via the shared toggle cell;
+/// this write makes the choice stick. A JSON-broken settings file is left
+/// untouched (the read errors out) rather than clobbered. Result reported via
+/// `TurnEvent::SystemNotice`.
+async fn run_sandbox_action(
+    action: tui::chat_widget::SandboxAction,
+    paths: permission::PermissionPaths,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+) {
+    use permission::PermissionUpdateDestination;
+    use serde_json::{json, Map, Value};
+    use tui::chat_widget::SandboxAction;
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    // Read → mutate the `sandbox` object → write, preserving sibling keys. A
+    // missing file starts empty; a JSON-broken file surfaces an error and is
+    // NOT overwritten.
+    fn merge<F: FnOnce(&mut Map<String, Value>)>(
+        path: &std::path::Path,
+        mutate: F,
+    ) -> std::io::Result<()> {
+        let mut root: Map<String, Value> = match std::fs::read_to_string(path) {
+            Ok(c) if c.trim().is_empty() => Map::new(),
+            Ok(c) => serde_json::from_str(&c)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+            Err(e) => return Err(e),
+        };
+        let sandbox = root
+            .entry("sandbox")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(obj) = sandbox.as_object_mut() {
+            mutate(obj);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let serialized = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".to_string());
+        std::fs::write(path, serialized + "\n")
+    }
+
+    let (body, is_error) = match action {
+        SandboxAction::SetEnabled(enabled) => {
+            let Some(path) = paths.destination_path(PermissionUpdateDestination::UserSettings)
+            else {
+                return;
+            };
+            match merge(&path, |o| {
+                o.insert("enabled".to_string(), json!(enabled));
+            }) {
+                Ok(()) => (
+                    format!("Sandbox mode {}.", if enabled { "enabled" } else { "disabled" }),
+                    false,
+                ),
+                Err(e) => (format!("Failed to save sandbox setting: {e}"), true),
+            }
+        }
+        SandboxAction::Exclude(pattern) => {
+            let Some(path) = paths.destination_path(PermissionUpdateDestination::LocalSettings)
+            else {
+                return;
+            };
+            let clean = pattern.clone();
+            match merge(&path, |o| {
+                let list = o
+                    .entry("excludedCommands")
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(arr) = list.as_array_mut() {
+                    if !arr.iter().any(|v| v.as_str() == Some(clean.as_str())) {
+                        arr.push(json!(clean));
+                    }
+                }
+            }) {
+                Ok(()) => (
+                    format!("Added \"{pattern}\" to excluded commands in local settings"),
+                    false,
+                ),
+                Err(e) => (format!("Failed to update excluded commands: {e}"), true),
+            }
+        }
+    };
+    let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error });
 }
 
 /// Run one `/permissions` [`tui::bottom_pane::PermissionAction`] to
@@ -1547,6 +1654,60 @@ mod tests {
     fn prompt_routes_to_print() {
         let a = argv(Some("fix it"), false);
         assert_eq!(decide_mode_with(&a, true), Mode::Print("fix it".into()));
+    }
+
+    /// `/sandbox` persistence: `SetEnabled` writes `sandbox.enabled` to USER
+    /// settings, `Exclude` appends to `sandbox.excludedCommands` in LOCAL
+    /// settings (idempotent), and both preserve sibling keys.
+    #[tokio::test]
+    async fn run_sandbox_action_persists_toggle_and_excludes() {
+        use permission::{PermissionPaths, PermissionUpdateDestination};
+        use tui::chat_widget::SandboxAction;
+        use tui_core::orchestrator_bridge::TurnEvent;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: home.clone(),
+            cwd: cwd.clone(),
+        };
+        let user_path = paths
+            .destination_path(PermissionUpdateDestination::UserSettings)
+            .unwrap();
+        let local_path = paths
+            .destination_path(PermissionUpdateDestination::LocalSettings)
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // SetEnabled(true) → user settings.json {"sandbox":{"enabled":true}}.
+        run_sandbox_action(SandboxAction::SetEnabled(true), paths.clone(), tx.clone()).await;
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&user_path).unwrap()).unwrap();
+        assert_eq!(v["sandbox"]["enabled"], serde_json::json!(true));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TurnEvent::SystemNotice { is_error: false, .. })
+        ));
+
+        // Exclude appends to local settings; a repeat is idempotent.
+        run_sandbox_action(SandboxAction::Exclude("npm test:*".into()), paths.clone(), tx.clone())
+            .await;
+        run_sandbox_action(SandboxAction::Exclude("npm test:*".into()), paths.clone(), tx.clone())
+            .await;
+        let local: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&local_path).unwrap()).unwrap();
+        let arr = local["sandbox"]["excludedCommands"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "idempotent: no duplicate on repeat");
+        assert_eq!(arr[0], serde_json::json!("npm test:*"));
+
+        // Toggling back to false rewrites the same user file (sibling-safe).
+        run_sandbox_action(SandboxAction::SetEnabled(false), paths.clone(), tx.clone()).await;
+        let v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&user_path).unwrap()).unwrap();
+        assert_eq!(v2["sandbox"]["enabled"], serde_json::json!(false));
     }
 
     #[test]

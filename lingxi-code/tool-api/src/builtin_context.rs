@@ -243,6 +243,34 @@ pub struct BuiltinToolContext {
     /// deliberately does NOT depend on `hooks`, so the trait is defined here and
     /// the orchestrator implements it.
     pub task_lifecycle_hooks: Option<Arc<dyn TaskLifecycleHookFirer>>,
+    /// Live session override for `sandbox_runtime.enabled` (the `/sandbox`
+    /// toggle). `None` at every non-live construction site (frozen behavior).
+    /// The desktop root wires a shared `Arc<AtomicBool>` here that is ALSO held
+    /// by the TUI, so `/sandbox` flips sandboxing for the live session and the
+    /// bash tool's next command observes it via [`Self::effective_sandbox_runtime`].
+    pub sandbox_enabled_override: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl BuiltinToolContext {
+    /// The sandbox config the shell tools should actually use: the frozen
+    /// [`Self::sandbox_runtime`] with its `enabled` flag overridden live by the
+    /// `/sandbox` toggle cell when one is wired.
+    ///
+    /// Only `enabled` is overridden — every other field (excluded commands,
+    /// allow-unsandboxed, platform, …) rides the frozen config, and the cell is
+    /// seeded from `sandbox_runtime.enabled`, so the result is byte-identical to
+    /// the frozen config until `/sandbox` actually flips the toggle.
+    #[must_use]
+    pub fn effective_sandbox_runtime(&self) -> SandboxRuntimeConfig {
+        match &self.sandbox_enabled_override {
+            Some(cell) => {
+                let mut cfg = self.sandbox_runtime.clone();
+                cfg.enabled = cell.load(std::sync::atomic::Ordering::Relaxed);
+                cfg
+            }
+            None => self.sandbox_runtime.clone(),
+        }
+    }
 }
 
 /// BLOCKING `TaskCreated` / `TaskCompleted` lifecycle-hook firer for the V2
@@ -419,6 +447,34 @@ mod tests {
     use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
     use std::sync::Arc;
     use telemetry::AnalyticsBus;
+
+    /// `/sandbox`: `effective_sandbox_runtime` overrides ONLY `enabled` from the
+    /// live toggle cell, observing later flips, and is byte-identical to the
+    /// frozen config when no cell is wired (or the cell matches the seed).
+    #[test]
+    fn effective_sandbox_runtime_reflects_the_toggle_cell() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut ctx = ctx_for_file_tools(make_dummy_fs(), Arc::new(AnalyticsBus::new()), vec![]);
+        let frozen_enabled = ctx.sandbox_runtime.enabled;
+
+        // No cell wired ⇒ frozen behavior (byte-identical to `sandbox_runtime`).
+        assert_eq!(ctx.effective_sandbox_runtime().enabled, frozen_enabled);
+
+        // Wire a cell set to the OPPOSITE ⇒ `enabled` flips, other fields ride
+        // the frozen config.
+        let cell = Arc::new(AtomicBool::new(!frozen_enabled));
+        ctx.sandbox_enabled_override = Some(cell.clone());
+        let eff = ctx.effective_sandbox_runtime();
+        assert_eq!(eff.enabled, !frozen_enabled, "toggle must override enabled");
+        assert_eq!(
+            eff.excluded_commands, ctx.sandbox_runtime.excluded_commands,
+            "only `enabled` is overridden"
+        );
+
+        // A later flip of the SAME cell is observed live (next command sees it).
+        cell.store(frozen_enabled, Ordering::Relaxed);
+        assert_eq!(ctx.effective_sandbox_runtime().enabled, frozen_enabled);
+    }
 
     /// A mock provider for tests — counts calls and returns fixed secrets.
     struct MockProvider {

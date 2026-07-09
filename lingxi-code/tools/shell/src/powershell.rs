@@ -206,10 +206,12 @@ impl Tool for PowerShellTool {
         }
         // Windows sandbox-policy refusal: PowerShell cannot be sandbox-wrapped on
         // Windows, so a sandbox-required policy means the command must not run.
+        // (/sandbox) Use the effective config so a live toggle is respected.
+        let sandbox_runtime = self.ctx.effective_sandbox_runtime();
         if cfg!(target_os = "windows")
             && windows_sandbox_policy_refuses(
-                self.ctx.sandbox_runtime.enabled,
-                self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
+                sandbox_runtime.enabled,
+                sandbox_runtime.are_unsandboxed_commands_allowed(),
             )
         {
             return Err(ValidationError(WINDOWS_SANDBOX_POLICY_REFUSAL.into()));
@@ -241,14 +243,18 @@ impl Tool for PowerShellTool {
             )));
         }
 
+        // (/sandbox) Effective sandbox config for this command: frozen config
+        // with `enabled` overridden by the live `/sandbox` toggle when wired.
+        let sandbox_runtime = self.ctx.effective_sandbox_runtime();
+
         // Windows sandbox-policy refusal — checked BEFORE `resolve_powershell_path`
         // so a missing-pwsh diagnostic cannot mask the policy refusal. PowerShell
         // cannot be sandbox-wrapped on Windows, so a sandbox-required policy means
         // the command must not run.
         if cfg!(target_os = "windows")
             && windows_sandbox_policy_refuses(
-                self.ctx.sandbox_runtime.enabled,
-                self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
+                sandbox_runtime.enabled,
+                sandbox_runtime.are_unsandboxed_commands_allowed(),
             )
         {
             return Err(ToolError::PermissionDenied(
@@ -294,8 +300,8 @@ impl Tool for PowerShellTool {
             &cmd_str,
             self.ctx.sandbox_available && cfg!(not(target_os = "windows")),
             dangerously_disable_sandbox,
-            self.ctx.sandbox_runtime.are_unsandboxed_commands_allowed(),
-            &self.ctx.sandbox_runtime,
+            sandbox_runtime.are_unsandboxed_commands_allowed(),
+            &sandbox_runtime,
             self.ctx.workspace.clone(),
         );
         let final_cmd = match decision {
@@ -311,7 +317,7 @@ impl Tool for PowerShellTool {
                     .sandbox_runner
                     .wrap(
                         &cmd_str,
-                        &self.ctx.sandbox_runtime,
+                        &sandbox_runtime,
                         self.ctx.platform,
                         Some(&bin_shell),
                         Some(self.ctx.workspace.as_path()),

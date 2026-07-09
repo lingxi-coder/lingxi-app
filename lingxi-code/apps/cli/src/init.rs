@@ -63,6 +63,11 @@ pub struct Runtime {
     /// clone into `tui::session::Runtime::with_subscription` so the rate-limit
     /// composer reads the live snapshot.
     pub subscription: traits::subscription::SharedSubscription,
+    /// (`/sandbox`) Shared bash-sandbox toggle cell, projected straight from
+    /// [`engine_desktop::DesktopRuntime::sandbox_toggle`] (the SAME
+    /// `Arc<AtomicBool>` the bash tool reads). The TUI mount threads a clone
+    /// into the widget so `/sandbox` flips sandboxing for the live session.
+    pub sandbox_toggle: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// (Plan 3c §8) Per-provider availability map, projected straight from
     /// [`engine_desktop::DesktopRuntime::provider_availability`] (computed at
     /// `build()` from the LIVE multi-provider config). The TUI mount threads it
@@ -679,6 +684,7 @@ pub async fn build_runtime_from_config(
         settings_watcher: rt.settings_watcher,
         file_changed_watcher: rt.file_changed_watcher,
         subscription: rt.subscription,
+        sandbox_toggle: rt.sandbox_toggle,
         provider_availability: rt.provider_availability,
         provider_auth_methods: rt.provider_auth_methods,
         model_providers: rt.model_providers,

@@ -889,6 +889,9 @@ pub async fn build_mobile_inner(
         sandbox,
         clock: clock.clone(),
         sandbox_runtime: SandboxRuntimeConfig::default(),
+        // Mobile has no interactive `/sandbox` toggle (no live TUI); the frozen
+        // `sandbox_runtime` above governs — full Android/iOS sandboxing intact.
+        sandbox_enabled_override: None,
         // RUNNER ↔ AVAILABILITY COUPLING (#5): the live `SandboxRuntimeRunner`
         // (domain/proxy/policy enforcement) requires host forward proxies +
         // bwrap/seatbelt — desktop-OS primitives a phone (iOS/Android,

@@ -504,6 +504,16 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_reload_skills,
     },
     SlashCommand {
+        name: "/sandbox",
+        aliases: &[],
+        description: "Toggle sandbox mode for bash commands",
+        // Optional (NOT None): a bare `/sandbox` toggles; `exclude "..."` and an
+        // unknown subcommand must also reach the handler for their echoes.
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_sandbox,
+    },
+    SlashCommand {
         name: "/compact",
         aliases: &[],
         description: "Free up context by summarizing the conversation so far",

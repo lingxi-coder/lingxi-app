@@ -1807,6 +1807,11 @@ pub struct DesktopRuntime {
     /// it at compose time and treat `None` / a poisoned lock as the
     /// conservative default snapshot.
     pub subscription: traits::subscription::SharedSubscription,
+    /// (`/sandbox`) The shared fast-toggle cell for bash-command sandboxing.
+    /// The SAME `Arc<AtomicBool>` the bash tool reads via
+    /// `BuiltinToolContext::sandbox_enabled_override`; the TUI mount threads a
+    /// clone into the widget so `/sandbox` flips it for the live session.
+    pub sandbox_toggle: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Phase 2a §6.2: per-`profile_name` availability flag driving the `/model`
     /// picker's Connect badge (a sibling map, NOT a field on the frozen
     /// `ModelListing`). The tui joins it by provider/profile name.
@@ -4350,6 +4355,16 @@ pub async fn build(
             runtime: Arc::new(PosixRuntime::new()) as Arc<dyn traits::RuntimeSpawner>,
         });
 
+    // (/sandbox) One shared fast-toggle cell, seeded from the config's
+    // `enabled` flag (read BEFORE `sandbox_runtime_cfg` is moved into the
+    // literal below). It is cloned into BOTH the bash tool's
+    // `sandbox_enabled_override` (read per-command via
+    // `effective_sandbox_runtime`) AND the TUI's `/sandbox` handle, so a live
+    // toggle flips sandboxing for the session's next command. Whether
+    // sandboxing physically engages still rides platform support (unchanged),
+    // exactly as the config `enabled` flag does today.
+    let sandbox_toggle =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(sandbox_runtime_cfg.enabled));
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -4365,6 +4380,8 @@ pub async fn build(
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: sandbox_runtime_cfg,
+        // (/sandbox) Live-toggle cell shared with the TUI (see above).
+        sandbox_enabled_override: Some(sandbox_toggle.clone()),
         // Inject the LIVE runner: the desktop session routes its sandboxed
         // bash/powershell/skill commands through `sandbox-runtime`'s
         // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),
@@ -5413,6 +5430,7 @@ pub async fn build(
         settings_watcher,
         file_changed_watcher,
         subscription,
+        sandbox_toggle,
         provider_availability,
         provider_auth_methods,
         model_providers,

@@ -224,24 +224,46 @@ pub async fn dispatch(
 /// process exit code) or follow an in-session `/resume` switch by re-mounting
 /// the chosen session in-process (writer retargeted) — never an in-place
 /// `resume_session` swap, which would fork the conversation across files.
+/// The in-session active `(request_model, provider_profile)` carried through a
+/// re-mount so the rebuilt runtime keeps the user's `/model` choice instead of
+/// reverting to the boot/config model. `None` on a cold `--resume` (the runtime
+/// opens on the config/CLI model, matching claude-code).
+///
+/// PARITY NOTE: claude-code's `/rewind`/`/resume` are in-place React `setState`
+/// transitions — the process/runtime is never rebuilt, so `mainLoopModel` (a
+/// separate state) naturally persists and claude-code has NO per-session model
+/// persistence at all. Our synchronous ratatui loop must tear down + rebuild
+/// (the JSONL-writer-retarget seam), so we carry the model IN MEMORY here to
+/// reproduce the same observable behavior WITHOUT writing a `lastModel` key the
+/// upstream project config never had.
+pub(crate) type RemountModel = Option<(String, Option<String>)>;
+
 pub(crate) enum RunOutcome {
     /// The TUI exited normally; carry the process exit code.
     Exit(i32),
     /// The `/resume` picker resolved to this session uuid; the caller re-mounts
     /// it in-process via [`crate::run::load_resume_session`] +
-    /// [`crate::run::mount_resumed_tui`].
-    SwitchTo(uuid::Uuid),
+    /// [`crate::run::mount_resumed_tui`], carrying the outgoing session's active
+    /// [`RemountModel`].
+    SwitchTo {
+        target: uuid::Uuid,
+        model: RemountModel,
+    },
     /// `/branch`: fork the session driving the loop into a new session and
     /// switch into it. [`crate::run::drive_tui_switch_loop`] creates the branch
     /// transcript from the CURRENT session, then re-mounts the new id via
     /// [`crate::run::mount_resumed_tui`]. `title` is the optional `/branch
     /// [name]` argument (`None` ⇒ derive the branch name from the first prompt).
-    BranchFrom { title: Option<String> },
+    BranchFrom {
+        title: Option<String>,
+        model: RemountModel,
+    },
     /// `/rewind`: restore working tree and/or conversation to `message`, then
-    /// re-mount via [`crate::run::mount_resumed_tui`].
+    /// re-mount via [`crate::run::mount_resumed_tui`], carrying the model.
     RewindTo {
         message: uuid::Uuid,
         scope: tui::bottom_pane::view::RewindScope,
+        model: RemountModel,
     },
 }
 
@@ -805,25 +827,14 @@ pub(crate) async fn run_ratatui(
             );
         }
     }
-    // Resume parity: persist this session's active MODEL (+ provider profile) so
-    // a re-mount (`/rewind`, `/resume`, `/branch`) or `--resume` restores the
-    // in-session `/model` switch instead of reverting to the boot/config model —
-    // the freshly-built runtime otherwise opens on the config model. Same
-    // (project, session-id) gate + best-effort contract as the cost above.
-    {
+    // (/rewind, /resume, /branch re-mount) Capture the in-session active model so
+    // the re-mount can carry it into the rebuilt runtime — see [`RemountModel`]
+    // for why this is in-memory (not a config key). Only consumed by the
+    // re-mount arms below; the plain-quit arm drops it.
+    let carried_model: RemountModel = {
         let status = summary_orch.get_status_snapshot().await;
-        let session_uuid = summary_orch.current_session_id().await.as_uuid();
-        if let Some(cfg_path) = migrations::global_config::global_config_path() {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            crate::session_cost::save_session_model(
-                &cfg_path,
-                &cwd,
-                &session_uuid.to_string(),
-                &status.model,
-                status.model_profile.as_deref(),
-            );
-        }
-    }
+        Some((status.model, status.model_profile))
+    };
     match run_result {
         Ok(Ok(tui::app::AppExit::Quit)) => {
             // Print the BARE uuid (not the `sess:`-prefixed SessionId Display):
@@ -843,11 +854,19 @@ pub(crate) async fn run_ratatui(
         // before unwinding — so the outgoing session is fully wound down. SUPPRESS
         // the "Session saved" tail here: the process continues into the re-mount,
         // so that stdout line would otherwise scroll into the next session.
-        Ok(Ok(tui::app::AppExit::SwitchSession(uuid))) => RunOutcome::SwitchTo(uuid),
-        Ok(Ok(tui::app::AppExit::BranchSession { title })) => RunOutcome::BranchFrom { title },
-        Ok(Ok(tui::app::AppExit::Rewind { message, scope })) => {
-            RunOutcome::RewindTo { message, scope }
-        }
+        Ok(Ok(tui::app::AppExit::SwitchSession(uuid))) => RunOutcome::SwitchTo {
+            target: uuid,
+            model: carried_model,
+        },
+        Ok(Ok(tui::app::AppExit::BranchSession { title })) => RunOutcome::BranchFrom {
+            title,
+            model: carried_model,
+        },
+        Ok(Ok(tui::app::AppExit::Rewind { message, scope })) => RunOutcome::RewindTo {
+            message,
+            scope,
+            model: carried_model,
+        },
         Ok(Err(e)) => {
             eprintln!("lingxi-cli: tui-rata session failed: {e}");
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)

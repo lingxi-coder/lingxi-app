@@ -187,6 +187,10 @@ pub struct BottomPane {
     /// unwanted — and for tests, whose synthetic machine-speed keystrokes are
     /// indistinguishable from a paste (codex `disable_paste_burst`).
     disable_paste_burst: bool,
+    /// An image path detected by a KEY-path burst flush (which cannot bubble
+    /// an outcome): parked here and delivered by the next
+    /// [`Self::flush_paste_burst_if_due`] tick so the image is never lost.
+    deferred_pasted_image: Option<String>,
     /// Large pastes replaced by a `[Pasted Content N chars]` placeholder in
     /// the composer: `(placeholder, full_text)` pairs expanded on submit.
     /// A placeholder the user deleted simply drops its paste (codex
@@ -221,7 +225,11 @@ impl BottomPane {
             vim: None,
             ctrl_c_at: None,
             paste_burst: paste_burst::PasteBurst::default(),
-            disable_paste_burst: false,
+            // Unit tests default the heuristic OFF: synthetic keystrokes
+            // arrive at machine speed, which IS the burst signature. Burst
+            // tests opt back in with `set_disable_paste_burst(false)`.
+            disable_paste_burst: cfg!(test),
+            deferred_pasted_image: None,
             pending_pastes: Vec::new(),
             view_stack: ViewStack::new(),
             status: BottomPaneStatus::default(),
@@ -361,11 +369,24 @@ impl BottomPane {
     /// becomes [`BottomPaneOutcome::PastedImage`] and a huge burst still
     /// collapses to a placeholder. `None` when nothing was due.
     pub fn flush_paste_burst_if_due(&mut self) -> Option<BottomPaneOutcome> {
+        // An image path parked by a key-path flush is delivered first — even
+        // when the heuristic has since been disabled.
+        if let Some(path) = self.deferred_pasted_image.take() {
+            return Some(BottomPaneOutcome::PastedImage(path));
+        }
         if self.disable_paste_burst {
             return None;
         }
         match self.paste_burst.flush_if_due(Instant::now()) {
-            paste_burst::FlushResult::Paste(text) => Some(self.apply_paste_text(&text)),
+            paste_burst::FlushResult::Paste(text) => {
+                // Same routing as a bracketed paste: an active modal view
+                // owns the paste stream (the burst began before it opened);
+                // otherwise the shared pipeline applies.
+                if let Some(outcome) = self.view_stack.route_paste(&text) {
+                    return Some(Self::map_view_outcome(outcome));
+                }
+                Some(self.apply_paste_text(&text))
+            }
             paste_burst::FlushResult::Typed(ch) => {
                 self.composer.insert(ch);
                 self.sync_completion();
@@ -392,16 +413,36 @@ impl BottomPane {
     }
 
     /// Toggle the non-bracketed paste-burst heuristic (codex
-    /// `set_disable_paste_burst`). Flushes any in-flight burst as plain text
-    /// when turning it off so buffered input is never lost.
+    /// `set_disable_paste_burst`). Flushes any in-flight burst through the
+    /// full paste pipeline when turning it off so buffered input (including
+    /// an image path) is never lost.
     pub fn set_disable_paste_burst(&mut self, disabled: bool) {
         if disabled {
             if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                let _ = self.apply_paste_text(&pasted);
+                self.flush_burst_text_now(pasted);
             }
             self.paste_burst.clear_after_explicit_paste();
         }
         self.disable_paste_burst = disabled;
+    }
+
+    /// Whether burst state is pending (buffering, non-empty buffer, or a
+    /// held first char). The app shortens its input-poll timeout while this
+    /// is true so held chars echo within ~10ms instead of a full redraw
+    /// interval.
+    #[must_use]
+    pub fn paste_burst_pending(&self) -> bool {
+        !self.disable_paste_burst && self.paste_burst.is_active()
+    }
+
+    /// Route flushed burst text through the FULL paste pipeline from a path
+    /// that cannot bubble an outcome (key handling, the disable setter): a
+    /// detected image path is parked in `deferred_pasted_image` for the next
+    /// tick pump instead of being dropped.
+    fn flush_burst_text_now(&mut self, text: String) {
+        if let BottomPaneOutcome::PastedImage(path) = self.apply_paste_text(&text) {
+            self.deferred_pasted_image = Some(path);
+        }
     }
 
     pub fn show_permission(&mut self, exchange: PermissionExchange) {
@@ -558,16 +599,25 @@ impl BottomPane {
         // (codex keeps pending_pastes with its history entries).
         let mut pending: Vec<&(String, String)> = self.pending_pastes.iter().collect();
         pending.sort_by_key(|(placeholder, _)| std::cmp::Reverse(placeholder.len()));
+        // Locate every non-overlapping occurrence on the PRE-expansion text
+        // (longest placeholder first so the bare label never matches inside
+        // its own ` #N` variants), then splice from the END: earlier
+        // positions stay valid and no scan ever crosses expanded content.
+        let mut matches: Vec<(usize, usize, &str)> = Vec::new();
         for (placeholder, actual) in pending {
-            // Every occurrence expands (a recalled entry can repeat one);
-            // resume the search AFTER the replacement so a paste whose
-            // CONTENT contains the placeholder string cannot loop.
             let mut from = 0;
-            while let Some(rel) = text[from..].find(placeholder) {
-                let pos = from + rel;
-                text.replace_range(pos..pos + placeholder.len(), actual);
-                from = pos + actual.len();
+            while let Some(rel) = text[from..].find(placeholder.as_str()) {
+                let start = from + rel;
+                let end = start + placeholder.len();
+                if matches.iter().all(|&(s, e, _)| end <= s || start >= e) {
+                    matches.push((start, end, actual.as_str()));
+                }
+                from = end;
             }
+        }
+        matches.sort_by_key(|&(start, _, _)| std::cmp::Reverse(start));
+        for (start, end, actual) in matches {
+            text.replace_range(start..end, actual);
         }
         Some(text.trim().to_string())
     }
@@ -755,16 +805,13 @@ impl BottomPane {
                 Some(BottomPaneOutcome::Consumed)
             }
             CharDecision::BeginBuffer { retro_chars } => {
-                // Reclassify the fast-typed prefix as pasted text: move it
+                // Reclassify the fast-typed tail as pasted text: move it
                 // from the composer into the burst buffer.
-                let before = self.composer.text_before_cursor();
-                let grab =
-                    self.paste_burst
-                        .decide_begin_buffer(now, &before, usize::from(retro_chars))?;
-                if !grab.grabbed.is_empty() {
-                    self.composer
-                        .remove_chars_before_cursor(grab.grabbed.chars().count());
+                let tail = self.composer.chars_before_cursor(usize::from(retro_chars));
+                if !self.paste_burst.decide_begin_buffer(now, &tail) {
+                    return None;
                 }
+                self.composer.remove_chars_before_cursor(tail.chars().count());
                 self.paste_burst.append_char_to_buffer(c, now);
                 self.sync_completion();
                 Some(BottomPaneOutcome::Consumed)
@@ -774,15 +821,11 @@ impl BottomPane {
     }
 
     /// Key-path due-burst flush: a held first char renders as typing, a
-    /// completed burst inserts as text (no image detection here — a key is
-    /// being processed; the tick path handles the full pipeline).
+    /// completed burst routes through the full paste pipeline (an image path
+    /// is deferred to the next tick pump — this path returns no outcome).
     fn flush_due_burst_inline(&mut self, now: Instant) {
         match self.paste_burst.flush_if_due(now) {
-            paste_burst::FlushResult::Paste(text) => {
-                let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-                self.composer.insert_str(&normalized);
-                self.sync_completion();
-            }
+            paste_burst::FlushResult::Paste(text) => self.flush_burst_text_now(text),
             paste_burst::FlushResult::Typed(ch) => {
                 self.composer.insert(ch);
                 self.sync_completion();
@@ -828,10 +871,7 @@ impl BottomPane {
                 }
                 _ => {
                     if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                        // Inline flush on the key path inserts as plain text
-                        // (the tick flush routes the full paste pipeline).
-                        let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
-                        self.composer.insert_str(&normalized);
+                        self.flush_burst_text_now(pasted);
                     }
                     self.paste_burst.clear_window_after_non_char();
                 }
@@ -1621,11 +1661,10 @@ mod tests {
     use ratatui::layout::Position;
 
     fn pane() -> BottomPane {
-        let mut pane = BottomPane::new(Theme::dark());
-        // Synthetic test keystrokes arrive at machine speed — exactly the
-        // paste-burst signature — so tests opt out; burst tests opt back in.
-        pane.set_disable_paste_burst(true);
-        pane
+        // The cfg!(test) default already disables the burst heuristic
+        // (synthetic keystrokes are machine-speed = the burst signature);
+        // burst tests opt back in with set_disable_paste_burst(false).
+        BottomPane::new(Theme::dark())
     }
 
     // ===== Large-paste placeholders (codex pending_pastes) =====
@@ -1702,9 +1741,10 @@ mod tests {
         // Review #2: the completion popup must not consume a key that
         // belongs to an in-flight paste burst — its Enter is a pasted
         // newline, not a completion commit.
-        let mut pane = BottomPane::new(Theme::dark()); // burst ENABLED
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_disable_paste_burst(false); // burst tests re-enable the heuristic
         let _ = pane.handle_key(key(KeyCode::Char('/')));
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(30));
         let _ = pane.flush_paste_burst_if_due(); // '/' lands, popup opens
         assert_eq!(pane.composer().text(), "/");
         assert!(pane.completion.is_some(), "command completion popup open");
@@ -1714,7 +1754,7 @@ mod tests {
         }
         let outcome = pane.handle_key(key(KeyCode::Enter));
         assert!(matches!(outcome, BottomPaneOutcome::Consumed));
-        std::thread::sleep(std::time::Duration::from_millis(12));
+        std::thread::sleep(std::time::Duration::from_millis(30));
         let _ = pane.flush_paste_burst_if_due();
         assert_eq!(
             pane.composer().text(),
@@ -1727,10 +1767,11 @@ mod tests {
 
     #[test]
     fn machine_speed_chars_reassemble_as_one_paste_with_enter_as_newline() {
-        // Burst ENABLED (fresh pane): chars at machine speed are buffered,
-        // Enter mid-burst is a pasted newline (NOT submit), and the tick
-        // flush lands the whole burst as one insert.
+        // Burst re-enabled: chars at machine speed are buffered, Enter
+        // mid-burst is a pasted newline (NOT submit), and the tick flush
+        // lands the whole burst as one insert.
         let mut pane = BottomPane::new(Theme::dark());
+        pane.set_disable_paste_burst(false); // burst tests re-enable the heuristic
         for c in "hello world".chars() {
             assert!(matches!(
                 pane.handle_key(key(KeyCode::Char(c))),
@@ -1741,7 +1782,7 @@ mod tests {
             pane.handle_key(key(KeyCode::Enter)),
             BottomPaneOutcome::Consumed
         ));
-        std::thread::sleep(std::time::Duration::from_millis(12));
+        std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(pane.flush_paste_burst_if_due().is_some());
         assert_eq!(pane.composer().text(), "hello world
 ");
@@ -1750,13 +1791,14 @@ mod tests {
     #[test]
     fn held_first_char_flushes_as_normal_typing() {
         let mut pane = BottomPane::new(Theme::dark());
+        pane.set_disable_paste_burst(false); // burst tests re-enable the heuristic
         let _ = pane.handle_key(key(KeyCode::Char('a')));
         assert_eq!(
             pane.composer().text(),
             "",
             "first fast char is held briefly (flicker suppression)"
         );
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(30));
         let _ = pane.flush_paste_burst_if_due();
         assert_eq!(pane.composer().text(), "a", "held char lands as typing");
     }
@@ -1771,10 +1813,11 @@ mod tests {
         ));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut pane = BottomPane::new(Theme::dark());
+        pane.set_disable_paste_burst(false); // burst tests re-enable the heuristic
         for c in path.display().to_string().chars() {
             let _ = pane.handle_key(key(KeyCode::Char(c)));
         }
-        std::thread::sleep(std::time::Duration::from_millis(12));
+        std::thread::sleep(std::time::Duration::from_millis(30));
         let flushed = pane.flush_paste_burst_if_due();
         std::fs::remove_file(&path).ok();
         assert!(
@@ -1955,7 +1998,6 @@ mod tests {
         ));
         // …and an @file fragment with no matching entries.
         let mut pane = super::BottomPane::new(Theme::dark());
-        pane.set_disable_paste_burst(true);
         typ(&mut pane, "see @Carg");
         assert!(pane.completion().is_some());
         typ(&mut pane, "zzz"); // "@Cargzzz" matches no file
@@ -2002,7 +2044,6 @@ mod tests {
         assert_eq!(pane.take_submission_state(), None, "blank stays put");
         assert_eq!(pane.composer().text(), "   ", "blank buffer untouched");
         let mut pane = super::BottomPane::new(Theme::dark());
-        pane.set_disable_paste_burst(true);
         typ(&mut pane, "  hi there  ");
         assert_eq!(pane.take_submission_state().as_deref(), Some("hi there"));
         assert!(pane.composer_is_empty());

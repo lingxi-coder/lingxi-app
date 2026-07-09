@@ -554,6 +554,14 @@ impl ChatWidget {
         self.bottom_pane.set_disable_paste_burst(disabled);
     }
 
+    /// Whether paste-burst state is pending (held first char / buffering):
+    /// the app shortens its input-poll timeout while true so held chars echo
+    /// within ~10ms instead of a full redraw interval.
+    #[must_use]
+    pub fn paste_burst_pending(&self) -> bool {
+        self.bottom_pane.paste_burst_pending()
+    }
+
     /// Tick hook: flush a DUE non-bracketed paste burst (held first char or
     /// completed burst). The app calls this once per UI tick; a burst-pasted
     /// image path routes through the normal pane-outcome mapping (it becomes
@@ -2823,9 +2831,6 @@ mod tests {
 
     fn widget() -> ChatWidget {
         let mut w = ChatWidget::new(Vec::new(), SessionInfo::default());
-        // Synthetic test keystrokes arrive at machine speed — exactly the
-        // paste-burst signature — so tests opt out.
-        w.set_disable_paste_burst(true);
         w
     }
 
@@ -3370,7 +3375,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        widget.set_disable_paste_burst(true);
         // The /model picker gates by live provider availability: anthropic must
         // be connected for its (curated) models to show.
         widget.set_connect_data(
@@ -3791,7 +3795,6 @@ mod tests {
         // channels unsent (the gate maps a dropped resp_tx to a deny) instead
         // of leaking unanswerable prompts.
         let mut widget = ChatWidget::new(Vec::new(), SessionInfo::default());
-        widget.set_disable_paste_burst(true);
         let (open, open_rx) = tool_exchange();
         let (queued, queued_rx) = tool_exchange();
         widget.open_permission(open);
@@ -3854,7 +3857,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        widget.set_disable_paste_burst(true);
         widget.set_connect_data(
             std::collections::BTreeMap::new(),
             [("anthropic".to_string(), true)].into_iter().collect(),
@@ -3972,7 +3974,6 @@ mod tests {
                 ..Default::default()
             },
         );
-        widget.set_disable_paste_burst(true);
 
         widget.set_current_model("gpt-5.5", Some("github-copilot"));
         let current: Vec<&str> = widget
@@ -4044,7 +4045,6 @@ mod tests {
         };
         for cmd in ["/skills", "/memory", "/status", "/config"] {
             let mut widget = ChatWidget::new(Vec::new(), session.clone());
-        widget.set_disable_paste_burst(true);
             let outcome = submit_command(&mut widget, cmd);
             assert!(matches!(outcome, ChatOutcome::Continue), "{cmd}");
             assert!(
@@ -4285,7 +4285,6 @@ mod tests {
             ],
             SessionInfo::default(),
         );
-        widget.set_disable_paste_burst(true);
         assert!(matches!(
             submit_command(&mut widget, "/stats"),
             ChatOutcome::Continue
@@ -4334,7 +4333,6 @@ mod tests {
             ],
             SessionInfo::default(),
         );
-        widget.set_disable_paste_burst(true);
         widget.set_export_dir(dir.clone());
 
         // Named export writes the committed cells' raw (copy-friendly) text.
@@ -4402,7 +4400,6 @@ mod tests {
             ],
             SessionInfo::default(),
         );
-        widget.set_disable_paste_burst(true);
         let outcome = submit_command(&mut widget, "/copy");
         assert!(matches!(outcome, ChatOutcome::CopyToClipboard(ref t) if t == "newest"));
         assert_eq!(
@@ -4433,7 +4430,6 @@ mod tests {
             }],
             SessionInfo::default(),
         );
-        widget.set_disable_paste_burst(true);
         let mut terminal = test_terminal();
         widget.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(widget.transcript().committed_to_terminal(), 1);
@@ -4753,7 +4749,6 @@ mod tests {
             }],
             SessionInfo::default(),
         );
-        widget.set_disable_paste_burst(true);
         widget
             .bottom_pane
             .show_view(Box::new(CommandStub(Some(CommandAction::ClearTranscript))));

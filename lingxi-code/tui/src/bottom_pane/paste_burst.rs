@@ -74,13 +74,6 @@ pub(crate) enum CharDecision {
     BeginBufferFromPending,
 }
 
-/// A retro-capture request: remove `start_byte..cursor` from the UI text (it
-/// was typed-then-reclassified) — it is already in the burst buffer.
-pub(crate) struct RetroGrab {
-    pub start_byte: usize,
-    pub grabbed: String,
-}
-
 /// The outcome of a tick flush.
 pub(crate) enum FlushResult {
     /// A completed burst: route through the paste pipeline.
@@ -227,29 +220,22 @@ impl PasteBurst {
         self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
     }
 
-    /// Decide whether to begin buffering by retroactively capturing recent
-    /// chars from the slice before the cursor.
+    /// Decide whether to begin buffering by retroactively capturing
+    /// `retro_tail` — the already-inserted chars of the burst window,
+    /// immediately before the cursor.
     ///
-    /// Heuristic: a retro-grabbed slice containing whitespace or ≥16 chars is
-    /// paste-like (URLs, paths, multiline text) — short words are not, so
-    /// ordinary fast typing never disappears into a buffer.
-    pub fn decide_begin_buffer(
-        &mut self,
-        now: Instant,
-        before: &str,
-        retro_chars: usize,
-    ) -> Option<RetroGrab> {
-        let start_byte = retro_start_index(before, retro_chars);
-        let grabbed = before[start_byte..].to_string();
-        let looks_pastey =
-            grabbed.chars().any(char::is_whitespace) || grabbed.chars().count() >= 16;
+    /// Heuristic: a tail containing whitespace or ≥16 chars is paste-like
+    /// (URLs, paths, multiline text) — short words are not, so ordinary fast
+    /// typing never disappears into a buffer. Returns true when buffering
+    /// began; the CALLER then removes the tail from the UI text (it is now
+    /// in the burst buffer).
+    pub fn decide_begin_buffer(&mut self, now: Instant, retro_tail: &str) -> bool {
+        let looks_pastey = retro_tail.chars().any(char::is_whitespace)
+            || retro_tail.chars().count() >= 16;
         if looks_pastey {
-            // The caller removes this slice from the UI text.
-            self.begin_with_retro_grabbed(grabbed.clone(), now);
-            Some(RetroGrab { start_byte, grabbed })
-        } else {
-            None
+            self.begin_with_retro_grabbed(retro_tail.to_string(), now);
         }
+        looks_pastey
     }
 
     /// Before applying modified/non-char input: flush the buffered burst
@@ -298,19 +284,6 @@ impl PasteBurst {
         self.buffer.clear();
         self.pending_first_char = None;
     }
-}
-
-/// Byte index where a retro-grab of the last `retro_chars` chars starts.
-fn retro_start_index(before: &str, retro_chars: usize) -> usize {
-    if retro_chars == 0 {
-        return before.len();
-    }
-    before
-        .char_indices()
-        .rev()
-        .nth(retro_chars.saturating_sub(1))
-        .map(|(idx, _)| idx)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -377,11 +350,14 @@ mod tests {
         let Some(CharDecision::BeginBuffer { retro_chars }) = last else {
             panic!("expected BeginBuffer");
         };
-        let grab = pb
-            .decide_begin_buffer(t0 + step * 16, before, retro_chars as usize)
-            .expect(">=16-char retro slice is paste-like");
-        assert!(before.ends_with(&grab.grabbed));
-        assert!(grab.grabbed.chars().count() >= 16);
+        let tail: String = before
+            .chars()
+            .skip(before.chars().count() - usize::from(retro_chars))
+            .collect();
+        assert!(
+            pb.decide_begin_buffer(t0 + step * 16, &tail),
+            ">=16-char retro tail is paste-like"
+        );
         assert!(pb.is_active());
     }
 
@@ -419,9 +395,8 @@ mod tests {
             panic!("expected BeginBuffer");
         };
         // A short word with no whitespace stays as normal typing.
-        assert!(pb
-            .decide_begin_buffer(t0 + step * 4, "word", retro_chars as usize)
-            .is_none());
+        let _ = retro_chars;
+        assert!(!pb.decide_begin_buffer(t0 + step * 4, "word"));
         assert!(!pb.is_active());
     }
 }

@@ -240,8 +240,25 @@ impl BottomPane {
             return Self::map_view_outcome(outcome);
         }
         if self.completion.is_some() {
-            if let Some(outcome) = self.on_completion_key(key) {
-                return outcome;
+            // A key that belongs to an in-flight paste burst is PASTED
+            // CONTENT, not popup navigation: mid-burst (and for Enter, the
+            // suppress window right after one) it must reach the composer's
+            // burst layer instead of committing a completion into the middle
+            // of the paste (review #2).
+            let plain = !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            let burst_owns_key = !self.disable_paste_burst
+                && (self.paste_burst.is_active()
+                    || (plain
+                        && key.code == KeyCode::Enter
+                        && self
+                            .paste_burst
+                            .newline_should_insert_instead_of_submit(Instant::now())));
+            if !burst_owns_key {
+                if let Some(outcome) = self.on_completion_key(key) {
+                    return outcome;
+                }
             }
         }
         // When vim is enabled, the vim layer sees the key first. It fully
@@ -535,12 +552,21 @@ impl BottomPane {
         // Expand large-paste placeholders (codex `expand_pending_pastes`):
         // each placeholder still present becomes its full pasted text; a
         // placeholder the user deleted drops its paste. Longest-first so the
-        // bare label never matches inside its own ` #N` variants.
-        let mut pending = std::mem::take(&mut self.pending_pastes);
+        // bare label never matches inside its own ` #N` variants. The pairs
+        // are KEPT after submit — the composer's recall history stores the
+        // placeholder text, so a recalled entry must re-expand on resubmit
+        // (codex keeps pending_pastes with its history entries).
+        let mut pending: Vec<&(String, String)> = self.pending_pastes.iter().collect();
         pending.sort_by_key(|(placeholder, _)| std::cmp::Reverse(placeholder.len()));
         for (placeholder, actual) in pending {
-            if let Some(pos) = text.find(&placeholder) {
-                text.replace_range(pos..pos + placeholder.len(), &actual);
+            // Every occurrence expands (a recalled entry can repeat one);
+            // resume the search AFTER the replacement so a paste whose
+            // CONTENT contains the placeholder string cannot loop.
+            let mut from = 0;
+            while let Some(rel) = text[from..].find(placeholder) {
+                let pos = from + rel;
+                text.replace_range(pos..pos + placeholder.len(), actual);
+                from = pos + actual.len();
             }
         }
         Some(text.trim().to_string())
@@ -1648,6 +1674,53 @@ mod tests {
             panic!("expected submit");
         };
         assert_eq!(text, "keep this", "deleted placeholder drops the paste");
+    }
+
+    #[test]
+    fn recalled_large_paste_expands_again_on_resubmit() {
+        // Review #1: history stores the placeholder text, so the
+        // (placeholder, paste) pairs must survive the submit — recalling the
+        // entry with Up and resubmitting must send the CONTENT again, not
+        // the literal placeholder string.
+        let mut pane = pane();
+        let big = "x".repeat(1500);
+        let _ = pane.handle_paste(&big);
+        let BottomPaneOutcome::Submitted(first) = pane.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected first submit");
+        };
+        assert_eq!(first, big);
+        let _ = pane.handle_key(key(KeyCode::Up)); // recall from history
+        assert_eq!(pane.composer().text(), "[Pasted Content 1500 chars]");
+        let BottomPaneOutcome::Submitted(second) = pane.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected resubmit");
+        };
+        assert_eq!(second, big, "recalled placeholder re-expands to the paste");
+    }
+
+    #[test]
+    fn mid_burst_enter_is_a_newline_even_with_the_completion_popup_open() {
+        // Review #2: the completion popup must not consume a key that
+        // belongs to an in-flight paste burst — its Enter is a pasted
+        // newline, not a completion commit.
+        let mut pane = BottomPane::new(Theme::dark()); // burst ENABLED
+        let _ = pane.handle_key(key(KeyCode::Char('/')));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = pane.flush_paste_burst_if_due(); // '/' lands, popup opens
+        assert_eq!(pane.composer().text(), "/");
+        assert!(pane.completion.is_some(), "command completion popup open");
+        // A machine-speed burst arrives (chars + an embedded newline).
+        for c in "abcd".chars() {
+            let _ = pane.handle_key(key(KeyCode::Char(c)));
+        }
+        let outcome = pane.handle_key(key(KeyCode::Enter));
+        assert!(matches!(outcome, BottomPaneOutcome::Consumed));
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        let _ = pane.flush_paste_burst_if_due();
+        assert_eq!(
+            pane.composer().text(),
+            "/abcd\n",
+            "the pasted newline joins the burst; the popup must not commit"
+        );
     }
 
     // ===== Non-bracketed paste bursts (codex paste_burst) =====

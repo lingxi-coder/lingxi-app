@@ -26,7 +26,7 @@ use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;
 
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
-use crate::bottom_pane::{ConnectAction, PermissionAction, WebAction};
+use crate::bottom_pane::{ConnectAction, PermissionAction, TaskAction, WebAction};
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
@@ -112,6 +112,11 @@ pub struct AppCallbacks<'cb> {
     /// [`TurnEvent::SystemNotice`] (same shape as `on_permission_action`). The
     /// live session flip already happened in the widget via the shared cell.
     pub on_sandbox_action: Box<dyn FnMut(crate::chat_widget::SandboxAction) + 'cb>,
+    /// Executed on [`ChatOutcome::TaskAction`]: the caller stops the background
+    /// task off-loop via `TaskRegistryHandle::kill` on the live runtime; the
+    /// result returns via `TurnEvent::SystemNotice` (same shape as
+    /// `on_permission_action`).
+    pub on_task_action: Box<dyn FnMut(TaskAction) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -264,6 +269,12 @@ impl<'cb> RataApp<'cb> {
                     // `TurnEvent::SystemNotice`.
                     ChatOutcome::SandboxAction(action) => {
                         (self.callbacks.on_sandbox_action)(action);
+                    }
+                    // `/tasks`: stop a running background task off-loop on the
+                    // live runtime; the result returns via
+                    // `TurnEvent::SystemNotice`, same shape as `SandboxAction`.
+                    ChatOutcome::TaskAction(action) => {
+                        (self.callbacks.on_task_action)(action);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -423,6 +434,7 @@ pub fn run_app(
     command_registry: Option<
         std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     >,
+    task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
     on_submit: impl FnMut(String, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
@@ -434,6 +446,7 @@ pub fn run_app(
     on_fast_mode: impl FnMut(Option<bool>),
     on_plan_mode: impl FnMut(String),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
+    on_task_action: impl FnMut(TaskAction),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -465,6 +478,7 @@ pub fn run_app(
             on_fast_mode: Box::new(on_fast_mode),
             on_plan_mode: Box::new(on_plan_mode),
             on_sandbox_action: Box::new(on_sandbox_action),
+            on_task_action: Box::new(on_task_action),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -503,6 +517,11 @@ pub fn run_app(
     }
     if let Some(registry) = command_registry {
         app.chat_widget.set_command_registry(registry);
+    }
+    // `/tasks`: wire the live background-task registry so the picker can read a
+    // snapshot. `None` (tests / no engine) keeps `/tasks` a graceful no-op.
+    if let Some(handle) = task_registry {
+        app.chat_widget.set_task_registry(handle);
     }
     app.run(&mut terminal)
 }
@@ -554,6 +573,7 @@ mod tests {
                 on_fast_mode: Box::new(|_| {}),
                 on_plan_mode: Box::new(|_| {}),
                 on_sandbox_action: Box::new(|_| {}),
+                on_task_action: Box::new(|_| {}),
             },
         )
     }

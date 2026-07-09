@@ -59,6 +59,11 @@ pub enum ViewOutcome {
     /// user can make several edits; the async persist result is reported back
     /// through `TurnEvent::SystemNotice`.
     RunPermissionAction(PermissionAction),
+    /// The `/tasks` picker asks the app to STOP a running background task. Like
+    /// [`Self::RunPermissionAction`], the picker stays OPEN so the user can stop
+    /// several tasks; the async `TaskRegistryHandle::kill` result is reported
+    /// through `TurnEvent::SystemNotice`.
+    RunTaskAction(TaskAction),
     /// The `/resume` picker resolved to this session uuid. Unlike the off-loop
     /// effect variants above, this UNWINDS the app loop: the owner
     /// (`RataApp::run` → `run_app`) returns an `AppExit::SwitchSession(uuid)` so
@@ -106,6 +111,20 @@ pub enum PermissionAction {
         path: String,
         /// Which settings file to persist to.
         dest: PermissionUpdateDestination,
+    },
+}
+
+/// An app-level `/tasks` effect a view can request via
+/// [`ViewOutcome::RunTaskAction`]. The owner aborts the task OFF-LOOP via
+/// [`traits::task_registry::TaskRegistryHandle::kill`] on the live runtime and
+/// reports the result back through `TurnEvent::SystemNotice`. The 9-char task
+/// id is not secret, so the derived `Debug` is fine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskAction {
+    /// Stop the running background task with this 9-char id.
+    Kill {
+        /// The `[bartwmd][0-9a-z]{8}` task id to stop.
+        task_id: String,
     },
 }
 

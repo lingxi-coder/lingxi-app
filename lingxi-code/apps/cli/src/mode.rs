@@ -323,6 +323,13 @@ pub(crate) async fn run_ratatui(
     // (/sandbox) The shared toggle cell threaded into the widget + clones for
     // the off-loop settings-persistence effect (mirrors the sibling triplets).
     let sandbox_toggle = tui_build.runtime.sandbox_toggle.clone();
+    // (/tasks) The live background-task registry (already `TaskRegistryHandle`),
+    // cloned as a trait object for the widget's snapshot read; plus a handle +
+    // tx clone for the off-loop stop effect (mirrors the sandbox triplet).
+    let task_registry_handle: std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle> =
+        tui_build.runtime.task_registry.clone();
+    let task_handle = handle.clone();
+    let task_turn_tx = turn_tx.clone();
     let sandbox_paths = permission_paths.clone();
     let sandbox_handle = handle.clone();
     let sandbox_turn_tx = turn_tx.clone();
@@ -609,6 +616,27 @@ pub(crate) async fn run_ratatui(
             run_sandbox_action(action, paths, tx).await;
         });
     };
+    // (/tasks) The picker returns a `TaskAction` synchronously from the blocking
+    // ratatui loop; the kill (abort the background task + mark it `killed` in
+    // the registry) is async, so it is spawned onto the captured handle — same
+    // off-loop shape as `on_permission_action`. The result lands in the
+    // transcript via `TurnEvent::SystemNotice`.
+    let task_registry_effect = task_registry_handle.clone();
+    let on_task_action = move |action: tui::bottom_pane::TaskAction| {
+        let registry = task_registry_effect.clone();
+        let tx = task_turn_tx.clone();
+        task_handle.spawn(async move {
+            let tui::bottom_pane::TaskAction::Kill { task_id } = action;
+            let (body, is_error) = match registry.kill(&task_id).await {
+                Ok(_) => (format!("Stopped task {task_id}"), false),
+                Err(e) => (format!("Could not stop task {task_id}: {e}"), true),
+            };
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                body,
+                is_error,
+            });
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -673,6 +701,7 @@ pub(crate) async fn run_ratatui(
             Some(widget_orch),
             Some(sandbox_toggle),
             Some(command_registry),
+            Some(task_registry_handle),
             on_submit,
             on_switch_model,
             on_web_action,
@@ -684,6 +713,7 @@ pub(crate) async fn run_ratatui(
             on_fast_mode,
             on_plan_mode,
             on_sandbox_action,
+            on_task_action,
         )
     })
     .await;

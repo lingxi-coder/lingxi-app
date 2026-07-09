@@ -26,6 +26,7 @@ pub mod pending_input_preview;
 pub mod permission_view;
 pub mod permissions_editor_view;
 pub mod resume_picker_view;
+pub mod tasks_view;
 pub mod screen_view;
 pub mod theme_picker_view;
 pub mod view;
@@ -55,8 +56,8 @@ use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
 pub use view::{
-    BottomPaneView, CommandAction, ConnectAction, PermissionAction, ViewAction, ViewOutcome,
-    WebAction,
+    BottomPaneView, CommandAction, ConnectAction, PermissionAction, TaskAction, ViewAction,
+    ViewOutcome, WebAction,
 };
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
@@ -114,6 +115,10 @@ pub enum BottomPaneOutcome {
     /// added/removed rule) on its behalf. The editor stays OPEN (like a `/web`
     /// test), so the user can make several edits before closing.
     RunPermissionAction(PermissionAction),
+    /// A view asks the owner to run a `/tasks` stop effect. The picker stays
+    /// OPEN (like `RunPermissionAction`); the kill result is reported into the
+    /// transcript.
+    RunTaskAction(TaskAction),
     /// The `/resume` picker resolved to this session uuid: the owner must
     /// UNWIND its loop and re-mount that session in-process (writer retargeted)
     /// — surfaced up through `ChatOutcome::SwitchSession` → `AppExit`. The
@@ -296,6 +301,14 @@ impl BottomPane {
     /// Open the `/resume` session picker over `rows` (preloaded at startup),
     /// pre-filtered by `query` when non-empty (the `/resume <term>` argument).
     /// The picker paints with the pane's active `theme`.
+    /// Open the `/tasks` background-task picker over `rows` (a live snapshot of
+    /// the registry taken by `ChatWidget::cmd_tasks`). The picker paints with
+    /// the pane's active `theme`.
+    pub fn show_tasks(&mut self, rows: Vec<tui_core::multiagent::TaskRow>) {
+        self.view_stack
+            .push(Box::new(tasks_view::TasksView::new(rows, self.theme)));
+    }
+
     pub fn show_resume_picker(
         &mut self,
         rows: Vec<crate::resume::ResumeRow>,
@@ -451,6 +464,7 @@ impl BottomPane {
             ViewOutcome::RunPermissionAction(action) => {
                 BottomPaneOutcome::RunPermissionAction(action)
             }
+            ViewOutcome::RunTaskAction(action) => BottomPaneOutcome::RunTaskAction(action),
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
         }
     }
@@ -981,6 +995,10 @@ impl ViewStack {
             ViewOutcome::RunPermissionAction(action) => {
                 ViewOutcome::RunPermissionAction(action)
             }
+            // A `/tasks` stop keeps the picker OPEN (like `/permissions`) so
+            // several tasks can be stopped in one visit; the row was already
+            // marked `killed` optimistically. Only `Esc` closes it.
+            ViewOutcome::RunTaskAction(action) => ViewOutcome::RunTaskAction(action),
             // A `/resume` pick CLOSES the whole picker (like `/connect`): the
             // owner is about to unwind the app loop and re-mount the chosen
             // session, so there is no live view to return to.

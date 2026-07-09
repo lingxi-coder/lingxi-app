@@ -38,7 +38,7 @@ use crate::bottom_pane::theme_picker_view::ThemePickerView;
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::{
     BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction, PermissionAction,
-    WebAction,
+    TaskAction, WebAction,
 };
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
@@ -138,6 +138,12 @@ pub enum ChatOutcome {
     /// `TurnEvent::SystemNotice`, same shape as `PermissionAction`. The live
     /// session flip already happened in `cmd_sandbox` via the shared toggle.
     SandboxAction(SandboxAction),
+    /// A `/tasks` picker asked the caller to STOP a running background task.
+    /// The caller aborts it off-loop via `TaskRegistryHandle::kill` on the live
+    /// runtime (never a reactor mutation on the render thread) and reports the
+    /// result back through `TurnEvent::SystemNotice`. The picker stays open and
+    /// has already marked the row `killed` optimistically.
+    TaskAction(TaskAction),
 }
 
 /// A `/sandbox` off-loop effect handed to the embedder via
@@ -330,6 +336,13 @@ pub struct ChatWidget {
     /// <condition>` — status/clear would always report "No goal set". Storing
     /// one instance and passing a cheap `.clone()` (shared-`Arc` state) into
     /// `run_core_command` keeps the goal alive across invocations.
+    /// Live background-task registry handle (`None` until the embedder wires one
+    /// via [`Self::set_task_registry`]). [`Self::cmd_tasks`] reads a live
+    /// snapshot through it (the proven-safe throwaway-`block_on` in-memory read)
+    /// to seed the `/tasks` picker; the picker's stop action goes off-loop via
+    /// [`ChatOutcome::TaskAction`]. `None` (every test widget) makes `/tasks` a
+    /// graceful "unavailable" line.
+    task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
     goal_handler: Option<command_core::goal::GoalHandler>,
 }
 
@@ -370,6 +383,7 @@ impl ChatWidget {
             connect_availability: std::collections::BTreeMap::new(),
             shell_expansion: None,
             orchestrator: None,
+            task_registry: None,
             sandbox_toggle: None,
             command_registry: None,
             goal_handler: None,
@@ -917,6 +931,15 @@ impl ChatWidget {
         self.resume_rows = rows;
     }
 
+    /// Wire the live background-task registry handle (drives `/tasks`). `None`
+    /// (tests) keeps `/tasks` a graceful "unavailable" no-op.
+    pub fn set_task_registry(
+        &mut self,
+        handle: std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>,
+    ) {
+        self.task_registry = Some(handle);
+    }
+
     /// Cancel any in-flight streaming turn (its `CancellationToken`), used when
     /// the app loop is about to UNWIND for a `/resume` switch so the outgoing
     /// turn stops streaming into the session file the user just left. Mirrors
@@ -1462,6 +1485,37 @@ impl ChatWidget {
     pub(crate) fn cmd_resume(&mut self, args: &str) -> ChatOutcome {
         self.bottom_pane
             .show_resume_picker(self.resume_rows.clone(), args.trim());
+        ChatOutcome::Continue
+    }
+
+    /// `/tasks` (alias `/bashes`): open the interactive background-task picker
+    /// over a LIVE snapshot of the registry. The snapshot is read with a
+    /// throwaway current-thread runtime (the sync render loop is off the async
+    /// runtime, and `TaskRegistryHandle::list` is a pure in-memory read — the
+    /// same proven-safe `block_on` idiom as `run_core_command`). An empty list
+    /// or a missing handle renders a system line instead of an empty picker.
+    /// Stopping a task goes off-loop via [`ChatOutcome::TaskAction`].
+    pub(crate) fn cmd_tasks(&mut self, _args: &str) -> ChatOutcome {
+        let Some(registry) = self.task_registry.clone() else {
+            return self.show_system_text("/tasks is unavailable (no engine handle wired)", true);
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => return self.show_system_text(&format!("/tasks failed: {err}"), true),
+        };
+        let rows: Vec<tui_core::multiagent::TaskRow> = runtime
+            .block_on(registry.list(traits::task_registry::TaskListFilter::default()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(tui_core::multiagent::task_row_from_record)
+            .collect();
+        if rows.is_empty() {
+            return self.show_system_text("No background tasks are running.", false);
+        }
+        self.bottom_pane.show_tasks(rows);
         ChatOutcome::Continue
     }
 
@@ -2272,6 +2326,7 @@ impl ChatWidget {
             BottomPaneOutcome::RunPermissionAction(action) => {
                 ChatOutcome::PermissionAction(action)
             }
+            BottomPaneOutcome::RunTaskAction(action) => ChatOutcome::TaskAction(action),
             BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
         }
     }

@@ -51,7 +51,9 @@ pub struct SlashCommand {
 ///
 /// Commands the iocraft backend advertised but that have NO data source or
 /// core API on this backend are deliberately NOT registered (never advertise
-/// "not implemented"): `/tasks` (no background-task feed reaches `run_app`).
+/// "not implemented"). `/tasks` was previously dropped for lack of a feed; it
+/// now reads the live `TaskRegistry` (`ChatWidget::set_task_registry`) and IS
+/// registered below.
 /// (`/fork` and `/recap` were previously deferred here; the engine
 /// `fork_conversation` override + `generate_recap` seam now exist, so both are
 /// registered below.)
@@ -130,6 +132,14 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_resume,
+    },
+    SlashCommand {
+        name: "/tasks",
+        aliases: &["/bashes"],
+        description: "List and manage background tasks",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_tasks,
     },
     SlashCommand {
         name: "/hooks",
@@ -692,10 +702,13 @@ mod tests {
     /// Deliberately dropped commands stay dropped: the iocraft backend's
     /// `/tasks` has no data source on this backend, so it must not be
     /// registered (plan Phase 8 step 4: never advertise "not implemented").
+    /// `/tasks` now reads the live `TaskRegistry`, so it IS registered (with
+    /// its claude-code `/bashes` alias).
     #[test]
-    fn dropped_commands_are_not_registered() {
-        assert!(resolve("/tasks").is_none());
-        assert!(!BUILTIN.iter().any(|c| c.name == "/tasks"));
+    fn tasks_command_is_registered_with_its_alias() {
+        assert_eq!(resolve("/tasks").expect("registered").0.name, "/tasks");
+        assert_eq!(resolve("/bashes").expect("alias").0.name, "/tasks");
+        assert!(BUILTIN.iter().any(|c| c.name == "/tasks"));
     }
 
     #[test]

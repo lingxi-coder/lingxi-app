@@ -51,6 +51,21 @@ pub struct Composer {
     /// `preferred_col`): set on the first vertical move, kept while moving
     /// through shorter lines, cleared by any other edit or motion.
     preferred_col: Option<usize>,
+    /// Lazily computed visual rows for `(width, revision)` — recomputed by
+    /// [`Self::rows_for`] only when the width or the text changes, so the
+    /// per-frame render/height/cursor passes and Up/Down share one layout
+    /// instead of rescanning the buffer each call (codex `WrapCache`).
+    wrap_cache: std::cell::RefCell<Option<WrapCache>>,
+    /// Bumped on every text mutation; part of the wrap-cache key.
+    revision: u64,
+}
+
+/// Cached [`wrap_layout`] output plus the key it was computed for.
+#[derive(Debug)]
+struct WrapCache {
+    width: u16,
+    revision: u64,
+    rows: Vec<Range<usize>>,
 }
 
 /// One display column per char, except wide (CJK/emoji) chars.
@@ -296,6 +311,7 @@ impl Composer {
             i += 1;
         }
         self.cursor = i;
+        self.preferred_col = None;
     }
 
     /// Vim `w`: move to the START of the next word (skip the rest of the current
@@ -309,6 +325,7 @@ impl Composer {
             i += 1;
         }
         self.cursor = i;
+        self.preferred_col = None;
     }
 
     /// Vim `e`: move to the END of the current/next word (advance at least one,
@@ -322,6 +339,7 @@ impl Composer {
             i += 1;
         }
         self.cursor = i.min(self.chars.len().saturating_sub(1));
+        self.preferred_col = None;
     }
 
     /// Begin a visual selection anchored at the cursor.
@@ -368,6 +386,22 @@ impl Composer {
         self.cursor = lo;
         self.anchor = None;
         Some(removed)
+    }
+
+    /// The text before the cursor (paste-burst retro-capture window).
+    #[must_use]
+    pub fn text_before_cursor(&self) -> String {
+        self.chars[..self.cursor].iter().collect()
+    }
+
+    /// Remove the `n` chars immediately before the cursor (paste-burst
+    /// retro-capture: they were typed, then reclassified as pasted text and
+    /// moved into the burst buffer).
+    pub fn remove_chars_before_cursor(&mut self, n: usize) {
+        self.detach_history();
+        let start = self.cursor.saturating_sub(n);
+        self.chars.drain(start..self.cursor);
+        self.cursor = start;
     }
 
     /// Insert a string at the cursor (used by vim paste), cursor after it.
@@ -459,11 +493,30 @@ impl Composer {
         i
     }
 
+    /// The visual rows wrapped at `width`, through the `(width, revision)`
+    /// cache — recomputed only when the width or the text changed.
+    fn rows_for(&self, width: u16) -> std::cell::Ref<'_, Vec<Range<usize>>> {
+        {
+            let mut cache = self.wrap_cache.borrow_mut();
+            let stale = cache
+                .as_ref()
+                .is_none_or(|c| c.width != width || c.revision != self.revision);
+            if stale {
+                *cache = Some(WrapCache {
+                    width,
+                    revision: self.revision,
+                    rows: wrap_layout(&self.chars, usize::from(width)),
+                });
+            }
+        }
+        std::cell::Ref::map(self.wrap_cache.borrow(), |c| &c.as_ref().unwrap().rows)
+    }
+
     /// The current visual-row layout at the width the view last rendered at,
     /// or `None` before the first render (logical-line fallback).
     fn visual_rows(&self) -> Option<Vec<Range<usize>>> {
         let width = self.last_wrap_width.get();
-        (width > 0).then(|| wrap_layout(&self.chars, usize::from(width)))
+        (width > 0).then(|| self.rows_for(width).clone())
     }
 
     /// The cursor's display column within visual row `row` (CJK-aware).
@@ -488,7 +541,17 @@ impl Composer {
             }
             col += cw;
         }
-        self.cursor = content_end;
+        // Landing past the row's content: on a SOFT-wrapped row the boundary
+        // index is the NEXT row's start (sentinel overlap), so parking there
+        // would bounce `row_index` forward again and Up/Down could never
+        // leave a full-width row — stop on the row's last char instead. Hard
+        // (newline-terminated) and final rows keep the true end-of-content.
+        let soft = content_end < self.chars.len() && self.chars[content_end] != '\n';
+        self.cursor = if soft {
+            content_end.saturating_sub(1).max(row.start)
+        } else {
+            content_end
+        };
     }
 
     /// `Up`: move the cursor to the previous VISUAL row preserving the display
@@ -554,6 +617,8 @@ impl Composer {
         self.cursor = 0;
         self.browse = None;
         self.stash.clear();
+        self.preferred_col = None;
+        self.revision = self.revision.wrapping_add(1);
         text
     }
 
@@ -583,6 +648,7 @@ impl Composer {
                 self.cursor = self.chars.len();
                 self.browse = None;
                 self.preferred_col = None;
+                self.revision = self.revision.wrapping_add(1);
             }
         }
     }
@@ -592,6 +658,7 @@ impl Composer {
         self.cursor = self.chars.len();
         self.browse = Some(i);
         self.preferred_col = None;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Editing a browsed history entry adopts it as the live buffer. Every
@@ -601,6 +668,7 @@ impl Composer {
         self.browse = None;
         self.stash.clear();
         self.preferred_col = None;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn set_cursor_row_col(&mut self, row: usize, col: usize) {
@@ -700,7 +768,7 @@ impl Renderable for ComposerView<'_> {
         // Seed the model's wrap width so `Up`/`Down` move across the same
         // visual rows the user sees (codex textarea wrap-cache seam).
         self.composer.last_wrap_width.set(inner.width);
-        let rows = wrap_layout(&self.composer.chars, usize::from(inner.width));
+        let rows = self.composer.rows_for(inner.width);
         let cursor_row = row_index(&rows, self.composer.cursor);
         let first_row = Self::first_visible_row(cursor_row, usize::from(inner.height));
         for (dy, row) in rows
@@ -724,8 +792,12 @@ impl Renderable for ComposerView<'_> {
     /// Visual (soft-wrapped) lines at `width`, clamped to
     /// [`MAX_VISIBLE_LINES`], plus the 2 padding rows.
     fn desired_height(&self, width: u16) -> u16 {
-        let inner_w = width.saturating_sub(3); // gutter(2) + right margin(1)
-        let content = wrap_layout(&self.composer.chars, usize::from(inner_w))
+        // Derive the inner width from `inner_rect` so the gutter/margin inset
+        // has a single source of truth (the height fed in is irrelevant).
+        let inner_w = inner_rect(Rect::new(0, 0, width, 3)).width;
+        let content = self
+            .composer
+            .rows_for(inner_w)
             .len()
             .clamp(1, MAX_VISIBLE_LINES);
         u16::try_from(content + 2).unwrap_or(u16::MAX)
@@ -736,7 +808,7 @@ impl Renderable for ComposerView<'_> {
         if inner.width == 0 || inner.height == 0 {
             return None;
         }
-        let rows = wrap_layout(&self.composer.chars, usize::from(inner.width));
+        let rows = self.composer.rows_for(inner.width);
         let cursor_row = row_index(&rows, self.composer.cursor);
         let disp_col = self.composer.display_col_in(&rows[cursor_row]);
         let first_row = Self::first_visible_row(cursor_row, usize::from(inner.height));
@@ -1189,6 +1261,46 @@ mod tests {
             c.cursor_row_col(),
             (0, 4),
             "cursor moves to display col 4 of the first visual row"
+        );
+    }
+
+    #[test]
+    fn up_traverses_full_width_soft_rows_without_sticking() {
+        // Regression (review #1): an unbroken word wraps into FULL-width rows
+        // whose content end equals the next row's start; landing there bounced
+        // the cursor back down and Up could never leave the last row.
+        let mut c = typed("aaaaaaaaaaaa"); // 12 chars, inner width 4 → 3 rows
+        let area = Rect::new(0, 0, 7, 5); // inner width 4
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&c).render(area, &mut buf);
+        assert_eq!(c.cursor_row_col(), (0, 12));
+        c.up(); // row 2 → row 1 (lands on its last char, col 3)
+        assert_eq!(c.cursor_row_col(), (0, 7), "one visual row up");
+        c.up(); // row 1 → row 0
+        assert_eq!(c.cursor_row_col(), (0, 3), "two visual rows up");
+        c.up(); // row 0 → history (empty) → no-op
+        assert_eq!(c.cursor_row_col(), (0, 3), "first row recalls history");
+    }
+
+    #[test]
+    fn word_motions_clear_the_sticky_column() {
+        // Regression (review #5): move_word_right/next_word_start/word_end
+        // must drop preferred_col like every other horizontal motion.
+        let mut c = typed("aaaaaaaa\nbb cc\ndd");
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&c).render(area, &mut buf);
+        c.up(); // (2,2) → (1,2)? cursor ends at (1,2); seeds preferred_col 2
+        c.up(); // → (0,2)
+        assert_eq!(c.cursor_row_col(), (0, 2));
+        c.up(); // history (empty) no-op; preferred_col still armed
+        c.move_word_right(); // horizontal word motion must clear stickiness
+        let here = c.cursor_row_col().1;
+        c.down();
+        assert_eq!(
+            c.cursor_row_col(),
+            (1, here.min(5)),
+            "Down uses the CURRENT column, not the stale sticky one"
         );
     }
 

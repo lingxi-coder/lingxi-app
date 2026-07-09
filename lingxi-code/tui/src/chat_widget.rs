@@ -55,8 +55,15 @@ pub enum ChatOutcome {
     Quit,
     /// The user submitted `prompt`; the caller should drive a turn for it,
     /// honoring the paired [`CancellationToken`] (the widget cancels it on
-    /// Ctrl-C).
-    Submit(String, CancellationToken),
+    /// Ctrl-C). Carries the image files queued for this turn (pasted paths,
+    /// clipboard images, `/image`) so every Submit consumer receives them
+    /// atomically with the prompt.
+    Submit(String, Vec<std::path::PathBuf>, CancellationToken),
+    /// Ctrl+V/Alt+V: read an IMAGE from the system clipboard. The read + PNG
+    /// encode can take hundreds of ms, so the caller runs it OFF the render
+    /// thread and feeds the result back via
+    /// [`ChatWidget::clipboard_image_result`].
+    PasteImage,
     /// The user picked a model in `/model`; the caller should switch to
     /// `(request_model, profile)` via `OrchestratorHandle::switch_model`.
     SwitchModel(String, Option<String>),
@@ -518,35 +525,60 @@ impl ChatWidget {
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        self.bottom_pane.set_task_running(self.pane_status());
         // Ctrl+V / Alt+V: paste an IMAGE from the system clipboard (codex
         // `chatwidget/interaction.rs`). Bracketed paste only carries text —
-        // a copied screenshot never arrives as `Event::Paste`, so it needs
-        // an explicit chord read off the native clipboard.
-        if key.kind == crossterm::event::KeyEventKind::Press
-            && key
-                .modifiers
-                .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+        // a copied screenshot never arrives as `Event::Paste`, so it needs an
+        // explicit chord. Gated on no modal view owning the keyboard, and the
+        // (potentially slow) clipboard read runs OFF this render thread: the
+        // app spawns it and delivers via [`Self::clipboard_image_result`].
+        if !self.bottom_pane.has_active_view()
+            && key.kind == crossterm::event::KeyEventKind::Press
+            && key.modifiers.intersects(
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+            )
             && matches!(key.code, crossterm::event::KeyCode::Char(c) if c.eq_ignore_ascii_case(&'v'))
         {
-            match crate::clipboard_paste::paste_image_to_temp_png() {
-                Ok((path, _info)) => {
-                    return self.push_image(&path.display().to_string());
-                }
-                Err(err) => {
-                    self.transcript.push_message(RenderedMessage::SystemText {
-                        body: format!("Failed to paste image: {err}"),
-                        timestamp: 0,
-                        is_error: true,
-                    });
-                    return ChatOutcome::Continue;
-                }
-            }
+            self.open_next_queued_permission();
+            return ChatOutcome::PasteImage;
         }
-        self.bottom_pane.set_task_running(self.pane_status());
         let outcome = self.bottom_pane.handle_key(key);
         let outcome = self.on_pane_outcome(outcome);
         self.open_next_queued_permission();
         outcome
+    }
+
+    /// Toggle the non-bracketed paste-burst heuristic (tests/embedders;
+    /// codex `set_disable_paste_burst`).
+    pub fn set_disable_paste_burst(&mut self, disabled: bool) {
+        self.bottom_pane.set_disable_paste_burst(disabled);
+    }
+
+    /// Tick hook: flush a DUE non-bracketed paste burst (held first char or
+    /// completed burst). The app calls this once per UI tick; a burst-pasted
+    /// image path routes through the normal pane-outcome mapping (it becomes
+    /// an image message exactly like a bracketed paste of that path).
+    pub fn pump_paste_burst(&mut self) -> ChatOutcome {
+        match self.bottom_pane.flush_paste_burst_if_due() {
+            Some(outcome) => self.on_pane_outcome(outcome),
+            None => ChatOutcome::Continue,
+        }
+    }
+
+    /// Deliver the off-thread clipboard-image read's result (the
+    /// [`ChatOutcome::PasteImage`] round-trip): attach the temp PNG on
+    /// success, surface the failure as a red transcript line otherwise.
+    pub fn clipboard_image_result(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(path) => {
+                let _ = self.push_image(&path);
+            }
+            Err(err) => self.transcript.push_message(RenderedMessage::SystemText {
+                body: format!("Failed to paste image: {err}"),
+                timestamp: 0,
+                is_error: true,
+            }),
+        }
     }
 
     /// Route a bracketed paste through the pane (active view first, then
@@ -1809,6 +1841,9 @@ impl ChatWidget {
         // (review M1) Reset per-turn side-tables so `/clear` starts clean.
         self.tool_inputs.clear();
         self.current_todo = None;
+        // The queued-image cells just vanished from the screen; keeping the
+        // paths would silently attach them to a later unrelated message.
+        self.pending_images.clear();
     }
 
     /// `/image <path>`: record an image message for `path` so a graphics
@@ -1933,7 +1968,7 @@ impl ChatWidget {
         });
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
-        ChatOutcome::Submit(content, token)
+        ChatOutcome::Submit(content, self.take_pending_images(), token)
     }
 
     /// Render read-only command output into the transcript as a `system`
@@ -2592,7 +2627,7 @@ impl ChatWidget {
         });
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
-        ChatOutcome::Submit(text, token)
+        ChatOutcome::Submit(text, self.take_pending_images(), token)
     }
 
     /// Execute a command effect a view requested via
@@ -2616,6 +2651,20 @@ impl ChatWidget {
     /// by `/image <path>` and pasted-image-path routing.
     fn push_image(&mut self, path: &str) -> ChatOutcome {
         let path = path.trim().to_string();
+        // Queued paths are read + base64-encoded at SUBMIT time, where a bad
+        // path aborts the whole turn (the user's text prompt included) — so
+        // reject missing/non-image files up front with a visible error
+        // instead of letting `/image typo.png` poison the next turn.
+        if !crate::bottom_pane::is_image_path(&path) {
+            self.transcript.push_message(RenderedMessage::SystemText {
+                body: format!(
+                    "Cannot attach image (not an existing .png/.jpg/.jpeg/.gif/.webp/.bmp file): {path}"
+                ),
+                timestamp: 0,
+                is_error: true,
+            });
+            return ChatOutcome::Continue;
+        }
         let name = std::path::Path::new(&path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -2632,9 +2681,9 @@ impl ChatWidget {
     }
 
     /// Drain the images queued for the next turn (pasted paths, clipboard
-    /// images, `/image`). Called by the app when a prompt is submitted; the
-    /// paths ride along to `run_turn_streaming_with_images`.
-    pub fn take_pending_images(&mut self) -> Vec<std::path::PathBuf> {
+    /// images, `/image`) into the [`ChatOutcome::Submit`] payload; the paths
+    /// ride along to `run_turn_streaming_with_images`.
+    fn take_pending_images(&mut self) -> Vec<std::path::PathBuf> {
         std::mem::take(&mut self.pending_images)
     }
 
@@ -2773,7 +2822,11 @@ mod tests {
     }
 
     fn widget() -> ChatWidget {
-        ChatWidget::new(Vec::new(), SessionInfo::default())
+        let mut w = ChatWidget::new(Vec::new(), SessionInfo::default());
+        // Synthetic test keystrokes arrive at machine speed — exactly the
+        // paste-burst signature — so tests opt out.
+        w.set_disable_paste_burst(true);
+        w
     }
 
     #[test]
@@ -2788,15 +2841,16 @@ mod tests {
         let mut w = widget();
         w.handle_paste(&path.display().to_string());
         std::fs::remove_file(&path).ok();
-        assert_eq!(
-            w.take_pending_images(),
-            vec![path.clone()],
-            "pasted image path queued for the next turn"
-        );
-        assert!(
-            w.take_pending_images().is_empty(),
-            "queue drains on submit; images never leak into a later turn"
-        );
+        typ(&mut w, "hi");
+        let ChatOutcome::Submit(_, images, _) = w.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        assert_eq!(images, vec![path.clone()], "image rides the Submit payload");
+        typ(&mut w, "again");
+        let ChatOutcome::Submit(_, images, _) = w.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        assert!(images.is_empty(), "queue drained; nothing leaks to later turns");
     }
 
     fn typ(widget: &mut ChatWidget, s: &str) {
@@ -2894,7 +2948,7 @@ mod tests {
     fn core_bridge_inject_message_submits_template_but_displays_invocation() {
         let mut widget = widget();
         let outcome = widget.cmd_commit("");
-        let ChatOutcome::Submit(payload, _token) = outcome else {
+        let ChatOutcome::Submit(payload, _, _token) = outcome else {
             panic!("prompt-type command must queue a turn");
         };
         // The model payload is the full expanded handler template …
@@ -3112,7 +3166,7 @@ mod tests {
         let (mut widget, _mock) = widget_with_orchestrator();
         let outcome = widget.cmd_goal("finish the task");
         assert!(
-            matches!(outcome, ChatOutcome::Submit(_, _)),
+            matches!(outcome, ChatOutcome::Submit(..)),
             "/goal <condition> arms a turn (InjectMessage)"
         );
         let outcome = widget.cmd_goal("");
@@ -3212,7 +3266,7 @@ mod tests {
     fn tui_prompt_command_expands_embedded_shell_before_submit() {
         let mut widget = widget();
         widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: false }));
-        let ChatOutcome::Submit(payload, _token) = widget.cmd_commit("") else {
+        let ChatOutcome::Submit(payload, _, _token) = widget.cmd_commit("") else {
             panic!("/commit must submit a turn");
         };
         assert!(
@@ -3316,6 +3370,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        widget.set_disable_paste_burst(true);
         // The /model picker gates by live provider availability: anthropic must
         // be connected for its (curated) models to show.
         widget.set_connect_data(
@@ -3477,7 +3532,7 @@ mod tests {
     fn event_lifecycle_started_deltas_tools_ended() {
         let mut widget = widget();
         let outcome = submit_command(&mut widget, "go");
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "go"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "go"));
         assert!(widget.turn_running());
 
         // TurnStarted opens an empty active assistant cell and starts the clock.
@@ -3553,7 +3608,7 @@ mod tests {
     fn ctrl_c_cancels_the_turn_and_clears_activity() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, token) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, token) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -3600,7 +3655,7 @@ mod tests {
 
         // Unregistered input falls through as a normal prompt.
         let outcome = submit_command(&mut widget, "/frobnicate");
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "/frobnicate"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "/frobnicate"));
 
         // Argument gating mirrors the registry: no-arg commands reject
         // trailing args, arg-taking commands require them.
@@ -3610,13 +3665,65 @@ mod tests {
 
     #[test]
     fn slash_image_dispatches_with_arguments() {
+        let path = std::env::temp_dir().join(format!("tui-cw-slash-image-{}.png", std::process::id()));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut widget = widget();
-        let outcome = submit_command(&mut widget, "/image /tmp/pic.png");
+        let outcome = submit_command(&mut widget, &format!("/image {}", path.display()));
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert_eq!(cells(&widget).len(), 1);
         let image = cell::<UserImageCell>(&widget, 0);
-        assert_eq!(image.source_path(), Some("/tmp/pic.png"));
-        assert_eq!(image.metadata(), Some("pic.png"));
+        assert_eq!(image.source_path(), Some(path.display().to_string().as_str()));
+        assert_eq!(
+            image.metadata(),
+            path.file_name().and_then(|n| n.to_str())
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn slash_image_rejects_missing_path_without_queueing() {
+        // Review #2: a bad `/image` path used to queue and abort the NEXT
+        // turn wholesale — now it errors immediately and queues nothing.
+        let mut widget = widget();
+        let outcome = submit_command(&mut widget, "/image /nonexistent/typo.png");
+        assert!(matches!(outcome, ChatOutcome::Continue));
+        typ(&mut widget, "hi");
+        let ChatOutcome::Submit(_, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        assert!(images.is_empty(), "bad path must not ride the next turn");
+    }
+
+    #[test]
+    fn clear_transcript_drops_queued_images() {
+        // Review #3: `/clear` removes the image cell from the screen, so the
+        // queued path must not silently attach to a later message.
+        let path = std::env::temp_dir().join(format!("tui-cw-clear-image-{}.png", std::process::id()));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
+        let mut widget = widget();
+        widget.handle_paste(&path.display().to_string());
+        std::fs::remove_file(&path).ok();
+        widget.clear_transcript();
+        typ(&mut widget, "hi");
+        let ChatOutcome::Submit(_, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
+            panic!("expected submit");
+        };
+        assert!(images.is_empty(), "cleared images must not ride a later turn");
+    }
+
+    #[test]
+    fn ctrl_v_requests_clipboard_image_only_without_a_modal() {
+        // Review #4/#6: the chord produces a PasteImage outcome (no clipboard
+        // IO on the render thread) and never fires behind a modal view.
+        let mut widget = widget();
+        let chord = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(matches!(widget.handle_key(chord), ChatOutcome::PasteImage));
+        let (exchange, _rx) = tool_exchange();
+        widget.open_permission(exchange);
+        assert!(
+            !matches!(widget.handle_key(chord), ChatOutcome::PasteImage),
+            "a modal owns the keyboard: the chord must not paste"
+        );
     }
 
     #[test]
@@ -3684,6 +3791,7 @@ mod tests {
         // channels unsent (the gate maps a dropped resp_tx to a deny) instead
         // of leaking unanswerable prompts.
         let mut widget = ChatWidget::new(Vec::new(), SessionInfo::default());
+        widget.set_disable_paste_burst(true);
         let (open, open_rx) = tool_exchange();
         let (queued, queued_rx) = tool_exchange();
         widget.open_permission(open);
@@ -3746,6 +3854,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        widget.set_disable_paste_burst(true);
         widget.set_connect_data(
             std::collections::BTreeMap::new(),
             [("anthropic".to_string(), true)].into_iter().collect(),
@@ -3863,6 +3972,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        widget.set_disable_paste_burst(true);
 
         widget.set_current_model("gpt-5.5", Some("github-copilot"));
         let current: Vec<&str> = widget
@@ -3934,6 +4044,7 @@ mod tests {
         };
         for cmd in ["/skills", "/memory", "/status", "/config"] {
             let mut widget = ChatWidget::new(Vec::new(), session.clone());
+        widget.set_disable_paste_burst(true);
             let outcome = submit_command(&mut widget, cmd);
             assert!(matches!(outcome, ChatOutcome::Continue), "{cmd}");
             assert!(
@@ -4174,6 +4285,7 @@ mod tests {
             ],
             SessionInfo::default(),
         );
+        widget.set_disable_paste_burst(true);
         assert!(matches!(
             submit_command(&mut widget, "/stats"),
             ChatOutcome::Continue
@@ -4222,6 +4334,7 @@ mod tests {
             ],
             SessionInfo::default(),
         );
+        widget.set_disable_paste_burst(true);
         widget.set_export_dir(dir.clone());
 
         // Named export writes the committed cells' raw (copy-friendly) text.
@@ -4289,6 +4402,7 @@ mod tests {
             ],
             SessionInfo::default(),
         );
+        widget.set_disable_paste_burst(true);
         let outcome = submit_command(&mut widget, "/copy");
         assert!(matches!(outcome, ChatOutcome::CopyToClipboard(ref t) if t == "newest"));
         assert_eq!(
@@ -4319,6 +4433,7 @@ mod tests {
             }],
             SessionInfo::default(),
         );
+        widget.set_disable_paste_burst(true);
         let mut terminal = test_terminal();
         widget.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(widget.transcript().committed_to_terminal(), 1);
@@ -4638,6 +4753,7 @@ mod tests {
             }],
             SessionInfo::default(),
         );
+        widget.set_disable_paste_burst(true);
         widget
             .bottom_pane
             .show_view(Box::new(CommandStub(Some(CommandAction::ClearTranscript))));

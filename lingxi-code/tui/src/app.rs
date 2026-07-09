@@ -146,6 +146,11 @@ pub struct RataApp<'cb> {
     /// Permission requests from the permission bridge, drained into the
     /// widget right after the turn events (the widget serializes prompts).
     permission_rx: Receiver<PermissionExchange>,
+    /// Off-thread clipboard-image paste results (`ChatOutcome::PasteImage`):
+    /// the loop spawns the (slow) clipboard read + PNG encode on a worker
+    /// thread and drains its result here each tick.
+    paste_tx: std::sync::mpsc::Sender<Result<String, String>>,
+    paste_rx: std::sync::mpsc::Receiver<Result<String, String>>,
     /// Embedder callbacks executed for app-level widget outcomes.
     callbacks: AppCallbacks<'cb>,
     /// Redraw cadence: the input-poll timeout, i.e. how long a tick waits for
@@ -165,10 +170,13 @@ impl<'cb> RataApp<'cb> {
         permission_rx: Receiver<PermissionExchange>,
         callbacks: AppCallbacks<'cb>,
     ) -> Self {
+        let (paste_tx, paste_rx) = std::sync::mpsc::channel();
         Self {
             chat_widget: ChatWidget::new(messages, session),
             events_rx,
             permission_rx,
+            paste_tx,
+            paste_rx,
             callbacks,
             redraw_interval: Duration::from_millis(50),
         }
@@ -193,6 +201,15 @@ impl<'cb> RataApp<'cb> {
             while let Ok(exchange) = self.permission_rx.try_recv() {
                 self.open_permission(exchange);
             }
+            // Off-thread clipboard-image paste results (Ctrl+V): attach the
+            // temp PNG (or surface the error) as soon as the worker delivers.
+            while let Ok(result) = self.paste_rx.try_recv() {
+                self.chat_widget.clipboard_image_result(result);
+            }
+            // Flush a due non-bracketed paste burst (held first char renders
+            // as typing; a completed burst lands as one paste). The pump
+            // never submits, so the outcome needs no callback dispatch.
+            let _ = self.chat_widget.pump_paste_burst();
             // Hook-returned terminal escapes (`TurnEvent::TerminalSequence`,
             // already validated + BEL-normalized) write through to the tty
             // BEFORE the draw so the diff pass never interleaves with them.
@@ -232,12 +249,24 @@ impl<'cb> RataApp<'cb> {
                         self.chat_widget.cancel_active_turn();
                         return Ok(AppExit::Rewind { message, scope });
                     }
-                    ChatOutcome::Submit(prompt, token) => {
-                        // Pasted/attached images queued since the last turn
-                        // ride along with the prompt (they become
-                        // `ContentBlock::Image` on the user message).
-                        let images = self.chat_widget.take_pending_images();
+                    ChatOutcome::Submit(prompt, images, token) => {
+                        // The queued images ride inside the Submit payload
+                        // (they become `ContentBlock::Image` on the user
+                        // message).
                         (self.callbacks.on_submit)(prompt, images, token);
+                    }
+                    ChatOutcome::PasteImage => {
+                        // Clipboard image read + PNG encode can take hundreds
+                        // of ms on a large screenshot — run it OFF the render
+                        // thread; the result lands in `paste_rx` (drained at
+                        // the top of every tick).
+                        let tx = self.paste_tx.clone();
+                        std::thread::spawn(move || {
+                            let result = crate::clipboard_paste::paste_image_to_temp_png()
+                                .map(|(path, _info)| path.display().to_string())
+                                .map_err(|e| e.to_string());
+                            let _ = tx.send(result);
+                        });
                     }
                     ChatOutcome::SwitchModel(model, profile) => {
                         (self.callbacks.on_switch_model)(model, profile);
@@ -596,7 +625,7 @@ mod tests {
     fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         let (_events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_permission_tx, permission_rx) = tokio::sync::mpsc::channel(1);
-        RataApp::new(
+        let mut app = RataApp::new(
             messages,
             SessionInfo::default(),
             events_rx,
@@ -616,7 +645,11 @@ mod tests {
                 on_sandbox_action: Box::new(|_| {}),
                 on_task_action: Box::new(|_| {}),
             },
-        )
+        );
+        // Synthetic test keystrokes arrive at machine speed — exactly the
+        // paste-burst signature — so tests opt out.
+        app.chat_widget.set_disable_paste_burst(true);
+        app
     }
 
     fn typ(app: &mut RataApp, s: &str) {
@@ -664,7 +697,7 @@ mod tests {
         );
         // Plain Enter submits the full multi-line buffer.
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "line one\nline two"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "line one\nline two"));
         assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
     }
 
@@ -705,7 +738,7 @@ mod tests {
         }
         assert_eq!(app.chat_widget.bottom_pane().composer().text(), "hi");
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi"));
         assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
         assert!(app.chat_widget.turn_running());
         assert_eq!(cells(&app).len(), 1);
@@ -740,7 +773,7 @@ mod tests {
     fn ctrl_c_cancels_turn_then_needs_two_presses_to_quit() {
         let mut app = test_app(Vec::new());
         app.on_key(press(KeyCode::Char('x')));
-        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert!(!token.is_cancelled());
@@ -838,13 +871,19 @@ mod tests {
 
     #[test]
     fn slash_image_pushes_image_message() {
+        let path = std::env::temp_dir().join(format!("tui-app-slash-image-{}.png", std::process::id()));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut app = test_app(Vec::new());
-        let outcome = submit_command(&mut app, "/image /tmp/pic.png");
+        let outcome = submit_command(&mut app, &format!("/image {}", path.display()));
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert_eq!(cells(&app).len(), 1);
         let image = cell::<UserImageCell>(&app, 0);
-        assert_eq!(image.source_path(), Some("/tmp/pic.png"));
-        assert_eq!(image.metadata(), Some("pic.png"));
+        assert_eq!(image.source_path(), Some(path.display().to_string().as_str()));
+        assert_eq!(
+            image.metadata(),
+            path.file_name().and_then(|n| n.to_str())
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -882,7 +921,7 @@ mod tests {
         typ(&mut app, "hi");
         app.on_key(press(KeyCode::Esc)); // → Normal
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi"));
     }
 
     #[test]
@@ -971,7 +1010,7 @@ mod tests {
     fn esc_interrupts_running_turn_then_quits_when_idle() {
         let mut app = test_app(Vec::new());
         typ(&mut app, "go");
-        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         app.apply_turn_event(TurnEvent::TurnStarted);
@@ -991,7 +1030,7 @@ mod tests {
     fn esc_routes_to_active_view_before_the_interrupt_policy() {
         let mut app = test_app(Vec::new());
         typ(&mut app, "go");
-        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         let (exchange, resp_rx) = tool_exchange();
@@ -1019,7 +1058,7 @@ mod tests {
     fn esc_dismisses_completion_before_the_interrupt_policy() {
         let mut app = test_app(Vec::new());
         typ(&mut app, "go");
-        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         // Layer 2 — the completion popup owns Esc while open.
@@ -1044,7 +1083,7 @@ mod tests {
     fn ctrl_c_routes_to_active_view_before_the_interrupt_policy() {
         let mut app = test_app(Vec::new());
         typ(&mut app, "go");
-        let ChatOutcome::Submit(_, token) = app.on_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         let (exchange, _resp_rx) = tool_exchange();
@@ -1199,7 +1238,7 @@ mod tests {
         }
         let outcome = app.on_key(press(KeyCode::Enter));
         // Unrecognized slash command falls through as a normal prompt.
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "/frobnicate"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "/frobnicate"));
         assert_eq!(cells(&app).len(), 1);
     }
 
@@ -1456,7 +1495,7 @@ mod tests {
         let mut app = test_app(Vec::new());
         typ(&mut app, "  hi there  ");
         let outcome = app.on_key(press(KeyCode::Enter));
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, _) if p == "hi there"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "hi there"));
         assert_eq!(cell::<UserTextCell>(&app, 0).body(), "hi there");
     }
 
@@ -1539,7 +1578,7 @@ mod tests {
         assert_eq!(app.chat_widget.bottom_pane().composer().text(), "x");
         assert!(matches!(
             app.on_key(press(KeyCode::Enter)),
-            ChatOutcome::Submit(ref p, _) if p == "x"
+            ChatOutcome::Submit(ref p, ..) if p == "x"
         ));
     }
 

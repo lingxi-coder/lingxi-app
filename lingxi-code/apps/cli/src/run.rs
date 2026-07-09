@@ -1488,7 +1488,7 @@ async fn mount_resumed_tui(
     argv: &Argv,
     session_id: uuid::Uuid,
     messages: Vec<JsonlMessage>,
-    carried_model: crate::mode::RemountModel,
+    carried_state: Option<crate::mode::RemountState>,
 ) -> crate::mode::RunOutcome {
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
@@ -1520,19 +1520,21 @@ async fn mount_resumed_tui(
                 .await;
         }
     }
-    // MODEL carry (parity with claude-code's in-place `/rewind`, which is a React
-    // setState that never rebuilds and so keeps `mainLoopModel`): apply the model
-    // the OUTGOING runtime had, carried IN MEMORY through the `RunOutcome`, so the
-    // rebuilt runtime opens on the user's `/model` choice rather than the
-    // boot/config model. `None` on a cold `--resume` (keeps the config model).
-    // A pure session-state write, run BEFORE `run_ratatui` — which reads a fresh
-    // status snapshot to build `session.models`, so the display follows too.
-    if let Some((model, profile)) = carried_model {
-        let _ = tui_build
-            .runtime
-            .orchestrator
-            .switch_model(&model, profile.as_deref())
-            .await;
+    // LIVE-STATE carry (parity with claude-code's in-place `/rewind`, a React
+    // setState that never rebuilds and so keeps model + fast-mode + plan-mode):
+    // apply the state the OUTGOING runtime had, carried IN MEMORY through the
+    // `RunOutcome`, so the rebuilt runtime keeps the user's mid-session toggles
+    // rather than the boot/config defaults. `None` on a cold `--resume`. All are
+    // pure session-state writes, run BEFORE `run_ratatui` — model drives the
+    // `session.models` the freshly-read status snapshot builds (display follows);
+    // fast/plan are read live by the turn loop, no cached display to seed.
+    if let Some(state) = carried_state {
+        let orch = &tui_build.runtime.orchestrator;
+        if let Some((model, profile)) = state.model {
+            let _ = orch.switch_model(&model, profile.as_deref()).await;
+        }
+        let _ = orch.set_fast_mode(state.fast_mode).await;
+        let _ = orch.set_plan_mode(state.plan_mode).await;
     }
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
     // launch the ratatui backend with that replayed scrollback. Resume has no
@@ -1576,10 +1578,10 @@ pub(crate) async fn drive_tui_switch_loop(
     loop {
         match outcome {
             crate::mode::RunOutcome::Exit(code) => return code,
-            crate::mode::RunOutcome::SwitchTo { target, model } => match load_resume_session(target).await {
+            crate::mode::RunOutcome::SwitchTo { target, state } => match load_resume_session(target).await {
                 Ok(messages) => {
                     current = Some(target);
-                    outcome = mount_resumed_tui(argv, target, messages, model).await;
+                    outcome = mount_resumed_tui(argv, target, messages, state).await;
                 }
                 Err(e) => {
                     // The outgoing runtime is already unwound, so we cannot just
@@ -1595,7 +1597,7 @@ pub(crate) async fn drive_tui_switch_loop(
                             match load_resume_session(fallback).await {
                                 Ok(messages) => {
                                     outcome =
-                                        mount_resumed_tui(argv, fallback, messages, model).await;
+                                        mount_resumed_tui(argv, fallback, messages, state).await;
                                 }
                                 Err(e2) => {
                                     // Double failure: even the known-good session
@@ -1612,7 +1614,7 @@ pub(crate) async fn drive_tui_switch_loop(
                     }
                 }
             },
-            crate::mode::RunOutcome::BranchFrom { title, model } => {
+            crate::mode::RunOutcome::BranchFrom { title, state } => {
                 let Some(source) = current else {
                     eprintln!("lingxi-cli: cannot branch — no active session");
                     return exit_codes::RUNTIME_ERROR;
@@ -1642,7 +1644,7 @@ pub(crate) async fn drive_tui_switch_loop(
                 match load_resume_session(mount_target).await {
                     Ok(messages) => {
                         current = Some(mount_target);
-                        outcome = mount_resumed_tui(argv, mount_target, messages, model).await;
+                        outcome = mount_resumed_tui(argv, mount_target, messages, state).await;
                     }
                     Err(e) => {
                         // The branch (or fallback) target won't load. Fall back to
@@ -1652,7 +1654,7 @@ pub(crate) async fn drive_tui_switch_loop(
                             SwitchRecovery::Remount(fallback) => {
                                 match load_resume_session(fallback).await {
                                     Ok(messages) => {
-                                        outcome = mount_resumed_tui(argv, fallback, messages, model).await;
+                                        outcome = mount_resumed_tui(argv, fallback, messages, state).await;
                                     }
                                     Err(e2) => {
                                         eprintln!(
@@ -1668,7 +1670,7 @@ pub(crate) async fn drive_tui_switch_loop(
                     }
                 }
             }
-            crate::mode::RunOutcome::RewindTo { message, scope, model } => {
+            crate::mode::RunOutcome::RewindTo { message, scope, state } => {
                 use tui::bottom_pane::view::RewindScope;
                 let Some(source) = current else {
                     eprintln!("lingxi-cli: cannot rewind — no active session");
@@ -1710,7 +1712,7 @@ pub(crate) async fn drive_tui_switch_loop(
                 match load_resume_session(mount_target).await {
                     Ok(messages) => {
                         current = Some(mount_target);
-                        outcome = mount_resumed_tui(argv, mount_target, messages, model).await;
+                        outcome = mount_resumed_tui(argv, mount_target, messages, state).await;
                     }
                     // A conversation-scope rewind can legitimately truncate the
                     // transcript to EMPTY (rewinding to before the FIRST turn).
@@ -1724,7 +1726,7 @@ pub(crate) async fn drive_tui_switch_loop(
                     Err(LoaderError::EmptyDirectory) if scope != RewindScope::CodeOnly => {
                         eprintln!("lingxi-cli: rewound to the start — empty conversation");
                         current = Some(mount_target);
-                        outcome = mount_resumed_tui(argv, mount_target, Vec::new(), model).await;
+                        outcome = mount_resumed_tui(argv, mount_target, Vec::new(), state).await;
                     }
                     Err(e) => {
                         eprintln!("lingxi-cli: couldn't open {mount_target} after rewind: {e}");
@@ -1732,7 +1734,7 @@ pub(crate) async fn drive_tui_switch_loop(
                             SwitchRecovery::Remount(fallback) => {
                                 match load_resume_session(fallback).await {
                                     Ok(messages) => {
-                                        outcome = mount_resumed_tui(argv, fallback, messages, model).await;
+                                        outcome = mount_resumed_tui(argv, fallback, messages, state).await;
                                     }
                                     Err(e2) => {
                                         eprintln!(

@@ -224,19 +224,27 @@ pub async fn dispatch(
 /// process exit code) or follow an in-session `/resume` switch by re-mounting
 /// the chosen session in-process (writer retargeted) — never an in-place
 /// `resume_session` swap, which would fork the conversation across files.
-/// The in-session active `(request_model, provider_profile)` carried through a
-/// re-mount so the rebuilt runtime keeps the user's `/model` choice instead of
-/// reverting to the boot/config model. `None` on a cold `--resume` (the runtime
-/// opens on the config/CLI model, matching claude-code).
+/// The in-session live session state carried through a re-mount so the rebuilt
+/// runtime keeps the user's mid-session toggles instead of reverting to the
+/// boot/config defaults. `None` (the whole `Option`) on a cold `--resume` — the
+/// runtime opens on config/CLI defaults, matching claude-code.
 ///
 /// PARITY NOTE: claude-code's `/rewind`/`/resume` are in-place React `setState`
-/// transitions — the process/runtime is never rebuilt, so `mainLoopModel` (a
-/// separate state) naturally persists and claude-code has NO per-session model
-/// persistence at all. Our synchronous ratatui loop must tear down + rebuild
-/// (the JSONL-writer-retarget seam), so we carry the model IN MEMORY here to
-/// reproduce the same observable behavior WITHOUT writing a `lastModel` key the
-/// upstream project config never had.
-pub(crate) type RemountModel = Option<(String, Option<String>)>;
+/// transitions — the process/runtime is never rebuilt, so `mainLoopModel`,
+/// fast-mode and plan-mode (all separate state) naturally persist, and
+/// claude-code has NO per-session persistence for any of them. Our synchronous
+/// ratatui loop must tear down + rebuild (the JSONL-writer-retarget seam), so we
+/// carry this state IN MEMORY to reproduce the same observable behavior WITHOUT
+/// writing config keys the upstream never had.
+pub(crate) struct RemountState {
+    /// Active `(request_model, provider_profile)` — `None` resolves the model
+    /// by-id (no profile). Applied via `switch_model`.
+    pub model: Option<(String, Option<String>)>,
+    /// `/fast` toggle. Applied via `set_fast_mode`.
+    pub fast_mode: bool,
+    /// `/plan` mode. Applied via `set_plan_mode`.
+    pub plan_mode: bool,
+}
 
 pub(crate) enum RunOutcome {
     /// The TUI exited normally; carry the process exit code.
@@ -247,7 +255,7 @@ pub(crate) enum RunOutcome {
     /// [`RemountModel`].
     SwitchTo {
         target: uuid::Uuid,
-        model: RemountModel,
+        state: Option<RemountState>,
     },
     /// `/branch`: fork the session driving the loop into a new session and
     /// switch into it. [`crate::run::drive_tui_switch_loop`] creates the branch
@@ -256,14 +264,14 @@ pub(crate) enum RunOutcome {
     /// [name]` argument (`None` ⇒ derive the branch name from the first prompt).
     BranchFrom {
         title: Option<String>,
-        model: RemountModel,
+        state: Option<RemountState>,
     },
     /// `/rewind`: restore working tree and/or conversation to `message`, then
     /// re-mount via [`crate::run::mount_resumed_tui`], carrying the model.
     RewindTo {
         message: uuid::Uuid,
         scope: tui::bottom_pane::view::RewindScope,
-        model: RemountModel,
+        state: Option<RemountState>,
     },
 }
 
@@ -827,13 +835,18 @@ pub(crate) async fn run_ratatui(
             );
         }
     }
-    // (/rewind, /resume, /branch re-mount) Capture the in-session active model so
-    // the re-mount can carry it into the rebuilt runtime — see [`RemountModel`]
-    // for why this is in-memory (not a config key). Only consumed by the
-    // re-mount arms below; the plain-quit arm drops it.
-    let carried_model: RemountModel = {
+    // (/rewind, /resume, /branch re-mount) Capture the in-session live state
+    // (model + fast-mode + plan-mode) so the re-mount can carry it into the
+    // rebuilt runtime — see [`RemountState`] for why this is in-memory (not a
+    // config key). Only consumed by the re-mount arms below; the plain-quit arm
+    // drops it.
+    let carried_state = {
         let status = summary_orch.get_status_snapshot().await;
-        Some((status.model, status.model_profile))
+        Some(RemountState {
+            model: Some((status.model, status.model_profile)),
+            fast_mode: summary_orch.fast_mode().await,
+            plan_mode: summary_orch.plan_mode().await,
+        })
     };
     match run_result {
         Ok(Ok(tui::app::AppExit::Quit)) => {
@@ -856,16 +869,16 @@ pub(crate) async fn run_ratatui(
         // so that stdout line would otherwise scroll into the next session.
         Ok(Ok(tui::app::AppExit::SwitchSession(uuid))) => RunOutcome::SwitchTo {
             target: uuid,
-            model: carried_model,
+            state: carried_state,
         },
         Ok(Ok(tui::app::AppExit::BranchSession { title })) => RunOutcome::BranchFrom {
             title,
-            model: carried_model,
+            state: carried_state,
         },
         Ok(Ok(tui::app::AppExit::Rewind { message, scope })) => RunOutcome::RewindTo {
             message,
             scope,
-            model: carried_model,
+            state: carried_state,
         },
         Ok(Err(e)) => {
             eprintln!("lingxi-cli: tui-rata session failed: {e}");

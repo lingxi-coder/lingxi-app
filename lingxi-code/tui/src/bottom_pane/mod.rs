@@ -267,6 +267,14 @@ impl BottomPane {
     /// Open a permission prompt for `exchange`: it owns the keyboard until
     /// the user resolves it and delivers the response through the exchange's
     /// one-shot channel exactly once.
+    /// Whether a stacked modal view (permission prompt, picker, key entry…)
+    /// currently owns the keyboard. Used by the widget to keep global chords
+    /// (Ctrl+V image paste) from firing behind a modal.
+    #[must_use]
+    pub fn has_active_view(&self) -> bool {
+        self.view_stack.active().is_some()
+    }
+
     pub fn show_permission(&mut self, exchange: PermissionExchange) {
         self.view_stack
             .push(Box::new(PermissionView::new(exchange)));
@@ -894,8 +902,9 @@ impl Renderable for BottomPane {
 }
 
 /// Whether `s` is a single existing image file path (used to route pastes to
-/// an image message vs composer text).
-fn is_image_path(s: &str) -> bool {
+/// an image message vs composer text, and by `ChatWidget::push_image` to
+/// reject unreadable `/image` paths before they can poison a turn).
+pub(crate) fn is_image_path(s: &str) -> bool {
     if s.is_empty() || s.contains('\n') {
         return false;
     }

@@ -53,6 +53,16 @@ pub enum AppExit {
     /// re-mounts the new session in-process (same unwind path as
     /// [`Self::SwitchSession`]). Carries the optional `/branch [name]` title.
     BranchSession { title: Option<String> },
+    /// `/rewind`: restore the working tree and/or conversation to `message`.
+    /// The embedder runs the code file-rewind + optional transcript truncation
+    /// off-loop, then re-mounts in-process (same unwind path as
+    /// [`Self::SwitchSession`] / [`Self::BranchSession`]).
+    Rewind {
+        /// The target user-message uuid.
+        message: uuid::Uuid,
+        /// Which parts to restore.
+        scope: crate::bottom_pane::view::RewindScope,
+    },
 }
 
 /// The embedding CLI/orchestrator callbacks the event loop executes when the
@@ -214,6 +224,13 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::BranchSession { title } => {
                         self.chat_widget.cancel_active_turn();
                         return Ok(AppExit::BranchSession { title });
+                    }
+                    // `/rewind`: same switch-safety as SwitchSession/Branch —
+                    // stop the in-flight turn before unwinding so the embedder
+                    // can rewind files / truncate the transcript and re-mount.
+                    ChatOutcome::Rewind { message, scope } => {
+                        self.chat_widget.cancel_active_turn();
+                        return Ok(AppExit::Rewind { message, scope });
                     }
                     ChatOutcome::Submit(prompt, token) => {
                         // Pasted/attached images queued since the last turn

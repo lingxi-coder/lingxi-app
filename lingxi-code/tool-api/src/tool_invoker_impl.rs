@@ -167,6 +167,9 @@ impl ToolInvoker for RegistryToolInvoker {
             // → so a recursive `Agent` call inside this tool computes the child's
             // depth and the resolver can gate `Agent` at `depth < 5`.
             depth: ctx.depth,
+            // Subagent tool edits are not checkpointed in v1 (the main-loop
+            // turn wires `file_history`; subagent contexts do not carry it).
+            file_history: None,
         };
 
         // Drop the progress receiver immediately — production tools tolerate

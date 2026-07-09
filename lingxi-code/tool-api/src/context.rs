@@ -82,6 +82,11 @@ pub struct ToolUseContext {
     /// overwrites it from [`crate::SubagentInvocationContext::depth`] for a
     /// subagent's own tool calls.
     pub depth: u32,
+    /// (`/rewind`) Pre-edit file-history backup hook. The `Edit`/`Write`/
+    /// `NotebookEdit` tools call `track_edit(path)` through this BEFORE writing,
+    /// so `/rewind` can restore the pre-edit content. `None` (tests / no
+    /// checkpointing) makes every write untracked (no behavior change).
+    pub file_history: Option<Arc<dyn traits::FileHistorySink>>,
     // File state cache wired in Plan 10.
 }
 
@@ -121,6 +126,7 @@ impl ToolUseContext {
             cwd: None,
             // Inert seed; model-only context is never handed to a tool.
             depth: 0,
+            file_history: None,
         }
     }
 }

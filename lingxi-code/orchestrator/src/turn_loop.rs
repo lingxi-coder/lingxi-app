@@ -2259,6 +2259,12 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // cwd override); only an isolated subagent sets this.
             cwd: None,
             depth: 0,
+            // (/rewind) Hand each write tool the file-history sink (a trait view
+            // of the shared checkpoint store) so pre-edit content is backed up.
+            file_history: orch
+                .file_history
+                .clone()
+                .map(|fh| fh as std::sync::Arc<dyn traits::FileHistorySink>),
         };
 
         // validate_input gate (claude-code `toolExecution.ts:683-723`): a

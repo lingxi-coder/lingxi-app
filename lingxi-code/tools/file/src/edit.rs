@@ -365,7 +365,7 @@ impl Tool for FileEditTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         // Coerce claude-code's input aliases (path/old_str/new_str/replace_name)
@@ -698,6 +698,12 @@ impl Tool for FileEditTool {
                 }
             }
         };
+
+        // (/rewind) Back up the pre-edit content BEFORE writing so /rewind can
+        // restore it. Best-effort; no-op when checkpointing isn't wired.
+        if let Some(fh) = ctx.file_history.as_ref() {
+            fh.track_edit(&canon.to_string_lossy()).await;
+        }
 
         // Re-apply the original encoding + line endings on write so a CRLF or
         // UTF-16LE file round-trips byte-for-byte (claude-code

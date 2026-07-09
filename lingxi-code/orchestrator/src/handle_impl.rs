@@ -209,6 +209,40 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
     }
 
+    async fn rewind_rows(&self) -> Vec<traits::RewindRowData> {
+        let Some(fh) = self.file_history.as_ref() else {
+            return Vec::new();
+        };
+        let history = self.session.lock().await.history.clone();
+        let mut rows = Vec::new();
+        let mut turn = 0u32;
+        for msg in &history {
+            let uuid = msg.id().as_uuid();
+            // Only turns with a checkpoint are restore points (make_snapshot runs
+            // once per real user turn, so meta/assistant messages are excluded).
+            if !fh.can_restore(uuid) {
+                continue;
+            }
+            turn += 1;
+            let preview: String = msg
+                .text_content()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect();
+            let has_code_changes = fh.has_any_changes(uuid).await;
+            rows.push(traits::RewindRowData {
+                message_uuid: uuid,
+                preview,
+                timestamp_label: format!("turn {turn}"),
+                has_code_changes,
+            });
+        }
+        rows
+    }
+
     /// `/btw` — delegate to the history-inert inherent
     /// [`ConversationOrchestrator::answer_side_question_query`] with a fresh
     /// (un-cancelled) token, mirroring `generate_recap`'s delegation.

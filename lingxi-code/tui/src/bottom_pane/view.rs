@@ -75,6 +75,29 @@ pub enum ViewOutcome {
     /// the runtime is re-mounted in-process against that session (the JSONL
     /// writer is retargeted) — NEVER an in-place `resume_session` swap.
     SwitchSession(uuid::Uuid),
+    /// The `/rewind` picker resolved to `message` with restore `scope`. Like
+    /// [`Self::SwitchSession`] this UNWINDS the app loop (the owner returns
+    /// `AppExit::Rewind`) so the code is rewound and/or the conversation is
+    /// truncated + re-mounted in-process.
+    Rewind {
+        /// The target user-message uuid (the checkpoint key).
+        message: uuid::Uuid,
+        /// Which parts to restore.
+        scope: RewindScope,
+    },
+}
+
+/// Which parts of the session a `/rewind` restore should touch (claude-code
+/// `RestoreOption`, first-cut = the three concrete scopes; `summarize` /
+/// `summarize_up_to` are deferred).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewindScope {
+    /// Restore BOTH the working-tree files and the conversation (claude `both`).
+    CodeAndConversation,
+    /// Restore only the working-tree files to the checkpoint (claude `code`).
+    CodeOnly,
+    /// Restore only the conversation position (claude `conversation`).
+    ConversationOnly,
 }
 
 /// An app-level `/permissions` effect a view can request via
@@ -86,6 +109,7 @@ pub enum ViewOutcome {
 ///
 /// Rule strings are the `"Tool"` / `"Tool(content)"` wire form and are NOT
 /// secret, so the derived `Debug` is fine (unlike [`WebAction`]/[`ConnectAction`]).
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionAction {
     /// Add `rule` to `permissions.{allow|ask|deny}` (keyed by `behavior`) in

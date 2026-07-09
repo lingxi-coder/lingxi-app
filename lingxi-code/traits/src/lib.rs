@@ -28,6 +28,7 @@ pub mod computer_control;
 pub mod coordinator_mode;
 pub mod effect_handler;
 pub mod env;
+pub mod file_history_sink;
 pub mod filesystem;
 pub mod fork_subagent;
 pub mod http;
@@ -60,6 +61,7 @@ pub mod web_search;
 pub mod worktree;
 
 pub use auth::{AuthError, AuthHandle, LoginInfo};
+pub use file_history_sink::FileHistorySink;
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
@@ -88,7 +90,7 @@ pub use orchestrator::{
     CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
     DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpServerInfo, McpStatus,
     MemoryEditorOutcome, ModelListing, OrchestratorHandle, OutputEvent, OutputStream,
-    RateLimitSnapshot, RecapOutcome, StatusSnapshot, TurnOutcome,
+    RateLimitSnapshot, RecapOutcome, RewindRowData, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

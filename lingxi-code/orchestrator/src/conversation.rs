@@ -909,6 +909,12 @@ pub struct ConversationOrchestrator {
     /// fails gracefully. Read-only: recap NEVER writes history/slot (skipTranscript
     /// / skipCacheWrite), unlike `force_compact`.
     pub(crate) recap_runner: Option<Arc<sidequery::ForkedAgentRunner>>,
+    /// (`/rewind`) Shared file-history checkpoint store. The SAME
+    /// `Arc<session::FileHistory>` the CLI holds (for restore + picker rows). The
+    /// turn loop calls `make_snapshot` once per user turn and hands each tool a
+    /// `FileHistorySink` view via `ToolUseContext.file_history` so pre-edit
+    /// content is backed up. `None` ⇒ no checkpointing (edits untracked).
+    pub(crate) file_history: Option<Arc<session::FileHistory>>,
     /// Forced permission decisions keyed by `tool_use_id`, consulted ONCE
     /// (removed on read) by the permission gate in
     /// [`crate::turn_loop::dispatch_tool_uses_tracked`]. Populated transiently by
@@ -1253,6 +1259,7 @@ impl ConversationOrchestrator {
             fork_spawner: None,
             fork_budget: None,
             recap_runner: None,
+            file_history: None,
             orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
@@ -1796,6 +1803,15 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_recap_runner(mut self, runner: Arc<sidequery::ForkedAgentRunner>) -> Self {
         self.recap_runner = Some(runner);
+        self
+    }
+
+    /// (`/rewind`) Share the file-history checkpoint store — the SAME
+    /// `Arc<session::FileHistory>` the CLI holds for restore + picker rows. The
+    /// turn loop then snapshots each turn and tracks tool edits.
+    #[must_use]
+    pub fn with_file_history(mut self, file_history: Arc<session::FileHistory>) -> Self {
+        self.file_history = Some(file_history);
         self
     }
 
@@ -5031,6 +5047,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             s.history.push(user_msg.clone());
         }
         self.persist_message_to_jsonl(&user_msg).await;
+
+        // (/rewind) Snapshot the pre-turn file state, keyed by this user
+        // message, so /rewind can restore code (and conversation) to this
+        // point. Persist the index to the transcript so restore (which runs
+        // AFTER the TUI unwinds) + `--resume` can read it back.
+        if let Some(fh) = &self.file_history {
+            let record = fh.make_snapshot(user_msg.id().as_uuid()).await;
+            if let Some(writer) = &self.jsonl_writer {
+                let session_uuid = self.session.lock().await.session_id.as_uuid().to_string();
+                let line = session::file_history::snapshot_line_json(&session_uuid, &record);
+                let _ = writer.append_file_history_snapshot(&line).await;
+            }
+        }
 
         // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
         // first stream is opened. No-op when unregistered.

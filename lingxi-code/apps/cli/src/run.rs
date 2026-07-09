@@ -1651,6 +1651,72 @@ pub(crate) async fn drive_tui_switch_loop(
                     }
                 }
             }
+            crate::mode::RunOutcome::RewindTo { message, scope } => {
+                use tui::bottom_pane::view::RewindScope;
+                let Some(source) = current else {
+                    eprintln!("lingxi-cli: cannot rewind — no active session");
+                    return exit_codes::RUNTIME_ERROR;
+                };
+                let lingxi_home = lingxi_home_dir();
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let cwd_str = cwd.to_string_lossy().into_owned();
+                // 1. Code restore (unless conversation-only): rebuild the
+                //    file-history index from the persisted transcript + rewind
+                //    the working tree to the checkpoint.
+                if scope != RewindScope::ConversationOnly {
+                    match session::file_history::rewind_from_disk(
+                        &lingxi_home,
+                        &cwd_str,
+                        source,
+                        message,
+                    )
+                    .await
+                    {
+                        Ok(files) => eprintln!("lingxi-cli: rewound {} file(s)", files.len()),
+                        Err(e) => eprintln!("lingxi-cli: file rewind failed: {e}"),
+                    }
+                }
+                // 2. Conversation truncation (unless code-only): truncate the
+                //    live transcript in place up to `message`, re-mount same id.
+                let mount_target = if scope != RewindScope::CodeOnly {
+                    match session::rewind_conversation(&lingxi_home, &cwd_str, source, message).await
+                    {
+                        Ok(()) => source,
+                        Err(e) => {
+                            eprintln!("lingxi-cli: conversation rewind failed: {e}");
+                            source
+                        }
+                    }
+                } else {
+                    source
+                };
+                match load_resume_session(mount_target).await {
+                    Ok(messages) => {
+                        current = Some(mount_target);
+                        outcome = mount_resumed_tui(argv, mount_target, messages).await;
+                    }
+                    Err(e) => {
+                        eprintln!("lingxi-cli: couldn't open {mount_target} after rewind: {e}");
+                        match recover_from_failed_switch(current) {
+                            SwitchRecovery::Remount(fallback) => {
+                                match load_resume_session(fallback).await {
+                                    Ok(messages) => {
+                                        outcome = mount_resumed_tui(argv, fallback, messages).await;
+                                    }
+                                    Err(e2) => {
+                                        eprintln!(
+                                            "lingxi-cli: failed to re-mount current session \
+                                             {fallback}: {e2}"
+                                        );
+                                        return exit_codes::RUNTIME_ERROR;
+                                    }
+                                }
+                            }
+                            SwitchRecovery::Exit(code) => return code,
+                        }
+                    }
+                }
+            }
         }
     }
 }

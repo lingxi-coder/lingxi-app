@@ -27,6 +27,7 @@ pub mod permission_view;
 pub mod permissions_editor_view;
 pub mod plugins_view;
 pub mod resume_picker_view;
+pub mod rewind_picker_view;
 pub mod tasks_view;
 pub mod screen_view;
 pub mod theme_picker_view;
@@ -56,9 +57,10 @@ use crate::composer::{Composer, ComposerView};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
+pub use rewind_picker_view::RewindRow;
 pub use view::{
-    BottomPaneView, CommandAction, ConnectAction, PermissionAction, PluginAction, TaskAction,
-    ViewAction, ViewOutcome, WebAction,
+    BottomPaneView, CommandAction, ConnectAction, PermissionAction, PluginAction, RewindScope,
+    TaskAction, ViewAction, ViewOutcome, WebAction,
 };
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
@@ -123,6 +125,15 @@ pub enum BottomPaneOutcome {
     /// A view asks the owner to run a `/plugin` effect (toggle the on-disk
     /// `enabledPlugins` allowlist). The manager stays OPEN, like a `/web` test.
     RunPluginAction(PluginAction),
+    /// The `/rewind` picker resolved: unwind + re-mount (code rewound and/or
+    /// conversation truncated). Surfaced up through `ChatOutcome::Rewind` →
+    /// `AppExit::Rewind`; the picker stack is cleared by `ViewStack::apply`.
+    Rewind {
+        /// The target user-message uuid.
+        message: uuid::Uuid,
+        /// Which parts to restore.
+        scope: crate::bottom_pane::view::RewindScope,
+    },
     /// The `/resume` picker resolved to this session uuid: the owner must
     /// UNWIND its loop and re-mount that session in-process (writer retargeted)
     /// — surfaced up through `ChatOutcome::SwitchSession` → `AppExit`. The
@@ -323,6 +334,14 @@ impl BottomPane {
             .push(Box::new(plugins_view::PluginsView::new(snapshot)));
     }
 
+    /// Open the `/rewind` restore-point picker over `rows` (the session's
+    /// checkpoint index, preloaded at mount via `set_rewind_rows`).
+    pub fn show_rewind_picker(&mut self, rows: Vec<rewind_picker_view::RewindRow>) {
+        self.view_stack.push(Box::new(
+            rewind_picker_view::RewindPickerView::new(rows, self.theme),
+        ));
+    }
+
     pub fn show_resume_picker(
         &mut self,
         rows: Vec<crate::resume::ResumeRow>,
@@ -480,6 +499,9 @@ impl BottomPane {
             }
             ViewOutcome::RunTaskAction(action) => BottomPaneOutcome::RunTaskAction(action),
             ViewOutcome::RunPluginAction(action) => BottomPaneOutcome::RunPluginAction(action),
+            ViewOutcome::Rewind { message, scope } => {
+                BottomPaneOutcome::Rewind { message, scope }
+            }
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
         }
     }
@@ -1028,6 +1050,10 @@ impl ViewStack {
             ViewOutcome::SwitchSession(uuid) => {
                 self.views.clear();
                 ViewOutcome::SwitchSession(uuid)
+            }
+            ViewOutcome::Rewind { message, scope } => {
+                self.views.clear();
+                ViewOutcome::Rewind { message, scope }
             }
             ViewOutcome::Cancelled => {
                 // A cancelled child pops alone: parents stay open (codex

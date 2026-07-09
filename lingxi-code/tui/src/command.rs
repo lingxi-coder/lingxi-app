@@ -126,6 +126,14 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_add_dir,
     },
     SlashCommand {
+        name: "/rewind",
+        aliases: &["/checkpoint"],
+        description: "Restore the code and/or conversation to a previous point",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_rewind,
+    },
+    SlashCommand {
         name: "/resume",
         aliases: &["/continue"],
         description: "Resume a previous conversation",

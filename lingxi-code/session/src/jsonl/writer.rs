@@ -103,6 +103,40 @@ impl JsonlWriter {
     /// `custom_titles` map by file stem (`loader.rs`), so a prefixed id would
     /// never match on read. Same lock / dir-mode / file-mode contract as
     /// [`Self::append`].
+    /// Append a `/rewind` `file-history-snapshot` side-map line (the checkpoint
+    /// index for one turn) — same lock / dir-mode / file-mode contract as
+    /// [`Self::append`].
+    pub async fn append_file_history_snapshot(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<(), WriterError> {
+        let line = serde_json::to_string(value)?;
+        let _g = self.lock.lock().await;
+        let path_str = self.path.to_str().expect("session paths are UTF-8");
+        if let Some(parent) = self.path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    std::fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(parent)
+                        .map_err(|e| FsError::Io(e.to_string()))?;
+                }
+                #[cfg(not(unix))]
+                std::fs::create_dir_all(parent).map_err(|e| FsError::Io(e.to_string()))?;
+            }
+        }
+        let mut payload = String::with_capacity(line.len() + 1);
+        payload.push_str(&line);
+        payload.push('\n');
+        self.fs
+            .append_file_with_mode(path_str, &payload, 0o600)
+            .await?;
+        Ok(())
+    }
+
     pub async fn append_custom_title(
         &self,
         session_id: &str,

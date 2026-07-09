@@ -1,0 +1,660 @@
+//! `/rewind` file-history — per-file content backups keyed by turn, so the
+//! working tree can be restored to a previous point. Faithful port of
+//! claude-code's `utils/fileHistory.ts`.
+//!
+//! Flow: once per user turn the orchestrator calls [`FileHistory::make_snapshot`]
+//! (a new snapshot capturing the current version of already-tracked files);
+//! within the turn each Edit/Write/NotebookEdit tool calls
+//! [`FileHistory::track_edit`] BEFORE it writes, backing up the file's pre-edit
+//! content into that turn's snapshot. [`FileHistory::rewind_files`] restores the
+//! tracked files to a target snapshot (restore / delete), which is what
+//! `/rewind` drives.
+//!
+//! Backups live at `<lingxi_home>/file-history/<session>/<sha256(path)[:16]>@v<n>`;
+//! `null` backup = the file did not exist at that version. The index is
+//! persisted into the session JSONL as `file-history-snapshot` side-map lines so
+//! `/rewind` survives `--resume`.
+//!
+//! Divergences from claude-code (documented, non-behavioral for the core): the
+//! VSCode `file_updated` notifications and the resume-time hard-link backup copy
+//! are omitted; only-once telemetry events are dropped.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+/// Above this the oldest snapshots are evicted (claude-code `MAX_SNAPSHOTS`).
+const MAX_SNAPSHOTS: usize = 100;
+
+/// One file's backup at a given version. `backup_file_name = None` marks "the
+/// file did not exist in this version" (so rewinding deletes it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileHistoryBackup {
+    /// The `<hash>@v<n>` backup file name, or `None` if the file was absent.
+    pub backup_file_name: Option<String>,
+    /// Monotonic per-file version.
+    pub version: u32,
+}
+
+/// A per-turn snapshot: the message it is keyed by + the pre-turn backups of
+/// every tracked file.
+#[derive(Debug, Clone)]
+pub struct FileHistorySnapshot {
+    /// The user message this snapshot restores to.
+    pub message_id: Uuid,
+    /// Tracking-path → backup.
+    pub tracked_file_backups: BTreeMap<String, FileHistoryBackup>,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    snapshots: Vec<FileHistorySnapshot>,
+    tracked_files: HashSet<String>,
+}
+
+/// A serialized `file-history-snapshot` side-map line (persisted to the session
+/// JSONL; parsed back on resume).
+#[derive(Debug, Clone)]
+pub struct SnapshotRecord {
+    /// The snapshot's message id.
+    pub message_id: Uuid,
+    /// Tracking-path → (backup_file_name-or-null, version).
+    pub tracked_file_backups: BTreeMap<String, FileHistoryBackup>,
+}
+
+/// The session-scoped file-history store (behind an internal lock; cheap to
+/// clone the `Arc`).
+pub struct FileHistory {
+    state: Mutex<State>,
+    /// Config home (`~/.lingxi`) — the backup root parent.
+    home: PathBuf,
+    /// Original cwd — tracking paths are stored relative to it when possible.
+    cwd: PathBuf,
+    /// Bare session uuid — the backup dir segment.
+    session_id: String,
+}
+
+impl FileHistory {
+    /// New store for `session_id` under `home`, with tracking paths shortened
+    /// against `cwd`.
+    #[must_use]
+    pub fn new(home: PathBuf, cwd: PathBuf, session_id: String) -> Self {
+        Self {
+            state: Mutex::new(State::default()),
+            home,
+            cwd,
+            session_id,
+        }
+    }
+
+    /// Rebuild the in-memory index from persisted `file-history-snapshot`
+    /// records (resume). Tracking paths are re-shortened; `tracked_files` is the
+    /// union of every snapshot's keys (claude `fileHistoryRestoreStateFromLog`).
+    pub fn restore_from_records(&self, records: Vec<SnapshotRecord>) {
+        let mut tracked = HashSet::new();
+        let mut snapshots = Vec::with_capacity(records.len());
+        for rec in records {
+            let mut backups = BTreeMap::new();
+            for (path, backup) in rec.tracked_file_backups {
+                let key = self.shorten(&path);
+                tracked.insert(key.clone());
+                backups.insert(key, backup);
+            }
+            snapshots.push(FileHistorySnapshot {
+                message_id: rec.message_id,
+                tracked_file_backups: backups,
+            });
+        }
+        let mut st = self.state.lock().expect("file-history lock");
+        st.snapshots = snapshots;
+        st.tracked_files = tracked;
+    }
+
+    /// `true` when at least one snapshot restores to `message_id` (the picker's
+    /// per-row `canRestore`).
+    #[must_use]
+    pub fn can_restore(&self, message_id: Uuid) -> bool {
+        self.state
+            .lock()
+            .expect("file-history lock")
+            .snapshots
+            .iter()
+            .any(|s| s.message_id == message_id)
+    }
+
+    /// Back up `file_path`'s CURRENT (pre-edit) content into the most-recent
+    /// snapshot, if not already tracked there. MUST be called before the tool
+    /// writes. No-op when no snapshot exists yet (no active turn).
+    pub async fn track_edit(&self, file_path: &str) {
+        let tracking_path = self.shorten(file_path);
+
+        // Phase 1: is a backup needed? (already tracked in the most-recent
+        // snapshot ⇒ skip; re-backing v1 would corrupt it with post-edit bytes.)
+        {
+            let st = self.state.lock().expect("file-history lock");
+            let Some(recent) = st.snapshots.last() else {
+                return;
+            };
+            if recent.tracked_file_backups.contains_key(&tracking_path) {
+                return;
+            }
+        }
+
+        // Phase 2: async backup (v1) outside the lock.
+        let Ok(backup) = self.create_backup(Some(Path::new(file_path)), 1).await else {
+            return;
+        };
+
+        // Phase 3: commit — re-check under the lock (a racing track_edit may
+        // have added it), then retroactively track it in the most-recent snap.
+        let mut st = self.state.lock().expect("file-history lock");
+        let Some(recent) = st.snapshots.last_mut() else {
+            return;
+        };
+        if recent.tracked_file_backups.contains_key(&tracking_path) {
+            return;
+        }
+        recent
+            .tracked_file_backups
+            .insert(tracking_path.clone(), backup);
+        st.tracked_files.insert(tracking_path);
+    }
+
+    /// Add a new snapshot for `message_id`, backing up any tracked file that
+    /// changed since its latest backup (once per user turn). Returns the record
+    /// to persist (so the caller can append it to the session JSONL).
+    pub async fn make_snapshot(&self, message_id: Uuid) -> SnapshotRecord {
+        // Phase 1: capture the tracked set + latest backups.
+        let (tracked, latest): (Vec<String>, HashMap<String, FileHistoryBackup>) = {
+            let st = self.state.lock().expect("file-history lock");
+            let latest = st
+                .snapshots
+                .last()
+                .map(|s| {
+                    s.tracked_file_backups
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (st.tracked_files.iter().cloned().collect(), latest)
+        };
+
+        // Phase 2: async IO — decide each tracked file's backup for this snap.
+        let mut backups: BTreeMap<String, FileHistoryBackup> = BTreeMap::new();
+        for tracking_path in tracked {
+            let file_path = self.expand(&tracking_path);
+            let latest_backup = latest.get(&tracking_path);
+            let next_version = latest_backup.map_or(1, |b| b.version + 1);
+
+            let exists = tokio::fs::metadata(&file_path).await.is_ok();
+            if !exists {
+                backups.insert(
+                    tracking_path,
+                    FileHistoryBackup {
+                        backup_file_name: None,
+                        version: next_version,
+                    },
+                );
+                continue;
+            }
+            // File exists — reuse the latest backup if unchanged, else re-back.
+            if let Some(lb) = latest_backup {
+                if lb.backup_file_name.is_some()
+                    && !self
+                        .origin_file_changed(&file_path, lb.backup_file_name.as_deref())
+                        .await
+                {
+                    backups.insert(tracking_path, lb.clone());
+                    continue;
+                }
+            }
+            if let Ok(fresh) = self.create_backup(Some(&file_path), next_version).await {
+                backups.insert(tracking_path, fresh);
+            }
+        }
+
+        // Phase 3: commit the new snapshot (inherit any file a racing track_edit
+        // added), cap to MAX_SNAPSHOTS.
+        {
+            let mut st = self.state.lock().expect("file-history lock");
+            if let Some(last) = st.snapshots.last() {
+                let inherit: Vec<(String, FileHistoryBackup)> = st
+                    .tracked_files
+                    .iter()
+                    .filter(|p| !backups.contains_key(*p))
+                    .filter_map(|p| last.tracked_file_backups.get(p).map(|b| (p.clone(), b.clone())))
+                    .collect();
+                for (p, b) in inherit {
+                    backups.insert(p, b);
+                }
+            }
+            st.snapshots.push(FileHistorySnapshot {
+                message_id,
+                tracked_file_backups: backups.clone(),
+            });
+            let len = st.snapshots.len();
+            if len > MAX_SNAPSHOTS {
+                st.snapshots.drain(0..len - MAX_SNAPSHOTS);
+            }
+        }
+
+        SnapshotRecord {
+            message_id,
+            tracked_file_backups: backups,
+        }
+    }
+
+    /// Restore the tracked files to the snapshot keyed by `message_id`: files
+    /// present at that version are rewritten from their backup (only if they
+    /// differ now), files absent at that version are deleted. Returns the list
+    /// of changed paths. Errors if no snapshot matches.
+    ///
+    /// # Errors
+    /// Returns the target-not-found message when `message_id` has no snapshot.
+    pub async fn rewind_files(&self, message_id: Uuid) -> Result<Vec<String>, String> {
+        let (target, tracked, snapshots) = {
+            let st = self.state.lock().expect("file-history lock");
+            let target = st
+                .snapshots
+                .iter()
+                .rev()
+                .find(|s| s.message_id == message_id)
+                .cloned();
+            (
+                target,
+                st.tracked_files.iter().cloned().collect::<Vec<_>>(),
+                st.snapshots.clone(),
+            )
+        };
+        let Some(target) = target else {
+            return Err("The selected snapshot was not found".to_string());
+        };
+
+        let mut changed = Vec::new();
+        for tracking_path in tracked {
+            let file_path = self.expand(&tracking_path);
+            // Resolve the backup for this file at the target version, falling
+            // back to its first-version backup when untracked at the target.
+            let backup_name: Option<Option<String>> = match target.tracked_file_backups.get(&tracking_path) {
+                Some(b) => Some(b.backup_file_name.clone()),
+                None => Self::first_version_backup(&snapshots, &tracking_path),
+            };
+            let Some(backup_name) = backup_name else {
+                continue; // unresolved → leave the file untouched
+            };
+            match backup_name {
+                None => {
+                    // Absent at the target version → delete if present.
+                    if tokio::fs::remove_file(&file_path).await.is_ok() {
+                        changed.push(file_path.to_string_lossy().into_owned());
+                    }
+                }
+                Some(name) => {
+                    if self.origin_file_changed(&file_path, Some(&name)).await {
+                        if self.restore_backup(&file_path, &name).await.is_ok() {
+                            changed.push(file_path.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Would rewinding to `message_id` change any file on disk? (the picker's
+    /// per-row `has_code_changes` flag — early-exits, never diffs).
+    #[must_use]
+    pub async fn has_any_changes(&self, message_id: Uuid) -> bool {
+        let (target, tracked, snapshots) = {
+            let st = self.state.lock().expect("file-history lock");
+            let target = st
+                .snapshots
+                .iter()
+                .rev()
+                .find(|s| s.message_id == message_id)
+                .cloned();
+            (
+                target,
+                st.tracked_files.iter().cloned().collect::<Vec<_>>(),
+                st.snapshots.clone(),
+            )
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        for tracking_path in tracked {
+            let file_path = self.expand(&tracking_path);
+            let backup_name = match target.tracked_file_backups.get(&tracking_path) {
+                Some(b) => Some(b.backup_file_name.clone()),
+                None => Self::first_version_backup(&snapshots, &tracking_path),
+            };
+            let Some(backup_name) = backup_name else {
+                continue;
+            };
+            match backup_name {
+                None => {
+                    if tokio::fs::metadata(&file_path).await.is_ok() {
+                        return true;
+                    }
+                }
+                Some(name) => {
+                    if self.origin_file_changed(&file_path, Some(&name)).await {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    /// The first-version (`v1`) backup name for `tracking_path` across all
+    /// snapshots (used when the target snapshot predates the file's tracking).
+    /// `Some(None)` = existed-as-absent; `None` = unresolved.
+    fn first_version_backup(
+        snapshots: &[FileHistorySnapshot],
+        tracking_path: &str,
+    ) -> Option<Option<String>> {
+        for snap in snapshots {
+            if let Some(b) = snap.tracked_file_backups.get(tracking_path) {
+                if b.version == 1 {
+                    return Some(b.backup_file_name.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// `<hash>@v<n>` backup file name (sha256 of the path, first 16 hex chars).
+    fn backup_file_name(file_path: &str, version: u32) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(file_path.as_bytes());
+        let hash = hasher.finalize();
+        let hex: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        format!("{hex}@v{version}")
+    }
+
+    /// Absolute path of a backup file under `<home>/file-history/<session>/`.
+    fn resolve_backup_path(&self, backup_file_name: &str) -> PathBuf {
+        self.home
+            .join("file-history")
+            .join(&self.session_id)
+            .join(backup_file_name)
+    }
+
+    /// Copy `file_path`'s current content to a fresh backup; `None`/missing
+    /// source records a null backup. Lazy-mkdir on ENOENT.
+    async fn create_backup(
+        &self,
+        file_path: Option<&Path>,
+        version: u32,
+    ) -> Result<FileHistoryBackup, std::io::Error> {
+        let Some(file_path) = file_path else {
+            return Ok(FileHistoryBackup {
+                backup_file_name: None,
+                version,
+            });
+        };
+        if tokio::fs::metadata(file_path).await.is_err() {
+            return Ok(FileHistoryBackup {
+                backup_file_name: None,
+                version,
+            });
+        }
+        let name = Self::backup_file_name(&file_path.to_string_lossy(), version);
+        let backup_path = self.resolve_backup_path(&name);
+        if tokio::fs::copy(file_path, &backup_path).await.is_err() {
+            if let Some(parent) = backup_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::copy(file_path, &backup_path).await?;
+        }
+        Ok(FileHistoryBackup {
+            backup_file_name: Some(name),
+            version,
+        })
+    }
+
+    /// Overwrite `file_path` from its backup (lazy-mkdir on ENOENT). Silently
+    /// bails if the backup is missing.
+    async fn restore_backup(&self, file_path: &Path, backup_file_name: &str) -> std::io::Result<()> {
+        let backup_path = self.resolve_backup_path(backup_file_name);
+        if tokio::fs::metadata(&backup_path).await.is_err() {
+            return Ok(());
+        }
+        if tokio::fs::copy(&backup_path, file_path).await.is_err() {
+            if let Some(parent) = file_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::copy(&backup_path, file_path).await?;
+        }
+        Ok(())
+    }
+
+    /// Has `original` diverged from `backup_file_name`? Missing backup name ⇒
+    /// treat as changed. Compares existence then byte content.
+    async fn origin_file_changed(&self, original: &Path, backup_file_name: Option<&str>) -> bool {
+        let Some(name) = backup_file_name else {
+            return true;
+        };
+        let backup_path = self.resolve_backup_path(name);
+        let orig = tokio::fs::read(original).await;
+        let back = tokio::fs::read(&backup_path).await;
+        match (orig, back) {
+            (Ok(a), Ok(b)) => a != b,
+            // One readable and the other not ⇒ changed.
+            _ => true,
+        }
+    }
+
+    /// Store an absolute path relative to `cwd` when it lives under it (claude
+    /// `maybeShortenFilePath` — smaller keys); otherwise verbatim.
+    fn shorten(&self, file_path: &str) -> String {
+        let p = Path::new(file_path);
+        if p.is_absolute() {
+            if let Ok(rel) = p.strip_prefix(&self.cwd) {
+                return rel.to_string_lossy().into_owned();
+            }
+        }
+        file_path.to_string()
+    }
+
+    /// Re-absolutize a shortened tracking path against `cwd`.
+    fn expand(&self, tracking_path: &str) -> PathBuf {
+        let p = Path::new(tracking_path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.cwd.join(p)
+        }
+    }
+}
+
+/// Serialize a [`SnapshotRecord`] as a `file-history-snapshot` JSONL side-map
+/// line (persisted to the session transcript so `/rewind` survives unwind /
+/// `--resume`). Shape mirrors claude-code `recordFileHistorySnapshot`.
+#[must_use]
+pub fn snapshot_line_json(session_id: &str, record: &SnapshotRecord) -> serde_json::Value {
+    let backups: serde_json::Map<String, serde_json::Value> = record
+        .tracked_file_backups
+        .iter()
+        .map(|(path, b)| {
+            (
+                path.clone(),
+                serde_json::json!({
+                    "backupFileName": b.backup_file_name,
+                    "version": b.version,
+                }),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "type": "file-history-snapshot",
+        "sessionId": session_id,
+        "messageId": record.message_id.to_string(),
+        "trackedFileBackups": backups,
+    })
+}
+
+/// Parse every persisted `file-history-snapshot` line out of a transcript body.
+#[must_use]
+pub fn parse_snapshot_records(content: &str) -> Vec<SnapshotRecord> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(serde_json::Value::as_str) != Some("file-history-snapshot") {
+            continue;
+        }
+        let Some(message_id) = v
+            .get("messageId")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        let mut backups = BTreeMap::new();
+        if let Some(obj) = v.get("trackedFileBackups").and_then(serde_json::Value::as_object) {
+            for (path, b) in obj {
+                let version = b.get("version").and_then(serde_json::Value::as_u64).unwrap_or(1) as u32;
+                let backup_file_name = b
+                    .get("backupFileName")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                backups.insert(
+                    path.clone(),
+                    FileHistoryBackup {
+                        backup_file_name,
+                        version,
+                    },
+                );
+            }
+        }
+        out.push(SnapshotRecord {
+            message_id,
+            tracked_file_backups: backups,
+        });
+    }
+    out
+}
+
+/// The message ids that have a persisted checkpoint (the `/rewind` picker's
+/// candidate rows), in transcript order.
+#[must_use]
+pub fn checkpoint_message_ids(content: &str) -> Vec<Uuid> {
+    parse_snapshot_records(content)
+        .into_iter()
+        .map(|r| r.message_id)
+        .collect()
+}
+
+/// Rebuild a [`FileHistory`] from `session_id`'s persisted transcript and rewind
+/// the working tree to `message_id`. Used by the CLI restore path AFTER the TUI
+/// has unwound (the live in-memory index is gone by then).
+///
+/// # Errors
+/// Propagates [`FileHistory::rewind_files`]'s target-not-found error.
+pub async fn rewind_from_disk(
+    home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    message_id: Uuid,
+) -> Result<Vec<String>, String> {
+    let path = crate::jsonl::session_path(home, cwd, &session_id.to_string());
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("read transcript: {e}"))?;
+    let records = parse_snapshot_records(&content);
+    let fh = FileHistory::new(home.to_path_buf(), PathBuf::from(cwd), session_id.to_string());
+    fh.restore_from_records(records);
+    fh.rewind_files(message_id).await
+}
+
+#[async_trait::async_trait]
+impl traits::FileHistorySink for FileHistory {
+    async fn track_edit(&self, file_path: &str) {
+        FileHistory::track_edit(self, file_path).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "lingxi-filehist-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let cwd = base.join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        (home, cwd)
+    }
+
+    #[tokio::test]
+    async fn edit_then_rewind_restores_pre_edit_content() {
+        let (home, cwd) = scratch("restore");
+        let file = cwd.join("a.txt");
+        std::fs::write(&file, "v0\n").unwrap();
+        let fh = FileHistory::new(home, cwd.clone(), "sess1".into());
+
+        let msg = Uuid::new_v4();
+        // Turn opens: snapshot, then the tool backs up pre-edit content, then
+        // the tool writes the new content.
+        fh.make_snapshot(msg).await;
+        fh.track_edit(file.to_str().unwrap()).await;
+        std::fs::write(&file, "v1-edited\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v1-edited\n");
+
+        // Rewind to the turn → the pre-edit content is restored.
+        let changed = fh.rewind_files(msg).await.expect("rewind");
+        assert_eq!(changed.len(), 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "v0\n");
+    }
+
+    #[tokio::test]
+    async fn rewind_deletes_a_file_created_during_the_turn() {
+        let (home, cwd) = scratch("delete");
+        let fh = FileHistory::new(home, cwd.clone(), "sess2".into());
+        let msg = Uuid::new_v4();
+        fh.make_snapshot(msg).await;
+        // A brand-new file: track_edit records a null backup (did not exist),
+        // then the tool creates it.
+        let file = cwd.join("new.txt");
+        fh.track_edit(file.to_str().unwrap()).await;
+        std::fs::write(&file, "created\n").unwrap();
+        assert!(file.exists());
+
+        let changed = fh.rewind_files(msg).await.expect("rewind");
+        assert_eq!(changed.len(), 1);
+        assert!(!file.exists(), "file created after the snapshot is deleted");
+    }
+
+    #[tokio::test]
+    async fn has_any_changes_and_missing_snapshot() {
+        let (home, cwd) = scratch("changes");
+        let file = cwd.join("b.txt");
+        std::fs::write(&file, "x\n").unwrap();
+        let fh = FileHistory::new(home, cwd.clone(), "sess3".into());
+        let msg = Uuid::new_v4();
+        fh.make_snapshot(msg).await;
+        fh.track_edit(file.to_str().unwrap()).await;
+        // Not yet edited → no change vs the backup.
+        assert!(!fh.has_any_changes(msg).await);
+        std::fs::write(&file, "y\n").unwrap();
+        assert!(fh.has_any_changes(msg).await);
+        // Unknown message → false, and rewind errors.
+        assert!(!fh.has_any_changes(Uuid::new_v4()).await);
+        assert!(fh.rewind_files(Uuid::new_v4()).await.is_err());
+    }
+}

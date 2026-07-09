@@ -195,7 +195,7 @@ impl Tool for FileWriteTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
@@ -303,6 +303,12 @@ impl Tool for FileWriteTool {
                 self.emit_failed(&invocation_id, "stale_read").await;
                 return Err(e);
             }
+        }
+
+        // (/rewind) Back up the pre-write content (or record a null backup for a
+        // brand-new file) BEFORE writing so /rewind can restore it.
+        if let Some(fh) = ctx.file_history.as_ref() {
+            fh.track_edit(&canon.to_string_lossy()).await;
         }
 
         if let Err(e) = tokio::fs::write(&canon, content.as_bytes()).await {

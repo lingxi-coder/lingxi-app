@@ -116,6 +116,21 @@ pub enum RecapOutcome {
     Cancelled,
 }
 
+/// One `/rewind` restore-point row: a user turn that has a file-history
+/// checkpoint (claude-code `MessageSelector` row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindRowData {
+    /// The user message uuid (the checkpoint key the restore paths take).
+    pub message_uuid: uuid::Uuid,
+    /// A one-line preview of the user prompt.
+    pub preview: String,
+    /// A short dim label (turn ordinal / relative time).
+    pub timestamp_label: String,
+    /// Whether restoring to this point would change any file on disk
+    /// (claude-code `fileHistoryHasAnyChanges`).
+    pub has_code_changes: bool,
+}
+
 /// Errors surfaced through the orchestrator's public handle.
 ///
 /// Distinct from `orchestrator::OrchestratorError` because the
@@ -853,6 +868,13 @@ pub trait OrchestratorHandle: Send + Sync {
     /// it against the real forked-agent side-query runner.
     async fn generate_recap(&self) -> Result<RecapOutcome, HandleError> {
         Err(HandleError::Unimplemented("generate_recap".into()))
+    }
+
+    /// Build the `/rewind` restore-point rows LIVE from the session's user turns
+    /// that have a file-history checkpoint. DEFAULT is empty so impls/mocks
+    /// without checkpointing compile unchanged.
+    async fn rewind_rows(&self) -> Vec<RewindRowData> {
+        Vec::new()
     }
 
     /// Answer a one-off side question (`/btw`) via the SAME isolated,

@@ -124,6 +124,16 @@ pub enum ChatOutcome {
     /// NOT an in-place `resume_session` swap (which would fork the conversation
     /// across files).
     SwitchSession(uuid::Uuid),
+    /// The `/rewind` picker resolved to `message` with restore `scope`. Same
+    /// unwind seam as [`Self::SwitchSession`]: the app returns `AppExit::Rewind`
+    /// so the CLI runs the code file-rewind (via `session::file_history`) and/or
+    /// truncates the transcript, then re-mounts in-process.
+    Rewind {
+        /// The target user-message uuid (the checkpoint key).
+        message: uuid::Uuid,
+        /// Which parts to restore.
+        scope: crate::bottom_pane::view::RewindScope,
+    },
     /// `/branch [name]`: fork the conversation into a NEW session at this point
     /// and SWITCH into it. The widget carries only the optional custom title;
     /// the CLI (`session::branch::create_branch`) does the transcript copy off
@@ -2107,6 +2117,44 @@ impl ChatWidget {
     /// in-process re-mount happen in the CLI off the render thread — the widget
     /// only unwinds carrying the optional title (mirrors how `/resume` yields
     /// `SwitchSession` without touching the engine on the render thread).
+    /// `/rewind` (alias `/checkpoint`): open the restore-point picker over the
+    /// session's LIVE checkpoints (read via `OrchestratorHandle::rewind_rows`
+    /// through the proven-safe throwaway-`block_on`, like `/tasks`). On confirm
+    /// the picker yields [`ChatOutcome::Rewind`], which unwinds the app loop so
+    /// the CLI rewinds the working tree and/or truncates the transcript, then
+    /// re-mounts in-process. Graceful lines when no handle is wired or there are
+    /// no checkpoints yet.
+    pub(crate) fn cmd_rewind(&mut self, _args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/rewind is unavailable (no engine handle wired)", true);
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => return self.show_system_text(&format!("/rewind failed: {err}"), true),
+        };
+        let data = runtime.block_on(handle.rewind_rows());
+        if data.is_empty() {
+            return self.show_system_text(
+                "No restore points yet — /rewind restores to a past turn once you've edited files this session.",
+                false,
+            );
+        }
+        let rows: Vec<crate::bottom_pane::RewindRow> = data
+            .into_iter()
+            .map(|d| crate::bottom_pane::RewindRow {
+                message_uuid: d.message_uuid,
+                preview: d.preview,
+                timestamp_label: d.timestamp_label,
+                has_code_changes: d.has_code_changes,
+            })
+            .collect();
+        self.bottom_pane.show_rewind_picker(rows);
+        ChatOutcome::Continue
+    }
+
     pub(crate) fn cmd_branch(&mut self, args: &str) -> ChatOutcome {
         let title = args.trim();
         ChatOutcome::BranchSession {
@@ -2504,6 +2552,9 @@ impl ChatWidget {
             }
             BottomPaneOutcome::RunTaskAction(action) => ChatOutcome::TaskAction(action),
             BottomPaneOutcome::RunPluginAction(action) => ChatOutcome::PluginAction(action),
+            BottomPaneOutcome::Rewind { message, scope } => {
+                ChatOutcome::Rewind { message, scope }
+            }
             BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
         }
     }

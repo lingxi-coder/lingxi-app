@@ -195,7 +195,7 @@ Usage:\n\
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
@@ -530,6 +530,10 @@ Usage:\n\
                 }
             }
         };
+        // (/rewind) Back up the pre-edit notebook before writing.
+        if let Some(fh) = ctx.file_history.as_ref() {
+            fh.track_edit(&canon.to_string_lossy()).await;
+        }
         if let Err(e) = tokio::fs::write(&canon, serialized.as_bytes()).await {
             self.emit_failed(&invocation_id, "io_write").await;
             return Err(ToolError::Io(e.to_string()));

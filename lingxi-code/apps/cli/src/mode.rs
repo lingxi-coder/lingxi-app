@@ -237,6 +237,12 @@ pub(crate) enum RunOutcome {
     /// [`crate::run::mount_resumed_tui`]. `title` is the optional `/branch
     /// [name]` argument (`None` ⇒ derive the branch name from the first prompt).
     BranchFrom { title: Option<String> },
+    /// `/rewind`: restore working tree and/or conversation to `message`, then
+    /// re-mount via [`crate::run::mount_resumed_tui`].
+    RewindTo {
+        message: uuid::Uuid,
+        scope: tui::bottom_pane::view::RewindScope,
+    },
 }
 
 pub(crate) async fn run_ratatui(
@@ -803,6 +809,9 @@ pub(crate) async fn run_ratatui(
         // so that stdout line would otherwise scroll into the next session.
         Ok(Ok(tui::app::AppExit::SwitchSession(uuid))) => RunOutcome::SwitchTo(uuid),
         Ok(Ok(tui::app::AppExit::BranchSession { title })) => RunOutcome::BranchFrom { title },
+        Ok(Ok(tui::app::AppExit::Rewind { message, scope })) => {
+            RunOutcome::RewindTo { message, scope }
+        }
         Ok(Err(e)) => {
             eprintln!("lingxi-cli: tui-rata session failed: {e}");
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)

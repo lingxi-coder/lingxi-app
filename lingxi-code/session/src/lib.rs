@@ -7,6 +7,8 @@
 
 pub mod agent_color;
 pub mod branch;
+pub mod file_history;
+pub mod rewind;
 pub mod filestate;
 pub mod jsonl;
 pub mod metadata;
@@ -24,6 +26,8 @@ pub use metadata::SessionMetadata;
 pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
 pub use storage::{LoadedSession, SessionStorage};
 pub use branch::{create_branch, BranchError, BranchResult};
+pub use file_history::{FileHistory, FileHistoryBackup, SnapshotRecord};
+pub use rewind::rewind_conversation;
 pub use transcript::TranscriptEntry;
 
 // New M5-07 surface — distinct name (`JsonlSessionMetadata`) so it does NOT

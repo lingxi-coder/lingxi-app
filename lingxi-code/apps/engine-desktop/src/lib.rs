@@ -1812,6 +1812,10 @@ pub struct DesktopRuntime {
     /// `BuiltinToolContext::sandbox_enabled_override`; the TUI mount threads a
     /// clone into the widget so `/sandbox` flips it for the live session.
     pub sandbox_toggle: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// (`/rewind`) The shared file-history checkpoint store. The SAME
+    /// `Arc<session::FileHistory>` the orchestrator captures into; the CLI uses
+    /// it to build the `/rewind` picker rows and to restore code on rewind.
+    pub file_history: std::sync::Arc<session::FileHistory>,
     /// Phase 2a §6.2: per-`profile_name` availability flag driving the `/model`
     /// picker's Connect badge (a sibling map, NOT a field on the frozen
     /// `ModelListing`). The tui joins it by provider/profile name.
@@ -2420,6 +2424,15 @@ pub async fn build(
         .and_then(protocol::SessionId::parse_prefixed)
         .unwrap_or_else(protocol::SessionId::new);
     let main_session_uuid = main_session_id.as_uuid().to_string();
+    // (/rewind) One shared file-history checkpoint store: cloned into the
+    // orchestrator (per-turn snapshots + pre-edit tool backups) AND the
+    // DesktopRuntime (so the CLI can restore + build the picker rows). Backups
+    // live under `<lingxi_home>/file-history/<session>/`.
+    let file_history = std::sync::Arc::new(session::FileHistory::new(
+        cfg.lingxi_home.clone(),
+        cwd.clone(),
+        main_session_uuid.clone(),
+    ));
     let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
         &cfg.lingxi_home,
         &cwd.to_string_lossy(),
@@ -4833,6 +4846,9 @@ pub async fn build(
     // (/fast) Share the same fast-mode flag the adapter reads, so the
     // `set_fast_mode` handle flips the value the next request-build sees.
     .with_fast_mode(fast_flag.clone())
+    // (/rewind) Share the file-history store so the turn loop snapshots each
+    // turn + the write tools back up pre-edit content.
+    .with_file_history(file_history.clone())
     .with_config_home(cfg.lingxi_home.clone())
     // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
     // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
@@ -5431,6 +5447,7 @@ pub async fn build(
         file_changed_watcher,
         subscription,
         sandbox_toggle,
+        file_history,
         provider_availability,
         provider_auth_methods,
         model_providers,

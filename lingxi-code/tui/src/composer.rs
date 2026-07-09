@@ -388,10 +388,13 @@ impl Composer {
         Some(removed)
     }
 
-    /// The text before the cursor (paste-burst retro-capture window).
+    /// The last `n` chars before the cursor (paste-burst retro-capture
+    /// window) — bounded so the hot input path never copies the whole
+    /// buffer prefix.
     #[must_use]
-    pub fn text_before_cursor(&self) -> String {
-        self.chars[..self.cursor].iter().collect()
+    pub fn chars_before_cursor(&self, n: usize) -> String {
+        let start = self.cursor.saturating_sub(n);
+        self.chars[start..self.cursor].iter().collect()
     }
 
     /// Remove the `n` chars immediately before the cursor (paste-burst

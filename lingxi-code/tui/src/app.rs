@@ -221,7 +221,15 @@ impl<'cb> RataApp<'cb> {
             // BEFORE the draw so the diff pass never interleaves with them.
             self.write_terminal_sequences(terminal)?;
             self.render_tick(terminal)?;
-            if event::poll(self.redraw_interval)? {
+            // While burst state is pending (a held first char, an unflushed
+            // buffer) the 8ms flush deadline must not wait out the full
+            // redraw interval — a keystroke would echo up to ~50ms late.
+            let poll_timeout = if self.chat_widget.paste_burst_pending() {
+                Duration::from_millis(10)
+            } else {
+                self.redraw_interval
+            };
+            if event::poll(poll_timeout)? {
                 let outcome = match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key(key),
                     Event::Paste(text) => self.on_paste(&text),
@@ -661,9 +669,6 @@ mod tests {
                 on_task_action: Box::new(|_| {}),
             },
         );
-        // Synthetic test keystrokes arrive at machine speed — exactly the
-        // paste-burst signature — so tests opt out.
-        app.chat_widget.set_disable_paste_burst(true);
         app
     }
 

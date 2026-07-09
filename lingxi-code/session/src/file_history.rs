@@ -248,6 +248,26 @@ impl FileHistory {
         }
     }
 
+    /// The current in-memory snapshot record for `message_id` (the most-recent
+    /// matching snapshot), with the backups `track_edit` accumulated during the
+    /// turn. `None` when no snapshot exists for the message. Used to persist the
+    /// POPULATED snapshot at turn end — [`Self::make_snapshot`]'s return value is
+    /// captured at turn start, before any edit, so it is always empty.
+    #[must_use]
+    pub fn snapshot_record(&self, message_id: Uuid) -> Option<SnapshotRecord> {
+        self.state
+            .lock()
+            .expect("file-history lock")
+            .snapshots
+            .iter()
+            .rev()
+            .find(|s| s.message_id == message_id)
+            .map(|s| SnapshotRecord {
+                message_id: s.message_id,
+                tracked_file_backups: s.tracked_file_backups.clone(),
+            })
+    }
+
     /// Restore the tracked files to the snapshot keyed by `message_id`: files
     /// present at that version are rewritten from their backup (only if they
     /// differ now), files absent at that version are deleted. Returns the list
@@ -638,6 +658,56 @@ mod tests {
         let changed = fh.rewind_files(msg).await.expect("rewind");
         assert_eq!(changed.len(), 1);
         assert!(!file.exists(), "file created after the snapshot is deleted");
+    }
+
+    /// The disk round-trip the orchestrator relies on for `/rewind`: the record
+    /// that must be PERSISTED is the one `track_edit` populated during the turn
+    /// (`snapshot_record`), NOT `make_snapshot`'s turn-start return (always empty
+    /// — no edits have happened yet). Persisting the empty one — the original bug
+    /// — left `rewind_from_disk` with nothing to restore. Reloading the populated
+    /// record into a FRESH history (== `rewind_from_disk`) must still delete a
+    /// file created during the turn.
+    #[tokio::test]
+    async fn disk_roundtrip_restores_from_populated_snapshot_record() {
+        let (home, cwd) = scratch("roundtrip");
+        let file = cwd.join("note.txt");
+        let fh = FileHistory::new(home.clone(), cwd.clone(), "sess-rt".into());
+        let msg = Uuid::new_v4();
+
+        // Turn start: make_snapshot's return is EMPTY (the value that must NOT be
+        // persisted).
+        let turn_start = fh.make_snapshot(msg).await;
+        assert!(
+            turn_start.tracked_file_backups.is_empty(),
+            "make_snapshot at turn start carries no backups"
+        );
+
+        // During the turn: a brand-new file is created (track_edit records the
+        // absent pre-edit state, then the tool writes it).
+        fh.track_edit(file.to_str().unwrap()).await;
+        std::fs::write(&file, "created\n").unwrap();
+
+        // Turn end: the POPULATED record carries the backup.
+        let turn_end = fh.snapshot_record(msg).expect("snapshot exists");
+        assert!(
+            !turn_end.tracked_file_backups.is_empty(),
+            "snapshot_record carries track_edit's accumulated backups"
+        );
+
+        // Persist the populated record and rebuild a FRESH history from it — the
+        // exact path `rewind_from_disk` takes (parse_snapshot_records →
+        // restore_from_records → rewind_files).
+        let line = snapshot_line_json("sess-rt", &turn_end);
+        let content = format!("{}\n", serde_json::to_string(&line).unwrap());
+        let fresh = FileHistory::new(home, cwd, "sess-rt".into());
+        fresh.restore_from_records(parse_snapshot_records(&content));
+
+        let changed = fresh.rewind_files(msg).await.expect("rewind");
+        assert_eq!(changed.len(), 1, "the created file is rewound (deleted)");
+        assert!(
+            !file.exists(),
+            "disk-rebuilt rewind deletes the file created during the turn"
+        );
     }
 
     #[tokio::test]

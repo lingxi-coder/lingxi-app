@@ -1695,6 +1695,20 @@ pub(crate) async fn drive_tui_switch_loop(
                         current = Some(mount_target);
                         outcome = mount_resumed_tui(argv, mount_target, messages).await;
                     }
+                    // A conversation-scope rewind can legitimately truncate the
+                    // transcript to EMPTY (rewinding to before the FIRST turn).
+                    // `load_resume_session` reports that as `EmptyDirectory`
+                    // ("No conversations found to resume"), but the session is
+                    // still valid — re-mount it with an empty history so the user
+                    // lands on a fresh composer for the SAME session id instead of
+                    // being dropped to the shell. Code-only rewinds don't touch
+                    // the transcript, so an empty load there IS a real error and
+                    // falls through to recovery below.
+                    Err(LoaderError::EmptyDirectory) if scope != RewindScope::CodeOnly => {
+                        eprintln!("lingxi-cli: rewound to the start — empty conversation");
+                        current = Some(mount_target);
+                        outcome = mount_resumed_tui(argv, mount_target, Vec::new()).await;
+                    }
                     Err(e) => {
                         eprintln!("lingxi-cli: couldn't open {mount_target} after rewind: {e}");
                         match recover_from_failed_switch(current) {

@@ -5048,17 +5048,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
         self.persist_message_to_jsonl(&user_msg).await;
 
-        // (/rewind) Snapshot the pre-turn file state, keyed by this user
-        // message, so /rewind can restore code (and conversation) to this
-        // point. Persist the index to the transcript so restore (which runs
-        // AFTER the TUI unwinds) + `--resume` can read it back.
+        // (/rewind) Snapshot the pre-turn file state IN MEMORY, keyed by this
+        // user message, so `track_edit` (fired by Edit/Write/NotebookEdit during
+        // the turn) records each file's pre-edit backup into it. The POPULATED
+        // record is persisted to the transcript at TURN END (see below) — NOT
+        // here: at turn start the backup map is empty (no edits yet), and
+        // persisting it now would leave disk-based restore (`rewind_from_disk`,
+        // which runs after the TUI unwinds and rebuilds the index from these
+        // lines) with nothing to restore.
+        let file_history_msg_id = user_msg.id().as_uuid();
         if let Some(fh) = &self.file_history {
-            let record = fh.make_snapshot(user_msg.id().as_uuid()).await;
-            if let Some(writer) = &self.jsonl_writer {
-                let session_uuid = self.session.lock().await.session_id.as_uuid().to_string();
-                let line = session::file_history::snapshot_line_json(&session_uuid, &record);
-                let _ = writer.append_file_history_snapshot(&line).await;
-            }
+            fh.make_snapshot(file_history_msg_id).await;
         }
 
         // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
@@ -6499,6 +6499,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     final_message_id = assistant_id;
                     break;
                 }
+            }
+        }
+
+        // (/rewind) Persist THIS turn's now-populated file-history snapshot to the
+        // transcript — `track_edit` filled its backup map (pre-edit content of
+        // every file Edit/Write/NotebookEdit touched) during the turn above.
+        // Restore (`rewind_from_disk`) and `--resume` rebuild the index from
+        // these lines, so the record must carry the backups, not the empty map
+        // it had at turn start. Persisted unconditionally (an edit-free turn
+        // still records a restore point for conversation-only rewind).
+        if let Some(fh) = &self.file_history {
+            if let (Some(record), Some(writer)) =
+                (fh.snapshot_record(file_history_msg_id), &self.jsonl_writer)
+            {
+                let session_uuid = self.session.lock().await.session_id.as_uuid().to_string();
+                let line = session::file_history::snapshot_line_json(&session_uuid, &record);
+                let _ = writer.append_file_history_snapshot(&line).await;
             }
         }
 

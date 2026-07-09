@@ -19,6 +19,7 @@ pub mod agents_screen;
 pub mod app;
 pub mod bottom_pane;
 pub mod chat_widget;
+pub mod clipboard_paste;
 pub mod color;
 pub mod command;
 pub mod composer;

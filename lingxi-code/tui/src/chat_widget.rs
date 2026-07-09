@@ -228,6 +228,11 @@ pub struct ChatWidget {
     /// Permission requests waiting for the currently open prompt to resolve
     /// (prompts are serialized: one owns the keyboard at a time).
     pending_permissions: VecDeque<PermissionExchange>,
+    /// Image files queued for the NEXT submitted turn: pasted image paths,
+    /// clipboard-image pastes (Ctrl+V) and `/image` attachments. Drained by
+    /// [`Self::take_pending_images`] when the prompt is submitted so the
+    /// orchestrator sends them as `ContentBlock::Image` on the user message.
+    pending_images: Vec<std::path::PathBuf>,
     /// Widget-lifetime clock driving the spinner's animation frame (and the
     /// `/stats` session-duration row).
     start: std::time::Instant,
@@ -386,6 +391,7 @@ impl ChatWidget {
             spinner_verb: spinner::sample_verb(),
             current_todo: None,
             pending_permissions: VecDeque::new(),
+            pending_images: Vec::new(),
             start: std::time::Instant::now(),
             export_dir: crate::export::default_export_dir(),
             cost: None,
@@ -502,6 +508,30 @@ impl ChatWidget {
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        // Ctrl+V / Alt+V: paste an IMAGE from the system clipboard (codex
+        // `chatwidget/interaction.rs`). Bracketed paste only carries text —
+        // a copied screenshot never arrives as `Event::Paste`, so it needs
+        // an explicit chord read off the native clipboard.
+        if key.kind == crossterm::event::KeyEventKind::Press
+            && key
+                .modifiers
+                .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+            && matches!(key.code, crossterm::event::KeyCode::Char(c) if c.eq_ignore_ascii_case(&'v'))
+        {
+            match crate::clipboard_paste::paste_image_to_temp_png() {
+                Ok((path, _info)) => {
+                    return self.push_image(&path.display().to_string());
+                }
+                Err(err) => {
+                    self.transcript.push_message(RenderedMessage::SystemText {
+                        body: format!("Failed to paste image: {err}"),
+                        timestamp: 0,
+                        is_error: true,
+                    });
+                    return ChatOutcome::Continue;
+                }
+            }
+        }
         self.bottom_pane.set_task_running(self.pane_status());
         let outcome = self.bottom_pane.handle_key(key);
         let outcome = self.on_pane_outcome(outcome);
@@ -2542,9 +2572,19 @@ impl ChatWidget {
         self.transcript.push_message(RenderedMessage::UserImage {
             image_id: None,
             metadata: name,
-            source_path: Some(path),
+            source_path: Some(path.clone()),
         });
+        // Queue the file for the next submitted turn: the transcript cell is
+        // display-only — without this the model never receives the image.
+        self.pending_images.push(std::path::PathBuf::from(path));
         ChatOutcome::Continue
+    }
+
+    /// Drain the images queued for the next turn (pasted paths, clipboard
+    /// images, `/image`). Called by the app when a prompt is submitted; the
+    /// paths ride along to `run_turn_streaming_with_images`.
+    pub fn take_pending_images(&mut self) -> Vec<std::path::PathBuf> {
+        std::mem::take(&mut self.pending_images)
     }
 
     /// Surface the oldest queued permission once no prompt is open (called
@@ -2683,6 +2723,29 @@ mod tests {
 
     fn widget() -> ChatWidget {
         ChatWidget::new(Vec::new(), SessionInfo::default())
+    }
+
+    #[test]
+    fn pasted_image_paths_queue_for_the_next_submit_then_drain() {
+        // The transcript cell alone is display-only: the queued path is what
+        // actually reaches the model (`run_turn_streaming_with_images`).
+        let path = std::env::temp_dir().join(format!(
+            "tui-chatwidget-image-queue-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
+        let mut w = widget();
+        w.handle_paste(&path.display().to_string());
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            w.take_pending_images(),
+            vec![path.clone()],
+            "pasted image path queued for the next turn"
+        );
+        assert!(
+            w.take_pending_images().is_empty(),
+            "queue drains on submit; images never leak into a later turn"
+        );
     }
 
     fn typ(widget: &mut ChatWidget, s: &str) {

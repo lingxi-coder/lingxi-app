@@ -25,4 +25,5 @@ pub mod retry_ux;
 pub mod telemetry;
 pub mod theme;
 pub mod theme_detect;
+pub mod terminal_setup;
 pub mod theme_persist;

@@ -1714,6 +1714,18 @@ impl ChatWidget {
         )
     }
 
+    /// `/terminal-setup`: detect the active terminal and install the Shift+Enter
+    /// (Apple Terminal: Option+Enter) newline keybinding by writing the
+    /// terminal's own config, then echo the result. Native-CSI-u terminals
+    /// (Ghostty/Kitty/iTerm2/WezTerm/Warp) get an informational "already
+    /// supported" line; unsupported terminals get setup guidance. Synchronous
+    /// host I/O (no async engine / socket), so — unlike `/compact` — it is safe
+    /// to run inline on the render thread's blocking loop.
+    pub(crate) fn cmd_terminal_setup(&mut self, _args: &str) -> ChatOutcome {
+        let (message, is_error) = tui_core::terminal_setup::run();
+        self.show_system_text(&message, is_error)
+    }
+
     /// `/keybindings`: open or preview the keybindings configuration.
     pub(crate) fn cmd_keybindings(&mut self, args: &str) -> ChatOutcome {
         self.run_core_command(

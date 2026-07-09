@@ -1246,6 +1246,19 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// `/diff`: render uncommitted working-tree changes (`git diff HEAD`) into
+    /// the transcript as read-only system output. Faithful v1 of claude-code's
+    /// interactive `DiffDialog`; a scrollable overlay + per-turn-diff pages are
+    /// deferred. The git call is a local, read-only host subprocess (no engine
+    /// handle, no network, no state mutation), so it runs synchronously on the
+    /// slash path — same class as the filesystem I/O `/export` performs — with
+    /// no off-loop `ChatOutcome` effect.
+    pub(crate) fn cmd_diff(&mut self, _args: &str) -> ChatOutcome {
+        let cwd = std::path::PathBuf::from(&self.session.doctor.cwd);
+        let out = crate::diff::collect_diff(&cwd);
+        self.show_system_text(&out.body, out.is_error)
+    }
+
     /// `/export [filename]`: write the transcript (every committed cell's
     /// copy-friendly raw lines — the raw-scrollback text) to a `.txt` file in
     /// the export dir, echoing the outcome as a `system` message. No arg →

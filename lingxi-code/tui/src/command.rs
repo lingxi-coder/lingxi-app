@@ -177,6 +177,14 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_stats,
     },
     SlashCommand {
+        name: "/diff",
+        aliases: &[],
+        description: "View uncommitted changes and per-turn diffs",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_diff,
+    },
+    SlashCommand {
         name: "/export",
         aliases: &[],
         description: "Export the conversation to a file",

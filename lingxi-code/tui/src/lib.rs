@@ -23,6 +23,7 @@ pub mod command;
 pub mod composer;
 pub mod connect;
 pub mod copy;
+pub mod diff;
 pub mod export;
 pub mod files;
 pub mod history_cell;

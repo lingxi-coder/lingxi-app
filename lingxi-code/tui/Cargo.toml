@@ -42,6 +42,10 @@ crossterm = { workspace = true }
 # only png+jpeg (pinned to 0.25.5 in Cargo.lock, below the 0.25.6 moxcms bump).
 ratatui-image = { version = "=5.0.0", default-features = false, features = ["crossterm"] }
 image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
+# Clipboard IMAGE paste (Ctrl+V/Alt+V): bracketed paste only carries text, so
+# screenshots need a native clipboard read (codex-rs/tui `clipboard_paste`).
+arboard = { version = "3", features = ["wayland-data-control"] }
+tempfile = "3.13"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }

@@ -403,12 +403,20 @@ pub(crate) async fn run_ratatui(
     if initial_cost > 0.0 {
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
-    let on_submit = move |prompt: String, cancel: CancellationToken| {
+    let on_submit = move |prompt: String,
+                          images: Vec<std::path::PathBuf>,
+                          cancel: CancellationToken| {
         let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
         let orch = orchestrator.clone();
         let tx = turn_tx.clone();
         handle.spawn(async move {
-            if let Err(e) = orch.run_turn_streaming_with_cancel(&prompt, cancel).await {
+            // Image-aware entry: with no images this is byte-identical to
+            // `run_turn_streaming_with_cancel`; with pasted/attached images
+            // they become `ContentBlock::Image` on the user message.
+            if let Err(e) = orch
+                .run_turn_streaming_with_images(&prompt, &images, cancel)
+                .await
+            {
                 // A HARD terminal error (rate limit, auth, model-unavailable, …)
                 // propagates as `Err` WITHOUT being surfaced as an assistant
                 // message or an `emit_end_turn` — unlike a graceful `model_error`,

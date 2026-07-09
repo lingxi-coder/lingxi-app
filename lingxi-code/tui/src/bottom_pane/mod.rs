@@ -50,7 +50,7 @@ use crate::bottom_pane::completion_view::{command_items, CompletionView};
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::permission_view::PermissionView;
-use crate::composer::{Composer, ComposerView, MAX_VISIBLE_LINES};
+use crate::composer::{Composer, ComposerView};
 use crate::renderable::Renderable;
 use crate::session::ModelRow;
 use crate::vim::{VimOutcome, VimState};
@@ -198,7 +198,7 @@ impl BottomPane {
             return Self::map_view_outcome(outcome);
         }
         if self.completion.is_some() {
-            if let Some(outcome) = self.on_completion_key(key.code) {
+            if let Some(outcome) = self.on_completion_key(key) {
                 return outcome;
             }
         }
@@ -242,7 +242,10 @@ impl BottomPane {
         if is_image_path(trimmed) {
             return BottomPaneOutcome::PastedImage(trimmed.to_string());
         }
-        self.composer.insert_str(text);
+        // Normalize line endings so \r\n (Windows clipboard) and stray \r
+        // (legacy Mac) don't become phantom chars that misalign the cursor.
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.composer.insert_str(&normalized);
         self.sync_completion();
         BottomPaneOutcome::Consumed
     }
@@ -459,7 +462,8 @@ impl BottomPane {
     /// `Some(outcome)` when the popup consumes the key (nav / complete /
     /// dismiss), or `None` to let it fall through to the composer (so typing
     /// keeps filtering).
-    fn on_completion_key(&mut self, code: KeyCode) -> Option<BottomPaneOutcome> {
+    fn on_completion_key(&mut self, key: KeyEvent) -> Option<BottomPaneOutcome> {
+        let code = key.code;
         match code {
             KeyCode::Up => {
                 self.completion.as_mut()?.prev();
@@ -491,6 +495,11 @@ impl BottomPane {
             // through to the composer so the command actually RUNS — that's the
             // second-Enter-after-accept path too (the overlay is closed by then).
             KeyCode::Enter => {
+                // Modified Enter (Alt/Shift) inserts a newline — let the composer
+                // handle it instead of committing the completion.
+                if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) {
+                    return None;
+                }
                 let insert = self.completion.as_ref()?.selected_insert().to_string();
                 if let Some((at, _)) = self.composer.at_fragment() {
                     // `@file`: commit the highlighted path in place + close.
@@ -747,8 +756,7 @@ impl BottomPane {
     /// freshly computed value instead.
     #[must_use]
     pub fn desired_height_for(&self, width: u16, running: bool) -> u16 {
-        let composer =
-            u16::try_from(self.composer.lines().len().clamp(1, MAX_VISIBLE_LINES)).unwrap_or(1) + 2;
+        let composer = ComposerView::new(&self.composer).desired_height(width);
         let preview = self.pending_input_preview.desired_height(width);
         let banner = u16::from(self.context_pressure.is_some());
         let running = u16::from(running);

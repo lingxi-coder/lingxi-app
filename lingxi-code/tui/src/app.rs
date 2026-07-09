@@ -61,7 +61,7 @@ pub struct AppCallbacks<'cb> {
     /// Executed on [`ChatOutcome::Submit`]: the caller drives a turn for the
     /// prompt, honoring the paired [`CancellationToken`] (the widget cancels
     /// it on Ctrl-C/Esc).
-    pub on_submit: Box<dyn FnMut(String, CancellationToken) + 'cb>,
+    pub on_submit: Box<dyn FnMut(String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
     /// Executed on [`ChatOutcome::SwitchModel`] with the picked
     /// `(request_model, profile)` pair.
     pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
@@ -199,7 +199,11 @@ impl<'cb> RataApp<'cb> {
                         return Ok(AppExit::BranchSession { title });
                     }
                     ChatOutcome::Submit(prompt, token) => {
-                        (self.callbacks.on_submit)(prompt, token);
+                        // Pasted/attached images queued since the last turn
+                        // ride along with the prompt (they become
+                        // `ContentBlock::Image` on the user message).
+                        let images = self.chat_widget.take_pending_images();
+                        (self.callbacks.on_submit)(prompt, images, token);
                     }
                     ChatOutcome::SwitchModel(model, profile) => {
                         (self.callbacks.on_switch_model)(model, profile);
@@ -409,7 +413,7 @@ pub fn run_app(
     command_registry: Option<
         std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     >,
-    on_submit: impl FnMut(String, CancellationToken),
+    on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
     on_connect_action: impl FnMut(ConnectAction),
@@ -527,7 +531,7 @@ mod tests {
             events_rx,
             permission_rx,
             AppCallbacks {
-                on_submit: Box::new(|_, _| {}),
+                on_submit: Box::new(|_, _, _| {}),
                 on_switch_model: Box::new(|_, _| {}),
                 on_web_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
@@ -2141,27 +2145,28 @@ mod tests {
     #[test]
     fn layout_cursor_stays_inside_composer_rect_with_wide_chars_at_narrow_width() {
         let mut app = test_app(Vec::new());
-        // 25 CJK chars = 50 display columns, wider than the 38-column inner
-        // rect of a 40-column composer: the cursor clamps to the inner right
-        // edge instead of escaping through the border.
+        // 25 CJK chars = 50 display columns, wider than the 37-column inner
+        // rect of a 40-column composer: the line soft-wraps (18 chars = 36
+        // cols, then 7 chars = 14 cols) and the cursor follows onto the
+        // second visual row instead of escaping through the right margin.
         typ(&mut app, &"你".repeat(25));
-        assert_eq!(app.viewport_height(40), 4);
+        assert_eq!(app.viewport_height(40), 5, "2 wrapped rows + padding");
         let mut terminal = draw_viewport_at(&mut app, 40, 12);
         let pos = terminal.get_cursor_position().unwrap();
-        // y = 1: idle has no leading status row (the composer's top padding
-        // is row 0, the prompt row is row 1).
+        // y = 2: idle has no leading status row (top padding is row 0, the
+        // prompt row is row 1, the wrapped continuation row is row 2).
         assert_eq!(
             (pos.x, pos.y),
-            (38, 1),
-            "cursor clamps to the last inner column"
+            (16, 2),
+            "cursor after 7 wide chars on the wrapped row"
         );
-        // The 1-column right margin is untouched by text — the cursor sits
+        // The 1-column right margin is untouched by text — wrapped rows stay
         // inside the inset textarea, not bleeding into the margin.
         let buf = terminal.last_frame_buffer();
         assert_eq!(
-            buf.cell(Position::new(39, 2)).map(Cell::symbol),
+            buf.cell(Position::new(39, 1)).map(Cell::symbol),
             Some(" "),
-            "right margin intact at the clamp edge"
+            "right margin intact on the full first row"
         );
     }
 

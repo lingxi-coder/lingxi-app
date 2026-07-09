@@ -805,6 +805,25 @@ pub(crate) async fn run_ratatui(
             );
         }
     }
+    // Resume parity: persist this session's active MODEL (+ provider profile) so
+    // a re-mount (`/rewind`, `/resume`, `/branch`) or `--resume` restores the
+    // in-session `/model` switch instead of reverting to the boot/config model —
+    // the freshly-built runtime otherwise opens on the config model. Same
+    // (project, session-id) gate + best-effort contract as the cost above.
+    {
+        let status = summary_orch.get_status_snapshot().await;
+        let session_uuid = summary_orch.current_session_id().await.as_uuid();
+        if let Some(cfg_path) = migrations::global_config::global_config_path() {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            crate::session_cost::save_session_model(
+                &cfg_path,
+                &cwd,
+                &session_uuid.to_string(),
+                &status.model,
+                status.model_profile.as_deref(),
+            );
+        }
+    }
     match run_result {
         Ok(Ok(tui::app::AppExit::Quit)) => {
             // Print the BARE uuid (not the `sess:`-prefixed SessionId Display):

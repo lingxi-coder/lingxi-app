@@ -23,6 +23,14 @@ use std::path::Path;
 const LAST_COST: &str = "lastCost";
 /// claude-code project-config key: which session `lastCost` belongs to.
 const LAST_SESSION_ID: &str = "lastSessionId";
+/// Project-config key: the last session's active model id, so an in-session
+/// `/model` switch survives a re-mount (`/rewind`, `/resume`, `/branch`) or
+/// `--resume` instead of reverting to the boot/config model.
+const LAST_MODEL: &str = "lastModel";
+/// Project-config key: the last model's provider profile (disambiguates a model
+/// id shared across providers, e.g. `gpt-5.5` on both OpenAI and Copilot).
+/// `null` when routing resolves the id by-provider.
+const LAST_MODEL_PROFILE: &str = "lastModelProfile";
 
 /// Persist `total_usd` as this project's `lastCost`, tagged with `session_id`
 /// as `lastSessionId`, so a later `--resume <session_id>` can restore it
@@ -53,6 +61,62 @@ pub fn restore_session_cost_usd(config_path: &Path, cwd: &Path, session_id: &str
         return None;
     }
     proj.get(LAST_COST).and_then(serde_json::Value::as_f64)
+}
+
+/// Persist the session's active `model` (+ provider `profile`) as this project's
+/// `lastModel`/`lastModelProfile`, tagged with `session_id`, so a re-mount
+/// (`/rewind`, `/resume`, `/branch`) or `--resume` restores the in-session
+/// `/model` switch rather than reverting to the boot/config model. Shares the
+/// `lastSessionId` gate with [`save_session_cost`]. Best-effort — a write failure
+/// must never fail an otherwise-clean session exit.
+pub fn save_session_model(
+    config_path: &Path,
+    cwd: &Path,
+    session_id: &str,
+    model: &str,
+    profile: Option<&str>,
+) {
+    let key = migrations::global_config::project_path_for_config(cwd);
+    let session_id = session_id.to_string();
+    let model = model.to_string();
+    let profile = profile.map(str::to_string);
+    let _ = migrations::global_config::save_project_config(config_path, &key, |mut p| {
+        p.insert(LAST_MODEL.to_string(), serde_json::json!(model));
+        p.insert(
+            LAST_MODEL_PROFILE.to_string(),
+            profile
+                .as_ref()
+                .map_or(serde_json::Value::Null, |s| serde_json::json!(s)),
+        );
+        p.insert(LAST_SESSION_ID.to_string(), serde_json::json!(session_id));
+        p
+    });
+}
+
+/// Restore the persisted `(model, profile)` IF it was saved for `session_id`
+/// (same `lastSessionId` gate as [`restore_session_cost_usd`]). The re-mount
+/// applies it via `switch_model`, so the in-session model choice survives.
+/// Returns `None` when unset or mismatched — start from the boot/config model.
+#[must_use]
+pub fn restore_session_model(
+    config_path: &Path,
+    cwd: &Path,
+    session_id: &str,
+) -> Option<(String, Option<String>)> {
+    let key = migrations::global_config::project_path_for_config(cwd);
+    let proj = migrations::global_config::get_project_config(config_path, &key).ok()?;
+    let last_session = proj
+        .get(LAST_SESSION_ID)
+        .and_then(serde_json::Value::as_str)?;
+    if last_session != session_id {
+        return None;
+    }
+    let model = proj.get(LAST_MODEL).and_then(serde_json::Value::as_str)?;
+    let profile = proj
+        .get(LAST_MODEL_PROFILE)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some((model.to_string(), profile))
 }
 
 /// USD → nano-USD for seeding
@@ -118,6 +182,53 @@ mod tests {
         assert_eq!(
             restore_session_cost_usd(&cfg, Path::new("/proj/alpha"), "sess-1"),
             None
+        );
+    }
+
+    #[test]
+    fn round_trips_model_and_profile_when_session_matches() {
+        let (_dir, cfg) = tmp_config();
+        let cwd = Path::new("/proj/alpha");
+        save_session_model(&cfg, cwd, "sess-1", "deepseek-chat", Some("deepseek"));
+        assert_eq!(
+            restore_session_model(&cfg, cwd, "sess-1"),
+            Some(("deepseek-chat".to_string(), Some("deepseek".to_string())))
+        );
+    }
+
+    #[test]
+    fn round_trips_model_with_null_profile() {
+        let (_dir, cfg) = tmp_config();
+        let cwd = Path::new("/proj/alpha");
+        // A by-id (profile-less) selection round-trips as `None`, not `""`.
+        save_session_model(&cfg, cwd, "sess-1", "claude-opus-4-8", None);
+        assert_eq!(
+            restore_session_model(&cfg, cwd, "sess-1"),
+            Some(("claude-opus-4-8".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn does_not_restore_model_for_a_different_session() {
+        let (_dir, cfg) = tmp_config();
+        let cwd = Path::new("/proj/alpha");
+        save_session_model(&cfg, cwd, "sess-1", "deepseek-chat", Some("deepseek"));
+        // A different session must open on the boot/config model, not inherit.
+        assert_eq!(restore_session_model(&cfg, cwd, "sess-2"), None);
+    }
+
+    #[test]
+    fn cost_and_model_coexist_under_the_same_session_gate() {
+        let (_dir, cfg) = tmp_config();
+        let cwd = Path::new("/proj/alpha");
+        // Both are written at exit for the same session; neither clobbers the
+        // other's key (shared `lastSessionId`).
+        save_session_cost(&cfg, cwd, "sess-1", 0.02);
+        save_session_model(&cfg, cwd, "sess-1", "deepseek-chat", Some("deepseek"));
+        assert_eq!(restore_session_cost_usd(&cfg, cwd, "sess-1"), Some(0.02));
+        assert_eq!(
+            restore_session_model(&cfg, cwd, "sess-1"),
+            Some(("deepseek-chat".to_string(), Some("deepseek".to_string())))
         );
     }
 

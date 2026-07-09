@@ -1517,6 +1517,23 @@ async fn mount_resumed_tui(
                 .await;
         }
     }
+    // MODEL seed (resume parity): the freshly-built runtime opens on the
+    // boot/config model, so an in-session `/model` switch would be lost across a
+    // re-mount (`/rewind`, `/resume`, `/branch`). Restore the persisted model
+    // (+ profile) IF it was saved for THIS session id, applying it exactly as
+    // `/model` does (`switch_model` — a pure session-state write).
+    if let Some(cfg_path) = migrations::global_config::global_config_path() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Some((model, profile)) =
+            crate::session_cost::restore_session_model(&cfg_path, &cwd, &session_id.to_string())
+        {
+            let _ = tui_build
+                .runtime
+                .orchestrator
+                .switch_model(&model, profile.as_deref())
+                .await;
+        }
+    }
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
     // launch the ratatui backend with that replayed scrollback. Resume has no
     // SessionRegistration (fresh launches register; resume does not), so no

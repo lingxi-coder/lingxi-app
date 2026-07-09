@@ -196,6 +196,10 @@ impl<'cb> RataApp<'cb> {
             while let Ok(result) = self.paste_rx.try_recv() {
                 self.chat_widget.clipboard_image_result(result);
             }
+            // Flush a due non-bracketed paste burst (held first char renders
+            // as typing; a completed burst lands as one paste). The pump
+            // never submits, so the outcome needs no callback dispatch.
+            let _ = self.chat_widget.pump_paste_burst();
             // Hook-returned terminal escapes (`TurnEvent::TerminalSequence`,
             // already validated + BEL-normalized) write through to the tty
             // BEFORE the draw so the diff pass never interleaves with them.
@@ -604,7 +608,7 @@ mod tests {
     fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         let (_events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (_permission_tx, permission_rx) = tokio::sync::mpsc::channel(1);
-        RataApp::new(
+        let mut app = RataApp::new(
             messages,
             SessionInfo::default(),
             events_rx,
@@ -624,7 +628,11 @@ mod tests {
                 on_sandbox_action: Box::new(|_| {}),
                 on_task_action: Box::new(|_| {}),
             },
-        )
+        );
+        // Synthetic test keystrokes arrive at machine speed — exactly the
+        // paste-burst signature — so tests opt out.
+        app.chat_widget.set_disable_paste_burst(true);
+        app
     }
 
     fn typ(app: &mut RataApp, s: &str) {

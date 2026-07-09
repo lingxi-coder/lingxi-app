@@ -388,6 +388,22 @@ impl Composer {
         Some(removed)
     }
 
+    /// The text before the cursor (paste-burst retro-capture window).
+    #[must_use]
+    pub fn text_before_cursor(&self) -> String {
+        self.chars[..self.cursor].iter().collect()
+    }
+
+    /// Remove the `n` chars immediately before the cursor (paste-burst
+    /// retro-capture: they were typed, then reclassified as pasted text and
+    /// moved into the burst buffer).
+    pub fn remove_chars_before_cursor(&mut self, n: usize) {
+        self.detach_history();
+        let start = self.cursor.saturating_sub(n);
+        self.chars.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
     /// Insert a string at the cursor (used by vim paste), cursor after it.
     pub fn insert_str(&mut self, s: &str) {
         self.detach_history();

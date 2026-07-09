@@ -94,6 +94,12 @@ pub struct AppCallbacks<'cb> {
     /// `run_disable`) asynchronously, refreshes the shared `/plugin` snapshot,
     /// and reports the result via a [`TurnEvent::SystemNotice`].
     pub on_plugin_action: Box<dyn FnMut(PluginAction) + 'cb>,
+    /// Executed on [`ChatOutcome::ReloadPlugins`] (`/reload-plugins`): the caller
+    /// re-reads the on-disk enabled set and applies pending plugin enable/disable
+    /// changes to the LIVE session (commands/hooks/agents/MCP/LSP swap in place),
+    /// reporting the component tallies via a [`TurnEvent::SystemNotice`]. No-op
+    /// (informational notice) when plugins are disabled for the session.
+    pub on_reload_plugins: Box<dyn FnMut() + 'cb>,
     /// Executed on [`ChatOutcome::RunBash`]: the caller runs the `!`-prefixed
     /// command through the sandboxed bash runner (no LLM turn) and folds its
     /// output back via [`TurnEvent::BashOutput`].
@@ -294,6 +300,12 @@ impl<'cb> RataApp<'cb> {
                     // `TurnEvent::SystemNotice`, same shape as `PermissionAction`.
                     ChatOutcome::PluginAction(action) => {
                         (self.callbacks.on_plugin_action)(action);
+                    }
+                    // `/reload-plugins`: re-read the enabled set + apply pending
+                    // plugin changes to the live session off-loop; the component
+                    // tallies return via `TurnEvent::SystemNotice`.
+                    ChatOutcome::ReloadPlugins => {
+                        (self.callbacks.on_reload_plugins)();
                     }
                     // A `!`-prefixed bash-mode command: run it off the model
                     // path; the output returns via `TurnEvent::BashOutput`.
@@ -505,6 +517,7 @@ pub fn run_app(
     on_connect_action: impl FnMut(ConnectAction),
     on_permission_action: impl FnMut(PermissionAction),
     on_plugin_action: impl FnMut(PluginAction),
+    on_reload_plugins: impl FnMut(),
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String),
     on_rename: impl FnMut(String),
@@ -538,6 +551,7 @@ pub fn run_app(
             on_connect_action: Box::new(on_connect_action),
             on_permission_action: Box::new(on_permission_action),
             on_plugin_action: Box::new(on_plugin_action),
+            on_reload_plugins: Box::new(on_reload_plugins),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
             on_rename: Box::new(on_rename),
@@ -637,6 +651,7 @@ mod tests {
                 on_connect_action: Box::new(|_| {}),
                 on_permission_action: Box::new(|_| {}),
                 on_plugin_action: Box::new(|_| {}),
+                on_reload_plugins: Box::new(|| {}),
                 on_bash: Box::new(|_| {}),
                 on_compact: Box::new(|_| {}),
                 on_rename: Box::new(|_| {}),

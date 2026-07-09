@@ -457,6 +457,22 @@ impl PluginManager {
         }
     }
 
+    /// The ids of every plugin currently in the `Loaded` state (its components
+    /// are live in the engine registries). Used by the composition-root
+    /// `/reload-plugins` refresh to diff the on-disk enabled set against what is
+    /// materialised, so it can `disable()` only the plugins that were turned off
+    /// and `enable()` only the ones newly turned on (no needless MCP churn).
+    pub async fn loaded_plugin_ids(&self) -> Vec<PluginId> {
+        self.plugins
+            .read()
+            .await
+            .iter()
+            .filter_map(|(id, state)| {
+                matches!(state, PluginState::Loaded { .. }).then_some(*id)
+            })
+            .collect()
+    }
+
     /// Materialise `manifest`'s components into the 8 registries.
     #[allow(clippy::too_many_lines)] // Wiring layer — validate-then-mutate over 7 component slots.
     async fn load_plugin(

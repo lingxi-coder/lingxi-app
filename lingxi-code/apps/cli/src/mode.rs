@@ -406,6 +406,22 @@ pub(crate) async fn run_ratatui(
             run_plugin_action(action, &dir, &home, &cwd, &slot, tx).await;
         });
     };
+    // (`/reload-plugins`) The retained plugin subsystem — `None` when plugins are
+    // disabled for the session. The effect re-reads the on-disk enabled set and
+    // applies pending enable/disable changes to the LIVE registries off-loop,
+    // reporting the component tallies via `TurnEvent::SystemNotice` — same
+    // off-loop shape as `on_plugin_action`, but a READ+RECONCILE against the
+    // engine's live `PluginManager` rather than a settings-file write.
+    let reload_plugin_runtime = tui_build.runtime.plugin_runtime.clone();
+    let reload_handle = handle.clone();
+    let reload_turn_tx = turn_tx.clone();
+    let on_reload_plugins = move || {
+        let rt = reload_plugin_runtime.clone();
+        let tx = reload_turn_tx.clone();
+        reload_handle.spawn(async move {
+            run_reload_plugins(rt, tx).await;
+        });
+    };
     // (/resume) Preload the recent-session rows for the interactive picker.
     // This is an ASYNC disk scan (the M5-08 loader), so it MUST run here — the
     // blocking ratatui loop can't `.await`. The rows go slightly stale as new
@@ -749,6 +765,7 @@ pub(crate) async fn run_ratatui(
             on_connect_action,
             on_permission_action,
             on_plugin_action,
+            on_reload_plugins,
             on_bash,
             on_compact,
             on_rename,
@@ -919,6 +936,62 @@ async fn run_plugin_action(
         *guard = fresh;
     }
     let _ = turn_tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
+}
+
+/// (`/reload-plugins`) Apply pending plugin enable/disable changes to the LIVE
+/// session: [`engine_desktop::PluginRuntime::refresh`] re-reads the on-disk
+/// enabled set and reconciles it into the engine's retained registries
+/// (commands/hooks/agents/MCP/LSP swap in place), then this reports the component
+/// tallies via `TurnEvent::SystemNotice`. Mirrors claude-code's
+/// `refreshActivePlugins` result line (`commands/reload-plugins/reload-plugins.ts`
+/// `Reloaded: N plugins · N skills · …`). A `None` runtime means plugins are
+/// disabled for the session (safe mode / `--bare`).
+async fn run_reload_plugins(
+    plugin_runtime: Option<std::sync::Arc<engine_desktop::PluginRuntime>>,
+    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
+) {
+    use tui_core::orchestrator_bridge::TurnEvent;
+
+    /// `N noun` / `N nouns` — naive `+s` plural, matching claude-code's
+    /// `plural()` for these ASCII nouns.
+    fn n(count: usize, noun: &str) -> String {
+        if count == 1 {
+            format!("{count} {noun}")
+        } else {
+            format!("{count} {noun}s")
+        }
+    }
+
+    let Some(rt) = plugin_runtime else {
+        let _ = turn_tx.send(TurnEvent::SystemNotice {
+            body: "Plugins are disabled for this session.".to_string(),
+            is_error: false,
+        });
+        return;
+    };
+
+    let c = rt.refresh().await;
+    // claude-code labels plugin COMMANDS "skills" in this line (`n(command_count,
+    // 'skill')`); `agent_count`/hooks/MCP/LSP mirror the same result struct.
+    let parts = [
+        n(c.enabled, "plugin"),
+        n(c.commands, "skill"),
+        n(c.agents, "agent"),
+        n(c.hooks, "hook"),
+        n(c.mcp, "plugin MCP server"),
+        n(c.lsp, "plugin LSP server"),
+    ];
+    let mut body = format!("Reloaded: {}", parts.join(" \u{00b7} "));
+    if c.errors > 0 {
+        body.push_str(&format!(
+            "\n{} during load. Run /doctor for details.",
+            n(c.errors, "error")
+        ));
+    }
+    let _ = turn_tx.send(TurnEvent::SystemNotice {
+        body,
+        is_error: c.errors > 0,
+    });
 }
 
 /// Run one `/sandbox` [`tui::chat_widget::SandboxAction`] to completion off the

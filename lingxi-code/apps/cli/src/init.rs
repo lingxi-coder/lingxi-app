@@ -73,6 +73,12 @@ pub struct Runtime {
     /// `/rewind` picker rows from it, and the restore path calls its
     /// `rewind_files` on a code rewind.
     pub file_history: std::sync::Arc<session::FileHistory>,
+    /// (`/reload-plugins`) Retained plugin subsystem, projected from
+    /// [`engine_desktop::DesktopRuntime::plugin_runtime`]. The TUI mount threads
+    /// it into the `on_reload_plugins` effect so the interactive command applies
+    /// pending enable/disable changes to the live session. `None` when plugins
+    /// are disabled.
+    pub plugin_runtime: Option<std::sync::Arc<engine_desktop::PluginRuntime>>,
     /// (Plan 3c §8) Per-provider availability map, projected straight from
     /// [`engine_desktop::DesktopRuntime::provider_availability`] (computed at
     /// `build()` from the LIVE multi-provider config). The TUI mount threads it
@@ -691,6 +697,7 @@ pub async fn build_runtime_from_config(
         subscription: rt.subscription,
         sandbox_toggle: rt.sandbox_toggle,
         file_history: rt.file_history,
+        plugin_runtime: rt.plugin_runtime,
         provider_availability: rt.provider_availability,
         provider_auth_methods: rt.provider_auth_methods,
         model_providers: rt.model_providers,

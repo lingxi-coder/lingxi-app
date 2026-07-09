@@ -94,6 +94,12 @@ pub enum ChatOutcome {
     /// asynchronously (CLI `plugin_settings::run_enable`/`run_disable`) and
     /// reports the result back through `TurnEvent::SystemNotice`.
     PluginAction(PluginAction),
+    /// `/reload-plugins` asked the caller to apply pending plugin enable/disable
+    /// changes to the LIVE session. The caller re-reads the on-disk enabled set
+    /// and reconciles it into the running registries off-loop (commands, hooks,
+    /// agents, MCP, LSP), reporting the component tallies via
+    /// `TurnEvent::SystemNotice` — mirroring claude-code's `refreshActivePlugins`.
+    ReloadPlugins,
     /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
     /// through the sandboxed [`tui_core::bash_runner::BashRunner`] (no LLM
     /// turn) and folds the captured output back through
@@ -1725,16 +1731,15 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/reload-plugins`: activate pending plugin changes in the LIVE session.
-    /// DESIGN-GATED: LingXi materializes plugins once at engine boot and drops
-    /// the PluginManager, so live refresh needs a new engine seam (a follow-up
-    /// `OrchestratorHandle::refresh_plugins`). Until it lands this reports the
-    /// honest restart note.
+    /// `/reload-plugins`: apply pending plugin enable/disable changes to the LIVE
+    /// session. The engine retains the `PluginManager` past boot (the
+    /// `on_reload_plugins` effect), so this hands off to the CLI closure, which
+    /// re-reads the on-disk enabled set and reconciles it into the running
+    /// registries off-loop — commands/hooks/agents/MCP/LSP swap without a restart
+    /// — reporting the component tallies via `TurnEvent::SystemNotice`. Mirrors
+    /// claude-code's `refreshActivePlugins` (Layer-3 refresh).
     pub(crate) fn cmd_reload_plugins(&mut self, _args: &str) -> ChatOutcome {
-        self.show_system_text(
-            "Plugin changes take effect on restart. In-session /reload-plugins is not yet wired.",
-            false,
-        )
+        ChatOutcome::ReloadPlugins
     }
 
     /// `/connect [provider]`: with no argument, open the grouped provider

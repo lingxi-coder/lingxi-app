@@ -1816,6 +1816,11 @@ pub struct DesktopRuntime {
     /// `Arc<session::FileHistory>` the orchestrator captures into; the CLI uses
     /// it to build the `/rewind` picker rows and to restore code on rewind.
     pub file_history: std::sync::Arc<session::FileHistory>,
+    /// (`/reload-plugins`) The retained plugin subsystem, or `None` when plugins
+    /// are disabled for the session. The CLI threads it into the TUI mount so the
+    /// interactive `/reload-plugins` command applies pending enable/disable
+    /// changes to the live session (see [`PluginRuntime::refresh`]).
+    pub plugin_runtime: Option<std::sync::Arc<PluginRuntime>>,
     /// Phase 2a §6.2: per-`profile_name` availability flag driving the `/model`
     /// picker's Connect badge (a sibling map, NOT a field on the frozen
     /// `ModelListing`). The tui joins it by provider/profile name.
@@ -2195,6 +2200,194 @@ async fn load_enabled_plugins(
         }
     }
     merged
+}
+
+/// Discover the set of plugins that should be active for the current session —
+/// the shared body of both the startup bootstrap (§6.5) and the
+/// `/reload-plugins` refresh ([`PluginRuntime::refresh`]). `ambient` resolves
+/// the `enabledPlugins` allowlist against the on-disk plugin cache (with a
+/// flat-walk fallback for dev/local dirs); `inline` appends any `--plugin-dir`
+/// session plugins. Returns `(id, manifest, install_dir)` per plugin — exactly
+/// what [`plugin::PluginManager::enable`] consumes.
+async fn discover_plugin_set(
+    ambient: bool,
+    inline: bool,
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+    plugins_dir: &std::path::Path,
+    cli_plugin_dirs: &[std::path::PathBuf],
+) -> Vec<(protocol::PluginId, plugin::PluginManifest, std::path::PathBuf)> {
+    let mut discovered = if ambient {
+        let enabled = load_enabled_plugins(lingxi_home, cwd).await;
+        let mut d = plugin::discover_enabled_plugins(plugins_dir, &enabled).await;
+        // Fallback: no allowlist match ⇒ flat-walk for direct plugin dirs.
+        if d.is_empty() {
+            d = plugin::discover_installed_plugins(plugins_dir).await;
+        }
+        d
+    } else {
+        Vec::new()
+    };
+    if inline {
+        discovered.extend(plugin::discover_cli_plugin_dirs(cli_plugin_dirs).await);
+    }
+    discovered
+}
+
+/// Materialise one plugin's AGENTS into the shared catalog (the manager
+/// validates agent frontmatter but does not own the catalog — faithful to
+/// claude-code's dir-scan `getAgentDefinitionsWithOverrides`). Plugin agents win
+/// on collision (replace any same-named entry). Shared by the startup bootstrap
+/// and [`PluginRuntime::refresh`].
+async fn materialize_plugin_agents(
+    dir: &std::path::Path,
+    catalog: &Arc<RwLock<Vec<agent::definition::AgentDefinition>>>,
+) {
+    let agents_dir = dir.join("agents");
+    if !agents_dir.is_dir() {
+        return;
+    }
+    let plugin_agents = agent::load_agents_from_dirs(&[(
+        agents_dir,
+        agent::definition::AgentSource::Plugin,
+    )])
+    .await;
+    if plugin_agents.is_empty() {
+        return;
+    }
+    let mut cat = catalog.write().await;
+    for a in plugin_agents {
+        if let Some(slot) = cat.iter_mut().find(|e| e.agent_type == a.agent_type) {
+            *slot = a;
+        } else {
+            cat.push(a);
+        }
+    }
+}
+
+/// Component tallies reported by [`PluginRuntime::refresh`], mirroring
+/// claude-code's `RefreshActivePluginsResult` (`utils/plugins/refresh.ts`). The
+/// CLI formats these into the `/reload-plugins` confirmation line.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PluginRefreshCounts {
+    /// Plugins now live in the session (successfully enabled).
+    pub enabled: usize,
+    /// Slash-commands (claude-code labels these "skills") across enabled plugins.
+    pub commands: usize,
+    /// Agents contributed by enabled plugins.
+    pub agents: usize,
+    /// Hook matchers across enabled plugins.
+    pub hooks: usize,
+    /// Plugin MCP servers across enabled plugins.
+    pub mcp: usize,
+    /// Plugin LSP servers across enabled plugins.
+    pub lsp: usize,
+    /// Plugins that failed to (re)load during the refresh.
+    pub errors: usize,
+}
+
+/// (`/reload-plugins`) The live plugin subsystem, retained past startup so the
+/// interactive `/reload-plugins` command can apply pending enable/disable
+/// changes to the RUNNING session without a restart — claude-code's
+/// `refreshActivePlugins` (Layer-3 refresh). Holds the SAME [`plugin::PluginManager`]
+/// the startup bootstrap materialised through (its registries are the shared
+/// `Arc`s the orchestrator reads), plus the discovery ingredients, so `refresh`
+/// re-reads `enabledPlugins` off disk and diffs it against what is loaded:
+/// `disable()` for plugins turned off (drops their commands/hooks/MCP/LSP from
+/// the live registries), `enable()` for newly-on ones (re-materialises +
+/// live-dials MCP), and a wholesale rebuild of the plugin-agent catalog portion.
+pub struct PluginRuntime {
+    manager: Arc<plugin::PluginManager>,
+    agent_catalog: Arc<RwLock<Vec<agent::definition::AgentDefinition>>>,
+    plugins_dir: std::path::PathBuf,
+    home: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+    cli_plugin_dirs: Vec<std::path::PathBuf>,
+    ambient: bool,
+    inline: bool,
+}
+
+impl PluginRuntime {
+    /// Re-read the on-disk enabled set and reconcile it into the live session.
+    /// Returns the component tallies for the confirmation message. Best-effort:
+    /// a plugin that fails to enable is counted in `errors` and skipped; already
+    /// live plugins are left untouched (no MCP reconnect churn).
+    pub async fn refresh(&self) -> PluginRefreshCounts {
+        use std::collections::HashSet;
+
+        // (1) The fresh target set from disk + settings.
+        let target = discover_plugin_set(
+            self.ambient,
+            self.inline,
+            &self.home,
+            &self.cwd,
+            &self.plugins_dir,
+            &self.cli_plugin_dirs,
+        )
+        .await;
+        let target_ids: HashSet<protocol::PluginId> =
+            target.iter().map(|(id, _, _)| *id).collect();
+
+        // (2) Disable plugins no longer enabled — unloads their commands/hooks/
+        //     MCP/LSP from the shared registries.
+        let loaded: HashSet<protocol::PluginId> =
+            self.manager.loaded_plugin_ids().await.into_iter().collect();
+        for id in &loaded {
+            if !target_ids.contains(id) {
+                let _ = self.manager.disable(id).await;
+            }
+        }
+
+        // (3) Rebuild the plugin-agent portion of the catalog wholesale: agents
+        //     carry no live connections, so dropping every `Plugin`-source entry
+        //     and re-adding from the target set below is cheap and matches
+        //     claude-code's full re-read of agent definitions.
+        {
+            let mut cat = self.agent_catalog.write().await;
+            cat.retain(|a| {
+                !matches!(a.source, agent::definition::AgentSource::Plugin)
+            });
+        }
+
+        // (4) Enable newly-on plugins (already-live ones keep their registry
+        //     entries — skip re-enable to avoid MCP churn), and re-materialise
+        //     agents for EVERY target plugin (the catalog portion was wiped).
+        let still_loaded: HashSet<protocol::PluginId> =
+            loaded.intersection(&target_ids).copied().collect();
+        let mut counts = PluginRefreshCounts::default();
+        for (id, manifest, dir) in target {
+            materialize_plugin_agents(&dir, &self.agent_catalog).await;
+            // Tally BEFORE `manifest` moves into `enable`.
+            let c = &manifest.components;
+            let this = (
+                c.commands.len(),
+                c.agents.len(),
+                c.hooks.len(),
+                c.mcp_servers.len(),
+                c.lsp_servers.len(),
+            );
+            let add = |counts: &mut PluginRefreshCounts| {
+                counts.enabled += 1;
+                counts.commands += this.0;
+                counts.agents += this.1;
+                counts.hooks += this.2;
+                counts.mcp += this.3;
+                counts.lsp += this.4;
+            };
+            if still_loaded.contains(&id) {
+                add(&mut counts);
+                continue;
+            }
+            match self.manager.enable(&id, manifest, dir).await {
+                Ok(()) => add(&mut counts),
+                Err(e) => {
+                    counts.errors += 1;
+                    tracing::warn!(error = %e, "/reload-plugins: plugin failed to load");
+                }
+            }
+        }
+        counts
+    }
 }
 
 /// SKILLLIST.1: `CommandRegistry`-backed skill-listing provider for the per-turn
@@ -5099,6 +5292,10 @@ pub async fn build(
     //       materialisation path (binary `EBm` → the shared plugin merge).
     let ambient_plugins = !cfg.customization_gates.disables_plugins();
     let inline_plugins = !cfg.cli_plugin_dirs.is_empty() && !cfg.customization_gates.safe_mode;
+    // (`/reload-plugins`) The retained plugin subsystem — `None` when plugins are
+    // entirely disabled (safe mode / `--bare` with no `--plugin-dir`), so the
+    // interactive refresh reports "plugins disabled" rather than reloading.
+    let mut plugin_runtime: Option<Arc<PluginRuntime>> = None;
     if ambient_plugins || inline_plugins {
         let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
             || cfg.lingxi_home.join("plugins"),
@@ -5108,101 +5305,72 @@ pub async fn build(
         // allowlist (`plugin@marketplace` → enabled) to versioned cache dirs
         // `cache/{marketplace}/{plugin}/{version}/`, exactly as
         // `loadAllPluginsCacheOnly` (`pluginLoader.ts:1888`) consumes a real
-        // `~/.lingxi/plugins`. Read `enabledPlugins` from the user then project
-        // settings (project wins), mirroring `getSettings_DEPRECATED()`.
-        let mut discovered = if ambient_plugins {
-            let enabled = load_enabled_plugins(&cfg.lingxi_home, &cwd_for_plugins).await;
-            let mut d = plugin::discover_enabled_plugins(&plugins_dir, &enabled).await;
-            // Fallback: when no allowlist resolves anything (e.g. a flat
-            // directory of pre-fetched plugin dirs supplied directly, as with
-            // `--add-dir`), flat-walk for direct `.lingxi-plugin/plugin.json`
-            // children. This is NOT the real cache layout but keeps local/dev
-            // plugin dirs loadable.
-            if d.is_empty() {
-                d = plugin::discover_installed_plugins(&plugins_dir).await;
-            }
-            d
-        } else {
-            Vec::new()
-        };
-        // (M4 cc2.1.198) `--plugin-dir <path>` entries (dir or .zip), loaded
-        // like the binary's inline plugins (`EBm` path arm): a bad path warns
-        // and is skipped; loaded ones enable through the same manager path as
-        // marketplace-installed plugins below.
-        if inline_plugins {
-            discovered.extend(plugin::discover_cli_plugin_dirs(&cfg.cli_plugin_dirs).await);
-        }
-        if !discovered.is_empty() {
-            // Live registries the manager materialises plugin components into:
-            // - command  → `shared_command_registry` (drives `/`-completion +
-            //   the per-turn skill listing).
-            // - hooks    → `plugin_hook_registry` (the orchestrator's clone).
-            // - MCP      → `plugin_mcp_registry` (== the orchestrator's
-            //   `mcp_registry`; scoped configs are live-connected via
-            //   `connect_all`, the same path as configured `.mcp.json`
-            //   servers, and the already-spawned reconnect loop covers any
-            //   that fail their initial dial).
-            // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
-            // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer
-            // yet (skills surface to the model via the command-registry listing,
-            // output styles via the dir-based resolver `resolve_output_style`),
-            // so they are still local instances here: registration is faithful
-            // to `loadAllPlugins`' registry population, but end-to-end
-            // consumption of these two registries is separate existing-arch work
-            // (residual).
-            let pm = plugin::PluginManager::new(
-                plugins_dir.clone(),
-                Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
-                http.clone(),
-                Arc::new(PosixRuntime::new()),
-                credentials.clone(),
-                Arc::new(plugin::PluginBlocklist::new(String::new())),
-                Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
-                shared_command_registry.clone(),
-                Arc::new(RwLock::new(SkillRegistry::new())),
-                plugin_hook_registry.clone(),
-                Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
-                plugin_mcp_registry.clone(),
-                plugin_lsp_registry.clone(),
-                Arc::new(RwLock::new(ToolRegistry::new())),
-            );
-            for (id, manifest, dir) in discovered {
-                let plugin_name = manifest.name.clone();
-                // Materialise the plugin's AGENTS into the live catalog via the
-                // dir-scan loader (the manager validates agent frontmatter but
-                // does not own the catalog). Plugin agents win on collision
-                // (passed as a later contribution).
-                let agents_dir = dir.join("agents");
-                if agents_dir.is_dir() {
-                    let plugin_agents = agent::load_agents_from_dirs(&[(
-                        agents_dir,
-                        agent::definition::AgentSource::Plugin,
-                    )])
-                    .await;
-                    if !plugin_agents.is_empty() {
-                        let mut cat = plugin_agent_catalog.write().await;
-                        for a in plugin_agents {
-                            // Replace any same-named agent; otherwise append.
-                            if let Some(slot) =
-                                cat.iter_mut().find(|e| e.agent_type == a.agent_type)
-                            {
-                                *slot = a;
-                            } else {
-                                cat.push(a);
-                            }
-                        }
-                    }
-                }
-                // Materialise COMMANDS + HOOKS (and validate agent frontmatter).
-                if let Err(e) = pm.enable(&id, manifest, dir).await {
-                    tracing::warn!(
-                        plugin = %plugin_name,
-                        error = %e,
-                        "skipping plugin that failed to load"
-                    );
-                }
+        // `~/.lingxi/plugins`; a flat-walk fallback covers pre-fetched local
+        // dirs, and `--plugin-dir` session plugins append. The shared body is
+        // `discover_plugin_set`, reused by [`PluginRuntime::refresh`].
+        let discovered = discover_plugin_set(
+            ambient_plugins,
+            inline_plugins,
+            &cfg.lingxi_home,
+            &cwd_for_plugins,
+            &plugins_dir,
+            &cfg.cli_plugin_dirs,
+        )
+        .await;
+        // Build the manager UNCONDITIONALLY (even when zero plugins resolve on
+        // disk) and RETAIN it in `plugin_runtime`, so a later `/reload-plugins`
+        // can enable a plugin the user turns on mid-session. Live registries the
+        // manager materialises components into:
+        // - command  → `shared_command_registry` (drives `/`-completion + the
+        //   per-turn skill listing).
+        // - hooks    → `plugin_hook_registry` (the orchestrator's clone).
+        // - MCP      → `plugin_mcp_registry` (== the orchestrator's
+        //   `mcp_registry`; scoped configs live-connect via `connect_all`, the
+        //   same path as configured `.mcp.json` servers, and the reconnect loop
+        //   covers any that fail their initial dial).
+        // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
+        // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer yet,
+        // so they are local instances here (residual, as at startup).
+        let pm = Arc::new(plugin::PluginManager::new(
+            plugins_dir.clone(),
+            Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
+            http.clone(),
+            Arc::new(PosixRuntime::new()),
+            credentials.clone(),
+            Arc::new(plugin::PluginBlocklist::new(String::new())),
+            Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+            shared_command_registry.clone(),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            plugin_hook_registry.clone(),
+            Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+            plugin_mcp_registry.clone(),
+            plugin_lsp_registry.clone(),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        ));
+        for (id, manifest, dir) in discovered {
+            let plugin_name = manifest.name.clone();
+            // Materialise the plugin's AGENTS into the live catalog (the manager
+            // validates agent frontmatter but does not own the catalog).
+            materialize_plugin_agents(&dir, &plugin_agent_catalog).await;
+            // Materialise COMMANDS + HOOKS + MCP + LSP (and validate agents).
+            if let Err(e) = pm.enable(&id, manifest, dir).await {
+                tracing::warn!(
+                    plugin = %plugin_name,
+                    error = %e,
+                    "skipping plugin that failed to load"
+                );
             }
         }
+        plugin_runtime = Some(Arc::new(PluginRuntime {
+            manager: pm,
+            agent_catalog: plugin_agent_catalog.clone(),
+            plugins_dir,
+            home: cfg.lingxi_home.clone(),
+            cwd: cwd_for_plugins.clone(),
+            cli_plugin_dirs: cfg.cli_plugin_dirs.clone(),
+            ambient: ambient_plugins,
+            inline: inline_plugins,
+        }));
     }
 
     // (M4 cc2.1.198) `--agent <agent>` — resolve the session agent against the
@@ -5448,6 +5616,7 @@ pub async fn build(
         subscription,
         sandbox_toggle,
         file_history,
+        plugin_runtime,
         provider_availability,
         provider_auth_methods,
         model_providers,
@@ -8215,5 +8384,148 @@ mod tests {
             "dir must not be the old in-repo .lingxi/tasks-output path"
         );
         assert!(dir.ends_with("tasks"));
+    }
+
+    // ── `/reload-plugins` — `PluginRuntime::refresh` live reconcile ──────────
+
+    /// Write a plugin into the versioned cache layout
+    /// `plugins/cache/{marketplace}/{plugin}/{version}/` that
+    /// `discover_enabled_plugins` resolves, shipping one namespaced command.
+    fn write_cached_plugin(
+        plugins_dir: &std::path::Path,
+        marketplace: &str,
+        name: &str,
+        version: &str,
+        cmd: &str,
+    ) {
+        let dir = plugins_dir
+            .join("cache")
+            .join(marketplace)
+            .join(name)
+            .join(version);
+        std::fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
+        std::fs::write(
+            dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(
+            dir.join("commands").join(format!("{cmd}.md")),
+            format!("---\ndescription: cmd {cmd}\n---\nBody of {cmd}.\n"),
+        )
+        .unwrap();
+    }
+
+    /// Write `home/settings.json` with the given `enabledPlugins` allowlist.
+    fn write_enabled_plugins(home: &std::path::Path, entries: &[(&str, bool)]) {
+        let map: serde_json::Map<String, serde_json::Value> = entries
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), serde_json::json!(v)))
+            .collect();
+        std::fs::write(
+            home.join("settings.json"),
+            serde_json::to_string(&serde_json::json!({ "enabledPlugins": map })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// `/reload-plugins` applies pending enable/disable changes to the LIVE
+    /// session: enabling a plugin materialises its command into the shared
+    /// registry; toggling the on-disk allowlist off (and another on) then
+    /// re-running `refresh` swaps them in place — the disabled plugin's command
+    /// is gone, the newly-enabled one is present, and the tallies reflect the
+    /// live set. Exercises the retained `PluginManager` + the diff reconcile
+    /// (`loaded_plugin_ids` → `disable` removed / `enable` added).
+    #[tokio::test]
+    async fn plugin_runtime_refresh_swaps_enabled_set_live() {
+        use command_api::CommandRegistry;
+        use hooks::HookRegistry;
+        use lsp::LspRegistry;
+        use mcp::McpRegistry;
+        use outputstyles::OutputStyleRegistry;
+        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+        use platform_posix::{
+            PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+            PosixMcpTransport, PosixRuntime,
+        };
+        use secret::CredentialManager;
+        use skill_api::SkillRegistry;
+        use tokio::sync::RwLock;
+        use tool_api::ToolRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugins_dir = home.join("plugins");
+        write_cached_plugin(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd");
+        write_cached_plugin(&plugins_dir, "mkt", "pluginb", "1.0.0", "bcmd");
+        // Start with only A enabled.
+        write_enabled_plugins(&home, &[("plugina@mkt", true)]);
+
+        let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        let manager = Arc::new(PluginManager::new(
+            plugins_dir.clone(),
+            Arc::new(PosixFileSystem::new(cwd.clone())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(PluginBlocklist::new(String::new())),
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            command_registry.clone(),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        ));
+        let rt = super::PluginRuntime {
+            manager: manager.clone(),
+            agent_catalog: Arc::new(RwLock::new(Vec::new())),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            ambient: true,
+            inline: false,
+        };
+
+        // First refresh: A enables, its command lands in the live registry.
+        let c1 = rt.refresh().await;
+        assert_eq!(c1.enabled, 1, "one plugin enabled");
+        assert_eq!(c1.commands, 1, "A's command tallied");
+        assert_eq!(c1.errors, 0);
+        assert!(
+            command_registry.read().await.resolve("plugina:acmd").is_some(),
+            "A's command materialised"
+        );
+        assert_eq!(manager.loaded_plugin_ids().await.len(), 1);
+
+        // Toggle the on-disk allowlist: disable A, enable B — then reload.
+        write_enabled_plugins(&home, &[("plugina@mkt", false), ("pluginb@mkt", true)]);
+        let c2 = rt.refresh().await;
+        assert_eq!(c2.enabled, 1, "still one plugin — the set swapped");
+        assert_eq!(c2.errors, 0);
+        assert!(
+            command_registry.read().await.resolve("plugina:acmd").is_none(),
+            "A's command unloaded on disable"
+        );
+        assert!(
+            command_registry.read().await.resolve("pluginb:bcmd").is_some(),
+            "B's command materialised on enable"
+        );
+        let ids = manager.loaded_plugin_ids().await;
+        assert_eq!(ids.len(), 1, "only B remains loaded after the swap");
     }
 }

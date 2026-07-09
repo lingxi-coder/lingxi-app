@@ -13,10 +13,11 @@
         "input": 0.14,
         "output": 0.28
       },
+      "description": "Deprecated 2026/07/24 — maps to deepseek-v4-flash non-thinking mode",
       "family": "deepseek",
       "id": "deepseek-chat",
       "knowledge": "2025-09",
-      "last_updated": "2026-02-28",
+      "last_updated": "2026-07-09",
       "limit": {
         "context": 1000000,
         "output": 384000
@@ -31,8 +32,22 @@
       },
       "name": "DeepSeek Chat",
       "open_weights": true,
-      "reasoning": false,
+      "reasoning": true,
+      "reasoning_options": [
+        {
+          "type": "toggle"
+        },
+        {
+          "type": "effort",
+          "values": [
+            "high",
+            "max"
+          ]
+        }
+      ],
       "release_date": "2025-12-01",
+      "status": "deprecated",
+      "structured_output": true,
       "temperature": true,
       "tool_call": true
     },

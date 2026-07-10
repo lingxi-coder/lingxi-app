@@ -9,6 +9,7 @@ use command_api::{
     CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
 };
 
+pub mod code_review_skill;
 pub mod fewer_permission_prompts_skill;
 pub mod loop_skill;
 pub mod run_skill;
@@ -30,6 +31,28 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_simplify_skill(reg);
     register_run_skill_generator_skill(reg);
     register_fewer_permission_prompts_skill(reg);
+    register_code_review_skill(reg);
+}
+
+/// Register the `/code-review` bundled skill — the reference's assembler skill
+/// (registrar over name-var `Lee`, `userInvocable:!0`, no `isEnabled` gate,
+/// `argumentHint:"[low|medium|high|xhigh|max] [--fix] [--comment] [<target>]"`).
+/// Distinct from the builtin `/review` (GitHub PRs); see [`code_review_skill`].
+fn register_code_review_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "code-review".into(),
+        description: code_review_skill::CODE_REVIEW_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(code_review_skill::CodeReviewPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        argument_hint: Some(code_review_skill::CODE_REVIEW_ARGUMENT_HINT.into()),
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/fewer-permission-prompts` bundled skill — an inline-body skill
@@ -314,6 +337,31 @@ mod tests {
                 assert!(f
                     .build("x")
                     .contains("\n\n## Additional instructions from the user\n\nx"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn code_review_is_registered_with_argument_hint() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("code-review").expect("registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert_eq!(
+            cmd.argument_hint.as_deref(),
+            Some("[low|medium|high|xhigh|max] [--fix] [--comment] [<target>]")
+        );
+        assert!(cmd.description.starts_with("Review the current diff for correctness bugs"));
+        // Distinct command from the builtin `/review`.
+        assert!(reg.resolve("review").is_none());
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let f = prompt_fn.as_ref().expect("prompt_fn set");
+                // Default = the medium effort body; explicit level selects another.
+                assert!(f.build("").starts_with("`medium effort"));
+                assert!(f.build("high").starts_with("`high effort"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }

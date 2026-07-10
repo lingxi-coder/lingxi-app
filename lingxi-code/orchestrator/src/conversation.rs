@@ -1683,13 +1683,31 @@ impl ConversationOrchestrator {
         for _ in 0..MAX_DRAIN_BATCHES {
             match source.take_mid_turn_input().await {
                 Some(text) => {
-                    self.inject_meta_user_message(&text).await;
+                    let wrapped = Self::wrap_mid_turn_user_message(&text);
+                    self.inject_meta_user_message(&wrapped).await;
                     injected = true;
                 }
                 None => break,
             }
         }
         injected
+    }
+
+    /// Wrap joined mid-turn user input in the 2.1.206 envelope (`YAt`, binary
+    /// @225654300) before injection. The `human` / `auto-continuation` / unset
+    /// arm — the only source the port's `MsgQueueMidTurnInput` produces (all
+    /// mid-turn input is user-typed) — prefixes `jca` ("The user sent a new
+    /// message while you were working:\n") and appends the explainer. Em-dash is
+    /// U+2014; "Claude Code" -> "LingXi" per the brand rebrand. (206 dropped the
+    /// 201 "IMPORTANT: After completing your current task…" suffix — 0 hits in
+    /// 206.) A non-user source would instead use
+    /// `"[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]\n{text}"`, but the port
+    /// has no such mid-turn source today.
+    #[must_use]
+    fn wrap_mid_turn_user_message(text: &str) -> String {
+        format!(
+            "The user sent a new message while you were working:\n{text}\n\nThis is how LingXi surfaces messages the user sends mid-turn \u{2014} within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn."
+        )
     }
 
     /// Finding #73: wire the V2 task source consulted by the per-turn

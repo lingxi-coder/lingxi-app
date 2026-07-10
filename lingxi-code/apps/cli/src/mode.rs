@@ -244,6 +244,10 @@ pub(crate) struct RemountState {
     pub fast_mode: bool,
     /// `/plan` mode. Applied via `set_plan_mode`.
     pub plan_mode: bool,
+    /// One-shot system notice appended to the re-mounted transcript (the
+    /// `/branch` success confirmation — claude-code renders it in the NEW
+    /// branch). `None` for /resume switches and rewinds.
+    pub notice: Option<String>,
 }
 
 pub(crate) enum RunOutcome {
@@ -846,6 +850,7 @@ pub(crate) async fn run_ratatui(
             model: Some((status.model, status.model_profile)),
             fast_mode: summary_orch.fast_mode().await,
             plan_mode: summary_orch.plan_mode().await,
+            notice: None,
         })
     };
     match run_result {
@@ -1303,19 +1308,36 @@ async fn run_permission_action(
         PermissionAction::AddDirectory { path, dest } => {
             match permission::persist_workspace_directory(&path, true, dest, &paths).await {
                 Ok(written) => {
+                    // claude-code 2.1.205 success/already echoes, byte-exact:
+                    // `Added ${path} as a working directory and saved to local
+                    // settings` (persisted) / `… for this session` (session
+                    // scope) / `${path} is already added as a working
+                    // directory.`
                     let body = if written {
-                        format!(
-                            "\u{2713} Added {path} as a working directory ({}). \u{b7} /permissions to manage",
-                            dest_word(dest)
-                        )
+                        match dest {
+                            PermissionUpdateDestination::Session => format!(
+                                "Added {path} as a working directory for this session"
+                            ),
+                            PermissionUpdateDestination::LocalSettings => format!(
+                                "Added {path} as a working directory and saved to local settings"
+                            ),
+                            other => format!(
+                                "Added {path} as a working directory and saved to {}",
+                                dest_word(other)
+                            ),
+                        }
                     } else {
-                        format!("{path} is already a working directory ({}).", dest_word(dest))
+                        format!("{path} is already added as a working directory.")
                     };
                     let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error: false });
                 }
                 Err(e) => {
+                    // claude-code's save-failure variant (the session add is
+                    // what failed here, but the message shape is preserved).
                     let _ = turn_tx.send(TurnEvent::SystemNotice {
-                        body: format!("\u{2717} Failed to add working directory: {e}"),
+                        body: format!(
+                            "Added {path} as a working directory. Failed to save to local settings: {e}"
+                        ),
                         is_error: true,
                     });
                 }

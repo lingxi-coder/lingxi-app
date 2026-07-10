@@ -129,7 +129,7 @@ impl RewindPickerView {
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled("Rewind", accent)));
         lines.push(Line::from(Span::styled(
-            "Restore code and/or conversation to a previous point".to_string(),
+            "Restore the code and/or conversation to a previous point".to_string(),
             dim,
         )));
         lines.push(Line::from(String::new()));
@@ -185,9 +185,9 @@ impl RewindPickerView {
 /// Human label for the confirm footer.
 fn scope_label(scope: RewindScope) -> &'static str {
     match scope {
-        RewindScope::CodeAndConversation => "Code and conversation",
-        RewindScope::CodeOnly => "Code only",
-        RewindScope::ConversationOnly => "Conversation only",
+        RewindScope::CodeAndConversation => "Restore code and conversation",
+        RewindScope::CodeOnly => "Restore code",
+        RewindScope::ConversationOnly => "Restore conversation",
     }
 }
 

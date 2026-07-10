@@ -1528,6 +1528,7 @@ async fn mount_resumed_tui(
     // pure session-state writes, run BEFORE `run_ratatui` — model drives the
     // `session.models` the freshly-read status snapshot builds (display follows);
     // fast/plan are read live by the turn loop, no cached display to seed.
+    let mut boot_notice = None;
     if let Some(state) = carried_state {
         let orch = &tui_build.runtime.orchestrator;
         if let Some((model, profile)) = state.model {
@@ -1535,12 +1536,21 @@ async fn mount_resumed_tui(
         }
         let _ = orch.set_fast_mode(state.fast_mode).await;
         let _ = orch.set_plan_mode(state.plan_mode).await;
+        boot_notice = state.notice;
     }
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then
     // launch the ratatui backend with that replayed scrollback. Resume has no
     // SessionRegistration (fresh launches register; resume does not), so no
-    // status forwarder is threaded.
-    let resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
+    // status forwarder is threaded. A carried one-shot notice (the `/branch`
+    // success confirmation) renders as the newest system cell.
+    let mut resumed_messages = tui::replay::rebuild_from_jsonl(&messages);
+    if let Some(body) = boot_notice {
+        resumed_messages.push(tui_core::message::RenderedMessage::SystemText {
+            body,
+            timestamp: 0,
+            is_error: false,
+        });
+    }
     crate::mode::run_ratatui(tui_build, None, resumed_messages).await
 }
 
@@ -1624,6 +1634,7 @@ pub(crate) async fn drive_tui_switch_loop(
                 let cwd_str = cwd.to_string_lossy().into_owned();
                 let fs: Arc<dyn FileSystem> =
                     Arc::new(platform_posix::PosixFileSystem::new(cwd.clone()));
+                let mut state = state;
                 let mount_target = match session::create_branch(
                     &lingxi_home,
                     &cwd_str,
@@ -1633,10 +1644,43 @@ pub(crate) async fn drive_tui_switch_loop(
                 )
                 .await
                 {
-                    Ok(result) => result.new_session_id,
+                    Ok(result) => {
+                        // claude-code 2.1.205 success confirmation, rendered in
+                        // the NEW branch's transcript: `Branched
+                        // conversation (Branch N). You are now in the new
+                        // branch (session <new>). Use /resume <src> to return
+                        // to the original, or run `lingxi-cli -r <src>` in a
+                        // new terminal.` The saved title already embeds the
+                        // " (Branch[ N])" marker — reuse it.
+                        let marker = result
+                            .title
+                            .rfind(" (Branch")
+                            .map(|i| result.title[i..].to_string())
+                            .unwrap_or_default();
+                        let notice = format!(
+                            "Branched conversation{marker}. You are now in the new branch \
+                             (session {new}). Use /resume {src} to return to the original, \
+                             or run `lingxi-cli -r {src}` in a new terminal.",
+                            new = result.new_session_id,
+                            src = result.source_session_id,
+                        );
+                        if let Some(s) = state.as_mut() {
+                            s.notice = Some(notice);
+                        }
+                        result.new_session_id
+                    }
+                    Err(session::BranchError::NoConversation) => {
+                        // claude-code's in-transcript empty-state line (was a
+                        // stderr-only eprintln): re-mount the source session
+                        // carrying the notice.
+                        if let Some(s) = state.as_mut() {
+                            s.notice = Some("No conversation to branch".to_string());
+                        }
+                        source
+                    }
                     Err(e) => {
-                        // Branch creation failed (e.g. empty transcript); never
-                        // drop the user — re-mount the still-good source session.
+                        // Branch creation failed; never drop the user —
+                        // re-mount the still-good source session.
                         eprintln!("lingxi-cli: failed to branch conversation: {e}");
                         source
                     }

@@ -1449,15 +1449,19 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/agents`: open the agents listing.
+    /// `/agents`: claude-code 2.1.205 removed the agents wizard — print its
+    /// removed-notice byte-exactly (LingXi-branded paths) instead of opening a
+    /// picker.
     pub(crate) fn cmd_agents(&mut self, _args: &str) -> ChatOutcome {
-        self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
-            "Agents",
-            "Agents",
-            &self.session.agents,
-            "No agents configured.",
-        )));
-        ChatOutcome::Continue
+        self.show_system_text(
+            "The /agents wizard has been removed.\n\
+             Ask LingXi to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\n\
+             or edit the files directly:\n  \
+             \u{2022} .lingxi/agents/       (this project)\n  \
+             \u{2022} ~/.lingxi/agents/     (all projects)\n\
+             Docs: https://code.claude.com/docs/en/sub-agents",
+            false,
+        )
     }
 
     /// `/skills`: open the skills listing (captured at launch from the
@@ -1691,7 +1695,7 @@ impl ChatWidget {
             .map(tui_core::multiagent::task_row_from_record)
             .collect();
         if rows.is_empty() {
-            return self.show_system_text("No background tasks are running.", false);
+            return self.show_system_text("No tasks currently running", false);
         }
         self.bottom_pane.show_tasks(rows);
         ChatOutcome::Continue

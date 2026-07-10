@@ -1537,17 +1537,14 @@ mod tests {
             .view_stack()
             .contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /hooks
+        // `/agents` prints the 2.1.205 removed-notice (no picker view).
         assert!(matches!(
             submit_command(&mut app, "/agents"),
             ChatOutcome::Continue
         ));
-        assert!(app
-            .chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ScreenView>());
-        app.on_key(press(KeyCode::Esc)); // close /agents
-        assert!(cells(&app).is_empty(), "views, not scrollback dumps");
+        assert!(app.chat_widget.bottom_pane().view_stack().is_empty());
+        let agents_cells = cells(&app);
+        assert_eq!(agents_cells.len(), 1, "one removed-notice cell");
         assert!(
             !app.chat_widget.turn_running(),
             "no prompt turn for commands"

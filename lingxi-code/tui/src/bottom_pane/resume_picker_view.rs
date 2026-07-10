@@ -234,6 +234,6 @@ mod tests {
             })
             .collect();
         assert!(text.contains("resume me"), "{text}");
-        assert!(text.contains("Resume Session"), "{text}");
+        assert!(text.contains("Resume session"), "{text}");
     }
 }

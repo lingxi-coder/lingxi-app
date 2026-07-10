@@ -256,10 +256,10 @@ pub fn resume_lines(state: &ResumeState, theme: &Theme) -> Vec<Line<'static>> {
     let n = filtered.len();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Header: bold suggestion-colored "Resume Session" + dim "(idx of N)" only
+    // Header: bold suggestion-colored "Resume session" + dim "(idx of N)" only
     // in list mode when the list overflows the viewport.
     let mut header = vec![Span::styled(
-        "Resume Session",
+        "Resume session",
         Style::default()
             .fg(suggestion)
             .add_modifier(Modifier::BOLD),
@@ -443,7 +443,7 @@ mod tests {
             .iter()
             .map(|l| l.spans.iter().map(|sp| sp.content.as_ref()).collect())
             .collect();
-        assert_eq!(joined[0], "Resume Session");
+        assert_eq!(joined[0], "Resume session");
         assert!(joined.iter().any(|l| l == "> hello"));
         assert!(joined.iter().any(|l| l == "Type to search \u{00b7} Esc cancel"));
     }

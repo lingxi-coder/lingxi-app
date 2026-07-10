@@ -84,6 +84,10 @@ impl Tool for SyntheticOutputTool {
     fn name(&self) -> &str {
         SYNTHETIC_OUTPUT_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("return the final response as structured JSON")
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }

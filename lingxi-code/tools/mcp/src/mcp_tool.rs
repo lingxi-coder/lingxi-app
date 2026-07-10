@@ -1018,6 +1018,10 @@ impl Tool for ListMcpResourcesTool {
     fn name(&self) -> &str {
         LIST_MCP_RESOURCES_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("list resources from connected MCP servers")
+    }
     fn input_schema(&self) -> &Value {
         &LIST_MCP_RESOURCES_SCHEMA
     }
@@ -1229,6 +1233,10 @@ fn tag_resource_with_server(r: &traits::McpResourceDto, server: &str) -> Value {
 impl Tool for ReadMcpResourceTool {
     fn name(&self) -> &str {
         READ_MCP_RESOURCE_TOOL_NAME
+    }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("read a specific MCP resource by URI")
     }
     fn input_schema(&self) -> &Value {
         &READ_MCP_RESOURCE_SCHEMA

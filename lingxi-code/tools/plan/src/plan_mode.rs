@@ -241,6 +241,10 @@ impl Tool for EnterPlanModeTool {
     fn name(&self) -> &str {
         ENTER_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("switch to plan mode to design an approach before coding")
+    }
     fn input_schema(&self) -> &Value {
         &EMPTY_INPUT_SCHEMA
     }
@@ -387,6 +391,10 @@ impl ExitPlanModeTool {
 impl Tool for ExitPlanModeTool {
     fn name(&self) -> &str {
         EXIT_TOOL_NAME
+    }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("present plan for approval and start coding (plan mode only)")
     }
     fn input_schema(&self) -> &Value {
         &EXIT_INPUT_SCHEMA

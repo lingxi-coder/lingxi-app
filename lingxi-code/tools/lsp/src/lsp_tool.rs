@@ -1089,6 +1089,10 @@ impl Tool for LSPTool {
     fn name(&self) -> &str {
         LSP_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("code intelligence (definitions, references, symbols, hover)")
+    }
     fn input_schema(&self) -> &Value {
         &LSP_TOOL_SCHEMA
     }

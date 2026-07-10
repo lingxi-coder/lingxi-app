@@ -11,6 +11,7 @@ use command_api::{
 
 pub mod loop_skill;
 pub mod run_skill;
+pub mod run_skill_generator_skill;
 pub mod simplify_skill;
 pub mod verify_skill;
 
@@ -26,6 +27,30 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_verify_skill(reg);
     register_run_skill(reg);
     register_simplify_skill(reg);
+    register_run_skill_generator_skill(reg);
+}
+
+/// Register the `/run-skill-generator` bundled skill — a file-based skill in the
+/// reference (registrar `hab`), USER-only (`disableModelInvocation:!0`, no
+/// `isEnabled` gate). Prompt shape matches [`verify_skill`].
+fn register_run_skill_generator_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "run-skill-generator".into(),
+        description: run_skill_generator_skill::RUN_SKILL_GENERATOR_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(
+                run_skill_generator_skill::RunSkillGeneratorPromptFn,
+            )),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        // Reference `disableModelInvocation:!0` — a user-only command.
+        disable_model_invocation: true,
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/simplify` bundled skill — an inline-body skill in the
@@ -231,6 +256,23 @@ mod tests {
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn run_skill_generator_is_user_only() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("run-skill-generator").expect("registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.user_invocable, Some(true));
+        // Reference `disableModelInvocation:!0` — the model may not invoke it.
+        assert!(cmd.disable_model_invocation);
+        assert!(cmd.description.starts_with("Author or improve the run-<unit> skill"));
+        // Excluded from the model-invocable listing.
+        assert!(!reg
+            .model_invocable_commands()
+            .iter()
+            .any(|c| c.name == "run-skill-generator"));
     }
 
     #[test]

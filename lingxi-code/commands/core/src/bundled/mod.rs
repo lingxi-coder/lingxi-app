@@ -9,6 +9,7 @@ use command_api::{
     CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
 };
 
+pub mod fewer_permission_prompts_skill;
 pub mod loop_skill;
 pub mod run_skill;
 pub mod run_skill_generator_skill;
@@ -28,6 +29,29 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_run_skill(reg);
     register_simplify_skill(reg);
     register_run_skill_generator_skill(reg);
+    register_fewer_permission_prompts_skill(reg);
+}
+
+/// Register the `/fewer-permission-prompts` bundled skill — an inline-body skill
+/// in the reference (`userInvocable:!0`, `requires:{workspace:!0}`, no
+/// `isEnabled` gate). Its prompt appends `## Additional instructions from the
+/// user` on an argument (see [`fewer_permission_prompts_skill`]).
+fn register_fewer_permission_prompts_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "fewer-permission-prompts".into(),
+        description: fewer_permission_prompts_skill::FEWER_PERMISSION_PROMPTS_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(
+                fewer_permission_prompts_skill::FewerPermissionPromptsPromptFn,
+            )),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/run-skill-generator` bundled skill — a file-based skill in the
@@ -273,6 +297,26 @@ mod tests {
             .model_invocable_commands()
             .iter()
             .any(|c| c.name == "run-skill-generator"));
+    }
+
+    #[test]
+    fn fewer_permission_prompts_is_registered() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("fewer-permission-prompts").expect("registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert!(cmd.description.contains(".lingxi/settings.json"));
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let f = prompt_fn.as_ref().expect("prompt_fn set");
+                assert!(f.build("").starts_with("# Fewer Permission Prompts"));
+                assert!(f
+                    .build("x")
+                    .contains("\n\n## Additional instructions from the user\n\nx"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
     }
 
     #[test]

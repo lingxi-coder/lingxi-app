@@ -10,6 +10,7 @@ use command_api::{
 };
 
 pub mod loop_skill;
+pub mod verify_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
 /// `bundledSkills.ts`).
@@ -20,6 +21,31 @@ pub mod loop_skill;
 /// `isEnabled: isKairosCronEnabled` gate (loop.ts:83).
 pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_loop_skill(reg, cron_enabled);
+    register_verify_skill(reg);
+}
+
+/// Register the `/verify` bundled skill — a file-based bundled skill in the
+/// reference (`Lu({name:Mee, description:Pob, userInvocable:!0, files:…,
+/// getPromptForCommand})`, name-var `Mee="verify"`). Unconditionally registered
+/// (no `isEnabled` gate, unlike `/loop`).
+fn register_verify_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "verify".into(),
+        description: verify_skill::VERIFY_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(verify_skill::VerifyPromptFn)),
+        },
+        // Sets `is_bundled` in the skill listing + satisfies the listing's
+        // loadedFrom ∈ {bundled,…} filter.
+        loaded_from: Some("bundled".into()),
+        // Reference `userInvocable:!0`.
+        user_invocable: Some(true),
+        // The frontmatter carries an explicit `description` ⇒ listing-eligible.
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/loop` bundled skill (loop.ts:74-92). Metadata is byte-faithful
@@ -101,6 +127,27 @@ mod tests {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
         assert!(reg.resolve("loop").is_none());
+    }
+
+    #[test]
+    fn verify_is_registered_unconditionally() {
+        // `/verify` has no `isEnabled` gate — present even when cron is off.
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("verify").expect("verify registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert!(cmd.has_user_specified_description);
+        assert!(cmd.description.starts_with("Verify that a code change actually does"));
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let f = prompt_fn.as_ref().expect("prompt_fn set");
+                assert!(f.build("").starts_with("**Verification is runtime observation.**"));
+                assert!(f.build("check X").contains("\n\n## User Request\n\ncheck X"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
     }
 
     #[test]

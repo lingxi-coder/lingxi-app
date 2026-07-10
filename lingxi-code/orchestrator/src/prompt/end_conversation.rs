@@ -20,6 +20,9 @@ pub const END_CONVERSATION_TOOL_NAME: &str = "EndConversation";
 /// this section omitted, byte-identical to a build without the feature).
 pub const END_CONVERSATION_GB_FLAG: &str = "tengu_umber_kestrel";
 
+/// The tool's model-facing `description()` (byte-verified vs the binary, 2 hits).
+pub const END_CONVERSATION_DESCRIPTION: &str = "End the current conversation. Use only for sustained user abuse or when the user explicitly requests a demonstration of this tool. This will close the conversation and prevent any further messages from being sent.";
+
 /// Terminal message shown after the conversation is ended (claude-code `k4i`).
 ///
 /// "Claude" here is the assistant identity; the port keeps the model-family
@@ -66,5 +69,7 @@ mod tests {
             END_CONVERSATION_ENDED_MESSAGE,
             "Claude ended the conversation. To continue, please start a new session."
         );
+        assert!(END_CONVERSATION_DESCRIPTION.starts_with("End the current conversation. Use only for sustained user abuse"));
+        assert!(END_CONVERSATION_DESCRIPTION.ends_with("prevent any further messages from being sent."));
     }
 }

@@ -933,6 +933,10 @@ impl Tool for WebSearchTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("search the web for current information")
+    }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
     }

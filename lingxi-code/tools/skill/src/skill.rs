@@ -267,6 +267,10 @@ impl Tool for SkillTool {
     fn name(&self) -> &str {
         SKILL_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("invoke a slash-command skill")
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }

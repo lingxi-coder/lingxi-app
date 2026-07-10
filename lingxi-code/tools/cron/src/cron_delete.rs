@@ -100,6 +100,10 @@ impl Tool for CronDeleteTool {
     fn name(&self) -> &str {
         CRON_DELETE_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("cancel a scheduled cron job")
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }

@@ -168,6 +168,10 @@ impl Tool for CronListTool {
     fn name(&self) -> &str {
         CRON_LIST_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("list active cron jobs")
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }

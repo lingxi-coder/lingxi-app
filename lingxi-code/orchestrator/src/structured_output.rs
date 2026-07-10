@@ -55,6 +55,10 @@ impl Tool for StructuredOutputTool {
     fn name(&self) -> &str {
         STRUCTURED_OUTPUT_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("return the final response as structured JSON")
+    }
 
     fn input_schema(&self) -> &Value {
         &self.schema

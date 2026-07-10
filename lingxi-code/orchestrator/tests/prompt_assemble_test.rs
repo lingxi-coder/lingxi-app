@@ -16,6 +16,7 @@ fn ctx_minimal() -> SystemPromptContext {
         memory_files: Vec::new(),
         tool_names: Vec::new(),
         skills_available: false,
+        memory_dir: None,
         exclude_dynamic_sections: false,
     }
 }
@@ -40,6 +41,30 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
     // GAP-2: # Context management is the last body section; it follows env block.
     assert!(out.contains("# Context management"));
     assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
+    // The `# Memory` section is OMITTED when memory_dir is None (default) —
+    // byte-identical to a build without the memory feature.
+    assert!(!out.contains("# Memory\n"));
+    assert!(!out.contains("You have a persistent file-based memory"));
+}
+
+#[test]
+fn memory_section_emitted_when_memory_dir_set() {
+    // 2.1.206 `# Memory` write-instructions section fires when the memory
+    // feature is active (memory_dir = Some, i.e. the prefetch is wired).
+    let mut c = ctx_minimal();
+    c.memory_dir = Some(PathBuf::from("/home/u/.lingxi/memdir"));
+    let out = assemble_system_prompt(&c);
+    assert!(out.contains(
+        "# Memory\n\nYou have a persistent file-based memory at `/home/u/.lingxi/memdir`. This directory already exists \u{2014} write to it directly with the Write tool"
+    ));
+    assert!(out.contains("`MEMORY.md` is the index loaded into context each session"));
+    assert!(out.contains("code structure, past fixes, git history, LINGXI.md)"));
+    // Positioned as a dynamic post-env section, BEFORE `# Context management`.
+    let i_env = out.find("# Environment").expect("env");
+    let i_mem = out.find("# Memory\n").expect("memory");
+    let i_ctx = out.find("# Context management").expect("ctx-mgmt");
+    assert!(i_env < i_mem, "memory follows the env block");
+    assert!(i_mem < i_ctx, "memory precedes context management");
 }
 
 #[test]

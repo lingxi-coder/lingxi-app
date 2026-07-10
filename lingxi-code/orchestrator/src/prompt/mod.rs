@@ -181,6 +181,15 @@ pub fn assemble_system_prompt_with_style(
         s.push_str(&bg);
     }
 
+    // `# Memory` (2.1.206) — the file-based-memory WRITE instructions. Emitted
+    // only when the memory feature is active (the prefetch is wired →
+    // `ctx.memory_dir` is `Some`); default `None` omits it, byte-identical to a
+    // build without memory. Dynamic post-env section, before context_management.
+    if let Some(dir) = &ctx.memory_dir {
+        push_section_separator(&mut s);
+        s.push_str(&memory_section::render(&dir.to_string_lossy()));
+    }
+
     // GAP-2: `# Context management` (iIm) — always, unconditional.
     // Binary cx() position: after env_info_simple + language + output_style +
     // bg-session + scratchpad. In LingXi this is the LAST section, after
@@ -277,6 +286,11 @@ pub struct SystemPromptContext {
     /// claude-code `nz()`/skill-list non-empty. Gates the `# Session-specific
     /// guidance` Skill-invocation bullet (with the Skill tool present).
     pub skills_available: bool,
+    /// Resolved user-memdir path when the file-based memory feature is active
+    /// (the memory prefetch is wired — claude-code `tengu_moth_copse`, default
+    /// OFF). `Some(path)` emits the `# Memory` write-instructions section;
+    /// `None` (the default) omits it — byte-identical to a build without memory.
+    pub memory_dir: Option<PathBuf>,
     /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
     /// per-machine `env_block` is OMITTED from the assembled system prompt (it
     /// is emitted in the first-user-message context reminder instead). `false`
@@ -378,6 +392,7 @@ mod tests {
             memory_files: Vec::new(),
             tool_names: Vec::new(),
             skills_available: false,
+            memory_dir: None,
             exclude_dynamic_sections: false,
         };
         assert_eq!(ctx.cwd, PathBuf::from("/tmp"));
@@ -429,6 +444,7 @@ mod tests {
             memory_files: Vec::new(),
             tool_names: vec!["Read".into(), "Write".into()],
             skills_available: false,
+            memory_dir: None,
             exclude_dynamic_sections: false,
         }
     }

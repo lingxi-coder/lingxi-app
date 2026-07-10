@@ -7040,6 +7040,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 Some(provider) => !provider.skill_entries().await.is_empty(),
                 None => false,
             },
+            // `# Memory` section gate (claude-code `tengu_moth_copse`, default
+            // OFF): the memory feature is active iff a memory prefetch is wired
+            // (`memory_prefetch.is_some()`), and the section points the model at
+            // exactly the user memdir the prefetch scans. `None` ⇒ section
+            // omitted (byte-identical to the pre-memory prompt).
+            memory_dir: self
+                .memory_prefetch
+                .as_ref()
+                .and_then(|p| p.user_memdir())
+                .map(std::path::Path::to_path_buf),
             // `--exclude-dynamic-system-prompt-sections`: when set, `assemble`
             // OMITS the env block from the system prompt (it is re-emitted in the
             // first-user-message context reminder via `env_reminder_section`).

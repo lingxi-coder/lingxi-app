@@ -10,6 +10,8 @@ use command_api::{
 };
 
 pub mod loop_skill;
+pub mod run_skill;
+pub mod simplify_skill;
 pub mod verify_skill;
 
 /// Register all bundled skills onto `reg` (port of `registerBundledSkills`,
@@ -22,6 +24,48 @@ pub mod verify_skill;
 pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_loop_skill(reg, cron_enabled);
     register_verify_skill(reg);
+    register_run_skill(reg);
+    register_simplify_skill(reg);
+}
+
+/// Register the `/simplify` bundled skill — an inline-body skill in the
+/// reference (registrar `eVp`, `userInvocable:!0`, `argumentHint:"[<target>]"`,
+/// no `isEnabled` gate). Its `getPromptForCommand` PREPENDS a `Review target:`
+/// line (see [`simplify_skill`]).
+fn register_simplify_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "simplify".into(),
+        description: simplify_skill::SIMPLIFY_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(simplify_skill::SimplifyPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        // Reference `argumentHint:"[<target>]"`.
+        argument_hint: Some(simplify_skill::SIMPLIFY_ARGUMENT_HINT.into()),
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the `/run` bundled skill — a file-based bundled skill in the
+/// reference (static SKILL.md, `userInvocable:!0`, no `isEnabled` gate).
+fn register_run_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "run".into(),
+        description: run_skill::RUN_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(run_skill::RunPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/verify` bundled skill — a file-based bundled skill in the
@@ -145,6 +189,45 @@ mod tests {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
                 assert!(f.build("").starts_with("**Verification is runtime observation.**"));
                 assert!(f.build("check X").contains("\n\n## User Request\n\ncheck X"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_is_registered_unconditionally() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("run").expect("run registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert!(cmd.description.starts_with("Launch and drive this project's app"));
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let f = prompt_fn.as_ref().expect("prompt_fn set");
+                assert!(f.build("").starts_with("**Running means launching the actual app"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simplify_is_registered_with_argument_hint() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("simplify").expect("simplify registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert_eq!(cmd.argument_hint.as_deref(), Some("[<target>]"));
+        assert!(cmd.description.contains("reuse, simplification, efficiency, and altitude"));
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let f = prompt_fn.as_ref().expect("prompt_fn set");
+                // Inline skill PREPENDS a target line (contrast verify/run).
+                assert!(f.build("").starts_with("`/simplify → 4 cleanup agents"));
+                assert!(f.build("pull/9").starts_with("Review target: `pull/9`\n\n"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }

@@ -7012,6 +7012,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             file_tree: tree,
             memory_files,
             tool_names,
+            // `nz()` non-empty: at least one model-invocable prompt skill
+            // exists. Sourced from the attached skill-listing provider (same
+            // source as the per-turn skill reminder); `None` provider ⇒ false.
+            skills_available: match &self.skill_listing {
+                Some(provider) => !provider.skill_entries().await.is_empty(),
+                None => false,
+            },
             // `--exclude-dynamic-system-prompt-sections`: when set, `assemble`
             // OMITS the env block from the system prompt (it is re-emitted in the
             // first-user-message context reminder via `env_reminder_section`).

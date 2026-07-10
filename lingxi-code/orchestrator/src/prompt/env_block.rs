@@ -197,6 +197,7 @@ mod tests {
             file_tree: FileTree::default(),
             memory_files: Vec::new(),
             tool_names: Vec::new(),
+            skills_available: false,
             exclude_dynamic_sections: false,
         }
     }

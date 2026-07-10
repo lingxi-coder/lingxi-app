@@ -213,8 +213,9 @@ fn session_guidance(
     is_interactive: bool,
     has_agent_tool: bool,
     fork_mode_enabled: bool,
+    skills_present: bool,
 ) -> Option<String> {
-    let mut bullets: Vec<&'static str> = Vec::with_capacity(2);
+    let mut bullets: Vec<&'static str> = Vec::with_capacity(3);
 
     // Bullet 1: `! <command>` tip — fires when NOT `Hr()` (isInteractive=true
     // means the inner check `c?null:…` fires on the `c` = `Hr()` falsy branch,
@@ -242,6 +243,13 @@ fn session_guidance(
     // standard (non-fork) bullet fires.
     if has_agent_tool && !fork_mode_enabled {
         bullets.push("Use the Agent tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.");
+    }
+
+    // Skill-invocation bullet (claude-code `nXh` `s&&!n` arm): fires when at
+    // least one user-invocable skill exists AND the Skill tool is registered.
+    // `${m_}` = the Skill tool name "Skill"; em-dash U+2014, ASCII apostrophe.
+    if skills_present {
+        bullets.push("When the user types `/<skill-name>`, invoke it via Skill. Only use skills listed in the user-invocable skills section \u{2014} don't guess.");
     }
 
     if bullets.is_empty() {
@@ -384,6 +392,7 @@ pub fn format(
     has_agent_tool: bool,
     fork_mode_enabled: bool,
     model: &str,
+    skills_available: bool,
 ) -> String {
     let mut sections: Vec<String> = Vec::with_capacity(9);
     sections.push(opening_paragraph(output_style_active));
@@ -403,7 +412,13 @@ pub fn format(
     sections.push(anti_verbosity_section(model));
     // GAP-3: `# Session-specific guidance` (jHm) — when bullets non-empty.
     // Binary position: after anti_verbosity, before env_info_simple.
-    if let Some(sg) = session_guidance(is_interactive, has_agent_tool, fork_mode_enabled) {
+    let has_skill_tool = tool_names.iter().any(|t| t == "Skill");
+    if let Some(sg) = session_guidance(
+        is_interactive,
+        has_agent_tool,
+        fork_mode_enabled,
+        skills_available && has_skill_tool,
+    ) {
         sections.push(sg);
     }
     // NOTE: `# Context management` (GAP-2) is emitted AFTER the env block
@@ -473,15 +488,15 @@ mod tests {
     fn doing_tasks_gated_on_keep_coding_instructions() {
         let tools: Vec<String> = Vec::new();
         // No active style ⇒ DOING present (the `c===null` arm), regardless of flag.
-        assert!(format(false, true, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
-        assert!(format(false, false, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
+        assert!(format(false, true, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
+        assert!(format(false, false, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
         // Active style with keepCodingInstructions:true ⇒ DOING present.
-        assert!(format(true, true, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
+        assert!(format(true, true, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
         // Active style with keepCodingInstructions:false ⇒ DOING OMITTED (the
         // only case that diverges; binary `c.keepCodingInstructions===!0?…:null`).
-        assert!(!format(true, false, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
+        assert!(!format(true, false, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
         // Omitting DOING must not disturb the neighbouring sections.
-        let omitted = format(true, false, &tools, false, false, false, "claude-opus-4-7");
+        let omitted = format(true, false, &tools, false, false, false, "claude-opus-4-7", false);
         assert!(omitted.contains("# Executing actions with care"));
         assert!(omitted.contains("# Tone and style"));
     }
@@ -567,7 +582,7 @@ mod tests {
             "Agent".to_string(),
             "TodoWrite".to_string(),
         ];
-        let body = format(false, true, &tools, true, true, false, "claude-opus-4-7");
+        let body = format(false, true, &tools, true, true, false, "claude-opus-4-7", false);
         let i_open = body.find("You are an interactive agent").expect("opening");
         let i_system = body.find("# System").expect("system");
         let i_doing = body.find("# Doing tasks").expect("doing");
@@ -622,7 +637,7 @@ mod tests {
     #[test]
     fn text_output_section_present_in_full_body() {
         let tools: Vec<String> = Vec::new();
-        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7");
+        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7", false);
         assert!(body.contains("# Text output (does not apply to tool calls)"));
     }
 
@@ -708,7 +723,7 @@ mod tests {
         // `# Context management` is assembled in `mod.rs` AFTER the env block,
         // NOT inside the pre-env body block returned by `format()`.
         let tools: Vec<String> = Vec::new();
-        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7");
+        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7", false);
         assert!(
             !body.contains("# Context management"),
             "context management must not be in pre-env body block"
@@ -720,7 +735,7 @@ mod tests {
     #[test]
     fn session_guidance_both_bullets_interactive_with_agent() {
         // Standard interactive session + Agent tool + no fork mode.
-        let sg = session_guidance(true, true, false).expect("present");
+        let sg = session_guidance(true, true, false, false).expect("present");
         assert!(sg.starts_with("# Session-specific guidance\n"));
         // Bullet 1: ! <command> tip.
         assert!(sg.contains("suggest they type `! <command>` in the prompt \u{2014}"));
@@ -733,7 +748,7 @@ mod tests {
     #[test]
     fn session_guidance_no_agent_only_command_tip() {
         // Interactive + no Agent tool → only bullet 1.
-        let sg = session_guidance(true, false, false).expect("present");
+        let sg = session_guidance(true, false, false, false).expect("present");
         assert!(sg.contains("suggest they type `! <command>`"));
         assert!(!sg.contains("Use the Agent tool with specialized"));
     }
@@ -741,7 +756,7 @@ mod tests {
     #[test]
     fn session_guidance_not_interactive_with_agent() {
         // Not interactive + Agent tool → only bullet 2.
-        let sg = session_guidance(false, true, false).expect("present");
+        let sg = session_guidance(false, true, false, false).expect("present");
         assert!(!sg.contains("suggest they type `! <command>`"));
         assert!(sg.contains("Use the Agent tool with specialized"));
     }
@@ -749,16 +764,41 @@ mod tests {
     #[test]
     fn session_guidance_none_when_no_bullets() {
         // Not interactive + no Agent tool → None.
-        assert!(session_guidance(false, false, false).is_none());
+        assert!(session_guidance(false, false, false, false).is_none());
     }
 
     #[test]
     fn session_guidance_fork_mode_suppresses_agent_bullet() {
         // When fork mode enabled, the standard Agent bullet is suppressed.
         // The ! <command> bullet still fires (is_interactive=true).
-        let sg = session_guidance(true, true, true).expect("still has ! bullet");
+        let sg = session_guidance(true, true, true, false).expect("still has ! bullet");
         assert!(sg.contains("suggest they type `! <command>`"));
         // Standard Agent bullet absent; fork variant not yet implemented.
         assert!(!sg.contains("Use the Agent tool with specialized"));
+    }
+
+    #[test]
+    fn session_guidance_skill_bullet_when_skills_present() {
+        // `s && !n`: skills exist AND Skill tool present -> the Skill bullet
+        // (after the ! tip and the Agent bullet). Em-dash U+2014.
+        let sg = session_guidance(true, true, false, true).expect("present");
+        assert!(sg.contains("When the user types `/<skill-name>`, invoke it via Skill. Only use skills listed in the user-invocable skills section \u{2014} don't guess."));
+        // Ordering: after the Agent-delegation bullet.
+        assert!(
+            sg.find("Use the Agent tool with specialized").unwrap()
+                < sg.find("When the user types `/<skill-name>`").unwrap()
+        );
+    }
+
+    #[test]
+    fn session_guidance_no_skill_bullet_when_absent() {
+        // skills_present=false -> no Skill bullet.
+        let sg = session_guidance(true, true, false, false).expect("present");
+        assert!(!sg.contains("invoke it via Skill"));
+        // And it can be the SOLE bullet when only skills are present.
+        let only = session_guidance(false, false, false, true).expect("skill-only");
+        assert!(only.contains("invoke it via Skill"));
+        assert!(!only.contains("suggest they type `! <command>`"));
+        assert!(!only.contains("Use the Agent tool with specialized"));
     }
 }

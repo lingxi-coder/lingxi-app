@@ -136,6 +136,7 @@ pub fn assemble_system_prompt_with_style(
         /* has_agent_tool = */ has_agent,
         /* fork_mode_enabled = */ fork_mode,
         /* model = */ &ctx.model,
+        /* skills_available = */ ctx.skills_available,
     ));
 
     // `--exclude-dynamic-system-prompt-sections`: OMIT the per-machine env
@@ -271,6 +272,10 @@ pub struct SystemPromptContext {
     /// Available tool names — alphabetic order. Sorting happens here,
     /// NOT in `tools_block::format`.
     pub tool_names: Vec<String>,
+    /// Whether at least one user-invocable (model-invocable) skill exists —
+    /// claude-code `nz()`/skill-list non-empty. Gates the `# Session-specific
+    /// guidance` Skill-invocation bullet (with the Skill tool present).
+    pub skills_available: bool,
     /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
     /// per-machine `env_block` is OMITTED from the assembled system prompt (it
     /// is emitted in the first-user-message context reminder instead). `false`
@@ -371,6 +376,7 @@ mod tests {
             },
             memory_files: Vec::new(),
             tool_names: Vec::new(),
+            skills_available: false,
             exclude_dynamic_sections: false,
         };
         assert_eq!(ctx.cwd, PathBuf::from("/tmp"));
@@ -421,6 +427,7 @@ mod tests {
             file_tree: FileTree::default(),
             memory_files: Vec::new(),
             tool_names: vec!["Read".into(), "Write".into()],
+            skills_available: false,
             exclude_dynamic_sections: false,
         }
     }

@@ -85,6 +85,10 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     // The em-dash is U+2014.
     if ctx.in_worktree {
         s.push_str("\n - This is a git worktree \u{2014} an isolated copy of the repository. Run all commands from this directory. Do NOT `cd` to the original repository root.");
+        // `_Jc` — the shared-git-stash bullet emitted right after the worktree
+        // notice (present in 201 and 206; em-dash U+2014; ASCII apostrophes).
+        // "other Claude sessions" -> "other LingXi sessions" (CLI-brand rebrand).
+        s.push_str("\n - The git stash stack is shared with the main checkout and all other worktrees, and other LingXi sessions may push or pop it concurrently. Never use bare `git stash` / `git stash pop` \u{2014} you could pop another session's changes. Prefer a temporary WIP commit to set work aside; if you must stash, use `git stash push -u -m \"<unique-tag>\"`, immediately capture your entry's SHA via `git stash list --format='%H %gs'`, restore with `git stash apply <sha>` (not pop), and afterwards drop the entry, re-finding its current `stash@{n}` by tag first.");
     }
 
     // `Is a git repository: ${r}` — `r` is the boolean from `vy()`, rendered by
@@ -285,12 +289,26 @@ Run all commands from this directory. Do NOT `cd` to the original repository roo
             ),
             "worktree notice missing"
         );
-        // Notice sits between the two fixed lines.
+        // `_Jc` shared-stash bullet follows the worktree notice.
+        assert!(
+            out.contains(
+                "\n - The git stash stack is shared with the main checkout and all other worktrees, \
+and other LingXi sessions may push or pop it concurrently. Never use bare `git stash` / \
+`git stash pop` \u{2014} you could pop another session's changes. Prefer a temporary WIP commit \
+to set work aside; if you must stash, use `git stash push -u -m \"<unique-tag>\"`, immediately \
+capture your entry's SHA via `git stash list --format='%H %gs'`, restore with `git stash apply \
+<sha>` (not pop), and afterwards drop the entry, re-finding its current `stash@{n}` by tag first."
+            ),
+            "shared-stash bullet missing"
+        );
+        // Notice sits between the two fixed lines; the stash bullet follows it.
         let i_pwd = out.find("Primary working directory:").expect("pwd line");
         let i_notice = out.find("This is a git worktree").expect("notice present");
+        let i_stash = out.find("The git stash stack is shared").expect("stash bullet");
         let i_git = out.find("Is a git repository:").expect("git line");
         assert!(i_pwd < i_notice);
-        assert!(i_notice < i_git);
+        assert!(i_notice < i_stash);
+        assert!(i_stash < i_git);
     }
 
     #[test]

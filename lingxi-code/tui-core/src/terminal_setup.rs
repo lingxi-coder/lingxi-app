@@ -191,10 +191,10 @@ Note: You can already use backslash (\\) + return to add newlines.\n\n\
 To set up the shortcut (optional):\n\
 1. Exit tmux/screen temporarily\n\
 2. Run /terminal-setup directly in one of these terminals:\n\
-{platform_terminals}   \u{2022} IDE: VSCode, Cursor, Windsurf, Zed\n\
+{platform_terminals}   \u{2022} IDE: VSCode, Cursor, Devin Desktop, Zed\n\
    \u{2022} Other: Alacritty\n\
 3. Return to tmux/screen - settings will persist\n\n\
-Note: iTerm2, WezTerm, Ghostty, Kitty, and Warp support Shift+Enter natively."
+Note: iTerm2, WezTerm, Ghostty, Kitty, Warp, and Windows Terminal support Shift+Enter natively."
         );
         return (message, false);
     }

@@ -1801,8 +1801,18 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/vim`: toggle vim editing mode and echo the new state.
+    /// `/vim`: claude-code 2.1.205 replaced the toggle with a hidden
+    /// moved-to-config redirect that renders `/vim moved → Editor mode in
+    /// /config` and opens its Config dialog. LingXi's settings screen is still
+    /// read-only, so until the /config editor lands (R7) the redirect line
+    /// renders AND the toggle still flips (with its state echo) so vim users
+    /// aren't stranded; the dialog-open lands with the editor.
     pub(crate) fn cmd_vim(&mut self, _args: &str) -> ChatOutcome {
+        self.transcript.push_message(RenderedMessage::SystemText {
+            body: "/vim moved \u{2192} Editor mode in /config".to_string(),
+            timestamp: 0,
+            is_error: false,
+        });
         let now_on = self.bottom_pane.toggle_vim();
         self.transcript.push_message(RenderedMessage::SystemText {
             body: format!("Vim mode {}.", if now_on { "enabled" } else { "disabled" }),

@@ -1,12 +1,14 @@
 //! `/review` — returns the locked code-review prompt as an injected user
 //! message so the next turn fetches a GitHub PR and produces a code review.
 //!
-//! 1:1 behavioral port of the claude-code `review` slash command
-//! (`src/commands/review.ts`, a `type: 'prompt'` command whose
-//! `getPromptForCommand(args)` returns a single text block built by
-//! `LOCAL_REVIEW_PROMPT(args)`). The TS template ends with
-//! `PR number: ${args}` — the user-supplied args are always interpolated,
-//! whether or not they are empty (matching the TS unconditional `${args}`).
+//! 1:1 byte port of claude-code 2.1.205's `review` command (`type: "prompt"`,
+//! `argumentHint: "[pr number]"`, `progressMessage: "reviewing pull
+//! request"`). Its `getPromptForCommand(e)` splits the args on whitespace,
+//! cleans the first token of backticks and a leading `#`, and returns:
+//! - no PR token → the `gh pr list` guidance line (`hs_`);
+//! - a PR token → the review-target template (`gs_(n, rest)`), whose
+//!   `Additional instructions from the user: ${t}` line is UNCONDITIONAL
+//!   (renders with an empty tail when no extra instructions were given).
 //!
 //! Note: `/review` is a builtin but non-core command, so
 //! `core_description("review")` resolves to the shared fallback string rather
@@ -50,34 +52,40 @@ impl BuiltinCommandHandler for ReviewHandler {
     }
 }
 
-/// Build the code-review prompt, interpolating the user's args as the PR
-/// number (mirrors the TS `PR number: ${args}` unconditional interpolation,
-/// including the template literal's leading newline and indentation).
+/// The no-PR-number branch (claude-code 2.1.205 `hs_`).
+const LIST_PROMPT: &str = "Run `gh pr list` to show the open pull requests, then ask the user which one to review (`/review <number>`).";
+
+/// Build the injected prompt (claude-code 2.1.205 `getPromptForCommand`):
+/// first whitespace token (stripped of backticks and a leading `#`) is the PR
+/// number; the rest join as extra instructions.
 fn build_prompt(args: &str) -> String {
+    let mut tokens = args.trim().split_whitespace();
+    let first = tokens.next().unwrap_or("");
+    let number = first.replace('`', "");
+    let number = number.strip_prefix('#').unwrap_or(&number);
+    if number.is_empty() {
+        return LIST_PROMPT.to_string();
+    }
+    let instructions = tokens.collect::<Vec<_>>().join(" ");
     format!(
-        "
-      You are an expert code reviewer. Follow these steps:
-
-      1. If no PR number is provided in the args, run `gh pr list` to show open PRs
-      2. If a PR number is provided, run `gh pr view <number>` to get PR details
-      3. Run `gh pr diff <number>` to get the diff
-      4. Analyze the changes and provide a thorough code review that includes:
-         - Overview of what the PR does
-         - Analysis of code quality and style
-         - Specific suggestions for improvements
-         - Any potential issues or risks
-
-      Keep your review concise but thorough. Focus on:
-      - Code correctness
-      - Following project conventions
-      - Performance implications
-      - Test coverage
-      - Security considerations
-
-      Format your review with clear sections and bullet points.
-
-      PR number: {args}
-    "
+        "Review target: GitHub pull request `{number}`.\n\
+         Gather this target's diff with (instead of any local `git diff`):\n\
+         1. `gh pr view {number} --json title,body,author,baseRefName,headRefName,state,additions,deletions,changedFiles,labels` for context\n\
+         2. `gh pr diff {number}` for the unified diff\n\
+         The PR's diff is the only review scope \u{2014} local working-tree changes are out of scope. When you need surrounding code, Read the files in this checkout if it matches the PR's branch, otherwise fetch file contents via `gh`.\n\
+         Additional instructions from the user: {instructions}\n\
+         Analyze the changes and provide a thorough code review that includes:\n\
+         - An overview of what the PR does\n\
+         - Analysis of code quality and style\n\
+         - Specific suggestions for improvements\n\
+         - Any potential issues or risks\n\
+         Keep your review concise but thorough. Focus on:\n\
+         - Code correctness\n\
+         - Following project conventions\n\
+         - Performance implications\n\
+         - Test coverage\n\
+         - Security considerations\n\
+         Format your review with clear sections and bullet points."
     )
 }
 
@@ -94,31 +102,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_inject_message_with_locked_template() {
+    async fn no_pr_number_returns_the_list_guidance() {
         let h = ReviewHandler::new();
         match h.handle(&args("")).await {
             CommandResult::InjectMessage { content } => {
-                assert!(content.contains("You are an expert code reviewer. Follow these steps:"));
-                assert!(content.contains(
-                    "1. If no PR number is provided in the args, run `gh pr list` to show open PRs"
-                ));
-                assert!(
-                    content.contains("Format your review with clear sections and bullet points.")
+                assert_eq!(
+                    content,
+                    "Run `gh pr list` to show the open pull requests, then ask the user \
+                     which one to review (`/review <number>`)."
                 );
-                // Unconditional `${args}` interpolation: empty args => trailing
-                // "PR number: " with nothing after it.
-                assert!(content.contains("PR number: "));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn interpolates_args_as_pr_number() {
+    async fn pr_number_builds_the_review_target_template() {
         let h = ReviewHandler::new();
         match h.handle(&args("123")).await {
             CommandResult::InjectMessage { content } => {
-                assert!(content.contains("PR number: 123"));
+                assert!(content.starts_with("Review target: GitHub pull request `123`.\n"));
+                assert!(content.contains("1. `gh pr view 123 --json title,body,author,baseRefName,headRefName,state,additions,deletions,changedFiles,labels` for context\n"));
+                assert!(content.contains("2. `gh pr diff 123` for the unified diff\n"));
+                // The instructions line is unconditional — empty tail here.
+                assert!(content.contains("Additional instructions from the user: \n"));
+                assert!(content.ends_with("Format your review with clear sections and bullet points."));
+            }
+            other => panic!("expected InjectMessage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pr_token_is_cleaned_and_instructions_join() {
+        let h = ReviewHandler::new();
+        match h.handle(&args("`#456`  focus on   tests")).await {
+            CommandResult::InjectMessage { content } => {
+                assert!(content.starts_with("Review target: GitHub pull request `456`.\n"));
+                assert!(content.contains("Additional instructions from the user: focus on tests\n"));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

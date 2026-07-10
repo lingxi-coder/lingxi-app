@@ -1127,10 +1127,21 @@ async fn run_sandbox_action(
                     }
                 }
             }) {
-                Ok(()) => (
-                    format!("Added \"{pattern}\" to excluded commands in local settings"),
-                    false,
-                ),
+                Ok(()) => {
+                    // claude-code 2.1.205 echoes the settings file's
+                    // cwd-relative path (fallback literal when unresolvable).
+                    let rel = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| path.strip_prefix(&cwd).ok().map(std::path::Path::to_path_buf))
+                        .map_or_else(
+                            || ".lingxi/settings.local.json".to_string(),
+                            |p| p.display().to_string(),
+                        );
+                    (
+                        format!("Added \"{pattern}\" to excluded commands in {rel}"),
+                        false,
+                    )
+                }
                 Err(e) => (format!("Failed to update excluded commands: {e}"), true),
             }
         }

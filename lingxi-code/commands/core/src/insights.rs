@@ -58,25 +58,23 @@ fn build_prompt(args: &str) -> String {
     } else {
         format!("Additional user input: {args}\n")
     };
+    // claude-code 2.1.205 framing — single-newline sections, the
+    // for-your-context-only summary label, and the verbatim-output
+    // instruction (the older "Here is what the user sees:" / "Now output the
+    // following message exactly:" wording is gone from the binary).
     format!(
         r#"The user just ran /insights to generate a usage report analyzing their LingXi sessions.
-
 Here is the full insights data:
 {{insights_json}}
-
 Report URL: {{report_url}}
 HTML file: {{html_path}}
 Facets directory: {{facets_dir}}
-
-Here is what the user sees:
-{{user_summary}}
-
-Now output the following message exactly:
-
+At-a-glance summary (for your context only — the user has not seen any output yet):
+{{user_summary}}{{upload_hint}}
+Output the text between <message> tags verbatim as your entire response. Do not omit any line:
 <message>
 Your shareable insights report is ready:
-{{report_url}}{{upload_hint}}
-
+{{report_url}}
 Want to dig into any section or try one of the suggestions?
 </message>
 {additional}"#
@@ -103,7 +101,12 @@ mod tests {
                 assert!(content.contains(
                     "The user just ran /insights to generate a usage report analyzing their LingXi sessions."
                 ));
-                assert!(content.contains("Now output the following message exactly:"));
+                assert!(content.contains(
+                    "Output the text between <message> tags verbatim as your entire response. Do not omit any line:"
+                ));
+                assert!(content.contains(
+                    "At-a-glance summary (for your context only — the user has not seen any output yet):"
+                ));
                 assert!(content.contains("Your shareable insights report is ready:"));
                 assert!(
                     content.contains("Want to dig into any section or try one of the suggestions?")

@@ -745,7 +745,7 @@ pub(crate) async fn run_ratatui(
     // `run_slash_command`. A `type:"prompt"` command's expanded prompt runs as a
     // turn; a local command's output / the unknown-command literal surfaces via
     // `TurnEvent::SystemNotice`.
-    let on_dispatch_slash = move |input: String| {
+    let on_dispatch_slash = move |input: String, token: CancellationToken| {
         let dispatcher = dispatch_dispatcher.clone();
         let orch = dispatch_orch.clone();
         let tx = dispatch_turn_tx.clone();
@@ -753,23 +753,32 @@ pub(crate) async fn run_ratatui(
             use traits::{SlashCommandDispatcher, SlashDispatchResult};
             match dispatcher.dispatch(&input).await {
                 SlashDispatchResult::RunAsTurn { prompt } => {
+                    // The widget already set this token as `current_turn`; pass it
+                    // through so Ctrl-C cancels the dispatched turn. On success the
+                    // orchestrator emits `TurnEnded`; on a hard error we do.
                     let _ = tx.send(tui::TurnEvent::TurnStarted);
                     if let Err(e) = orch
-                        .run_turn_streaming_with_images(&prompt, &[], CancellationToken::new())
+                        .run_turn_streaming_with_images(&prompt, &[], token)
                         .await
                     {
                         let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
                         let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
                     }
                 }
+                // A local / unknown result runs no turn: surface the text and
+                // emit `TurnEnded` so the widget clears the `current_turn` it set
+                // when it echoed the invocation.
                 SlashDispatchResult::Handled { display }
                 | SlashDispatchResult::Unknown { display, .. } => {
                     let _ = tx.send(tui::TurnEvent::SystemNotice {
                         body: display,
                         is_error: false,
                     });
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
                 }
-                SlashDispatchResult::NotASlashCommand => {}
+                SlashDispatchResult::NotASlashCommand => {
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+                }
             }
         });
     };

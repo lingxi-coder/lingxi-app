@@ -182,7 +182,13 @@ pub enum ChatOutcome {
     /// registry lock and (for markdown commands) runs embedded shell expansion,
     /// neither of which may run on the render thread. Mirrors the `-p` one-shot
     /// path's `run_slash_command`, so a typed `/loop …` actually schedules.
-    DispatchSlash(String),
+    ///
+    /// The [`CancellationToken`] is the widget's active-turn token (also stored
+    /// as `current_turn`), so Ctrl-C cancels a dispatched `RunAsTurn` turn just
+    /// like a normal submit. The caller passes it to `run_turn` for a prompt
+    /// command and emits `TurnEnded` for a non-turn result so the widget clears
+    /// its running state.
+    DispatchSlash(String, CancellationToken),
 }
 
 /// A `/sandbox` off-loop effect handed to the embedder via
@@ -1313,7 +1319,11 @@ impl ChatWidget {
             body: input.to_string(),
             timestamp: 0,
         });
-        ChatOutcome::DispatchSlash(input.to_string())
+        // A fresh per-turn token stored as `current_turn` so Ctrl-C cancels a
+        // dispatched prompt turn (the caller passes it to `run_turn`).
+        let token = CancellationToken::new();
+        self.current_turn = Some(token.clone());
+        ChatOutcome::DispatchSlash(input.to_string(), token)
     }
 
     /// Desired widget height at `width` columns: the streaming live tail (the
@@ -3583,10 +3593,13 @@ mod tests {
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(reg));
         widget.set_command_registry(registry);
 
-        let Some(ChatOutcome::DispatchSlash(input)) = widget.handle_slash("/loop 5m go") else {
+        let Some(ChatOutcome::DispatchSlash(input, _token)) = widget.handle_slash("/loop 5m go")
+        else {
             panic!("a registry-backed command must route to DispatchSlash");
         };
         assert_eq!(input, "/loop 5m go");
+        // The token is registered as the active turn so Ctrl-C can cancel it.
+        assert!(widget.turn_running());
         // The raw invocation is echoed as the user's turn message.
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/loop 5m go");

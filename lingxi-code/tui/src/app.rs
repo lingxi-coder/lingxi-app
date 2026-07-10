@@ -143,8 +143,12 @@ pub struct AppCallbacks<'cb> {
     /// (expanding a `type:"prompt"` command like `/loop` or a user command/skill
     /// and running it as a turn, or surfacing a local command's output / the
     /// unknown-command literal via a [`TurnEvent::SystemNotice`]). The widget has
-    /// already echoed the invocation. `None` (tests / no registry) is a no-op.
-    pub on_dispatch_slash: Box<dyn FnMut(String) + 'cb>,
+    /// already echoed the invocation and registered the paired
+    /// [`CancellationToken`] as its active turn, so the caller passes that token
+    /// to `run_turn` (Ctrl-C then cancels the dispatched turn) and emits a
+    /// `TurnEnded` for a non-turn result to clear the widget's running state.
+    /// `None` (tests / no registry) is a no-op.
+    pub on_dispatch_slash: Box<dyn FnMut(String, CancellationToken) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -369,8 +373,8 @@ impl<'cb> RataApp<'cb> {
                     // through the live `RegistrySlashDispatcher` off-loop; the
                     // expanded prompt runs as a turn (or the local output / the
                     // unknown-command literal returns via `TurnEvent::SystemNotice`).
-                    ChatOutcome::DispatchSlash(input) => {
-                        (self.callbacks.on_dispatch_slash)(input);
+                    ChatOutcome::DispatchSlash(input, token) => {
+                        (self.callbacks.on_dispatch_slash)(input, token);
                     }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
@@ -548,7 +552,7 @@ pub fn run_app(
     on_plan_mode: impl FnMut(String),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
-    on_dispatch_slash: impl FnMut(String),
+    on_dispatch_slash: impl FnMut(String, CancellationToken),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -684,7 +688,7 @@ mod tests {
                 on_plan_mode: Box::new(|_| {}),
                 on_sandbox_action: Box::new(|_| {}),
                 on_task_action: Box::new(|_| {}),
-                on_dispatch_slash: Box::new(|_| {}),
+                on_dispatch_slash: Box::new(|_, _| {}),
             },
         );
         app

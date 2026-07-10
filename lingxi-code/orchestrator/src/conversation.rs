@@ -3004,20 +3004,23 @@ impl ConversationOrchestrator {
             s.model_profile = None;
             prev
         };
-        // User-visible warning. Byte-exact reproduction of the binary's swap
-        // warning `INn(original, fallback, "other")` (≡ `baa`) =
-        //   `${Jct(n) ? Cio(e) : Rio(e,n)} Switched to ${vp(fallback)}. ${Yct}`
-        // for the common `category == "other"` path: `Jct("other")` is false, so
-        // `Rio(e,"other")` fires, and with no friendly label it returns `tlp =
-        // "This model's safeguards flagged this message. …"`. (The cyber/bio
-        // `Cio` variant and the `vp` label resolver are residuals — the raw
-        // fallback id stands in for the friendly label.) `Yct` is the feedback
-        // line. 2.1.195 reworded the old "… has safety measures that flagged
-        // something in this session" phrasing to "… 's safeguards flagged this
-        // message" everywhere.
+        // User-visible warning. 2.1.206 `VPn(e,t,r)` =
+        //   `${f_t(r) ? mmi(e) : hmi(e,r)} Switched to ${Mf(t)}. ${bxr(e)}`
+        // for the common `category == "other"` path: `f_t("other")` is false, so
+        // `hmi(e,"other")` fires with the generic `$7m` prefix ("This model's
+        // safeguards flagged this message. This sometimes happens with safe,
+        // normal conversations."); `bxr(e)` is the feedback line. `Mf(t)` = the
+        // fallback's MARKETING NAME (byte-verified: 206 uses the friendly name,
+        // not the raw id) — resolve it, falling back to the id for an unknown
+        // model. (The cyber/bio `mmi(e)` "intentionally broad" variant needs the
+        // refusal category routed through here — deferred with the typed
+        // model_refusal_fallback system frame.)
+        let fallback_display = crate::prompt::env_meta::marketing_name_for_model(&fallback)
+            .map(String::from)
+            .unwrap_or_else(|| fallback.clone());
         let warning = format!(
             "This model's safeguards flagged this message. \
-This sometimes happens with safe, normal conversations. Switched to {fallback}. \
+This sometimes happens with safe, normal conversations. Switched to {fallback_display}. \
 Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
         );
         self.output.emit_text(&warning).await;
@@ -11885,13 +11888,13 @@ mod refusal_fallback_tests {
         assert!(orch.maybe_swap_to_refusal_fallback().await);
         let texts = out.text_events().await;
         assert_eq!(texts.len(), 1, "exactly one warning emitted");
-        // Byte-exact reproduction of the binary's swap warning
-        // `INn(original, fallback, "other")` (≡ `baa`) for category == "other"
-        // (2.1.195 `Rio`→`tlp` rewording: "'s safeguards flagged this message").
+        // Byte-exact reproduction of 2.1.206 `VPn` for category == "other":
+        // the generic `$7m`/`hmi` prefix, then "Switched to {Mf(fallback)}" — the
+        // fallback's MARKETING NAME ("Sonnet 4.6"), not the raw id — then `bxr`.
         assert_eq!(
             texts[0],
             "This model's safeguards flagged this message. \
-This sometimes happens with safe, normal conversations. Switched to claude-sonnet-4-6. \
+This sometimes happens with safe, normal conversations. Switched to Sonnet 4.6. \
 Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
         );
     }

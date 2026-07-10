@@ -30,7 +30,7 @@ use crate::schedule_cron::cron_to_human;
 pub const CRON_LIST_TOOL_NAME: &str = "CronList";
 
 /// Model-facing description (CronListTool.ts description()).
-const CRON_LIST_DESCRIPTION: &str = "List all cron jobs scheduled via CronCreate.";
+const CRON_LIST_DESCRIPTION: &str = "List scheduled cron jobs";
 
 /// Empty `strictObject({})` schema — CronList takes no input.
 static SCHEMA: Lazy<Value> = Lazy::new(|| {

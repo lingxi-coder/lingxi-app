@@ -166,7 +166,7 @@ web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
         s.push_str(
             "\n - Fast mode for LingXi uses Claude Opus with faster output \
 (it does not downgrade to a smaller model). It can be toggled with /fast and is \
-available on Opus 4.8/4.7/4.6.",
+available on Opus 4.8/4.7.",
         );
     }
 
@@ -213,7 +213,7 @@ mod tests {
         // Static lines present, em-dash byte-exact.
         assert!(out.contains("Model IDs \u{2014} Fable 5: 'claude-fable-5'"));
         assert!(out.contains("Opus 4.8: 'claude-opus-4-8'"));
-        assert!(out.ends_with("available on Opus 4.8/4.7/4.6."));
+        assert!(out.ends_with("available on Opus 4.8/4.7."));
     }
 
     #[test]

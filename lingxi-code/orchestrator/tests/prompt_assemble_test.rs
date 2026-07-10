@@ -38,7 +38,7 @@ fn minimal_assembly_no_memory_no_tools_no_footer() {
     assert!(!out.contains("Notes:"));
     // GAP-2: # Context management is the last body section; it follows env block.
     assert!(out.contains("# Context management"));
-    assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+    assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn memory_files_are_not_spliced_into_the_prompt() {
     assert!(!out.contains("Contents of /proj/LINGXI.md"));
     assert!(!out.contains("<tools>"));
     assert!(!out.contains("Notes:"));
-    assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+    assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
 }
 
 #[test]

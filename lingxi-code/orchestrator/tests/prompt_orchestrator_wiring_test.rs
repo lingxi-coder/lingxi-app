@@ -50,7 +50,7 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
     assert!(!s.contains("<env>"));
     assert!(!s.contains("Notes:"));
     // The env block is still present; context management follows it.
-    assert!(s.contains("available on Opus 4.8/4.7/4.6."));
+    assert!(s.contains("available on Opus 4.8/4.7."));
     assert!(s.contains("# Context management"));
-    assert!(s.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+    assert!(s.ends_with("you don't need to wrap up early or hand off mid-task."));
 }

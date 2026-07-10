@@ -455,7 +455,7 @@ mod tests {
         // `# Context management` section's last line (no `Notes:` FOOTER — R-P1b).
         assert!(default.starts_with("You are LingXi, an agentic command-line coding assistant."));
         assert!(!default.contains("Notes:"));
-        assert!(default.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(default.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
     #[test]
@@ -489,7 +489,7 @@ mod tests {
             "context management must come AFTER output-style"
         );
         // The prompt now ends with context management, not the output-style body.
-        assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
     #[test]
@@ -509,7 +509,7 @@ mod tests {
         // The style is NOT the last section — context management follows.
         assert!(out.contains("# Output Style: Learning\nP"));
         // GAP-2: context management is now the true last section.
-        assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
     // ---- system-prompt cache-block split (splitSysPromptPrefix parity) ----
@@ -540,6 +540,6 @@ mod tests {
         assert!(!blocks[1].text.contains("Notes:"));
         assert!(blocks[1]
             .text
-            .ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+            .ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 }

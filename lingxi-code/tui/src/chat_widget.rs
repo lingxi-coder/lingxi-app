@@ -2151,7 +2151,7 @@ impl ChatWidget {
 
     /// `/fork`: fork the conversation into a detached background agent (the live
     /// `fork_conversation` override spawns it via the `SubagentSpawner`). Bare
-    /// `/fork` reaches the handler's "Usage: /fork <directive>" text.
+    /// `/fork` reaches the handler's "Usage: /fork \<directive\>" text.
     pub(crate) fn cmd_fork(&mut self, args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/fork is unavailable (no engine handle wired)", true);
@@ -3073,7 +3073,7 @@ mod tests {
         assert!(matches!(widget.cmd_fork(""), ChatOutcome::Continue));
         assert_eq!(
             cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body(),
-            "Usage: /fork <directive>",
+            "Usage: /fork \\<directive\\>",
         );
 
         let (mut widget, _mock) = widget_with_orchestrator();

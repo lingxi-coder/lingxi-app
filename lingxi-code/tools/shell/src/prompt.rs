@@ -358,6 +358,18 @@ fn commit_and_pr_instructions() -> String {
     // are empty, matching the TS shape with empty attribution (commit step says
     // "Create the commit with a message." and example HEREDOCs carry no
     // trailing attribution).
+    //
+    // `r=tH()?$F:_U`: the task-management tool name is `TaskCreate` when V2
+    // task tools are enabled (default) and `TodoWrite` when
+    // `LINGXI_ENABLE_TASKS` is a defined-falsy value — the same `tH()`/`TE()`
+    // gate `is_todo_v2_enabled` uses. The agent tool (`gi`) is always `Agent`.
+    let task_tool = if traits::env::is_env_defined_falsy(
+        std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
+    ) {
+        "TodoWrite"
+    } else {
+        "TaskCreate"
+    };
     "# Committing changes with git
 
 Only create commits when requested by the user. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:
@@ -391,7 +403,7 @@ Git Safety Protocol:
 
 Important notes:
 - NEVER run additional commands to read or explore code, besides git bash commands
-- NEVER use the TodoWrite or Task tools
+- NEVER use the {TASK_TOOL} or Agent tools
 - DO NOT push to the remote repository unless the user explicitly asks you to do so
 - IMPORTANT: Never use git commands with the -i flag (like git rebase -i or git add -i) since they require interactive input which is not supported.
 - IMPORTANT: Do not use --no-edit with git rebase commands, as the --no-edit flag is not a valid option for git rebase.
@@ -433,11 +445,12 @@ EOF
 </example>
 
 Important:
-- DO NOT use the TodoWrite or Task tools
+- DO NOT use the {TASK_TOOL} or Agent tools
 - Return the PR URL when you're done, so the user can see it
 
 # Other common operations
-- View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments".to_string()
+- View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments"
+        .replace("{TASK_TOOL}", task_tool)
 }
 
 // ===== Public entry point ===================================================
@@ -744,6 +757,28 @@ mod tests {
             !p.contains("(1-5 seconds)"),
             "sleep bullet must not contain the invented \"(1-5 seconds)\" qualifier"
         );
+    }
+
+    /// `- NEVER use the ${r} or ${gi} tools` / `- DO NOT use the ${r} or ${gi}
+    /// tools`: `r=tH()?$F:_U` (TaskCreate by default, TodoWrite when
+    /// `LINGXI_ENABLE_TASKS` is defined-falsy); `gi="Agent"` always.
+    #[test]
+    fn git_prompt_interpolates_task_and_agent_tool_names() {
+        let _g = ENV_LOCK.lock().unwrap();
+
+        // Default (V2 tasks enabled) → "TaskCreate or Agent".
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
+        let p = simple_prompt(&disabled_sandbox());
+        assert!(p.contains("- NEVER use the TaskCreate or Agent tools"), "default NEVER bullet");
+        assert!(p.contains("- DO NOT use the TaskCreate or Agent tools"), "default DO NOT bullet");
+        assert!(!p.contains("TodoWrite or Task tools"), "must not carry the stale hardcoded names");
+
+        // Defined-falsy LINGXI_ENABLE_TASKS → "TodoWrite or Agent".
+        std::env::set_var("LINGXI_ENABLE_TASKS", "0");
+        let p = simple_prompt(&disabled_sandbox());
+        assert!(p.contains("- NEVER use the TodoWrite or Agent tools"), "disabled NEVER bullet");
+        assert!(p.contains("- DO NOT use the TodoWrite or Agent tools"), "disabled DO NOT bullet");
+        std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 
     #[test]

@@ -1442,14 +1442,53 @@ impl ChatWidget {
     }
 
     /// `/mcp`: open the MCP servers listing.
-    pub(crate) fn cmd_mcp(&mut self, _args: &str) -> ChatOutcome {
-        self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
-            "MCP servers",
-            "MCP servers",
-            &self.session.mcp,
-            "No MCP servers configured.",
-        )));
-        ChatOutcome::Continue
+    /// `/mcp`: bare → open the servers listing; `reconnect [<server>|all]` →
+    /// tear down and re-establish MCP connections (claude-code 2.1.205's
+    /// control op) via the engine's `reconnect_mcp_servers` seam, reporting the
+    /// per-server outcome to the transcript. Any other subcommand renders the
+    /// byte-exact usage line rather than being silently swallowed.
+    pub(crate) fn cmd_mcp(&mut self, args: &str) -> ChatOutcome {
+        let args = args.trim();
+        if args.is_empty() {
+            self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
+                "MCP servers",
+                "MCP servers",
+                &self.session.mcp,
+                "No MCP servers configured.",
+            )));
+            return ChatOutcome::Continue;
+        }
+        let mut it = args.split_whitespace();
+        let sub = it.next().unwrap_or("");
+        let target = it.next(); // `<server>` | `all` | None
+        if sub != "reconnect" {
+            return self.show_system_text(
+                "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all.",
+                true,
+            );
+        }
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/mcp is unavailable (no engine handle wired)", true);
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => return self.show_system_text(&format!("/mcp failed: {err}"), true),
+        };
+        let (ok, failed) = runtime.block_on(handle.reconnect_mcp_servers(target));
+        if ok.is_empty() && failed.is_empty() {
+            return self.show_system_text("No MCP servers to reconnect.", false);
+        }
+        let mut body = String::new();
+        for name in &ok {
+            body.push_str(&format!("Reconnected {name}\n"));
+        }
+        for (name, reason) in &failed {
+            body.push_str(&format!("Failed to reconnect {name}: {reason}\n"));
+        }
+        self.show_system_text(body.trim_end(), !failed.is_empty())
     }
 
     /// `/hooks`: open the hooks listing.
@@ -1492,14 +1531,16 @@ impl ChatWidget {
 
     /// `/memory`: open the LINGXI.md memory-file listing (the tiers captured
     /// at launch; read-only — this backend has no in-TUI editor).
-    pub(crate) fn cmd_memory(&mut self, _args: &str) -> ChatOutcome {
-        self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
-            "Memory files",
-            "LINGXI.md memory files",
-            &self.session.memory,
-            "No memory files found.",
-        )));
-        ChatOutcome::Continue
+    /// `/memory`: open a memory file in the editor (claude-code 2.1.205 "Open
+    /// a memory file in your editor" — not a read-only listing). Bridges to the
+    /// engine's `open_memory_editor` seam via the shared `MemoryHandler` (the
+    /// same `block_on` editor-spawn path `/keybindings` uses), which edits the
+    /// user-tier LINGXI.md and echoes "Edited {path} (exit {code})." on return.
+    pub(crate) fn cmd_memory(&mut self, args: &str) -> ChatOutcome {
+        let Some(handle) = self.orchestrator.clone() else {
+            return self.show_system_text("/memory is unavailable (no engine handle wired)", true);
+        };
+        self.run_core_command("memory", args, &command_core::memory::MemoryHandler::new(handle))
     }
 
     /// `/status`: open the session status screen (snapshot facts + live
@@ -1516,18 +1557,92 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/config`: open the read-only settings screen (session-scoped
-    /// settings + on-disk settings files).
-    pub(crate) fn cmd_config(&mut self, _args: &str) -> ChatOutcome {
-        let view = ScreenView::settings(
-            self.theme_name,
-            self.bottom_pane.vim_enabled(),
-            self.transcript.verbose(),
-            &self.session.doctor.lingxi_home,
-            &self.session.doctor.cwd,
-        );
-        self.bottom_pane.show_view(Box::new(view));
-        ChatOutcome::Continue
+    /// `/config`: bare → open the settings screen; `key=value [key=value …]` →
+    /// set settings directly (claude-code 2.1.205's `/config` shorthand). The
+    /// format/unknown-key/bad-value errors are byte-exact with the reference;
+    /// the settable keys are the ones LingXi applies live this session (`vim`,
+    /// `verbose`, `theme`). Applying is session-scoped (LingXi has no writable
+    /// settings-file store on this path — the same read-only-file limitation
+    /// the settings screen documents), so the change takes effect immediately
+    /// but is not persisted for new sessions.
+    pub(crate) fn cmd_config(&mut self, args: &str) -> ChatOutcome {
+        let args = args.trim();
+        if args.is_empty() {
+            let view = ScreenView::settings(
+                self.theme_name,
+                self.bottom_pane.vim_enabled(),
+                self.transcript.verbose(),
+                &self.session.doctor.lingxi_home,
+                &self.session.doctor.cwd,
+            );
+            self.bottom_pane.show_view(Box::new(view));
+            return ChatOutcome::Continue;
+        }
+        let mut lines: Vec<String> = Vec::new();
+        let mut any_error = false;
+        for token in args.split_whitespace() {
+            let Some((key, value)) = token.split_once('=') else {
+                any_error = true;
+                lines.push(format!(
+                    "Expected key=value, got \"{token}\". Run /config to see what's available."
+                ));
+                continue;
+            };
+            match self.apply_config_shorthand(key, value) {
+                Ok(msg) => lines.push(msg),
+                Err(msg) => {
+                    any_error = true;
+                    lines.push(msg);
+                }
+            }
+        }
+        self.show_system_text(&lines.join("\n"), any_error)
+    }
+
+    /// Apply one `/config key=value` pair to the live session. `Ok(echo)` on a
+    /// successful set; `Err(msg)` with the byte-exact reference error for an
+    /// unknown key or a value the key's type rejects.
+    fn apply_config_shorthand(&mut self, key: &str, value: &str) -> Result<String, String> {
+        let parse_bool = |k: &str| -> Result<bool, String> {
+            match value {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                other => Err(format!("{k} takes true or false, not \"{other}\"")),
+            }
+        };
+        match key {
+            "vim" => {
+                let want = parse_bool("vim")?;
+                if self.bottom_pane.vim_enabled() != want {
+                    self.bottom_pane.toggle_vim();
+                }
+                Ok(format!("Set vim to {want}."))
+            }
+            "verbose" => {
+                let want = parse_bool("verbose")?;
+                self.bottom_pane.set_verbose(want);
+                self.transcript.set_verbose(want);
+                Ok(format!("Set verbose to {want}."))
+            }
+            "theme" => {
+                let setting = tui_core::theme::ThemeSetting::ALL
+                    .into_iter()
+                    .find(|s| s.as_wire() == value)
+                    .ok_or_else(|| {
+                        let names = tui_core::theme::ThemeSetting::ALL
+                            .iter()
+                            .map(|s| s.as_wire())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("theme takes one of: {names}")
+                    })?;
+                self.set_theme(setting);
+                Ok(format!("Set theme to {value}."))
+            }
+            other => Err(format!(
+                "{other} isn't a /config setting. Run /config to see what's available."
+            )),
+        }
     }
 
     /// `/diff`: render uncommitted working-tree changes (`git diff HEAD`) into
@@ -2123,16 +2238,31 @@ impl ChatWidget {
     // system line when no handle is wired (`None`, every test widget). =====
 
     /// `/context`: show the current context-window usage (read-only).
-    pub(crate) fn cmd_context(&mut self, args: &str) -> ChatOutcome {
+    /// `/context`: open the interactive context-usage grid (claude-code 2.1.205
+    /// "Visualize current context usage as a colored grid"). Reads the model +
+    /// `(used, max)` context-window totals via the proven-safe throwaway
+    /// `block_on` (in-memory reads) and renders them as a filled/free square
+    /// grid.
+    pub(crate) fn cmd_context(&mut self, _args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
             return self
                 .show_system_text("/context is unavailable (no engine handle wired)", true);
         };
-        self.run_core_command(
-            "context",
-            args,
-            &command_core::context::ContextHandler::new(handle),
-        )
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => return self.show_system_text(&format!("/context failed: {err}"), true),
+        };
+        let (model, used, max) = runtime.block_on(async {
+            let snap = handle.get_status_snapshot().await;
+            let (used, max) = handle.context_window_usage().await;
+            (snap.model, used, max)
+        });
+        self.bottom_pane
+            .show_view(Box::new(ScreenView::context(&model, used, max)));
+        ChatOutcome::Continue
     }
 
     /// `/fork`: fork the conversation into a detached background agent (the live
@@ -2951,6 +3081,74 @@ mod tests {
         assert!(matches!(w.cmd_sandbox("bogus"), ChatOutcome::Continue));
     }
 
+    /// `/config key=value`: applies live-settable keys with a confirmation and
+    /// renders the byte-exact reference errors for a bad format, unknown key,
+    /// or a value the key's type rejects.
+    #[test]
+    fn cmd_config_shorthand_sets_and_reports_errors() {
+        // vim=true applies live and confirms.
+        let mut w = widget();
+        assert!(!w.bottom_pane().vim_enabled());
+        assert!(matches!(w.cmd_config("vim=true"), ChatOutcome::Continue));
+        assert!(w.bottom_pane().vim_enabled());
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(sys.body(), "Set vim to true.");
+        assert!(!sys.is_error());
+
+        // Bad bool value → the exact "takes true or false" error.
+        let mut w = widget();
+        assert!(matches!(w.cmd_config("verbose=maybe"), ChatOutcome::Continue));
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(sys.body(), "verbose takes true or false, not \"maybe\"");
+        assert!(sys.is_error());
+
+        // Unknown key → the exact "isn't a /config setting" error.
+        let mut w = widget();
+        w.cmd_config("nope=1");
+        assert_eq!(
+            cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body(),
+            "nope isn't a /config setting. Run /config to see what's available."
+        );
+
+        // Bad format (no `=`) → the exact "Expected key=value" error.
+        let mut w = widget();
+        w.cmd_config("garbage");
+        assert_eq!(
+            cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body(),
+            "Expected key=value, got \"garbage\". Run /config to see what's available."
+        );
+    }
+
+    /// `/mcp` arg routing: bare `/mcp` opens the servers listing; an
+    /// unrecognized subcommand renders the byte-exact usage line (not a silent
+    /// swallow); `reconnect` reaches the engine seam.
+    #[test]
+    fn cmd_mcp_routes_listing_reconnect_and_usage() {
+        // Bare `/mcp` → focused listing view, no transcript dump.
+        let mut w = widget();
+        assert!(matches!(w.cmd_mcp(""), ChatOutcome::Continue));
+        assert!(w.bottom_pane().view_stack().contains::<ScreenView>());
+
+        // Unknown subcommand → the exact 2.1.205 usage line, as an error.
+        let mut w = widget();
+        assert!(matches!(w.cmd_mcp("frobnicate"), ChatOutcome::Continue));
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(
+            sys.body(),
+            "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all."
+        );
+        assert!(sys.is_error());
+
+        // `reconnect` without a wired handle → graceful "unavailable".
+        let mut w = widget();
+        assert!(matches!(w.cmd_mcp("reconnect"), ChatOutcome::Continue));
+        assert!(
+            cell::<crate::history_cell::system::SystemTextCell>(&w, 0)
+                .body()
+                .contains("unavailable")
+        );
+    }
+
     /// A prompt-type command (InjectMessage): the model receives the handler's
     /// expanded template, but the transcript shows only the compact
     /// `/commit-push-pr` invocation the user typed — not the whole template
@@ -3046,20 +3244,26 @@ mod tests {
         (widget, mock)
     }
 
-    /// (a) With a live handle wired, a read-only OrchestratorHandle command
-    /// renders its `Done` text into the transcript as a non-error system line.
+    /// (a) With a live handle wired, the interactive read-only commands open
+    /// their screen views (not transcript cells): `/context` → the context
+    /// grid, `/usage` → the Usage/Stats dialog.
     #[test]
     fn orchestrator_read_command_renders_done_text_when_wired() {
+        use crate::bottom_pane::screen_view::ScreenView;
         let (mut widget, _mock) = widget_with_orchestrator();
         let outcome = widget.cmd_context("");
         assert!(matches!(outcome, ChatOutcome::Continue));
-        let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        let ctx_body = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
+            .expect("context screen")
+            .body_text();
         assert!(
-            systext.body().contains("Context Usage"),
-            "/context rendered its report: {}",
-            systext.body()
+            ctx_body.contains("Free space") && ctx_body.contains("Messages"),
+            "/context grid rendered: {ctx_body}"
         );
-        assert!(!systext.is_error());
 
         // /usage now opens the interactive Usage/Stats screen (claude-code
         // 2.1.205's tabbed dialog), not a transcript cell.
@@ -4087,18 +4291,17 @@ mod tests {
         // Criterion 18: each command opens a focused ScreenView and leaves
         // the transcript untouched (no scrollback dump), then Esc returns to
         // the composer.
+        // NOTE: `/memory` is deliberately absent — claude-code 2.1.205's
+        // `/memory` opens a memory file in the editor (see `cmd_memory` /
+        // `MemoryHandler`), it is not a read-only listing view.
         let session = SessionInfo {
             skills: vec![crate::session::InfoRow::new(
                 "brainstorming",
                 Some("Project skills · explore ideas".to_string()),
             )],
-            memory: vec![crate::session::InfoRow::new(
-                "Project memory",
-                Some("Checked in at ./LINGXI.md".to_string()),
-            )],
             ..Default::default()
         };
-        for cmd in ["/skills", "/memory", "/status", "/config"] {
+        for cmd in ["/skills", "/status", "/config"] {
             let mut widget = ChatWidget::new(Vec::new(), session.clone());
             let outcome = submit_command(&mut widget, cmd);
             assert!(matches!(outcome, ChatOutcome::Continue), "{cmd}");

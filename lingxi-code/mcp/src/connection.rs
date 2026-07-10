@@ -128,6 +128,23 @@ impl McpConnectionState {
         }
     }
 
+    /// The originating [`McpServerConfig`], carried by every variant. Used by
+    /// [`crate::registry::McpRegistry::reconnect`] to re-establish a connection
+    /// after tearing the live one down.
+    #[must_use]
+    pub fn config(&self) -> &McpServerConfig {
+        match self {
+            Self::Disconnected { config, .. }
+            | Self::Connecting { config, .. }
+            | Self::AwaitingOAuth { config, .. }
+            | Self::Connected { config, .. }
+            | Self::HealthChecking { config, .. }
+            | Self::Reconnecting { config, .. }
+            | Self::Failed { config, .. }
+            | Self::Stopped { config } => config,
+        }
+    }
+
     /// Transport-kind label of the connection's config — `"stdio"`,
     /// `"sse"`, `"http"`, etc. Used by [`crate::registry::McpRegistry::snapshot`]
     /// (M6-07) to populate `McpServerInfo::transport`.

@@ -256,6 +256,78 @@ impl ScreenView {
         Self::tabbed("Usage", tabs, default, "tab to switch · esc to close")
     }
 
+    /// The `/context` screen — claude-code 2.1.205's "Visualize current context
+    /// usage as a colored grid". Renders a `GRID_COLS`×`GRID_ROWS` square grid
+    /// whose filled cells (`■`, colored) are the used share of the context
+    /// window and whose empty cells (`□`, dim) are free space, plus the token
+    /// counts and percentages.
+    ///
+    /// The reference splits the used cells by category (system prompt, tools,
+    /// MCP, memory, messages). LingXi's engine exposes only the total
+    /// `(used, max)` — there is no per-category token accounting seam — so the
+    /// used cells render as a single "Messages" band rather than the reference's
+    /// multi-color category breakdown. Every number shown is real; the category
+    /// split is honestly absent rather than fabricated.
+    #[must_use]
+    pub fn context(model: &str, used: u64, max: u64) -> Self {
+        const GRID_COLS: usize = 20;
+        const GRID_ROWS: usize = 5;
+        const CELLS: usize = GRID_COLS * GRID_ROWS;
+
+        let pct = if max == 0 { 0 } else { ((used * 100) / max).min(100) };
+        let free = max.saturating_sub(used);
+        let free_pct = 100u64.saturating_sub(pct);
+        // Round the filled-cell count to the nearest cell.
+        let filled = if max == 0 {
+            0
+        } else {
+            usize::try_from((used * CELLS as u64 + max / 2) / max).unwrap_or(CELLS).min(CELLS)
+        };
+
+        let used_style = Style::default().fg(ratatui::style::Color::Cyan);
+        let free_style = Style::default().add_modifier(Modifier::DIM);
+        let mut lines: Vec<Line<'static>> = vec![
+            Line::from(Span::styled(
+                format!("Model: {model}"),
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            Line::from(""),
+        ];
+        for r in 0..GRID_ROWS {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(GRID_COLS);
+            for c in 0..GRID_COLS {
+                let idx = r * GRID_COLS + c;
+                if idx < filled {
+                    spans.push(Span::styled("■ ", used_style));
+                } else {
+                    spans.push(Span::styled("□ ", free_style));
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("■ ", used_style),
+            Span::raw(format!(
+                "Messages: {} tokens ({pct}%)",
+                fmt_tokens(used)
+            )),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("□ ", free_style),
+            Span::raw(format!(
+                "Free space: {} tokens ({free_pct}%)",
+                fmt_tokens(free)
+            )),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Per-category breakdown (system prompt, tools, MCP) is not tracked yet.",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+        Self::new("Context Usage", lines, "esc to close")
+    }
+
     /// A read-only listing screen (`/mcp`, `/hooks`, `/agents`): a section
     /// header, then one entry per [`InfoRow`] (bold title + optional dim
     /// detail), or a dim "none" line when the list is empty.
@@ -399,6 +471,27 @@ impl BottomPaneView for ScreenView {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Compact token notation (`1.2k`, `3m`) — mirrors `command_core::context`'s
+/// `format_tokens` (Intl `maximumFractionDigits: 1`, trailing `.0` dropped).
+fn fmt_tokens(n: u64) -> String {
+    const UNITS: [(u64, char); 4] = [
+        (1_000_000_000_000, 't'),
+        (1_000_000_000, 'b'),
+        (1_000_000, 'm'),
+        (1_000, 'k'),
+    ];
+    for &(threshold, suffix) in &UNITS {
+        if n >= threshold {
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let rounded = ((n as f64 / threshold as f64) * 10.0).round() / 10.0;
+            let s = format!("{rounded:.1}");
+            let s = s.strip_suffix(".0").unwrap_or(&s);
+            return format!("{s}{suffix}");
+        }
+    }
+    n.to_string()
 }
 
 fn header(text: &str) -> Line<'static> {

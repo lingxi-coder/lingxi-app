@@ -718,6 +718,19 @@ pub trait OrchestratorHandle: Send + Sync {
     /// servers are configured.
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo>;
 
+    /// Reconnect MCP servers (`/mcp reconnect [<server>|all]`). `name = None`
+    /// (or `"all"`) reconnects every registered server; otherwise just the
+    /// named one. Returns `(reconnected, failures)` — the server names that
+    /// reconnected cleanly and the `(name, reason)` pairs that did not. An
+    /// unknown server name yields a single failure. The default (no MCP
+    /// registry wired) returns empty vectors.
+    async fn reconnect_mcp_servers(
+        &self,
+        _name: Option<&str>,
+    ) -> (Vec<String>, Vec<(String, String)>) {
+        (Vec::new(), Vec::new())
+    }
+
     /// Enumerate registered hooks (built-in + user). Used by `/hooks` and
     /// `/status`.
     async fn list_hooks(&self) -> Vec<HookInfo>;

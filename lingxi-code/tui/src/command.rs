@@ -111,7 +111,11 @@ pub const BUILTIN: &[SlashCommand] = &[
         description: "Manage MCP servers",
         dynamic_description: None,
         hint: "[reconnect|enable|disable [<server>|all]]",
-        args: ArgSpec::None,
+        // Optional (NOT None): bare `/mcp` opens the listing; `reconnect
+        // [<server>|all]` and any other subcommand must reach the handler
+        // (which reconnects or renders the usage line) rather than falling
+        // through as an LLM prompt.
+        args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_mcp,
     },
@@ -244,7 +248,11 @@ pub const BUILTIN: &[SlashCommand] = &[
         description: "Open settings",
         dynamic_description: None,
         hint: "[key=value]",
-        args: ArgSpec::None,
+        // Optional (NOT None): bare `/config` opens the settings screen;
+        // `key=value` pairs must reach the handler (which applies them or
+        // renders the byte-exact usage/error lines) rather than falling
+        // through as an LLM prompt.
+        args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_config,
     },

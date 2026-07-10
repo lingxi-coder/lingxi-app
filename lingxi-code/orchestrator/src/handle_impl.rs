@@ -335,6 +335,29 @@ impl OrchestratorHandle for ConversationOrchestrator {
         reg.snapshot().await
     }
 
+    async fn reconnect_mcp_servers(
+        &self,
+        name: Option<&str>,
+    ) -> (Vec<String>, Vec<(String, String)>) {
+        let Some(reg) = self.mcp_registry.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        // `None` / "all" → every registered server; else the single named one
+        // (reported as a failure when unknown).
+        let targets: Vec<String> = match name {
+            None | Some("all") => reg.server_names().await,
+            Some(n) => vec![n.to_string()],
+        };
+        let (mut ok, mut failed) = (Vec::new(), Vec::new());
+        for server in targets {
+            match reg.reconnect(&server).await {
+                Ok(()) => ok.push(server),
+                Err(e) => failed.push((server, e.to_string())),
+            }
+        }
+        (ok, failed)
+    }
+
     async fn list_hooks(&self) -> Vec<HookInfo> {
         // M6-07: read the wired HookRegistry (Task 7).
         let Some(reg) = self.hook_registry.as_ref() else {

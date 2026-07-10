@@ -1055,6 +1055,36 @@ impl McpRegistry {
         Ok(())
     }
 
+    /// Reconnect a single known server by name (`/mcp reconnect <server>`):
+    /// tear down the live connection and re-establish it from the config the
+    /// registry retains in every connection state. `Err(McpError::Internal)`
+    /// when no server by that name is registered (callers pre-check via
+    /// [`Self::server_names`] for the user-facing "no server named" message).
+    pub async fn reconnect(&self, name: &str) -> Result<(), McpError> {
+        // Every connection state carries its originating config; pull it out so
+        // we can re-`connect` after tearing the live connection down.
+        let config = {
+            let conns = self.connections.read().await;
+            let Some(state) = conns.get(name) else {
+                return Err(McpError::Internal(format!("no MCP server named \"{name}\"")));
+            };
+            state.config().clone()
+        };
+        // Best-effort teardown (a never-connected server is a no-op), then a
+        // fresh connect. `connect` early-returns the existing id if already
+        // connected, so the disconnect must land first.
+        let _ = self.disconnect(name).await;
+        self.connect(config).await.map(|_| ())
+    }
+
+    /// The names of every registered server (any connection state), sorted —
+    /// the set `/mcp reconnect all` iterates.
+    pub async fn server_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.connections.read().await.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Project every known connection into the trait-facing
     /// [`traits::McpServerInfo`] shape. Used by
     /// `OrchestratorHandle::list_mcp_servers` (M6-07) so `/mcp` can list

@@ -138,6 +138,13 @@ pub struct AppCallbacks<'cb> {
     /// result returns via `TurnEvent::SystemNotice` (same shape as
     /// `on_permission_action`).
     pub on_task_action: Box<dyn FnMut(TaskAction) + 'cb>,
+    /// Executed on [`ChatOutcome::DispatchSlash`]: the caller dispatches the
+    /// carried raw input through the live `RegistrySlashDispatcher` off-loop
+    /// (expanding a `type:"prompt"` command like `/loop` or a user command/skill
+    /// and running it as a turn, or surfacing a local command's output / the
+    /// unknown-command literal via a [`TurnEvent::SystemNotice`]). The widget has
+    /// already echoed the invocation. `None` (tests / no registry) is a no-op.
+    pub on_dispatch_slash: Box<dyn FnMut(String) + 'cb>,
 }
 
 /// Interactive chat runtime: the event-loop shell around [`ChatWidget`].
@@ -357,6 +364,14 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::TaskAction(action) => {
                         (self.callbacks.on_task_action)(action);
                     }
+                    // A registry-backed slash command (`/loop`, a user command,
+                    // a skill, a plugin/bundled command): dispatch the raw input
+                    // through the live `RegistrySlashDispatcher` off-loop; the
+                    // expanded prompt runs as a turn (or the local output / the
+                    // unknown-command literal returns via `TurnEvent::SystemNotice`).
+                    ChatOutcome::DispatchSlash(input) => {
+                        (self.callbacks.on_dispatch_slash)(input);
+                    }
                     // The widget already applied the theme live; persist the
                     // preference best-effort (no-op on any IO failure).
                     ChatOutcome::SetTheme(setting) => {
@@ -533,6 +548,7 @@ pub fn run_app(
     on_plan_mode: impl FnMut(String),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
+    on_dispatch_slash: impl FnMut(String),
 ) -> io::Result<AppExit> {
     // Startup theme (production path only, keeping widget construction
     // hermetic for tests): OSC-11 background detection first — it manages
@@ -567,6 +583,7 @@ pub fn run_app(
             on_plan_mode: Box::new(on_plan_mode),
             on_sandbox_action: Box::new(on_sandbox_action),
             on_task_action: Box::new(on_task_action),
+            on_dispatch_slash: Box::new(on_dispatch_slash),
         },
     );
     app.chat_widget.set_theme(startup_theme);
@@ -667,6 +684,7 @@ mod tests {
                 on_plan_mode: Box::new(|_| {}),
                 on_sandbox_action: Box::new(|_| {}),
                 on_task_action: Box::new(|_| {}),
+                on_dispatch_slash: Box::new(|_| {}),
             },
         );
         app

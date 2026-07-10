@@ -31,13 +31,80 @@ pub struct CompletionItem {
     pub desc: String,
 }
 
-/// The registry commands matching `prefix` (a `/`-led token), as completion
-/// items — derived from the single [`crate::command::BUILTIN`] registry (plan
-/// Phase 8). Empty when `prefix` is not a command fragment.
+/// A registry-backed slash command (user command, skill, plugin, or bundled
+/// skill) as a popup candidate — the NON-builtin half of claude-code's
+/// `generateCommandSuggestions` candidate set that lives in the
+/// `CommandRegistry` rather than the static [`crate::command::BUILTIN`] table.
 ///
-/// Ordering and matching are a port of claude-code 2.1.205's
-/// `generateCommandSuggestions`:
-/// - bare `/` lists every advertised command **alphabetically**;
+/// Snapshotted once when the registry is wired (and refreshed on
+/// `/reload-skills`) so the per-keystroke popup never has to touch the async
+/// registry lock. Names/aliases carry the leading `/`, matching [`SlashCommand`].
+///
+/// [`SlashCommand`]: crate::command::SlashCommand
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrySlashRow {
+    /// Command name WITH the leading `/` (e.g. `/loop`).
+    pub name: String,
+    /// Short user-facing description shown dim in the right column.
+    pub description: String,
+    /// Alternate names WITH the leading `/`.
+    pub aliases: Vec<String>,
+}
+
+/// A popup candidate: either a static builtin or a registry-backed command.
+/// Lets the ranking in [`command_items_merged`] operate over the two surfaces
+/// as one unified list, exactly as the reference's single Fuse index does.
+enum Cand<'a> {
+    Builtin(&'a crate::command::SlashCommand),
+    Registry(&'a RegistrySlashRow),
+}
+
+impl Cand<'_> {
+    /// Command name WITH the leading `/`.
+    fn name(&self) -> &str {
+        match self {
+            Cand::Builtin(c) => c.name,
+            Cand::Registry(r) => &r.name,
+        }
+    }
+
+    /// Resolved description (a builtin may compute it dynamically).
+    fn describe(&self) -> String {
+        match self {
+            Cand::Builtin(c) => c.describe(),
+            Cand::Registry(r) => r.description.clone(),
+        }
+    }
+
+    /// Alternate names WITH the leading `/`.
+    fn aliases(&self) -> Vec<&str> {
+        match self {
+            Cand::Builtin(c) => c.aliases.iter().copied().collect(),
+            Cand::Registry(r) => r.aliases.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// The builtin commands matching `prefix` (a `/`-led token), as completion
+/// items — derived from the single [`crate::command::BUILTIN`] registry.
+/// Empty when `prefix` is not a command fragment. Equivalent to
+/// [`command_items_merged`] with an empty registry snapshot.
+#[must_use]
+pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
+    command_items_merged(prefix, &[])
+}
+
+/// The commands matching `prefix`, merging the static builtins with the
+/// registry-backed `registry` snapshot (user commands, skills, plugin/bundled
+/// commands) into ONE ranked surface — the full claude-code 2.1.205
+/// `generateCommandSuggestions` candidate set. Passing `&[]` reproduces
+/// [`command_items`] byte-for-byte.
+///
+/// A registry row is dropped when a builtin already owns its name — the builtin
+/// surface is authoritative and never duplicated.
+///
+/// Ordering and matching are a port of `generateCommandSuggestions`:
+/// - bare `/` lists every command **alphabetically**;
 /// - a query ranks candidates exact-name > exact-alias > prefix-name (shorter
 ///   first) > prefix-alias (shorter first) > fuzzy, with the tie-break falling
 ///   back to alphabetical (the reference tie-breaks on Fuse score + usage;
@@ -45,12 +112,12 @@ pub struct CompletionItem {
 /// - fuzzy candidacy is name/alias substring or description word-prefix (a
 ///   deterministic stand-in for the reference's Fuse.js index over the same
 ///   keys);
-/// - a hidden command surfaces when its exact name is typed (the reference's
+/// - a hidden builtin surfaces when its exact name is typed (the reference's
 ///   `hiddenExact` rule);
 /// - the matched alias is shown in parens only when the user typed it
 ///   (`findMatchedAlias`), e.g. `/quit` → `/exit (quit)`.
 #[must_use]
-pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
+pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<CompletionItem> {
     if !prefix.starts_with('/') {
         return Vec::new();
     }
@@ -62,31 +129,50 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
     }
     let query = rest.to_lowercase();
 
-    // Bare "/": every advertised command, alphabetically.
+    // Registry rows whose name a builtin already owns are dropped (the builtin
+    // table is authoritative). Inlined at both use sites below — a shared
+    // closure confuses lifetime inference on the borrowed `registry` slice.
+
+    // Bare "/": every command, alphabetically. The registry iterator leads the
+    // `chain` so the item type binds to the borrowed `registry` lifetime and the
+    // `'static` builtins coerce down (covariance); order is irrelevant — the
+    // result is sorted by name below.
     if query.is_empty() {
-        let mut commands: Vec<_> = crate::command::advertised().collect();
-        commands.sort_by_key(|command| command.name);
-        return commands.into_iter().map(|c| item(c, None)).collect();
+        let mut commands: Vec<Cand> = registry
+            .iter()
+            .filter(|r| !crate::command::BUILTIN.iter().any(|b| b.name == r.name))
+            .map(|r| Cand::Registry(r))
+            .chain(crate::command::advertised().map(|c| Cand::Builtin(c)))
+            .collect();
+        commands.sort_by(|a, b| a.name().cmp(b.name()));
+        return commands
+            .into_iter()
+            .map(|c| item(c.name(), c.describe(), None))
+            .collect();
     }
 
     // Strip the leading slash from a registry name/alias for matching.
     let bare = |name: &str| name[1..].to_lowercase();
 
-    // `hiddenExact`: an unadvertised command typed out in full surfaces —
-    // unless a visible command shares the name (impossible in one registry,
-    // kept as a guard for parity with the reference).
+    // `hiddenExact`: an unadvertised builtin typed out in full surfaces — unless
+    // a visible command shares the name. Only builtins carry a hidden flag;
+    // registry rows are always visible.
     let hidden_exact = crate::command::BUILTIN
         .iter()
         .filter(|c| !c.advertised || crate::command::is_runtime_hidden(c.name))
         .find(|c| bare(c.name) == query);
 
-    // Candidates: advertised commands the reference's Fuse index would match —
-    // name/alias substring, name-part prefix, or description word prefix.
-    let mut candidates: Vec<_> = crate::command::advertised()
+    // Candidates: commands the reference's Fuse index would match — name/alias
+    // substring, name-part prefix, or description word prefix.
+    let mut candidates: Vec<Cand> = registry
+        .iter()
+        .filter(|r| !crate::command::BUILTIN.iter().any(|b| b.name == r.name))
+        .map(|r| Cand::Registry(r))
+        .chain(crate::command::advertised().map(|c| Cand::Builtin(c)))
         .filter(|c| {
-            bare(c.name).contains(&query)
-                || c.aliases.iter().any(|a| bare(a).contains(&query))
-                || bare(c.name)
+            bare(c.name()).contains(&query)
+                || c.aliases().iter().any(|a| bare(a).contains(&query))
+                || bare(c.name())
                     .split(['-', '_', ':'])
                     .any(|part| part.starts_with(&query))
                 || c.describe()
@@ -97,19 +183,19 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
         .collect();
 
     // Rank tiers (the reference comparator, minus the Fuse-score tail).
-    let tier = |c: &crate::command::SlashCommand| -> (u8, usize) {
-        let name = bare(c.name);
+    let tier = |c: &Cand| -> (u8, usize) {
+        let name = bare(c.name());
         if name == query {
             return (0, 0);
         }
-        if c.aliases.iter().any(|a| bare(a) == query) {
+        if c.aliases().iter().any(|a| bare(a) == query) {
             return (1, 0);
         }
         if name.starts_with(&query) {
             return (2, name.len());
         }
         if let Some(alias) = c
-            .aliases
+            .aliases()
             .iter()
             .filter(|a| bare(a).starts_with(&query))
             .min_by_key(|a| a.len())
@@ -118,38 +204,40 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
         }
         (4, 0)
     };
-    candidates.sort_by(|a, b| tier(a).cmp(&tier(b)).then(a.name.cmp(b.name)));
+    candidates.sort_by(|a, b| tier(a).cmp(&tier(b)).then(a.name().cmp(b.name())));
 
     let mut items: Vec<CompletionItem> = candidates
         .into_iter()
         .map(|c| {
             // Show the alias in parens only when the user typed it.
             let matched_alias = c
-                .aliases
-                .iter()
+                .aliases()
+                .into_iter()
                 .find(|a| bare(a).starts_with(&query))
-                .map(|a| &a[1..]);
-            item(c, matched_alias)
+                .map(|a| a[1..].to_string());
+            item(c.name(), c.describe(), matched_alias.as_deref())
         })
         .collect();
     if let Some(hidden) = hidden_exact {
         if !items.iter().any(|i| i.insert == hidden.name) {
-            items.insert(0, item(hidden, None));
+            items.insert(0, item(hidden.name, hidden.describe(), None));
         }
     }
     items
 }
 
-/// Build one popup row (claude-code `createCommandSuggestionItem`).
-fn item(command: &crate::command::SlashCommand, matched_alias: Option<&str>) -> CompletionItem {
+/// Build one popup row (claude-code `createCommandSuggestionItem`). `name`
+/// carries the leading `/`; `matched_alias` (without slash) is appended in
+/// parens when the user typed the alias.
+fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem {
     let label = match matched_alias {
-        Some(alias) => format!("{} ({alias})", command.name),
-        None => command.name.to_string(),
+        Some(alias) => format!("{name} ({alias})"),
+        None => name.to_string(),
     };
     CompletionItem {
         label,
-        insert: command.name.to_string(),
-        desc: command.describe(),
+        insert: name.to_string(),
+        desc,
     }
 }
 
@@ -287,6 +375,60 @@ mod tests {
         assert!(command_items("/zzz").is_empty());
         // Unadvertised registry entries never surface.
         assert!(!all.iter().any(|i| i.insert == "/image"));
+    }
+
+    fn rows(names: &[(&str, &str)]) -> Vec<RegistrySlashRow> {
+        names
+            .iter()
+            .map(|(n, d)| RegistrySlashRow {
+                name: (*n).to_string(),
+                description: (*d).to_string(),
+                aliases: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_registry_is_identical_to_builtin_only() {
+        // The merged surface with an empty snapshot must be byte-for-byte the
+        // builtin-only popup — the R1 ordering guarantee is untouched.
+        for q in ["/", "/m", "/re", "/help", "/zzz", "model"] {
+            assert_eq!(command_items_merged(q, &[]), command_items(q), "query {q:?}");
+        }
+    }
+
+    #[test]
+    fn registry_commands_merge_into_the_popup() {
+        let reg = rows(&[
+            ("/loop", "run a task on a loop"),
+            ("/deploy", "ship it"),
+        ]);
+        // Bare "/" now includes the registry rows alongside the builtins,
+        // alphabetically, and one more than the builtin-only count.
+        let all = command_items_merged("/", &reg);
+        assert_eq!(all.len(), crate::command::advertised().count() + reg.len());
+        assert!(all.iter().any(|i| i.insert == "/loop"));
+        assert!(all.iter().any(|i| i.insert == "/deploy"));
+        // Sorted by name: /deploy precedes /loop.
+        let d = all.iter().position(|i| i.insert == "/deploy").unwrap();
+        let l = all.iter().position(|i| i.insert == "/loop").unwrap();
+        assert!(d < l);
+        // A query surfaces the registry command with its description.
+        let lo = command_items_merged("/lo", &reg);
+        let loop_row = lo.iter().find(|i| i.insert == "/loop").expect("/loop matches /lo");
+        assert_eq!(loop_row.desc, "run a task on a loop");
+    }
+
+    #[test]
+    fn registry_row_shadowing_a_builtin_is_dropped() {
+        // A registry entry that reuses a builtin name never duplicates the
+        // builtin row — the builtin surface is authoritative.
+        let reg = rows(&[("/help", "SHOULD NOT WIN")]);
+        let all = command_items_merged("/", &reg);
+        assert_eq!(all.len(), crate::command::advertised().count());
+        let help: Vec<_> = all.iter().filter(|i| i.insert == "/help").collect();
+        assert_eq!(help.len(), 1);
+        assert_ne!(help[0].desc, "SHOULD NOT WIN");
     }
 
     #[test]

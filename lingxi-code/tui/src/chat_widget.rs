@@ -172,6 +172,17 @@ pub enum ChatOutcome {
     /// result back through `TurnEvent::SystemNotice`. The picker stays open and
     /// has already marked the row `killed` optimistically.
     TaskAction(TaskAction),
+    /// A registry-backed slash command (`/loop`, a user command, a skill, a
+    /// plugin/bundled command) that is NOT a static builtin. The widget already
+    /// echoed the raw invocation as a user message; the caller dispatches the
+    /// carried input through the live `RegistrySlashDispatcher` OFF-LOOP —
+    /// expanding a `type:"prompt"` command and running it as a turn, or printing
+    /// a `type:"local"` command's output / the unknown-command literal via
+    /// `TurnEvent::SystemNotice`. Off-loop because dispatch takes the async
+    /// registry lock and (for markdown commands) runs embedded shell expansion,
+    /// neither of which may run on the render thread. Mirrors the `-p` one-shot
+    /// path's `run_slash_command`, so a typed `/loop …` actually schedules.
+    DispatchSlash(String),
 }
 
 /// A `/sandbox` off-loop effect handed to the embedder via
@@ -496,6 +507,16 @@ impl ChatWidget {
         &mut self,
         registry: std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     ) {
+        // Snapshot the registry-backed commands (user commands, skills,
+        // plugin/bundled) into the completion popup + dispatch-routing set.
+        // `try_read` never blocks the render thread: this runs at startup wiring
+        // time (no dispatcher contention) and after `/reload-skills` (whose
+        // write lock is already released). A rare contended miss just leaves the
+        // previous snapshot in place.
+        if let Ok(reg) = registry.try_read() {
+            self.bottom_pane
+                .set_registry_commands(registry_slash_rows(&reg));
+        }
         self.command_registry = Some(registry);
     }
 
@@ -1258,16 +1279,41 @@ impl ChatWidget {
     /// registered command (screen open, clear, exit, …), or `None` to fall
     /// through and send the input as a normal prompt.
     pub fn handle_slash(&mut self, input: &str) -> Option<ChatOutcome> {
-        let (command, args) = crate::command::resolve(input)?;
-        // Record the exact `/name` token typed so an alias-shared handler can
-        // branch on the invoked alias (e.g. `/stats` → Stats tab).
-        self.invoked_slash = input
-            .trim()
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
-        Some((command.run)(self, args))
+        if let Some((command, args)) = crate::command::resolve(input) {
+            // Record the exact `/name` token typed so an alias-shared handler can
+            // branch on the invoked alias (e.g. `/stats` → Stats tab).
+            self.invoked_slash = input
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            return Some((command.run)(self, args));
+        }
+        // BUILTIN miss: a registry-backed command (`/loop`, a user command, a
+        // skill, a plugin/bundled command)? Echo the invocation and hand the raw
+        // input to the off-loop dispatcher. Anything the registry doesn't know
+        // falls through as a normal prompt — unchanged behavior for plain text
+        // that merely happens to start with `/`.
+        let name = input.trim().split_whitespace().next().unwrap_or("");
+        if self.bottom_pane.is_registry_command(name) {
+            self.invoked_slash = name.to_string();
+            return Some(self.dispatch_registry_slash(input));
+        }
+        None
+    }
+
+    /// Echo a registry-backed slash invocation as the user's turn message and
+    /// hand the raw input to the caller for OFF-LOOP dispatch through the live
+    /// `RegistrySlashDispatcher` ([`ChatOutcome::DispatchSlash`]). The expanded
+    /// prompt is what actually runs as the model turn (driven by the caller), so
+    /// this only records the invocation — it must NOT also submit a turn.
+    fn dispatch_registry_slash(&mut self, input: &str) -> ChatOutcome {
+        self.transcript.push_message(RenderedMessage::UserText {
+            body: input.to_string(),
+            timestamp: 0,
+        });
+        ChatOutcome::DispatchSlash(input.to_string())
     }
 
     /// Desired widget height at `width` columns: the streaming live tail (the
@@ -2498,11 +2544,21 @@ impl ChatWidget {
                 true,
             );
         };
-        self.run_core_command(
+        let outcome = self.run_core_command(
             "reload-skills",
             args,
             &command_core::reload_skills::ReloadSkillsHandler::new(registry),
-        )
+        );
+        // The reload mutated the live registry in place; re-snapshot so a skill
+        // added/changed/removed on disk this session is reflected in the
+        // completion popup (and dispatch routing) immediately.
+        if let Some(reg) = self.command_registry.clone() {
+            if let Ok(guard) = reg.try_read() {
+                self.bottom_pane
+                    .set_registry_commands(registry_slash_rows(&guard));
+            }
+        }
+        outcome
     }
 
     /// `/stop`: stop the session. Shows "Session stopped." then returns
@@ -2889,6 +2945,47 @@ impl ChatWidget {
 /// `lines.len()` as a saturating `u16` (row heights are `u16` everywhere).
 fn line_count(lines: &[ratatui::text::Line<'static>]) -> u16 {
     u16::try_from(lines.len()).unwrap_or(u16::MAX)
+}
+
+/// Snapshot the registry-backed slash commands — the NON-builtin surface (user
+/// commands, skills, plugin/bundled commands) — as completion-popup rows. The
+/// static builtins already populate the popup via [`crate::command::BUILTIN`],
+/// and a registry entry shadowing a builtin name is dropped by the popup merge,
+/// so only prompt/local-dispatchable kinds are included here. Skills the author
+/// marked non-user-invocable (`user_invocable: false`) are omitted — the
+/// reference hides them from the `/` picker. Names/aliases are normalized to
+/// carry the leading `/` to match [`crate::command::SlashCommand`].
+fn registry_slash_rows(
+    reg: &command_api::CommandRegistry,
+) -> Vec<crate::bottom_pane::completion_view::RegistrySlashRow> {
+    use command_api::SlashCommandKind;
+    let with_slash = |name: &str| {
+        if name.starts_with('/') {
+            name.to_string()
+        } else {
+            format!("/{name}")
+        }
+    };
+    reg.list_all()
+        .into_iter()
+        .filter(|c| {
+            matches!(
+                c.kind,
+                SlashCommandKind::Markdown { .. }
+                    | SlashCommandKind::Plugin { .. }
+                    | SlashCommandKind::Bundled { .. }
+                    | SlashCommandKind::Mcp { .. }
+            )
+        })
+        .filter(|c| c.user_invocable != Some(false))
+        .map(
+            |c| crate::bottom_pane::completion_view::RegistrySlashRow {
+                name: with_slash(&c.name),
+                description: c.description.clone(),
+                aliases: c.aliases.iter().map(|a| with_slash(a)).collect(),
+            },
+        )
+        .collect()
 }
 
 /// Human label shown in the spinner for an in-flight tool call, mapping the
@@ -3461,6 +3558,41 @@ mod tests {
             systext.body()
         );
         assert!(!systext.is_error());
+    }
+
+    /// A registry-backed command (`/loop`, a user command, a skill) that is NOT
+    /// a static builtin routes to OFF-LOOP dispatch (`ChatOutcome::DispatchSlash`)
+    /// after echoing the invocation — so a typed `/loop …` actually schedules
+    /// instead of being sent to the model as literal text. Anything the registry
+    /// doesn't know still falls through as a normal prompt (`None`).
+    #[test]
+    fn handle_slash_routes_registry_command_to_dispatch() {
+        let mut widget = widget();
+        let mut reg = command_api::CommandRegistry::new();
+        reg.register_command(command_api::SlashCommand {
+            name: "loop".to_string(),
+            description: "run a task on a loop".to_string(),
+            source: command_api::CommandSource::Bundled,
+            kind: command_api::SlashCommandKind::Bundled {
+                frontmatter: command_api::CommandFrontmatter::default(),
+                prompt_fn: None,
+            },
+            loaded_from: Some("bundled".to_string()),
+            ..command_api::SlashCommand::default()
+        });
+        let registry = std::sync::Arc::new(tokio::sync::RwLock::new(reg));
+        widget.set_command_registry(registry);
+
+        let Some(ChatOutcome::DispatchSlash(input)) = widget.handle_slash("/loop 5m go") else {
+            panic!("a registry-backed command must route to DispatchSlash");
+        };
+        assert_eq!(input, "/loop 5m go");
+        // The raw invocation is echoed as the user's turn message.
+        let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
+        assert_eq!(shown, "/loop 5m go");
+
+        // An unregistered slash command still falls through as a normal prompt.
+        assert!(widget.handle_slash("/totally-unknown").is_none());
     }
 
     /// A fake shell-expansion provider for the TUI expansion smoke tests: the

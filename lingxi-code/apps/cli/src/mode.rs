@@ -360,6 +360,16 @@ pub(crate) async fn run_ratatui(
     let fast_handle = handle.clone();
     let plan_orch = orchestrator.clone();
     let plan_handle = handle.clone();
+    // (registry slash dispatch) A fully-wired SHARED clone of the runtime's
+    // dispatcher — it carries the SAME `Arc<RwLock<CommandRegistry>>` plus the
+    // expansion hooks + shell-expansion provider — so a `/loop`/user-command/
+    // skill typed in the TUI expands identically to the `-p` one-shot path.
+    // Plus an orchestrator/handle/tx triplet for the off-loop dispatch closure.
+    // All taken BEFORE `on_submit` moves `orchestrator`/`handle` into its closure.
+    let dispatch_dispatcher = std::sync::Arc::new(tui_build.runtime.dispatcher.clone_shared());
+    let dispatch_orch = orchestrator.clone();
+    let dispatch_handle = handle.clone();
+    let dispatch_turn_tx = turn_tx.clone();
     // (/sandbox) The shared toggle cell threaded into the widget + clones for
     // the off-loop settings-persistence effect (mirrors the sibling triplets).
     let sandbox_toggle = tui_build.runtime.sandbox_toggle.clone();
@@ -727,6 +737,42 @@ pub(crate) async fn run_ratatui(
             });
         });
     };
+    // (registry slash dispatch) `/loop`, user commands, skills, and plugin/
+    // bundled commands are NOT in the TUI's static BUILTIN table. The widget
+    // echoes the invocation and hands the raw input back as
+    // `ChatOutcome::DispatchSlash`; here we run it through the live shared
+    // dispatcher OFF the render thread — mirroring the `-p` path's
+    // `run_slash_command`. A `type:"prompt"` command's expanded prompt runs as a
+    // turn; a local command's output / the unknown-command literal surfaces via
+    // `TurnEvent::SystemNotice`.
+    let on_dispatch_slash = move |input: String| {
+        let dispatcher = dispatch_dispatcher.clone();
+        let orch = dispatch_orch.clone();
+        let tx = dispatch_turn_tx.clone();
+        dispatch_handle.spawn(async move {
+            use traits::{SlashCommandDispatcher, SlashDispatchResult};
+            match dispatcher.dispatch(&input).await {
+                SlashDispatchResult::RunAsTurn { prompt } => {
+                    let _ = tx.send(tui::TurnEvent::TurnStarted);
+                    if let Err(e) = orch
+                        .run_turn_streaming_with_images(&prompt, &[], CancellationToken::new())
+                        .await
+                    {
+                        let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
+                        let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+                    }
+                }
+                SlashDispatchResult::Handled { display }
+                | SlashDispatchResult::Unknown { display, .. } => {
+                    let _ = tx.send(tui::TurnEvent::SystemNotice {
+                        body: display,
+                        is_error: false,
+                    });
+                }
+                SlashDispatchResult::NotASlashCommand => {}
+            }
+        });
+    };
     // (statusline) Shared slot for the custom `statusLine` command, built from
     // the User+Local setting, plus the debounced single-flight pump (the
     // claude-code `StatusLine.tsx` execute-on-change analog: 300ms tick, run
@@ -807,6 +853,7 @@ pub(crate) async fn run_ratatui(
             on_plan_mode,
             on_sandbox_action,
             on_task_action,
+            on_dispatch_slash,
         )
     })
     .await;

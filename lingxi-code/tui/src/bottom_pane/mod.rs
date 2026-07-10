@@ -50,7 +50,9 @@ use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
 use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
-use crate::bottom_pane::completion_view::{command_items, CompletionView};
+use crate::bottom_pane::completion_view::{
+    command_items_merged, CompletionView, RegistrySlashRow,
+};
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::permission_view::PermissionView;
@@ -213,6 +215,15 @@ pub struct BottomPane {
     /// Session accent color (`/color`): tints the composer's `›` gutter
     /// prompt when set. `None` → the theme default (no tint).
     accent: Option<tui_core::render::StyleColor>,
+    /// Snapshot of the registry-backed slash commands (user commands, skills,
+    /// plugin/bundled commands) merged into the completion popup alongside the
+    /// static builtins. Empty until the command registry is wired
+    /// ([`ChatWidget::set_command_registry`]); refreshed on `/reload-skills`.
+    /// Held here (not read from the async registry per-keystroke) so
+    /// [`Self::sync_completion`] stays a cheap synchronous render-thread call.
+    ///
+    /// [`ChatWidget::set_command_registry`]: crate::chat_widget::ChatWidget::set_command_registry
+    registry_commands: Vec<RegistrySlashRow>,
 }
 
 impl BottomPane {
@@ -238,7 +249,28 @@ impl BottomPane {
             context_pressure: None,
             theme,
             accent: None,
+            registry_commands: Vec::new(),
         }
+    }
+
+    /// Replace the registry-backed slash-command snapshot merged into the
+    /// completion popup (user commands, skills, plugin/bundled commands). Called
+    /// when the command registry is wired and after `/reload-skills`.
+    pub fn set_registry_commands(&mut self, rows: Vec<RegistrySlashRow>) {
+        self.registry_commands = rows;
+    }
+
+    /// Whether `name` (WITH the leading `/`) resolves to a registry-backed
+    /// command — by name or alias. Used by
+    /// [`ChatWidget::handle_slash`] to route a BUILTIN-miss to the async
+    /// dispatcher instead of submitting the text as a literal prompt.
+    ///
+    /// [`ChatWidget::handle_slash`]: crate::chat_widget::ChatWidget::handle_slash
+    #[must_use]
+    pub fn is_registry_command(&self, name: &str) -> bool {
+        self.registry_commands
+            .iter()
+            .any(|r| r.name == name || r.aliases.iter().any(|a| a == name))
     }
 
     /// Route one key press. Layered: the active view owns the keyboard until
@@ -782,7 +814,8 @@ impl BottomPane {
         let is_command =
             text.starts_with('/') && !text.contains('\n') && !text.contains(char::is_whitespace);
         if is_command {
-            self.completion = CompletionView::new(command_items(&text));
+            self.completion =
+                CompletionView::new(command_items_merged(&text, &self.registry_commands));
             return;
         }
         if let Some((_, fragment)) = self.composer.at_fragment() {

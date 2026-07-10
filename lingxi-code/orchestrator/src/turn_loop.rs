@@ -1461,7 +1461,6 @@ pub(crate) fn terminal_api_error_text(
             let category = stop_details.and_then(|sd| sd.category.as_deref());
             let cyber_or_bio = matches!(category, Some("cyber" | "bio"));
             let is_cyber = matches!(category, Some("cyber"));
-            let is_military_weapons = matches!(category, Some("military_weapons"));
             let base = match crate::prompt::env_meta::marketing_name_for_model(model) {
                 Some(label) => {
                     // LABEL branch. `m`/`f` are the interactive suffixes.
@@ -1503,48 +1502,34 @@ pub(crate) fn terminal_api_error_text(
                         "Try rephrasing the request in a new session or change your model."
                     };
                     if is_cyber {
-                        // Cyber-exemption variant (`cat==="cyber" && pd()`). `A`
-                        // is "This model" (no marketing name in this branch).
-                        let f = if interactive {
-                            "Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
-                        } else {
-                            "Learn more: https://support.claude.com/en/articles/15363606"
-                        };
-                        let exemption =
-                            refusal_exemption_url(stop_details.and_then(|sd| sd.explanation.as_deref()));
-                        // Binary: `${bT}: ${g}'s safeguards flagged this message
-                        // for a cybersecurity topic. … exemption: ${_aa(expl)}\n\n${m}\n\n${h}`
-                        // where `g = r!=null ? vp(r) : "This model"` — no marketing
-                        // name here, so `g` = "This model". DOUBLE `\n` separators
-                        // (od -c verified on 2.1.195 @206804566).
-                        format!(
-                            "API Error: This model's safeguards flagged this message for a cybersecurity topic. If your work requires this access, you can apply for an exemption: {exemption}\n\n{m}\n\n{f}"
-                        )
-                    } else if is_military_weapons {
-                        // Binary no-label `else if (f === "military_weapons")` arm:
-                        //   `${bT}: ${h} has added safeguards for weapons-related
-                        //   content, which blocked this request. Not weapons-related?
-                        //   This may be a false positive.\n\n${m}${p?"":`\n\nIf you
-                        //   believe this was flagged in error, send feedback with
-                        //   /feedback.`}`
-                        // `h = r!=null ? vp(r) : "This model"` — no marketing name
-                        // here ⇒ "This model". The feedback clause is interactive-only
-                        // (`p` = non-interactive; the `${p?"":…}` tail fires when `!p`).
-                        // DOUBLE `\n` separators (od -c verified on 2.1.195 @206804812).
-                        let tail = if interactive {
-                            "\n\nIf you believe this was flagged in error, send feedback with /feedback."
+                        // 2.1.206 (JS @217943553) replaced the old "apply for an
+                        // exemption" message with the Cyber Verification Program
+                        // interstitial (`t?.category==="cyber" && Xf()`; Xf() =
+                        // the first-party cyber-safeguards gate, always on for the
+                        // Anthropic path — the 195 code used the analogous
+                        // `pd()`=firstParty). `m2 = n!=null ? Mf(n) : "This model"`
+                        // = "This model" here (this is the no-marketing-name
+                        // branch). The feedback tail is interactive-only (binary
+                        // `g = p ? "" : "\n\nIf you were not…"`); there is NO
+                        // `\n\n{m}\n\n{f}` tail — it was dropped in 206.
+                        // Byte-verified: 'apply for an exemption' = 0 hits in 206;
+                        // help-center URL and interstitial = 2 hits each.
+                        let feedback_tail = if interactive {
+                            "\n\nIf you were not engaging in a cybersecurity topic, please send feedback via /feedback."
                         } else {
                             ""
                         };
                         format!(
-                            "API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n\n{m}{tail}"
+                            "API Error: This model has safety measures that flagged this message for a cybersecurity topic. To learn about the Cyber Verification Program and apply for access, visit our help center: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude.{feedback_tail}"
                         )
                     } else {
                         // Binary final `else`: `${bT}: <brand> is unable to respond
-                        // … aup).${a} `+m` — `${a}` is the optional explanation
-                        // clause (`a=i?` ${i}${punct}`:""`). Empty ⇒ `). {m}`
-                        // (matches the prior port output); present ⇒
-                        // `). <explanation>[.] {m}`.
+                        // … aup).${a} `+f` — `${a}` is the optional explanation
+                        // clause (`a=i?` ${i}${punct}`:""`). Empty ⇒ `). {m}`;
+                        // present ⇒ `). <explanation>[.] {m}`. (`f` == the port's
+                        // `m` rephrase message.) 2.1.206 REMOVED the
+                        // `military_weapons` arm entirely — 0 hits for
+                        // 'weapons-related content' / 'military_weapons' in 206.
                         let clause = refusal_explanation_clause(
                             stop_details.and_then(|sd| sd.explanation.as_deref()),
                         );
@@ -1596,28 +1581,6 @@ fn refusal_explanation_clause(explanation: Option<&str>) -> String {
         .last()
         .is_some_and(|c| matches!(c, '.' | '!' | '?' | '\u{2026}'));
     format!(" {i}{}", if ends_punct { "" } else { "." })
-}
-
-/// The binary's `oUi(explanation)`: extract a `https://claude.com/form/\S+`
-/// exemption URL from the refusal explanation (stripping trailing `.,;:!?)`),
-/// return it when ≤ 400 chars, else the fallback
-/// `https://claude.com/form/cyber-use-case`.
-fn refusal_exemption_url(explanation: Option<&str>) -> String {
-    const FALLBACK: &str = "https://claude.com/form/cyber-use-case";
-    const PREFIX: &str = "https://claude.com/form/";
-    if let Some(e) = explanation {
-        if let Some(start) = e.find(PREFIX) {
-            let rest = &e[start..];
-            // `\S+`: up to the next whitespace.
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
-            // `\S+` after `form/` requires at least one char; cap at dRd = 400.
-            if url.len() > PREFIX.len() && url.len() <= 400 {
-                return url.to_string();
-            }
-        }
-    }
-    FALLBACK.to_string()
 }
 
 /// Surface the terminal `API Error: …` assistant message on the BATCHED path

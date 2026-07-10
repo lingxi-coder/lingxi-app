@@ -644,6 +644,11 @@ impl Tool for CronCreateTool {
     fn name(&self) -> &str {
         CRON_CREATE_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` — the def that validates a 5-field
+    /// cron expression (byte-verified against the binary).
+    fn search_hint(&self) -> Option<&str> {
+        Some("schedule a recurring or one-shot prompt")
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }

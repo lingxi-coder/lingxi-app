@@ -26,9 +26,21 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 use tui_core::theme::ThemeName;
 
+use traits::CostSnapshot;
+
 use crate::bottom_pane::view::{BottomPaneView, ViewOutcome};
 use crate::renderable::Renderable;
 use crate::session::{DoctorInfo, InfoRow, ModelRow};
+
+/// Which tab the `/usage` screen opens on (claude-code
+/// `defaultTab: n === "stats" ? "Stats" : "Usage"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageTab {
+    /// The `/usage` and `/cost` entry points open on the Usage tab.
+    Usage,
+    /// The `/stats` alias opens on the Stats tab.
+    Stats,
+}
 
 /// Column width the shortcut/command key is padded to (iocraft `help::KEY_WIDTH`).
 const KEY_WIDTH: usize = 16;
@@ -40,6 +52,12 @@ pub struct ScreenView {
     footer: String,
     /// Lines scrolled down from the top (`0` = top).
     scroll: u16,
+    /// Optional tab strip (`(label, body)` pairs). Empty for single-body
+    /// screens; non-empty for the `/usage` Usage/Stats screen, where `Tab`
+    /// (and `←`/`→`) cycle the active tab and swap [`Self::lines`] to its body.
+    tabs: Vec<(String, Vec<Line<'static>>)>,
+    /// Index into [`Self::tabs`] of the active tab (`0` when untabbed).
+    active_tab: usize,
 }
 
 impl ScreenView {
@@ -55,7 +73,63 @@ impl ScreenView {
             lines,
             footer: footer.into(),
             scroll: 0,
+            tabs: Vec::new(),
+            active_tab: 0,
         }
+    }
+
+    /// A tabbed screen: a title, a set of `(label, body)` tabs, and a footer.
+    /// `default_tab` is the initially-active tab index (clamped). `Tab`/`←`/`→`
+    /// cycle tabs. The rendered body is a tab strip line, a blank spacer, then
+    /// the active tab's lines. Used by [`Self::usage`].
+    #[must_use]
+    pub fn tabbed(
+        title: impl Into<String>,
+        tabs: Vec<(String, Vec<Line<'static>>)>,
+        default_tab: usize,
+        footer: impl Into<String>,
+    ) -> Self {
+        let active_tab = default_tab.min(tabs.len().saturating_sub(1));
+        let mut view = Self {
+            title: title.into(),
+            lines: Vec::new(),
+            footer: footer.into(),
+            scroll: 0,
+            tabs,
+            active_tab,
+        };
+        view.rebuild_tab_lines();
+        view
+    }
+
+    /// Rebuild [`Self::lines`] for the active tab: a tab strip (active tab in
+    /// bold + `‹ ›` guillemets, others dim), a blank spacer, then the tab body.
+    /// No-op when untabbed.
+    fn rebuild_tab_lines(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let mut strip: Vec<Span<'static>> = Vec::new();
+        for (i, (label, _)) in self.tabs.iter().enumerate() {
+            if i > 0 {
+                strip.push(Span::raw("   "));
+            }
+            if i == self.active_tab {
+                strip.push(Span::styled(
+                    format!("‹{label}›"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                strip.push(Span::styled(
+                    format!(" {label} "),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+        }
+        let mut lines = vec![Line::from(strip), Line::from("")];
+        lines.extend(self.tabs[self.active_tab].1.iter().cloned());
+        self.lines = lines;
+        self.scroll = 0;
     }
 
     /// The `/help` screen (shortcuts + slash commands).
@@ -114,42 +188,72 @@ impl ScreenView {
     /// (claude-code `Stats.tsx`) needs the session-transcript store, which
     /// this backend does not read yet — the screen scopes itself honestly.
     #[must_use]
-    pub fn stats(
-        elapsed_secs: u64,
-        prompts_sent: usize,
-        replies_received: usize,
-        transcript_cells: usize,
-        model: Option<&ModelRow>,
-    ) -> Self {
-        let duration = if elapsed_secs >= 60 {
-            format!("{}m {:02}s", elapsed_secs / 60, elapsed_secs % 60)
-        } else {
-            format!("{elapsed_secs}s")
+    /// The `/usage` (aliases `/cost`, `/stats`) interactive screen — the
+    /// claude-code 2.1.205 tabbed Usage/Stats dialog (`oje`), populated from
+    /// the live [`CostSnapshot`]. `default_tab` picks the initially-shown tab
+    /// (`"Stats"` for the `/stats` alias, `"Usage"` otherwise), mirroring the
+    /// reference's `defaultTab: n === "stats" ? "Stats" : "Usage"`.
+    ///
+    /// - **Usage** tab: this session's token usage (input / output / cache) and
+    ///   API-call count — the local data LingXi tracks. Claude-plan rate-limit
+    ///   rows (the reference's "Current session" / "Current week" tiers) need a
+    ///   Claude.ai subscription backend LingXi (multi-provider) does not have,
+    ///   so that section is honestly absent rather than shown with placeholder
+    ///   numbers.
+    /// - **Stats** tab: the reference's `/cost` block — `Total cost:` and
+    ///   `Total duration (wall):` with the same fixed-width labels — from real
+    ///   accumulated figures.
+    #[must_use]
+    pub fn usage(cost: &CostSnapshot, default_tab: UsageTab) -> Self {
+        // Fixed-width labels aligned to the reference's widest ("Total
+        // duration (wall): " = 23 cols before the value).
+        let stat = |label: &str, value: &str| -> Line<'static> {
+            let pad = 23usize.saturating_sub(label.chars().count());
+            Line::from(Span::styled(
+                format!("{label}{}{value}", " ".repeat(pad)),
+                Style::default().add_modifier(Modifier::DIM),
+            ))
         };
-        let model_label = model.map_or_else(
-            || "unknown".to_string(),
-            |m| {
-                if m.provider_label.is_empty() {
-                    m.display.clone()
-                } else {
-                    format!("{} ({})", m.display, m.provider_label)
-                }
-            },
-        );
-        let lines = vec![
-            header("This session"),
-            row("└ Duration", &duration),
-            row("└ Prompts sent", &prompts_sent.to_string()),
-            row("└ Replies received", &replies_received.to_string()),
-            row("└ Transcript cells", &transcript_cells.to_string()),
-            row("└ Model", &model_label),
+        let secs = cost.session_duration.as_secs();
+        let wall = if secs >= 3600 {
+            format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        } else if secs >= 60 {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        } else {
+            format!("{secs}s")
+        };
+
+        let usage_lines = vec![
+            header("Session token usage"),
+            row("└ Input", &cost.input_tokens.to_string()),
+            row("└ Output", &cost.output_tokens.to_string()),
+            row("└ Cache read", &cost.cache_read_tokens.to_string()),
+            row("└ Cache write", &cost.cache_creation_tokens.to_string()),
+            row("└ API calls", &cost.api_calls.to_string()),
             Line::from(""),
             Line::from(Span::styled(
-                "Counts cover this session only.",
+                "Plan usage limits require a Claude.ai subscription.",
                 Style::default().add_modifier(Modifier::DIM),
             )),
         ];
-        Self::new("Stats", lines, "esc to close · ↑/↓ scroll")
+        let stats_lines = vec![
+            stat("Total cost:", &format!("${:.4}", cost.total_usd)),
+            stat("Total duration (wall):", &wall),
+            Line::from(""),
+            stat("Input tokens:", &cost.input_tokens.to_string()),
+            stat("Output tokens:", &cost.output_tokens.to_string()),
+            stat("Cache read tokens:", &cost.cache_read_tokens.to_string()),
+            stat("Cache write tokens:", &cost.cache_creation_tokens.to_string()),
+        ];
+        let tabs = vec![
+            ("Usage".to_string(), usage_lines),
+            ("Stats".to_string(), stats_lines),
+        ];
+        let default = match default_tab {
+            UsageTab::Usage => 0,
+            UsageTab::Stats => 1,
+        };
+        Self::tabbed("Usage", tabs, default, "tab to switch · esc to close")
     }
 
     /// A read-only listing screen (`/mcp`, `/hooks`, `/agents`): a section
@@ -245,6 +349,19 @@ impl BottomPaneView for ScreenView {
         let max = u16::try_from(self.lines.len().saturating_sub(1)).unwrap_or(u16::MAX);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ViewOutcome::Cancelled,
+            // Tab / ←/→ cycle the active tab on a tabbed screen (the `/usage`
+            // Usage/Stats dialog). No-op (falls through to scroll for `←`/`→`,
+            // which scroll nothing) on single-body screens.
+            KeyCode::Tab | KeyCode::Right if !self.tabs.is_empty() => {
+                self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                self.rebuild_tab_lines();
+                ViewOutcome::Pending
+            }
+            KeyCode::BackTab | KeyCode::Left if !self.tabs.is_empty() => {
+                self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+                self.rebuild_tab_lines();
+                ViewOutcome::Pending
+            }
             KeyCode::Up => {
                 self.scroll = self.scroll.saturating_sub(1);
                 ViewOutcome::Pending

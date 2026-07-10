@@ -368,6 +368,11 @@ pub struct ChatWidget {
     /// accordingly. `None` (tests / no engine) makes `/sandbox` a graceful
     /// "unavailable" no-op.
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The `/name` token the user actually typed for the command now
+    /// dispatching (set by [`Self::handle_slash`]). Lets an alias-shared
+    /// handler branch on which alias invoked it — e.g. `/usage` opens the
+    /// Usage tab, its `/stats` alias opens the Stats tab.
+    invoked_slash: String,
     /// The shared slash-command registry (`None` until the embedder wires one
     /// via [`Self::set_command_registry`]). Drives `/reload-skills`, which
     /// reloads the SAME `Arc<RwLock<CommandRegistry>>` the headless dispatcher
@@ -437,6 +442,7 @@ impl ChatWidget {
             orchestrator: None,
             task_registry: None,
             sandbox_toggle: None,
+            invoked_slash: String::new(),
             command_registry: None,
             goal_handler: None,
         }
@@ -1253,6 +1259,14 @@ impl ChatWidget {
     /// through and send the input as a normal prompt.
     pub fn handle_slash(&mut self, input: &str) -> Option<ChatOutcome> {
         let (command, args) = crate::command::resolve(input)?;
+        // Record the exact `/name` token typed so an alias-shared handler can
+        // branch on the invoked alias (e.g. `/stats` → Stats tab).
+        self.invoked_slash = input
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
         Some((command.run)(self, args))
     }
 
@@ -2233,11 +2247,34 @@ impl ChatWidget {
     }
 
     /// `/usage`: show the session cost/token usage summary (read-only).
-    pub(crate) fn cmd_usage(&mut self, args: &str) -> ChatOutcome {
+    /// `/usage` (aliases `/cost`, `/stats`): open the interactive Usage/Stats
+    /// screen (claude-code 2.1.205's tabbed `oje` dialog) over a live cost
+    /// snapshot. `/stats` opens on the Stats tab; `/usage` and `/cost` open on
+    /// Usage (the reference's `defaultTab` rule). The snapshot is read with a
+    /// throwaway current-thread runtime — the same proven-safe `block_on` idiom
+    /// as `/tasks` (an in-memory read; the sync render loop is not blocked on a
+    /// network call).
+    pub(crate) fn cmd_usage(&mut self, _args: &str) -> ChatOutcome {
+        use crate::bottom_pane::screen_view::UsageTab;
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/usage is unavailable (no engine handle wired)", true);
         };
-        self.run_core_command("usage", args, &command_core::usage::UsageHandler::new(handle))
+        let default_tab = if self.invoked_slash == "/stats" {
+            UsageTab::Stats
+        } else {
+            UsageTab::Usage
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => return self.show_system_text(&format!("/usage failed: {err}"), true),
+        };
+        let cost = runtime.block_on(handle.snapshot_cost());
+        self.bottom_pane
+            .show_view(Box::new(ScreenView::usage(&cost, default_tab)));
+        ChatOutcome::Continue
     }
 
     /// `/effort`: show or set the model effort level. The set/clear write is a
@@ -3024,12 +3061,58 @@ mod tests {
         );
         assert!(!systext.is_error());
 
-        // /usage on a fresh widget renders its cost/token summary too.
+        // /usage now opens the interactive Usage/Stats screen (claude-code
+        // 2.1.205's tabbed dialog), not a transcript cell.
         let (mut widget, _mock) = widget_with_orchestrator();
         assert!(matches!(widget.cmd_usage(""), ChatOutcome::Continue));
-        let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
-        assert!(!systext.body().is_empty(), "/usage rendered a summary");
-        assert!(!systext.is_error());
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<crate::bottom_pane::screen_view::ScreenView>(),
+            "/usage opened the interactive screen"
+        );
+        let body = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| v.as_any().downcast_ref::<crate::bottom_pane::screen_view::ScreenView>())
+            .expect("usage screen")
+            .body_text();
+        assert!(body.contains("Session token usage"), "Usage tab shown: {body}");
+    }
+
+    /// The `/stats` alias opens the Usage screen on its Stats tab (claude-code
+    /// `defaultTab: n === "stats" ? "Stats" : "Usage"`), and `Tab` cycles to
+    /// the other tab.
+    #[test]
+    fn usage_screen_stats_alias_opens_stats_tab_and_tab_switches() {
+        use crate::bottom_pane::screen_view::ScreenView;
+        let (mut widget, _mock) = widget_with_orchestrator();
+        // Route through handle_slash so the invoked alias (`/stats`) is recorded.
+        assert!(matches!(
+            widget.handle_slash("/stats"),
+            Some(ChatOutcome::Continue)
+        ));
+        let stats_body = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
+            .expect("usage screen")
+            .body_text();
+        assert!(stats_body.contains("Total cost:"), "Stats tab first: {stats_body}");
+        assert!(stats_body.contains("‹Stats›"), "Stats tab active: {stats_body}");
+        // Tab cycles to the Usage tab.
+        widget.handle_key(press(KeyCode::Tab));
+        let usage_body = widget
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
+            .expect("usage screen")
+            .body_text();
+        assert!(usage_body.contains("Session token usage"), "Tab → Usage: {usage_body}");
     }
 
     /// `/fork` dispatches to `ForkHandler` with the live handle: bare `/fork`

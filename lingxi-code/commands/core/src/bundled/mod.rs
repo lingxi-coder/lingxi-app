@@ -9,6 +9,7 @@ use command_api::{
     CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
 };
 
+pub mod batch_skill;
 pub mod code_review_skill;
 pub mod fewer_permission_prompts_skill;
 pub mod loop_skill;
@@ -32,6 +33,32 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     register_run_skill_generator_skill(reg);
     register_fewer_permission_prompts_skill(reg);
     register_code_review_skill(reg);
+    register_batch_skill(reg);
+}
+
+/// Register the `/batch` bundled skill — parallel-work orchestration
+/// (`userInvocable:!0`, `disableModelInvocation:!0`, `argumentHint:"<instruction>"`).
+/// The reference's `isEnabled` is an is-git-repo runtime check; we register
+/// unconditionally (the prompt itself, and the `await BE()` guard it replaces,
+/// have no static equivalent — see [`batch_skill`]).
+fn register_batch_skill(reg: &mut CommandRegistry) {
+    reg.register_command(SlashCommand {
+        name: "batch".into(),
+        description: batch_skill::BATCH_DESCRIPTION.into(),
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(batch_skill::BatchPromptFn)),
+        },
+        loaded_from: Some("bundled".into()),
+        user_invocable: Some(true),
+        // Reference `disableModelInvocation:!0` — user-only.
+        disable_model_invocation: true,
+        has_user_specified_description: true,
+        when_to_use: Some(batch_skill::BATCH_WHEN_TO_USE.into()),
+        argument_hint: Some(batch_skill::BATCH_ARGUMENT_HINT.into()),
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the `/code-review` bundled skill — the reference's assembler skill
@@ -362,6 +389,27 @@ mod tests {
                 // Default = the medium effort body; explicit level selects another.
                 assert!(f.build("").starts_with("`medium effort"));
                 assert!(f.build("high").starts_with("`high effort"));
+            }
+            other => panic!("expected Bundled kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_is_user_only_with_when_to_use() {
+        let mut reg = CommandRegistry::new();
+        register_bundled_skills(&mut reg, false);
+        let cmd = reg.resolve("batch").expect("registered");
+        assert_eq!(cmd.source, CommandSource::Bundled);
+        assert_eq!(cmd.user_invocable, Some(true));
+        assert!(cmd.disable_model_invocation);
+        assert_eq!(cmd.argument_hint.as_deref(), Some("<instruction>"));
+        assert!(cmd.when_to_use.as_deref().unwrap().starts_with("Use when the user wants"));
+        assert!(cmd.description.contains("5–30 isolated worktree agents"));
+        match &cmd.kind {
+            SlashCommandKind::Bundled { prompt_fn, .. } => {
+                let f = prompt_fn.as_ref().expect("prompt_fn set");
+                assert!(f.build("").starts_with("Provide an instruction"));
+                assert!(f.build("do X").contains("## User Instruction\n\ndo X"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }

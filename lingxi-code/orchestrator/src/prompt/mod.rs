@@ -15,6 +15,7 @@ pub mod file_tree;
 pub mod git_status;
 pub mod locked_templates;
 pub mod memory_block;
+pub mod memory_section;
 pub mod mid_turn_input;
 pub mod skill_listing;
 pub mod subagent_env;

@@ -45,8 +45,13 @@ pub struct CompletionItem {
 pub struct RegistrySlashRow {
     /// Command name WITH the leading `/` (e.g. `/loop`).
     pub name: String,
-    /// Short user-facing description shown dim in the right column.
+    /// Full description (the model-facing text; used for match candidacy).
     pub description: String,
+    /// Compact `/`-menu label (reference `menuDescription`). When present the
+    /// popup shows this instead of `description` (`menuDescription ??
+    /// description`); `None` falls back to `description`. Matching still uses
+    /// `description`.
+    pub menu_description: Option<String>,
     /// Alternate names WITH the leading `/`.
     pub aliases: Vec<String>,
 }
@@ -68,11 +73,24 @@ impl Cand<'_> {
         }
     }
 
-    /// Resolved description (a builtin may compute it dynamically).
+    /// Full description — used for match candidacy (the searchable text).
     fn describe(&self) -> String {
         match self {
             Cand::Builtin(c) => c.describe(),
             Cand::Registry(r) => r.description.clone(),
+        }
+    }
+
+    /// The text shown in the popup's dim right column: the reference's
+    /// `menuDescription ?? description`. Builtins have no menu label, so this is
+    /// their [`Self::describe`]; a registry row prefers its `menu_description`.
+    fn display_desc(&self) -> String {
+        match self {
+            Cand::Builtin(c) => c.describe(),
+            Cand::Registry(r) => r
+                .menu_description
+                .clone()
+                .unwrap_or_else(|| r.description.clone()),
         }
     }
 
@@ -147,7 +165,7 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
         commands.sort_by(|a, b| a.name().cmp(b.name()));
         return commands
             .into_iter()
-            .map(|c| item(c.name(), c.describe(), None))
+            .map(|c| item(c.name(), c.display_desc(), None))
             .collect();
     }
 
@@ -215,7 +233,7 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
                 .into_iter()
                 .find(|a| bare(a).starts_with(&query))
                 .map(|a| a[1..].to_string());
-            item(c.name(), c.describe(), matched_alias.as_deref())
+            item(c.name(), c.display_desc(), matched_alias.as_deref())
         })
         .collect();
     if let Some(hidden) = hidden_exact {
@@ -383,6 +401,7 @@ mod tests {
             .map(|(n, d)| RegistrySlashRow {
                 name: (*n).to_string(),
                 description: (*d).to_string(),
+                menu_description: None,
                 aliases: Vec::new(),
             })
             .collect()
@@ -417,6 +436,34 @@ mod tests {
         let lo = command_items_merged("/lo", &reg);
         let loop_row = lo.iter().find(|i| i.insert == "/loop").expect("/loop matches /lo");
         assert_eq!(loop_row.desc, "run a task on a loop");
+    }
+
+    #[test]
+    fn menu_description_is_shown_but_matching_uses_description() {
+        // A registry row with a compact menu label: the popup DISPLAYS the menu
+        // label (reference `menuDescription ?? description`) but still MATCHES on
+        // the full description.
+        let reg = vec![RegistrySlashRow {
+            name: "/simplify".into(),
+            description: "Review the changed code for reuse and altitude cleanups".into(),
+            menu_description: Some("Clean up the changed code".into()),
+            aliases: Vec::new(),
+        }];
+        // Bare "/": the row shows the compact menu label, not the full description.
+        let all = command_items_merged("/", &reg);
+        let row = all.iter().find(|i| i.insert == "/simplify").unwrap();
+        assert_eq!(row.desc, "Clean up the changed code");
+        // Matching still works off the full description ("altitude" is only there).
+        assert!(command_items_merged("/altitude", &reg)
+            .iter()
+            .any(|i| i.insert == "/simplify"));
+        // A row without a menu label falls back to its description.
+        let reg2 = rows(&[("/verify", "Verify a code change end-to-end")]);
+        let v = command_items_merged("/", &reg2);
+        assert_eq!(
+            v.iter().find(|i| i.insert == "/verify").unwrap().desc,
+            "Verify a code change end-to-end"
+        );
     }
 
     #[test]

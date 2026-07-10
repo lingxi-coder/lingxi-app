@@ -45,6 +45,7 @@ fn register_batch_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "batch".into(),
         description: batch_skill::BATCH_DESCRIPTION.into(),
+        menu_description: Some("Plan a large change; background agents each open a PR".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
@@ -69,6 +70,7 @@ fn register_code_review_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "code-review".into(),
         description: code_review_skill::CODE_REVIEW_DESCRIPTION.into(),
+        menu_description: Some("Review the current diff for bugs and cleanups".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
@@ -90,6 +92,7 @@ fn register_fewer_permission_prompts_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "fewer-permission-prompts".into(),
         description: fewer_permission_prompts_skill::FEWER_PERMISSION_PROMPTS_DESCRIPTION.into(),
+        menu_description: Some("Pre-approve safe read-only commands based on your usage".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
@@ -111,6 +114,7 @@ fn register_run_skill_generator_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "run-skill-generator".into(),
         description: run_skill_generator_skill::RUN_SKILL_GENERATOR_DESCRIPTION.into(),
+        menu_description: Some("Create a skill that knows how to run this project’s app".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
@@ -135,6 +139,7 @@ fn register_simplify_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "simplify".into(),
         description: simplify_skill::SIMPLIFY_DESCRIPTION.into(),
+        menu_description: Some("Clean up the changed code without changing behavior".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
@@ -155,6 +160,7 @@ fn register_run_skill(reg: &mut CommandRegistry) {
     reg.register_command(SlashCommand {
         name: "run".into(),
         description: run_skill::RUN_DESCRIPTION.into(),
+        menu_description: Some("Launch this project’s app to see your change working".into()),
         source: CommandSource::Bundled,
         kind: SlashCommandKind::Bundled {
             frontmatter: CommandFrontmatter::default(),
@@ -233,12 +239,13 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
         user_invocable: Some(true),
         // Explicit description ⇒ listing-eligible.
         has_user_specified_description: true,
-        // PARITY-TODO: binary `_Zm` also carries
-        // `menuDescription:"Repeat a prompt or command on an interval (e.g. /loop
-        // 5m /foo)"` (cc_all.txt:521920). The port's `SlashCommand` struct
-        // (`command-api/src/model.rs`) has no `menu_description` field, so this
-        // field is dropped. Add the field + wire it through the picker to close
-        // this gap.
+        // PARITY: binary `_Zm` `menuDescription:"Repeat a prompt or command on an
+        // interval (e.g. /loop 5m /foo)"` (cc_all.txt:521920) — the compact
+        // `/`-menu label, now wired via `menu_description` + the completion popup
+        // (`menuDescription ?? description`).
+        menu_description: Some(
+            "Repeat a prompt or command on an interval (e.g. /loop 5m /foo)".into(),
+        ),
         ..SlashCommand::default()
     });
 }

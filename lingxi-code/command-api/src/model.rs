@@ -98,6 +98,13 @@ pub struct SlashCommand {
     /// Raw markdown byte length for file-backed skills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_length: Option<usize>,
+    /// Compact label shown in the `/` command menu (TS `menuDescription`). The
+    /// reference's completion-popup row builder uses `menuDescription ??
+    /// description` for the visible text; `None` falls back to
+    /// [`Self::description`]. Set for bundled skills whose menu label is shorter
+    /// than their full model-facing description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu_description: Option<String>,
 }
 
 /// Serde `skip_serializing_if` predicate for `bool` fields that default to

@@ -2992,6 +2992,7 @@ fn registry_slash_rows(
             |c| crate::bottom_pane::completion_view::RegistrySlashRow {
                 name: with_slash(&c.name),
                 description: c.description.clone(),
+                menu_description: c.menu_description.clone(),
                 aliases: c.aliases.iter().map(|a| with_slash(a)).collect(),
             },
         )

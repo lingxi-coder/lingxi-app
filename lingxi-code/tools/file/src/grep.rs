@@ -446,6 +446,11 @@ impl Tool for GrepTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified against the
+    /// binary, 2 hits).
+    fn search_hint(&self) -> Option<&str> {
+        Some("search file contents with regex (ripgrep)")
+    }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
     }
@@ -1594,5 +1599,17 @@ mod tests {
         assert!(d.starts_with("A powerful search tool built on ripgrep\n"));
         assert!(d.contains("\"files_with_matches\" shows only file paths (default)"));
         assert!(d.contains("use `multiline: true`"));
+    }
+
+    #[tokio::test]
+    async fn search_hint_byte_exact() {
+        // 2.1.206 tool-definition searchHint (byte-verified, 2 hits).
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        assert_eq!(
+            tool.search_hint(),
+            Some("search file contents with regex (ripgrep)")
+        );
     }
 }

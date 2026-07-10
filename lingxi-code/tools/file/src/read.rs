@@ -1417,6 +1417,11 @@ impl Tool for FileReadTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified against the
+    /// binary, 2 hits).
+    fn search_hint(&self) -> Option<&str> {
+        Some("read files, images, PDFs, notebooks")
+    }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
     }

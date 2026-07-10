@@ -478,6 +478,49 @@ pub fn provider_has_curated_list(provider_id: &str) -> bool {
     )
 }
 
+/// Deterministic provider preference order for the boot-time connected-provider
+/// default-model fallback (LingXi multi-provider divergence): when the
+/// configured default model's provider is not connected at startup, the engine
+/// picks the first CONNECTED provider in this order and boots on its
+/// [`provider_default_model`]. Anthropic (the native route) ranks first; the
+/// first-class API providers follow in the [`is_curated_model`] arm order;
+/// OpenRouter — an aggregator passthrough — is the last resort.
+#[must_use]
+pub fn provider_fallback_order() -> &'static [&'static str] {
+    &[
+        "anthropic",
+        "openai",
+        "openai-chatgpt",
+        "deepseek",
+        "gemini",
+        "github-copilot",
+        "zai",
+        "glm-coding",
+        "openrouter",
+    ]
+}
+
+/// The boot-default model for `provider_id` — the model a session lands on when
+/// the connected-provider fallback (or a future onboarding flow) picks that
+/// provider without an explicit user choice. For curated providers this is the
+/// first-listed id of the [`is_curated_model`] shortlist; OpenRouter (no
+/// curated list) gets its `auto` meta-router. `None` for unknown/user-defined
+/// providers — callers fall back to the provider's own first listed model.
+#[must_use]
+pub fn provider_default_model(provider_id: &str) -> Option<&'static str> {
+    Some(match provider_id {
+        "anthropic" | "builtin" => "claude-sonnet-5",
+        "openai" => "gpt-5.5",
+        "openai-chatgpt" => "gpt-5.3-codex",
+        "deepseek" => "deepseek-chat",
+        "gemini" => "gemini-3.5-flash",
+        "github-copilot" => "claude-opus-4.8",
+        "zai" | "glm-coding" => "glm-5.1",
+        "openrouter" => "openrouter/auto",
+        _ => return None,
+    })
+}
+
 /// Curate a flat list of model names for the no-arg/mobile listing surfaces
 /// (`ClientEvent::ModelList`, `/model` text command) that carry only `Vec<String>`.
 ///
@@ -510,6 +553,62 @@ pub fn curated_model_names(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod provider_boot_default_tests {
+    use super::{
+        is_curated_model, provider_default_model, provider_fallback_order,
+        provider_has_curated_list,
+    };
+
+    /// Every provider in the fallback order has a boot-default model, and — for
+    /// providers with a curated shortlist — that default is itself curated
+    /// (single source of truth with [`is_curated_model`]).
+    #[test]
+    fn defaults_exist_and_are_curated() {
+        for p in provider_fallback_order() {
+            let m = provider_default_model(p).expect("ordered provider has a default");
+            if provider_has_curated_list(p) {
+                assert!(is_curated_model(p, m), "{p}/{m} must be curated");
+            }
+        }
+    }
+
+    #[test]
+    fn order_is_anthropic_first_unique_and_covers_openrouter() {
+        let order = provider_fallback_order();
+        assert_eq!(order.first(), Some(&"anthropic"));
+        let set: std::collections::HashSet<_> = order.iter().collect();
+        assert_eq!(set.len(), order.len(), "no duplicate providers");
+        assert!(order.contains(&"openrouter"), "aggregator last-resort present");
+        assert_eq!(order.last(), Some(&"openrouter"), "aggregator ranks last");
+    }
+
+    /// OpenRouter has no curated shortlist; its boot default is the `auto`
+    /// meta-router rather than an arbitrary alphabetical pick.
+    #[test]
+    fn openrouter_default_is_the_auto_router() {
+        assert_eq!(
+            provider_default_model("openrouter"),
+            Some("openrouter/auto")
+        );
+    }
+
+    /// The `builtin` alias mirrors anthropic (same as [`is_curated_model`]).
+    #[test]
+    fn builtin_alias_mirrors_anthropic() {
+        assert_eq!(
+            provider_default_model("builtin"),
+            provider_default_model("anthropic")
+        );
+    }
+
+    #[test]
+    fn unknown_provider_has_no_default() {
+        assert_eq!(provider_default_model("groq"), None);
+        assert_eq!(provider_default_model(""), None);
+    }
 }
 
 #[cfg(test)]

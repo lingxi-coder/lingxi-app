@@ -204,12 +204,19 @@ impl Default for KeybindingsHandler {
 }
 
 impl KeybindingsHandler {
-    /// Construct a `KeybindingsHandler` with the external-user default gate
-    /// (disabled → preview branch) and the real-editor spawner.
+    /// Construct a `KeybindingsHandler` with the real-editor spawner.
+    ///
+    /// Enabled by default: claude-code 2.1.205 gates the command on
+    /// `isEnabled: () => ufe()` (a GrowthBook flag) and, when disabled, HIDES
+    /// the command entirely — the older "…is not enabled. This feature is
+    /// currently in preview." string is gone from the 2.1.205 binary. LingXi
+    /// advertises `/keybindings` (it's a purely-local editor-open with no
+    /// backend), so the parity-correct behavior is for it to actually work
+    /// (open/create the file) rather than render the phantom preview string.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             spawn_editor: Arc::new(spawn_real_editor),
         }
     }
@@ -483,13 +490,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_disabled_default_returns_preview() {
-        // The default `new()` gate is disabled → preview branch (no file I/O
-        // against the real config dir).
-        let h = KeybindingsHandler::new();
+    async fn disabled_gate_still_returns_the_preview_branch() {
+        // The gate itself is unchanged: an explicitly-disabled handler still
+        // takes the preview branch (kept for callers that resolve a flag).
+        // The DEFAULT, however, is now enabled (2.1.205 parity) — asserted in
+        // `handle_default_is_enabled_and_opens_the_file`.
+        let h = KeybindingsHandler::with_enabled(false);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(s, KEYBINDINGS_PREVIEW_DISABLED);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// The `new()` default is enabled (claude-code 2.1.205 removed the
+    /// customization gate's preview string): running `/keybindings` opens or
+    /// creates the file rather than rendering the phantom preview.
+    #[tokio::test]
+    async fn handle_default_is_enabled_and_opens_the_file() {
+        let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = opened.clone();
+        let h = KeybindingsHandler::with_config(
+            true,
+            std::sync::Arc::new(move |_p: &std::path::Path| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
+        // The real `new()` default is enabled…
+        assert!(KeybindingsHandler::new().enabled);
+        // …and an enabled handler opens the file, never the preview string.
+        match h.handle(&args()).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_ne!(s, KEYBINDINGS_PREVIEW_DISABLED);
+                assert!(opened.load(std::sync::atomic::Ordering::SeqCst));
             }
             other => panic!("expected Done, got {other:?}"),
         }

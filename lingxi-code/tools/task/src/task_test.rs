@@ -1997,7 +1997,7 @@ mod tests {
             assert_eq!(s["properties"]["task_id"]["type"], "string");
             assert_eq!(
                 s["properties"]["task_id"]["description"],
-                "The ID of the background task to stop"
+                "The ID of the background task to stop. Agent-team teammates and named background agents are also accepted by agent ID or name."
             );
             assert_eq!(s["properties"]["shell_id"]["type"], "string");
             assert_eq!(

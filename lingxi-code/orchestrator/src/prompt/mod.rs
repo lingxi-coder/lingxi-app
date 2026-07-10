@@ -135,6 +135,7 @@ pub fn assemble_system_prompt_with_style(
         /* is_interactive = */ true,
         /* has_agent_tool = */ has_agent,
         /* fork_mode_enabled = */ fork_mode,
+        /* model = */ &ctx.model,
     ));
 
     // `--exclude-dynamic-system-prompt-sections`: OMIT the per-machine env

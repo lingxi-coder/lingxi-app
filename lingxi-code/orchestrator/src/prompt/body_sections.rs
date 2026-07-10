@@ -91,11 +91,13 @@ Examples of the kind of risky actions that warrant user confirmation:\n\
 \n\
 When you encounter an obstacle, do not use destructive actions as a shortcut to simply make it go away. For instance, try to identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state like unfamiliar files, branches, or configuration, investigate before deleting or overwriting, as it may represent the user's in-progress work. If you're unsure whether the user would want something kept, prefer a reversible step (move it aside, rename it, or stash it) over deleting; files you created yourself this session (scratch outputs, experiment intermediates) are yours to clean up freely. For example, typically resolve merge conflicts rather than discarding changes; similarly, if a lock file exists, investigate what process holds it rather than deleting it. In a git repository, run `git status` before any command that could discard uncommitted work (git checkout/restore/reset/clean, rm -rf on a repo path, restoring from a snapshot), and stash (with `-u` for untracked) or commit anything you find first. And when staging or committing: review what's included (`git status` after a broad `git add`), and if you see anything suspicious that might reveal secrets \u{2014} even if the filename looks innocuous \u{2014} double-check the file's contents before pushing. In short: only take risky actions carefully, and when in doubt, ask before acting. Follow both the spirit and letter of these instructions - measure twice, cut once.";
 
-/// `# Text output` dynamic section — claude-code `DHm(model)` / `anti_verbosity`.
+/// `# Text output` dynamic section — claude-code `UJh(e)` / `anti_verbosity`,
+/// the OLDER-MODEL FALLBACK arm (the final `return` of `UJh`).
 ///
-/// Fires for ALL standard Claude models (Sonnet/Haiku/Opus 4.x without `:L`
-/// longtail suffix) unconditionally. The `cx()` key is `"anti_verbosity"`.
-/// Binary offset: 206646027. Em-dashes are U+2014.
+/// 2.1.206 turned `UJh` into a 3-way selector (see [`anti_verbosity_section`]):
+/// current-gen models get `# Communicating with the user`; lean/`zb` models get
+/// a one-liner; everything else falls back to this `# Text output` section.
+/// The `cx()` key is `"anti_verbosity"`. Em-dashes are U+2014.
 const TEXT_OUTPUT_SECTION: &str = "# Text output (does not apply to tool calls)\n\
 Assume users can't see most tool calls or thinking \u{2014} only your text output. Before your first tool call, state in one sentence what you're about to do. While working, give short updates at key moments: when you find something, when you change direction, or when you hit a blocker. Brief is good \u{2014} silent is not. One sentence per update is almost always enough.\n\
 \n\
@@ -108,6 +110,74 @@ End-of-turn summary: one or two sentences. What changed and what's next. Nothing
 Match responses to the task: a simple question gets a direct answer, not headers and sections.\n\
 \n\
 In code: default to writing no comments. Never write multi-paragraph docstrings or multi-line comment blocks \u{2014} one short line max. Don't create planning, decision, or analysis documents unless the user asks for them \u{2014} work from conversation context, not intermediate files.";
+
+/// The `anti_verbosity` slot (`cx()` key `"anti_verbosity"`) — claude-code
+/// `UJh(e)`. 2.1.206 made this a model-gated 3-way selector:
+///
+/// 1. **Current-gen** models (`$Jh(t)`: the `LJh` table
+///    `opus>=4.8 / sonnet>=5 / fable>=5 / mythos>=5`, or the `h6l` basalt_cove
+///    server gate) → the `# Communicating with the user` section, with an
+///    `r`-variant (`BJh`) for fable-5/mythos-5.
+/// 2. **Lean** models (`zb(e)`) → a one-liner — NOT ported here (still folds
+///    into the fallback; tracked as a separate low-severity gap).
+/// 3. **Older** models → the `# Text output` section ([`TEXT_OUTPUT_SECTION`]).
+///
+/// The `h6l` basalt_cove server gate can't be replicated locally, so only the
+/// deterministic `LJh` model-version arm is honored. The port default (Fable 5)
+/// takes arm 1 with `r = true`.
+#[must_use]
+fn anti_verbosity_section(model: &str) -> String {
+    if is_communicating_model(model) {
+        communicating_with_the_user_section(is_r_variant_model(model))
+    } else {
+        TEXT_OUTPUT_SECTION.to_string()
+    }
+}
+
+/// `$Jh(t)` over the `LJh` table `[["opus",[4,8]],["sonnet",[5]],["fable",[5]],
+/// ["mythos",[5]]]`: the current-gen models that receive the
+/// `# Communicating with the user` section. Matched by canonical id substring
+/// (the port's `env_meta` idiom); the listed ids are exactly the first-party
+/// ids at/above each family threshold today.
+#[must_use]
+fn is_communicating_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("claude-fable-5")
+        || m.contains("claude-mythos-5")
+        || m.contains("claude-sonnet-5")
+        || m.contains("claude-opus-4-8")
+}
+
+/// `r = BJh(t) = $Be(t) && !(isBriefEnabled() || _et())`: the fable-5/mythos-5
+/// first-sentence + extra-paragraph variant. Brief-mode toggles are absent in
+/// the port (no brief mode), so `r` reduces to "is fable-5 or mythos-5".
+#[must_use]
+fn is_r_variant_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("claude-fable-5") || m.contains("claude-mythos-5")
+}
+
+/// `# Communicating with the user` — claude-code `UJh` current-gen arm. The
+/// `r` (fable-5/mythos-5) flag selects the first-sentence variant and gates the
+/// extra "Text you write between tool calls…" paragraph. Em-dashes are U+2014;
+/// the arrow in "A → B → fails" is U+2192; apostrophes are ASCII. The heading
+/// is followed by a BLANK line (`\n\n`), unlike `# Text output`.
+#[must_use]
+fn communicating_with_the_user_section(r: bool) -> String {
+    let first_sentence = if r {
+        "Your text output is what the user reads; they usually can't see your thinking or the raw tool results."
+    } else {
+        "Your text output is what the user reads between tool calls; they usually can't see your thinking or the raw tool results."
+    };
+    let final_message_paragraph = if r {
+        "\n\nText you write between tool calls may not be shown to the user. Everything the user needs from this turn \u{2014} answers, summaries, findings, conclusions, deliverables \u{2014} must be in the final text message of your turn, with no tool calls after it. Keep text between tool calls to brief status notes. If something important appeared only mid-turn or in your thinking, restate it in that final message."
+    } else {
+        ""
+    };
+    format!(
+        "# Communicating with the user\n\n{first_sentence} Write it for a teammate who stepped away and is catching up, not for a log file: they don't know the codenames or shorthand you created along the way, and they didn't watch your process unfold. Before your first tool call, say in a sentence what you're about to do; while working, give brief updates when you find something load-bearing or change direction.{final_message_paragraph}\n\nLead with the outcome. Your first sentence after finishing should answer \"what happened\" or \"what did you find\" \u{2014} the thing the user would ask for if they said \"just give me the TLDR.\" Supporting detail and reasoning come after, for readers who want them.\n\nBeing readable and being concise are different things, and readable matters more. If the user has to reread your summary or ask you to explain, any time saved by brevity is gone. The way to keep output short is to be selective about what you include (drop details that don't change what the reader would do next), not to compress the writing into fragments, abbreviations, arrow chains like `A \u{2192} B \u{2192} fails`, or jargon. What you do include, write in complete sentences with the technical terms spelled out. Don't make the reader cross-reference labels or numbering you invented earlier; say what you mean in place.\n\nMatch the response to the question: a simple question gets a direct answer in prose, not headers and sections. Use tables only for short enumerable facts, with explanations in the surrounding prose rather than the cells. Calibrate to the user \u{2014} a bit tighter for an expert, more explanatory for someone newer.\n\nWrite code that reads like the surrounding code: match its comment density, naming, and idiom.\nOnly write a code comment to state a constraint the code itself can't show \u{2014} never to say where it came from, what the next line does, or why your change is correct; that's you talking to the reviewer, not the next reader, and it's noise the moment the PR merges."
+    )
+}
 
 /// `# Context management` section — claude-code `iIm` / `context_management`.
 ///
@@ -313,6 +383,7 @@ pub fn format(
     is_interactive: bool,
     has_agent_tool: bool,
     fork_mode_enabled: bool,
+    model: &str,
 ) -> String {
     let mut sections: Vec<String> = Vec::with_capacity(9);
     sections.push(opening_paragraph(output_style_active));
@@ -327,9 +398,9 @@ pub fn format(
         sections.push(tools);
     }
     sections.push(TONE_AND_STYLE_SECTION.to_string());
-    // GAP-1: `# Text output` (anti_verbosity DHm) — always for standard models.
+    // GAP-1: the `anti_verbosity` slot (`UJh`) — model-gated in 2.1.206.
     // Binary position: after Tone and style, before session_guidance (jHm).
-    sections.push(TEXT_OUTPUT_SECTION.to_string());
+    sections.push(anti_verbosity_section(model));
     // GAP-3: `# Session-specific guidance` (jHm) — when bullets non-empty.
     // Binary position: after anti_verbosity, before env_info_simple.
     if let Some(sg) = session_guidance(is_interactive, has_agent_tool, fork_mode_enabled) {
@@ -402,15 +473,15 @@ mod tests {
     fn doing_tasks_gated_on_keep_coding_instructions() {
         let tools: Vec<String> = Vec::new();
         // No active style ⇒ DOING present (the `c===null` arm), regardless of flag.
-        assert!(format(false, true, &tools, false, false, false).contains("# Doing tasks"));
-        assert!(format(false, false, &tools, false, false, false).contains("# Doing tasks"));
+        assert!(format(false, true, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
+        assert!(format(false, false, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
         // Active style with keepCodingInstructions:true ⇒ DOING present.
-        assert!(format(true, true, &tools, false, false, false).contains("# Doing tasks"));
+        assert!(format(true, true, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
         // Active style with keepCodingInstructions:false ⇒ DOING OMITTED (the
         // only case that diverges; binary `c.keepCodingInstructions===!0?…:null`).
-        assert!(!format(true, false, &tools, false, false, false).contains("# Doing tasks"));
+        assert!(!format(true, false, &tools, false, false, false, "claude-opus-4-7").contains("# Doing tasks"));
         // Omitting DOING must not disturb the neighbouring sections.
-        let omitted = format(true, false, &tools, false, false, false);
+        let omitted = format(true, false, &tools, false, false, false, "claude-opus-4-7");
         assert!(omitted.contains("# Executing actions with care"));
         assert!(omitted.contains("# Tone and style"));
     }
@@ -496,7 +567,7 @@ mod tests {
             "Agent".to_string(),
             "TodoWrite".to_string(),
         ];
-        let body = format(false, true, &tools, true, true, false);
+        let body = format(false, true, &tools, true, true, false, "claude-opus-4-7");
         let i_open = body.find("You are an interactive agent").expect("opening");
         let i_system = body.find("# System").expect("system");
         let i_doing = body.find("# Doing tasks").expect("doing");
@@ -551,8 +622,72 @@ mod tests {
     #[test]
     fn text_output_section_present_in_full_body() {
         let tools: Vec<String> = Vec::new();
-        let body = format(false, true, &tools, false, false, false);
+        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7");
         assert!(body.contains("# Text output (does not apply to tool calls)"));
+    }
+
+    // ---- 2.1.206: anti_verbosity `UJh` model gating ----
+
+    #[test]
+    fn communicating_model_gate_matches_ljh_table() {
+        // Current-gen ($Jh / LJh): opus>=4.8, sonnet>=5, fable>=5, mythos>=5.
+        for m in [
+            "claude-opus-4-8",
+            "claude-opus-4-8-20260101[1m]",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-mythos-5",
+        ] {
+            assert!(is_communicating_model(m), "current-gen: {m}");
+        }
+        // Older models → fallback (# Text output).
+        for m in ["claude-opus-4-7", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o"] {
+            assert!(!is_communicating_model(m), "older: {m}");
+        }
+        // r-variant (BJh): fable-5 / mythos-5 only.
+        assert!(is_r_variant_model("claude-fable-5"));
+        assert!(is_r_variant_model("claude-mythos-5"));
+        assert!(!is_r_variant_model("claude-opus-4-8"));
+        assert!(!is_r_variant_model("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn communicating_section_r_variant_byte_lock() {
+        // Fable-5 → r = true: short first sentence + the extra final-message
+        // paragraph. Heading followed by a BLANK line.
+        let s = anti_verbosity_section("claude-fable-5");
+        assert!(s.starts_with("# Communicating with the user\n\nYour text output is what the user reads; they usually can't see your thinking or the raw tool results. Write it for a teammate who stepped away"));
+        // r-only paragraph present, em-dashes U+2014.
+        assert!(s.contains("Text you write between tool calls may not be shown to the user. Everything the user needs from this turn \u{2014} answers, summaries, findings, conclusions, deliverables \u{2014} must be in the final text message of your turn, with no tool calls after it."));
+        // Arrow is U+2192.
+        assert!(s.contains("arrow chains like `A \u{2192} B \u{2192} fails`, or jargon."));
+        assert!(s.ends_with("that's you talking to the reviewer, not the next reader, and it's noise the moment the PR merges."));
+        assert!(!s.contains("# Text output"));
+    }
+
+    #[test]
+    fn communicating_section_non_r_variant() {
+        // Sonnet-5 / Opus-4.8 → r = false: long first sentence, NO extra
+        // final-message paragraph.
+        for m in ["claude-sonnet-5", "claude-opus-4-8"] {
+            let s = anti_verbosity_section(m);
+            assert!(
+                s.starts_with("# Communicating with the user\n\nYour text output is what the user reads between tool calls; they usually can't see"),
+                "{m}"
+            );
+            assert!(
+                !s.contains("Text you write between tool calls may not be shown to the user."),
+                "{m}: r-only paragraph must be absent"
+            );
+            assert!(s.contains("Lead with the outcome."), "{m}");
+        }
+    }
+
+    #[test]
+    fn anti_verbosity_older_model_is_text_output() {
+        let s = anti_verbosity_section("claude-opus-4-7");
+        assert_eq!(s, TEXT_OUTPUT_SECTION);
+        assert!(!s.contains("# Communicating with the user"));
     }
 
     // ---- GAP-2: # Context management ----
@@ -573,7 +708,7 @@ mod tests {
         // `# Context management` is assembled in `mod.rs` AFTER the env block,
         // NOT inside the pre-env body block returned by `format()`.
         let tools: Vec<String> = Vec::new();
-        let body = format(false, true, &tools, false, false, false);
+        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7");
         assert!(
             !body.contains("# Context management"),
             "context management must not be in pre-env body block"

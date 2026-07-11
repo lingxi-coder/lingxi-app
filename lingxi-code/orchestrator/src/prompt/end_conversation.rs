@@ -20,7 +20,9 @@ pub const END_CONVERSATION_TOOL_NAME: &str = "EndConversation";
 /// this section omitted, byte-identical to a build without the feature).
 pub const END_CONVERSATION_GB_FLAG: &str = "tengu_umber_kestrel";
 
-/// The tool's model-facing `description()` (byte-verified vs the binary, 2 hits).
+/// The OPENING paragraph of the tool's full text (byte-verified, 2 hits). In
+/// claude-code the tool's `description()` and `prompt()` BOTH return the same
+/// full text (`G2r`) — [`render_prompt`], which begins with this paragraph.
 pub const END_CONVERSATION_DESCRIPTION: &str = "End the current conversation. Use only for sustained user abuse or when the user explicitly requests a demonstration of this tool. This will close the conversation and prevent any further messages from being sent.";
 
 /// Terminal message shown after the conversation is ended (claude-code `k4i`).
@@ -44,7 +46,9 @@ pub const END_CONVERSATION_ENDED_MESSAGE: &str =
 #[must_use]
 pub fn render_prompt(tool: &str) -> String {
     format!(
-        "The assistant may use the {tool} tool only in extreme cases of sustained abusive user behavior, or when the user asks the model to test the tool.\n\
+        "End the current conversation. Use only for sustained user abuse or when the user explicitly requests a demonstration of this tool. This will close the conversation and prevent any further messages from being sent.\n\
+\n\
+The assistant may use the {tool} tool only in extreme cases of sustained abusive user behavior, or when the user asks the model to test the tool.\n\
 \n\
 The assistant must NOT use this tool when:\n\
 - it is stuck in a loop or failing at a task\n\
@@ -125,8 +129,10 @@ mod tests {
     #[test]
     fn prompt_byte_locks_206() {
         let p = render_prompt(END_CONVERSATION_TOOL_NAME);
-        // Section 1 + must-NOT-use bullets.
-        assert!(p.starts_with("The assistant may use the EndConversation tool only in extreme cases of sustained abusive user behavior, or when the user asks the model to test the tool.\n\nThe assistant must NOT use this tool when:\n- it is stuck in a loop or failing at a task\n"));
+        // Opening paragraph (== description()) + section 1 + must-NOT-use bullets.
+        assert!(p.starts_with("End the current conversation. Use only for sustained user abuse or when the user explicitly requests a demonstration of this tool. This will close the conversation and prevent any further messages from being sent.\n\nThe assistant may use the EndConversation tool only in extreme cases of sustained abusive user behavior, or when the user asks the model to test the tool.\n\nThe assistant must NOT use this tool when:\n- it is stuck in a loop or failing at a task\n"));
+        // The opening paragraph is the const (the tool's description() == prompt() == this whole text).
+        assert!(p.starts_with(END_CONVERSATION_DESCRIPTION));
         assert!(p.contains("- the user is generally frustrated at the assistant, even if this involves profanity\n"));
         // reserved-strictly + Rules-for-use header (tool interpolated).
         assert!(p.contains("but for now, keep to this narrow scope.\n\n# Rules for use of the EndConversation tool:\n- The assistant ONLY considers ending a conversation"));

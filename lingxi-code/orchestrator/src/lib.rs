@@ -34,6 +34,7 @@ pub mod stop_hook_snapshot;
 pub(crate) mod streaming_executor;
 pub mod streaming_loop;
 pub mod structured_output;
+pub mod end_conversation_tool;
 pub mod task_completed_firer;
 pub mod task_created_firer;
 pub mod task_lifecycle_hook_firer;

@@ -722,7 +722,19 @@ impl PermissionPolicy {
             return allow_with_mode(PermissionMode::Plan);
         }
         if mode == PermissionMode::Plan && !crate::mode_policy::is_plan_safe_tool(tool_name) {
-            return ask_plan_mutation(tool_name);
+            // 206 splits the plan-mode ask message: a file-WRITE tool (Editor
+            // kind) surfaces `Cannot write to ${path} while in plan mode.` (the
+            // write-permission path, `o` = the resolved target), any other
+            // non-read-only tool surfaces `Cannot call ${name} while in plan
+            // mode.` (the general tool path).
+            let write_path = if file_tool_kind(tool_name) == FileToolKind::Editor {
+                self.roots
+                    .as_ref()
+                    .and_then(|roots| input_path_for_tool(tool_name, input, roots))
+            } else {
+                None
+            };
+            return ask_plan_mutation(tool_name, write_path.as_deref());
         }
         // 4. Mode fallback. `DontAsk` falls through to the generic mode ask here;
         //    the `ask`→`deny` conversion (PERM.1) is applied last in
@@ -1761,19 +1773,23 @@ fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
 }
 
 /// Plan-mode mutation backstop ask: a tool that would mutate state in `Plan`
-/// mode. Tagged with [`PermissionMode::Plan`]; the message tells the user that
-/// approving exits the plan-mode constraints (matching claude-code, which
-/// surfaces a plan-mode mutation as an interactive ask, NOT a hard deny).
-fn ask_plan_mutation(tool_name: &str) -> PermissionResult {
+/// mode. Tagged with [`PermissionMode::Plan`]; claude-code surfaces a plan-mode
+/// mutation as an interactive ask (NOT a hard deny). The message is byte-exact
+/// with the binary's two variants: `write_path = Some(p)` (a file-WRITE tool,
+/// Editor kind) → `Cannot write to {p} while in plan mode.`; `None` (any other
+/// non-read-only tool) → `Cannot call {tool_name} while in plan mode.`
+fn ask_plan_mutation(tool_name: &str, write_path: Option<&str>) -> PermissionResult {
+    let message = match write_path {
+        Some(path) => format!("Cannot write to {path} while in plan mode."),
+        None => format!("Cannot call {tool_name} while in plan mode."),
+    };
     PermissionResult::Ask {
         reason: PermissionDecisionReason::PermissionMode {
             mode: PermissionMode::Plan,
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
-            message: "Plan mode: this tool would modify state; approve to exit \
-                plan-mode constraints."
-                .into(),
+            message,
             options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
         },
         pending_classifier_check: None,

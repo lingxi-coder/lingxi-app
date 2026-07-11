@@ -1074,6 +1074,12 @@ pub struct ConversationOrchestrator {
     /// (no new env flag), mirroring claude-code's `tengu_moth_copse`-default-false
     /// gate. Wired (when a real selector lands) via [`Self::with_memory_prefetch`].
     pub(crate) memory_prefetch: Option<Arc<memory::prefetch::MemoryPrefetch>>,
+    /// EndConversation (2.1.206) end-request slot, shared with the
+    /// [`crate::end_conversation_tool::EndConversationTool`]: raised by the
+    /// tool's 2nd consecutive call, read (and consumed) by the turn loop after
+    /// tool execution to terminate the conversation. `None` when the feature is
+    /// disabled (default) → the turn loop never checks it → byte-identical.
+    pub(crate) end_conversation_slot: Option<crate::end_conversation_tool::EndConversationSlot>,
     /// P0.1 per-turn slot holding the in-flight prefetch handle armed by
     /// [`Self::start_memory_prefetch`] at turn start and consumed by
     /// [`Self::relevant_memory_reminder_message`] before snapshot assembly.
@@ -1277,6 +1283,7 @@ impl ConversationOrchestrator {
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
             memory_prefetch: None,
+            end_conversation_slot: None,
             pending_memory_prefetch: Mutex::new(None),
             surfaced_memory_paths: Mutex::new(std::collections::HashSet::new()),
             skill_discovery_prefetch: None,
@@ -1479,6 +1486,21 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_memory_prefetch(mut self, prefetch: Arc<memory::prefetch::MemoryPrefetch>) -> Self {
         self.memory_prefetch = Some(prefetch);
+        self
+    }
+
+    /// Wire the EndConversation end-request slot (shared with the tool). The
+    /// composition root passes the same `Arc` it gave
+    /// [`crate::end_conversation_tool::EndConversationTool::new`]; the turn loop
+    /// reads+consumes it after tool execution to terminate the conversation.
+    /// Only set when the feature is enabled — `None` keeps the turn loop
+    /// byte-identical.
+    #[must_use]
+    pub fn with_end_conversation_slot(
+        mut self,
+        slot: crate::end_conversation_tool::EndConversationSlot,
+    ) -> Self {
+        self.end_conversation_slot = Some(slot);
         self
     }
 

@@ -18,6 +18,7 @@ pub mod locked_templates;
 pub mod memory_block;
 pub mod memory_section;
 pub mod mid_turn_input;
+pub mod plan_reminder;
 pub mod skill_listing;
 pub mod subagent_env;
 pub mod task_notification;

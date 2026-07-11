@@ -294,7 +294,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn set_plan_mode(&self, on: bool) -> Result<(), HandleError> {
-        self.session.lock().await.plan_mode = on;
+        let mut s = self.session.lock().await;
+        s.plan_mode = on;
+        // Entering plan mode replays the FULL (206 `LU_`) reminder: reset the
+        // full-vs-sparse tracker so the next turn injects `full` before
+        // switching to `sparse` (206 `reminderType`). Leaving plan mode need not
+        // touch it (it's re-armed on the next entry).
+        if on {
+            s.plan_reminder_shown = false;
+        }
         Ok(())
     }
 

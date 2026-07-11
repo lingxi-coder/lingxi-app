@@ -424,6 +424,20 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         history_snapshot.push(reminder);
     }
 
+    // PLANMODE (batched twin): per-turn, transient `plan_mode` reminder (206
+    // `xEg` attachment). Emitted ONLY while `session.plan_mode` is active — i.e.
+    // after `EnterPlanMode` — so the DEFAULT build (plan mode OFF) stays
+    // byte-identical and the locked turn-loop fixtures still pass. Placed right
+    // after the output-style reminder and BEFORE the skill-listing reminder,
+    // matching 206 `KJn` where the plan_mode attachment (`l=await xEg(t)`) is
+    // spread before the invoked-skills bodies (`REg`) and the tool/mcp deltas
+    // (`gYt`/`YJn`). Appended to THIS call's OUTGOING snapshot only (never
+    // `session.history` / JSONL). See
+    // [`ConversationOrchestrator::plan_mode_reminder_message`].
+    if let Some(reminder) = orch.plan_mode_reminder_message().await {
+        history_snapshot.push(reminder);
+    }
+
     // SKILLLIST.1: per-turn, transient `skill_listing` reminder so the model can
     // discover the available skills. Appended to THIS call's OUTGOING snapshot
     // only (never to `session.history` / JSONL), after the output-style reminder

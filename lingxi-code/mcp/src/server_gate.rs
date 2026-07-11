@@ -25,7 +25,7 @@
 //! [`migrations::global_config::get_project_config`]. Only the `computer-use`
 //! server name is a wire/protocol identifier and stays verbatim (not branded).
 
-use crate::connection::McpServerConfig;
+use crate::connection::{ConfigScope, McpServerConfig};
 use serde_json::{Map, Value};
 use std::path::Path;
 
@@ -89,6 +89,61 @@ pub fn read_gate_lists(project_cfg: &Map<String, Value>) -> (Vec<String>, Vec<St
     )
 }
 
+/// `Gc(e)`: sanitize a server name for comparison — replace every character
+/// outside `[a-zA-Z0-9_-]` with `_`, and (only for the `"claude.ai "` prefix)
+/// collapse runs of `_` and trim leading/trailing `_`.
+#[must_use]
+fn normalize_mcp_name(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.starts_with("claude.ai ") {
+        // Collapse `_+` → `_`, then strip a leading/trailing `_`.
+        let mut collapsed = String::with_capacity(out.len());
+        let mut prev_us = false;
+        for c in out.chars() {
+            if c == '_' {
+                if !prev_us {
+                    collapsed.push(c);
+                }
+                prev_us = true;
+            } else {
+                collapsed.push(c);
+                prev_us = false;
+            }
+        }
+        out = collapsed.trim_matches('_').to_string();
+    }
+    out
+}
+
+/// `gCr(e,t)`: whether two MCP server names refer to the same server. Names with
+/// a `plugin:` prefix compare EXACTLY; all others compare after [`normalize_mcp_name`].
+#[must_use]
+fn mcp_names_match(a: &str, b: &str) -> bool {
+    if a.starts_with("plugin:") || b.starts_with("plugin:") {
+        a == b
+    } else {
+        normalize_mcp_name(a) == normalize_mcp_name(b)
+    }
+}
+
+/// Read `disabledMcpjsonServers` (`.mcp.json` REJECT list) from a project-config
+/// map, applying the `Eqn` non-array tolerance. This is the project-server trust
+/// model (`h2r` → `"rejected"`), distinct from the [`read_gate_lists`]
+/// `disabledMcpServers` denylist; it gates only `Project`-scoped servers.
+#[must_use]
+pub fn read_rejected_mcpjson_servers(project_cfg: &Map<String, Value>) -> Vec<String> {
+    eqn_string_array(project_cfg.get("disabledMcpjsonServers"))
+}
+
 /// Apply the per-project MCP-server gate to a loaded server list by MARKING each
 /// gated server `disabled` (claude-code `if(eI(cn))return` at the load path).
 ///
@@ -111,8 +166,17 @@ pub fn apply_project_server_gate(
     let project_cfg =
         migrations::global_config::get_project_config(global_config_path, &key).unwrap_or_default();
     let (enabled, disabled) = read_gate_lists(&project_cfg);
+    let rejected_json = read_rejected_mcpjson_servers(&project_cfg);
     for server in servers.iter_mut() {
         if mcp_server_is_disabled(&server.name, &enabled, &disabled) {
+            server.disabled = true;
+        }
+        // `.mcp.json` REJECT list (`h2r` → `"rejected"`): a Project-scoped server
+        // the user disabled via `/mcp disable` is written to
+        // `disabledMcpjsonServers` and must NOT connect on the next launch.
+        if server.scope == ConfigScope::Project
+            && rejected_json.iter().any(|r| mcp_names_match(r, &server.name))
+        {
             server.disabled = true;
         }
     }
@@ -269,6 +333,63 @@ mod tests {
                 .unwrap()
                 .disabled
         );
+    }
+
+    #[test]
+    fn mcp_names_match_normalizes_and_respects_plugin_prefix() {
+        // Simple names compare directly.
+        assert!(mcp_names_match("context7", "context7"));
+        assert!(!mcp_names_match("context7", "other"));
+        // Non-`[a-zA-Z0-9_-]` chars normalize to `_` on BOTH sides ⇒ match.
+        assert!(mcp_names_match("my.server", "my_server"));
+        // `plugin:` prefix compares EXACTLY (no normalization).
+        assert!(mcp_names_match("plugin:ctx:context7", "plugin:ctx:context7"));
+        assert!(!mcp_names_match("plugin:ctx:context7", "plugin:ctx_context7"));
+    }
+
+    #[test]
+    fn apply_gate_rejects_disabled_mcpjson_project_server() {
+        use crate::connection::ConfigScope;
+        use std::collections::HashMap;
+        use traits::McpTransportSpec;
+
+        let stdio = |name: &str, scope: ConfigScope| McpServerConfig {
+            name: name.to_string(),
+            spec: McpTransportSpec::Stdio {
+                command: "srv".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            scope,
+            disabled: false,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let key = migrations::global_config::project_path_for_config(&cwd);
+        let global = dir.path().join(".lingxi.json");
+        // `/mcp disable context7` persists this list.
+        let contents = serde_json::json!({
+            "projects": { key: { "disabledMcpjsonServers": ["context7"] } }
+        });
+        std::fs::write(&global, serde_json::to_vec(&contents).unwrap()).unwrap();
+
+        let mut servers = vec![
+            stdio("context7", ConfigScope::Project),
+            // Same name but NON-project scope ⇒ the jsonServers reject list
+            // (a `.mcp.json` trust model) must NOT touch it.
+            stdio("context7", ConfigScope::User),
+            stdio("linear", ConfigScope::Project),
+        ];
+        apply_project_server_gate(&mut servers, &global, &cwd);
+
+        // Project-scoped context7 is rejected (won't connect next launch).
+        assert!(servers[0].disabled);
+        // User-scoped same-name server is untouched.
+        assert!(!servers[1].disabled);
+        // An un-listed project server stays enabled.
+        assert!(!servers[2].disabled);
     }
 
     #[test]

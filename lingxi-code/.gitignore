@@ -3,6 +3,10 @@ target/
 Cargo.lock.*
 .DS_Store
 
+# machine-local LingXi settings (permission grants, editor mode, etc.) — never
+# committed, mirroring claude-code's ignored .claude/settings.local.json
+.lingxi/settings.local.json
+
 # packaging build output
 /npm/vendor/
 /npm/dist/

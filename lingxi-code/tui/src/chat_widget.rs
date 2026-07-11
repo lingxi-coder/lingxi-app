@@ -549,6 +549,23 @@ impl ChatWidget {
         self.bottom_pane.set_theme(self.theme);
     }
 
+    /// Apply persisted UI preferences read from `settings.json` at startup:
+    /// `verbose` (transcript + pane) and `editorMode`/vim. Each is `None` when
+    /// unset. The live `/config` setter persists these same fields, so a value
+    /// set with `/config verbose=true` survives a restart. Best-effort — an
+    /// absent/unreadable settings file just leaves the session defaults.
+    pub fn apply_startup_prefs(&mut self, verbose: Option<bool>, vim: Option<bool>) {
+        if let Some(v) = verbose {
+            self.bottom_pane.set_verbose(v);
+            self.transcript.set_verbose(v);
+        }
+        if let Some(v) = vim {
+            if self.bottom_pane.vim_enabled() != v {
+                self.bottom_pane.toggle_vim();
+            }
+        }
+    }
+
     /// The active theme preference (`/theme` picker current marker; tests).
     #[must_use]
     pub fn theme_setting(&self) -> ThemeSetting {
@@ -1678,9 +1695,12 @@ impl ChatWidget {
         self.show_system_text(&lines.join("\n"), any_error)
     }
 
-    /// Apply one `/config key=value` pair to the live session. `Ok(echo)` on a
-    /// successful set; `Err(msg)` with the byte-exact reference error for an
-    /// unknown key or a value the key's type rejects.
+    /// Apply one `/config key=value` pair to the live session AND persist it to
+    /// `~/.lingxi/settings.json` (read back at startup — `theme` via
+    /// `load_theme_setting`, `verbose`/`editorMode` via `run_app`). `Ok(echo)` on
+    /// a successful set; `Err(msg)` with the byte-exact reference error for an
+    /// unknown key or a value the key's type rejects. Persistence is best-effort:
+    /// a failed write leaves the change session-only.
     fn apply_config_shorthand(&mut self, key: &str, value: &str) -> Result<String, String> {
         let parse_bool = |k: &str| -> Result<bool, String> {
             match value {
@@ -1695,12 +1715,16 @@ impl ChatWidget {
                 if self.bottom_pane.vim_enabled() != want {
                     self.bottom_pane.toggle_vim();
                 }
+                // Persist to settings.json (`editorMode`) so it survives restarts
+                // — read back at startup (best-effort; session-only on failure).
+                tui_core::theme_persist::save_editor_mode(want);
                 Ok(format!("Set vim to {want}."))
             }
             "verbose" => {
                 let want = parse_bool("verbose")?;
                 self.bottom_pane.set_verbose(want);
                 self.transcript.set_verbose(want);
+                tui_core::theme_persist::save_verbose(want);
                 Ok(format!("Set verbose to {want}."))
             }
             "theme" => {
@@ -1716,6 +1740,9 @@ impl ChatWidget {
                         format!("theme takes one of: {names}")
                     })?;
                 self.set_theme(setting);
+                // Persist `theme` (same settings.json field the /theme picker
+                // writes) so it survives restarts.
+                tui_core::theme_persist::save_theme_setting(setting);
                 Ok(format!("Set theme to {value}."))
             }
             other => Err(format!(
@@ -3289,6 +3316,21 @@ mod tests {
             assert!(body.contains("unavailable"), "{cmd}: {body}");
             assert!(!body.starts_with("Usage:"), "{cmd} must not hit usage: {body}");
         }
+    }
+
+    #[test]
+    fn apply_startup_prefs_applies_persisted_vim_and_is_a_noop_on_none() {
+        let mut w = widget();
+        assert!(!w.bottom_pane().vim_enabled());
+        // Persisted vim=true is applied at startup.
+        w.apply_startup_prefs(Some(true), Some(true));
+        assert!(w.bottom_pane().vim_enabled());
+        // `None` (unset in settings) leaves the current state untouched.
+        w.apply_startup_prefs(None, None);
+        assert!(w.bottom_pane().vim_enabled());
+        // Persisted vim=false turns it back off.
+        w.apply_startup_prefs(Some(false), Some(false));
+        assert!(!w.bottom_pane().vim_enabled());
     }
 
     /// A prompt-type command (InjectMessage): the model receives the handler's

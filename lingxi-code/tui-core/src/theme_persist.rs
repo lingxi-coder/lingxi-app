@@ -117,6 +117,92 @@ pub fn save_syntax_highlighting_disabled_to(path: &Path, disabled: bool) -> std:
     std::fs::write(path, body)
 }
 
+/// The `verbose` config field (allowlisted by the config tool,
+/// `CONFIG_FIELD_VERBOSE`). Persisted by `/config verbose=…` so the transcript
+/// verbose mode survives restarts; read back at startup.
+const VERBOSE_KEY: &str = "verbose";
+
+/// Read the stored `verbose` flag. `None` on any error / absent key.
+#[must_use]
+pub fn load_verbose() -> Option<bool> {
+    load_bool_field_from(&settings_path()?, VERBOSE_KEY)
+}
+
+/// Best-effort save of `verbose`. Logs + swallows errors (session-only on fail).
+pub fn save_verbose(verbose: bool) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Err(e) = save_bool_field_to(&path, VERBOSE_KEY, verbose) {
+        tracing::debug!(error = %e, "verbose persist failed (session-only)");
+    }
+}
+
+/// The `editorMode` config field (`"vim"` | `"normal"`), the key claude-code
+/// persists the composer's Vim mode under. Persisted by `/config vim=…`; read
+/// back at startup.
+const EDITOR_MODE_KEY: &str = "editorMode";
+
+/// Read the stored editor mode. `Some(true)` ⇒ Vim, `Some(false)` ⇒ normal,
+/// `None` ⇒ unset/error.
+#[must_use]
+pub fn load_editor_mode_is_vim() -> Option<bool> {
+    load_editor_mode_is_vim_from(&settings_path()?)
+}
+
+/// Test seam: read the editor mode from an explicit path.
+#[must_use]
+pub fn load_editor_mode_is_vim_from(path: &Path) -> Option<bool> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
+    Some(obj.get(EDITOR_MODE_KEY)?.as_str()? == "vim")
+}
+
+/// Best-effort save of the editor mode (`vim` ⇒ `"vim"`, else `"normal"`).
+pub fn save_editor_mode(vim: bool) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let value = if vim { "vim" } else { "normal" };
+    if let Err(e) = save_string_field_to(&path, EDITOR_MODE_KEY, value) {
+        tracing::debug!(error = %e, "editorMode persist failed (session-only)");
+    }
+}
+
+/// Shared read: a top-level bool field at an explicit path.
+#[must_use]
+fn load_bool_field_from(path: &Path, key: &str) -> Option<bool> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
+    obj.get(key)?.as_bool()
+}
+
+/// Shared write: read-modify-write a top-level bool field, preserving all other
+/// keys (same JSON shape as [`save_theme_setting_to`]).
+fn save_bool_field_to(path: &Path, key: &str, value: bool) -> std::io::Result<()> {
+    write_field(path, key, Value::Bool(value))
+}
+
+/// Shared write: read-modify-write a top-level string field.
+fn save_string_field_to(path: &Path, key: &str, value: &str) -> std::io::Result<()> {
+    write_field(path, key, Value::String(value.to_string()))
+}
+
+/// The read-modify-write core shared by every field writer here.
+fn write_field(path: &Path, key: &str, value: Value) -> std::io::Result<()> {
+    let mut obj: Map<String, Value> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or_default();
+    obj.insert(key.to_string(), value);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut body = serde_json::to_string_pretty(&obj)?;
+    body.push('\n');
+    std::fs::write(path, body)
+}
+
 /// (SS-06) The settings key claude-code reads the reduced-motion preference
 /// from (`prefersReducedMotion`). Read-only here — LingXi has no UI to set it
 /// (it's an app/OS-level accessibility preference in claude-code).
@@ -135,4 +221,38 @@ pub fn load_prefers_reduced_motion_from(path: &Path) -> Option<bool> {
     let body = std::fs::read_to_string(path).ok()?;
     let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
     obj.get(REDUCED_MOTION_KEY)?.as_bool()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbose_and_editor_mode_round_trip_preserving_other_keys() {
+        let dir = std::env::temp_dir().join(format!("lingxi_cfg_persist_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_file(&path);
+
+        // verbose (bool) round-trips.
+        save_bool_field_to(&path, VERBOSE_KEY, true).unwrap();
+        assert_eq!(load_bool_field_from(&path, VERBOSE_KEY), Some(true));
+        save_bool_field_to(&path, VERBOSE_KEY, false).unwrap();
+        assert_eq!(load_bool_field_from(&path, VERBOSE_KEY), Some(false));
+
+        // editorMode (string) → vim/normal.
+        save_string_field_to(&path, EDITOR_MODE_KEY, "vim").unwrap();
+        assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
+        save_string_field_to(&path, EDITOR_MODE_KEY, "normal").unwrap();
+        assert_eq!(load_editor_mode_is_vim_from(&path), Some(false));
+
+        // A later write preserves the earlier keys (read-modify-write).
+        save_theme_setting_to(&path, ThemeSetting::Auto).unwrap();
+        assert_eq!(load_bool_field_from(&path, VERBOSE_KEY), Some(false));
+        assert_eq!(load_editor_mode_is_vim_from(&path), Some(false));
+
+        // Absent key → None.
+        assert_eq!(load_bool_field_from(&path, "nope"), None);
+        let _ = std::fs::remove_file(&path);
+    }
 }

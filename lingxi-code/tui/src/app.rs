@@ -591,6 +591,12 @@ pub fn run_app(
         },
     );
     app.chat_widget.set_theme(startup_theme);
+    // Persisted UI prefs (`/config verbose=…` / `vim=…`) read back from
+    // settings.json, mirroring the `theme` load above.
+    app.chat_widget.apply_startup_prefs(
+        tui_core::theme_persist::load_verbose(),
+        tui_core::theme_persist::load_editor_mode_is_vim(),
+    );
     if let Some(slot) = subscription {
         app.chat_widget.set_subscription(slot);
     }

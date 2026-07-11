@@ -830,6 +830,22 @@ pub trait OrchestratorHandle: Send + Sync {
         (Vec::new(), Vec::new())
     }
 
+    /// Enable/disable a project MCP server (`/mcp enable|disable [<server>|all]`)
+    /// by writing the global config's `projects[<cwd>].disabledMcpjsonServers`
+    /// list — the same list [`mcp::apply_project_server_gate`] reads at startup,
+    /// so the change round-trips (the disabled server is skipped on the next
+    /// launch). `server = None` (or `"all"`) applies to every configured server;
+    /// otherwise just the named one. `disabled = true` disables, `false`
+    /// re-enables. Returns the affected server names (empty when no server was
+    /// changed). The default (no MCP registry / config path wired) is a no-op.
+    async fn set_mcp_servers_disabled(
+        &self,
+        _server: Option<&str>,
+        _disabled: bool,
+    ) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
     /// Enumerate registered hooks (built-in + user). Used by `/hooks` and
     /// `/status`.
     async fn list_hooks(&self) -> Vec<HookInfo>;

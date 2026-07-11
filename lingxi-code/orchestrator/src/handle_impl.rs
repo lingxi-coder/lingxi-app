@@ -358,6 +358,52 @@ impl OrchestratorHandle for ConversationOrchestrator {
         (ok, failed)
     }
 
+    async fn set_mcp_servers_disabled(
+        &self,
+        server: Option<&str>,
+        disabled: bool,
+    ) -> Result<Vec<String>, String> {
+        let Some(path) = migrations::global_config::global_config_path() else {
+            return Err("global config path is unavailable".to_string());
+        };
+        // `None`/"all" → every registered server; else just the named one.
+        let targets: Vec<String> = match server {
+            None | Some("all") => match self.mcp_registry.as_ref() {
+                Some(reg) => reg.server_names().await,
+                None => Vec::new(),
+            },
+            Some(n) => vec![n.to_string()],
+        };
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Read-modify-write `projects[<cwd>].disabledMcpjsonServers` — the list
+        // `mcp::apply_project_server_gate` reads at startup. `affected` records
+        // only the servers whose membership actually changed.
+        let key = migrations::global_config::project_path_for_config(&self.cwd);
+        let mut affected: Vec<String> = Vec::new();
+        migrations::global_config::save_project_config(&path, &key, |mut proj| {
+            let list: Vec<String> = proj
+                .get("disabledMcpjsonServers")
+                .and_then(serde_json::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (next, changed) = apply_mcp_disabled(list, &targets, disabled);
+            affected = changed;
+            proj.insert(
+                "disabledMcpjsonServers".to_string(),
+                serde_json::json!(next),
+            );
+            proj
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(affected)
+    }
+
     async fn list_hooks(&self) -> Vec<HookInfo> {
         // M6-07: read the wired HookRegistry (Task 7).
         let Some(reg) = self.hook_registry.as_ref() else {
@@ -691,6 +737,30 @@ fn hook_executor_type_and_content(executor: &hooks::HookExecutor) -> (String, St
     }
 }
 
+/// Apply an enable/disable to a `disabledMcpjsonServers` list. `disabled=true`
+/// adds each target that isn't already present; `disabled=false` removes each
+/// that is. Returns `(new_list, affected)` where `affected` is the servers whose
+/// membership actually changed (so an already-disabled server re-disabled is a
+/// no-op and reported as unaffected). Idempotent.
+fn apply_mcp_disabled(
+    mut list: Vec<String>,
+    targets: &[String],
+    disabled: bool,
+) -> (Vec<String>, Vec<String>) {
+    let mut affected = Vec::new();
+    for t in targets {
+        let present = list.iter().any(|s| s == t);
+        if disabled && !present {
+            list.push(t.clone());
+            affected.push(t.clone());
+        } else if !disabled && present {
+            list.retain(|s| s != t);
+            affected.push(t.clone());
+        }
+    }
+    (list, affected)
+}
+
 /// (hooks-detail-fields-divergent) claude-code
 /// `hookSourceDescriptionDisplayString` (`utils/hooks/hooksSettings.ts`).
 /// `Managed`/`FrontMatter`/`Skill` have no TS analogue (LingXi-only source
@@ -806,6 +876,30 @@ fn resolve_editor() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_mcp_disabled_adds_removes_and_is_idempotent() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        // Disable adds absent targets (dedup) and reports them affected.
+        let (list, aff) = apply_mcp_disabled(s(&["a"]), &s(&["b", "c"]), true);
+        assert_eq!(list, s(&["a", "b", "c"]));
+        assert_eq!(aff, s(&["b", "c"]));
+
+        // Re-disabling an already-disabled server is a no-op (not affected).
+        let (list, aff) = apply_mcp_disabled(s(&["a", "b"]), &s(&["b"]), true);
+        assert_eq!(list, s(&["a", "b"]));
+        assert!(aff.is_empty());
+
+        // Enable removes present targets; absent ones are no-ops.
+        let (list, aff) = apply_mcp_disabled(s(&["a", "b", "c"]), &s(&["b", "z"]), false);
+        assert_eq!(list, s(&["a", "c"]));
+        assert_eq!(aff, s(&["b"]));
+
+        // Enabling on an empty list is a clean no-op.
+        let (list, aff) = apply_mcp_disabled(Vec::new(), &s(&["x"]), false);
+        assert!(list.is_empty() && aff.is_empty());
+    }
 
     /// cc 2.1.196 "/context shows 0 tokens on Bedrock" regression lock:
     /// LingXi's `context_window_usage` sums the session's CUMULATIVE usage

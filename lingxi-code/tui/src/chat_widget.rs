@@ -1517,7 +1517,7 @@ impl ChatWidget {
         let mut it = args.split_whitespace();
         let sub = it.next().unwrap_or("");
         let target = it.next(); // `<server>` | `all` | None
-        if sub != "reconnect" {
+        if sub != "reconnect" && sub != "enable" && sub != "disable" {
             return self.show_system_text(
                 "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all.",
                 true,
@@ -1533,6 +1533,29 @@ impl ChatWidget {
             Ok(runtime) => runtime,
             Err(err) => return self.show_system_text(&format!("/mcp failed: {err}"), true),
         };
+        if sub == "enable" || sub == "disable" {
+            // `/mcp enable|disable [<server>|all]` persists the
+            // `disabledMcpjsonServers` gate (engine `set_mcp_servers_disabled`),
+            // which the startup server gate honors — so it round-trips. A bare
+            // target applies to every configured server.
+            let disable = sub == "disable";
+            let target_owned = target.map(str::to_string);
+            return match runtime
+                .block_on(handle.set_mcp_servers_disabled(target_owned.as_deref(), disable))
+            {
+                Ok(names) if names.is_empty() => {
+                    self.show_system_text(&format!("No MCP servers to {sub}."), false)
+                }
+                Ok(names) => {
+                    let verb = if disable { "Disabled" } else { "Enabled" };
+                    self.show_system_text(
+                        &format!("{verb} {}. Takes effect for new sessions.", names.join(", ")),
+                        false,
+                    )
+                }
+                Err(e) => self.show_system_text(&format!("/mcp {sub} failed: {e}"), true),
+            };
+        }
         let (ok, failed) = runtime.block_on(handle.reconnect_mcp_servers(target));
         if ok.is_empty() && failed.is_empty() {
             return self.show_system_text("No MCP servers to reconnect.", false);
@@ -3255,6 +3278,17 @@ mod tests {
                 .body()
                 .contains("unavailable")
         );
+
+        // `enable`/`disable` are RECOGNIZED (route to the engine seam, not the
+        // usage-line fallback) — without a wired handle they report "unavailable"
+        // rather than the usage error.
+        for cmd in ["enable", "disable foo", "disable all"] {
+            let mut w = widget();
+            assert!(matches!(w.cmd_mcp(cmd), ChatOutcome::Continue));
+            let body = cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body();
+            assert!(body.contains("unavailable"), "{cmd}: {body}");
+            assert!(!body.starts_with("Usage:"), "{cmd} must not hit usage: {body}");
+        }
     }
 
     /// A prompt-type command (InjectMessage): the model receives the handler's

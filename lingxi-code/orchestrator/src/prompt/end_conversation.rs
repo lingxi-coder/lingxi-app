@@ -63,13 +63,23 @@ pub const END_CONVERSATION_GB_FLAG: &str = "tengu_umber_kestrel";
 /// full text (`G2r`) — [`render_prompt`], which begins with this paragraph.
 pub const END_CONVERSATION_DESCRIPTION: &str = "End the current conversation. Use only for sustained user abuse or when the user explicitly requests a demonstration of this tool. This will close the conversation and prevent any further messages from being sent.";
 
-/// Terminal message shown after the conversation is ended (claude-code `k4i`).
+/// User-facing terminal message shown after the conversation is ended
+/// (claude-code `k4i` = `END_CONVERSATION_FINAL_MESSAGE`, passed as the
+/// `finalMessage` to the app-state callback — NOT the tool result). Emitted to
+/// the user by the turn loop / streaming loop when the end slot is raised.
 ///
 /// "Claude" here is the assistant identity; the port keeps the model-family
 /// name (unlike the `Claude Code`->`LingXi` product rebrand). Revisit when the
 /// end message is wired if the port's assistant-brand convention differs.
 pub const END_CONVERSATION_ENDED_MESSAGE: &str =
     "Claude ended the conversation. To continue, please start a new session.";
+
+/// The tool's structured-output `message` value returned to the MODEL when the
+/// conversation is ended (claude-code `MWn` = `END_CONVERSATION_TOOL_RESULT`).
+/// Distinct from [`END_CONVERSATION_ENDED_MESSAGE`] (`k4i`, the user-facing
+/// finalMessage): the 206 handler returns `{data:{ended:true, message: MWn}}`
+/// while separately handing `finalMessage: k4i` to the app-state callback.
+pub const END_CONVERSATION_TOOL_RESULT: &str = "Claude has ended this chat.";
 
 /// Render the full model-facing tool `prompt()` (claude-code): sections 1-6
 /// (may-use / must-NOT-use / reserved-strictly / `# Rules for use` /

@@ -157,12 +157,15 @@ impl Tool for EndConversationTool {
         let tool = ec::END_CONVERSATION_TOOL_NAME;
         if prior_assistant_turn_called_end_conversation(&ctx.messages) {
             // SECOND consecutive call → actually end. Raise the slot so the turn
-            // loop terminates + surfaces the end message; return {ended,message}.
+            // loop terminates + surfaces the user-facing finalMessage (k4i). The
+            // tool's own `message` returned to the MODEL is the tool RESULT
+            // (MWn), NOT the finalMessage — matching 206's
+            // `{data:{ended:true, message: MWn}}` + `finalMessage: k4i`.
             self.end_requested.store(true, Ordering::SeqCst);
             Ok(ToolCallResult {
                 data: json!({
                     "ended": true,
-                    "message": ec::END_CONVERSATION_ENDED_MESSAGE,
+                    "message": ec::END_CONVERSATION_TOOL_RESULT,
                 }),
                 model_content: None,
                 new_messages: Vec::new(),
@@ -268,10 +271,9 @@ mod tests {
         ];
         let r = t.call(json!({}), ctx_with(msgs), tx).await.expect("ok");
         assert_eq!(r.data["ended"], true);
-        assert_eq!(
-            r.data["message"],
-            "Claude ended the conversation. To continue, please start a new session."
-        );
+        // Tool RESULT (MWn), returned to the model — NOT the user-facing
+        // finalMessage (k4i, emitted separately by the turn loop).
+        assert_eq!(r.data["message"], "Claude has ended this chat.");
         assert!(t.end_requested.load(Ordering::SeqCst), "slot raised on 2nd call");
     }
 }

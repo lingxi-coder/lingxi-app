@@ -460,6 +460,82 @@ pub fn url_matches(url_str: &str, pattern: &str) -> bool {
         .unwrap_or(false)
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Stage 3 — load-time enforcement (claude `Ree` / `Qme` / `bC("enterprise")`).
+//
+// At MCP load time claude drops any server the policy blocks (`Ree`: keep iff
+// `type === "sdk" || gPe(name, config)`), and when a managed MCP config is
+// active it takes *exclusive* control — only its own servers load (`Qme`'s
+// `D1()` branch). Both reuse the matchers above.
+// ────────────────────────────────────────────────────────────────────────────
+
+use crate::connection::{ConfigScope, McpServerConfig};
+use traits::McpTransportSpec;
+
+/// Project a loaded [`McpTransportSpec`] onto the `{type, command, args, url}`
+/// config view the matchers extract from (claude `oVn`/`iVn` read those keys).
+fn spec_matcher_view(spec: &McpTransportSpec) -> Value {
+    match spec {
+        McpTransportSpec::Stdio { command, args, .. } => serde_json::json!({
+            "type": "stdio",
+            "command": command,
+            "args": args,
+        }),
+        McpTransportSpec::Sse { url, .. } | McpTransportSpec::SseIde { url, .. } => {
+            serde_json::json!({ "type": "sse", "url": url })
+        }
+        McpTransportSpec::Http { url, .. } => serde_json::json!({ "type": "http", "url": url }),
+        McpTransportSpec::WebSocket { url, .. } => serde_json::json!({ "type": "ws", "url": url }),
+        // No command/url to match — a name-only matcher still applies; a plain
+        // object with a non-stdio type makes `oVn` return `None`.
+        McpTransportSpec::InProcess { .. } => serde_json::json!({ "type": "inprocess" }),
+        McpTransportSpec::SdkControl { .. } => serde_json::json!({ "type": "sdk" }),
+    }
+}
+
+/// claude `Ree`'s per-server predicate — a loaded server is kept iff it is an
+/// SDK-control server or the allow/deny policy permits it.
+#[must_use]
+pub fn is_server_allowed(config: &McpServerConfig, policy: &McpPolicy) -> bool {
+    if matches!(config.spec, McpTransportSpec::SdkControl { .. }) {
+        return true; // claude `i.type === "sdk"` short-circuit
+    }
+    is_allowed(&config.name, &spec_matcher_view(&config.spec), policy)
+}
+
+/// Parse the managed MCP config (`managed-mcp.json`) into server configs
+/// (claude `bC("enterprise")`), scoped [`ConfigScope::Enterprise`]. Empty on a
+/// missing/malformed file.
+#[must_use]
+pub fn load_enterprise_servers() -> Vec<McpServerConfig> {
+    let Ok(raw) = std::fs::read_to_string(managed_mcp_config_path()) else {
+        return Vec::new();
+    };
+    crate::json_config::parse_mcp_json_string(&raw, ConfigScope::Enterprise).unwrap_or_default()
+}
+
+/// Apply the enterprise MCP policy to the assembled to-connect list, in place —
+/// the load-site equivalent of claude's `Qme`/`Ree`:
+///
+/// - When [`enterprise_mcp_active`], replace the list with the managed
+///   (`managed-mcp.json`) servers that pass the allow policy — exclusive
+///   control (`D1()` branch).
+/// - Otherwise drop every server the allow/deny policy blocks (`Ree`).
+///
+/// Inert when no managed config or policy is present (nothing is removed), so a
+/// default deployment is byte-identical.
+pub fn apply_enterprise_mcp_policy(configs: &mut Vec<McpServerConfig>) {
+    let policy = read_managed_mcp_policy();
+    if enterprise_mcp_active() {
+        *configs = load_enterprise_servers()
+            .into_iter()
+            .filter(|c| is_server_allowed(c, &policy))
+            .collect();
+    } else {
+        configs.retain(|c| is_server_allowed(c, &policy));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,5 +747,55 @@ mod tests {
         assert!(p.denied.is_none() && p.allowed.is_none());
         assert!(!is_denied("x", &stdio("c", &[]), &p));
         assert!(is_allowed("x", &stdio("c", &[]), &p));
+    }
+
+    // ── load-time (Ree) enforcement ──
+
+    fn cfg(name: &str, spec: McpTransportSpec) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            spec,
+            scope: ConfigScope::User,
+            disabled: false,
+        }
+    }
+    fn stdio_spec(command: &str, args: &[&str]) -> McpTransportSpec {
+        McpTransportSpec::Stdio {
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn is_server_allowed_reuses_matchers_and_sdk_shortcircuits() {
+        let policy = McpPolicy {
+            denied: Some(matcher(r#"[{"serverName":"corp"}]"#)),
+            allowed: None,
+        };
+        assert!(!is_server_allowed(&cfg("corp", stdio_spec("c", &[])), &policy));
+        assert!(is_server_allowed(&cfg("ok", stdio_spec("c", &[])), &policy));
+        // SDK-control servers are always kept (claude `type === "sdk"`).
+        assert!(is_server_allowed(
+            &cfg(
+                "corp",
+                McpTransportSpec::SdkControl { control_channel_id: "x".into() }
+            ),
+            &policy
+        ));
+    }
+
+    #[test]
+    fn ree_retain_drops_denied_and_keeps_rest() {
+        let mut list = vec![
+            cfg("corp", stdio_spec("c", &[])),
+            cfg("keep", stdio_spec("c", &[])),
+        ];
+        let policy = McpPolicy {
+            denied: Some(matcher(r#"[{"serverName":"corp"}]"#)),
+            allowed: None,
+        };
+        list.retain(|c| is_server_allowed(c, &policy));
+        assert_eq!(list.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["keep"]);
     }
 }

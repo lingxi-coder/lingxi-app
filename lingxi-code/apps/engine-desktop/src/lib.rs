@@ -3771,6 +3771,13 @@ pub async fn build(
     // (`if(eI(cn))return`) while `/mcp` still lists it as disabled. Applied AFTER
     // the `--mcp-config` merge so an explicitly-supplied server is gated too.
     mcp::apply_project_server_gate(&mut mcp_configs, &global_mcp_path, &cwd);
+    // Enterprise MCP policy (claude-code `Qme`/`Ree`): when a managed
+    // `managed-mcp.json` is active it takes EXCLUSIVE control — only its own
+    // servers load; otherwise any server the managed allow/deny policy blocks
+    // (`deniedMcpServers`/`allowedMcpServers`) is dropped before connect. Inert
+    // (no server removed) when no managed config/policy is present, so a default
+    // deployment is byte-identical.
+    mcp::enterprise_policy::apply_enterprise_mcp_policy(&mut mcp_configs);
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
     // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
     // (live-client bridge), so a connected server yields a working `McpClient`

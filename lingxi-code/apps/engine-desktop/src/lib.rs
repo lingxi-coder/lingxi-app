@@ -4580,6 +4580,13 @@ pub async fn build(
     // turn-relative `budget.spent()`; published from the orchestrator below.
     let local_workflow_turn_baseline: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
         Arc::new(std::sync::OnceLock::new());
+    // Deferred status sink (bound to the registry Arc below) so the workflow
+    // worker's terminal `set_status(Completed/Failed)` actually reaches the
+    // registry — WITHOUT this the handler keeps the default `NoopStatusSink` and
+    // a finished workflow is stuck on `Running` forever in `/workflows`. Same
+    // "no stuck Running" wiring bash + local_agent already have.
+    let local_workflow_status_sink =
+        Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
         Arc::new(
@@ -4594,7 +4601,10 @@ pub async fn build(
             // pool (main loop + all workflows) once `output_pool_cell` is bound.
             .with_token_budget(orch_cfg.token_budget)
             .with_output_pool_cell(local_workflow_output_pool.clone())
-            .with_turn_baseline_cell(local_workflow_turn_baseline.clone()),
+            .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
+            .with_status_sink(
+                local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
+            ),
         ),
     );
 
@@ -4610,6 +4620,11 @@ pub async fn build(
     // terminal `set_status` / `set_exit_code` now reach `task_registry`, so a
     // finished background command flips its panel row off `Running`.
     bash_status_sink
+        .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+    // Bind the deferred LocalWorkflow sink: a finished workflow's terminal
+    // `set_status(Completed/Failed)` now reaches `task_registry`, so `/workflows`
+    // flips it off `Running` instead of showing it stuck forever.
+    local_workflow_status_sink
         .bind(task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
 
     // (5.48) Cron: construct, load the single persisted tasks file, and start the

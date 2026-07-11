@@ -7421,7 +7421,10 @@ As you answer the user's questions, you can use the following context:\n\
         let params = crate::prompt::plan_reminder::PlanReminderParams {
             plan_file_path: &path,
             plan_exists: exists,
-            custom_instructions: None,
+            // C5: `--plan-mode-instructions` custom workflow body (borrows from
+            // `self.config`, which outlives `params`; the session guard is already
+            // dropped). `None` ⇒ the default 5-phase reminder.
+            custom_instructions: self.config.plan_mode_instructions.as_deref(),
             is_subagent: false,
             reminder_type_sparse: sparse,
         };
@@ -10874,6 +10877,25 @@ mod skill_listing_reminder_tests {
             .expect("full again after reset")
             .text_content();
         assert!(again.starts_with("Plan mode is active. The user indicated"), "got: {again}");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_reminder_uses_custom_instructions() {
+        // C5: `--plan-mode-instructions` (config.plan_mode_instructions) replaces
+        // the default 5-phase body with the custom "## Plan Workflow" branch.
+        let mut orch = orch_with(ToolRegistry::new(), None);
+        orch.config.plan_mode_instructions = Some("MY BODY".to_string());
+        orch.session().lock().await.plan_mode = true;
+        let full = orch
+            .plan_mode_reminder_message()
+            .await
+            .expect("plan-mode custom reminder")
+            .text_content();
+        assert!(
+            full.contains("## Plan Workflow\n\nMY BODY\n\n### Call ExitPlanMode"),
+            "custom workflow body: {full}"
+        );
+        assert!(!full.contains("### Phase 1"), "default phases suppressed: {full}");
     }
 
     // ── SKILLLIST.1 delta (sent-tracking) ──────────────────────────────────

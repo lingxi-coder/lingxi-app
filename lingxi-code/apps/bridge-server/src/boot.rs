@@ -243,6 +243,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Electron bridge exposes no --max-turns / --max-budget flags;
         // both stay unset (unbounded), matching the CLI defaults.
         max_turns: None,
+        plan_mode_instructions: None,
         max_budget_usd: None,
         // The bridge has no structured-output flag; unconstrained turns.
         json_schema: None,
@@ -609,6 +610,7 @@ mod tests {
             permission_mode: permission::PermissionMode::Default,
             connect_prompt: None,
             max_turns: None,
+            plan_mode_instructions: None,
             max_budget_usd: None,
             json_schema: None,
             system_prompt_override: None,

@@ -847,6 +847,32 @@ mod tests {
         assert!(c.validate_session_persistence_args().is_ok());
     }
 
+    /// (C5) `--plan-mode-instructions` requires `--print`; mirrors the
+    /// `--no-session-persistence` gate (message sans `Error: ` prefix).
+    #[test]
+    fn plan_mode_instructions_requires_print_mode() {
+        // Set without --print ⟶ byte-exact rejection.
+        let a =
+            Argv::from_iter(["lingxi-cli", "--plan-mode-instructions", "BODY", "hi"]).unwrap();
+        assert_eq!(
+            a.validate_plan_mode_instructions_args().unwrap_err(),
+            "--plan-mode-instructions can only be used with --print mode."
+        );
+        // With --print ⟶ accepted.
+        let b = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--plan-mode-instructions",
+            "BODY",
+            "hi",
+        ])
+        .unwrap();
+        assert!(b.validate_plan_mode_instructions_args().is_ok());
+        // Flag absent ⟶ always fine, print or not.
+        let c = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(c.validate_plan_mode_instructions_args().is_ok());
+    }
+
     /// (M3 cc2.1.198) `--bg`/`--background` × `--print`/`-p` rejected up front.
     /// Message byte-locked to the bg fast-path validator `pof` @218854391
     /// (stderr line, no `Error:` prefix, exit 1) — note the real em dash.

@@ -104,6 +104,17 @@ pub struct Argv {
     #[arg(long = "max-turns", value_name = "turns", hide = true)]
     pub max_turns: Option<u32>,
 
+    /// `--plan-mode-instructions <instructions>` (hidden, `--print`-only): custom
+    /// workflow body for plan mode, threaded to
+    /// `OrchestratorConfig::plan_mode_instructions`.
+    ///
+    /// 206 help text: "Custom workflow body for plan mode. Replaces the default
+    /// code-implementation phases in the plan-mode system reminder; the read-only
+    /// enforcement preamble and ExitPlanMode protocol footer are always kept."
+    /// HIDDEN in 206 (`.hideHelp()`) — mirrored with `hide = true`.
+    #[arg(long = "plan-mode-instructions", value_name = "instructions", hide = true)]
+    pub plan_mode_instructions: Option<String>,
+
     /// Maximum dollar amount to spend on API calls (only works with --print).
     /// Must be a positive number greater than 0.
     // Maps to `OrchestratorConfig::max_budget_nano_usd` (× 1e9); unset = no cap.
@@ -733,6 +744,16 @@ impl Argv {
             return Err(
                 "--no-session-persistence can only be used with --print mode.".to_string(),
             );
+        }
+        Ok(())
+    }
+
+    /// `--plan-mode-instructions` requires `--print` (206 gate, mirroring the
+    /// sibling `--no-session-persistence` guard). The returned string EXCLUDES the
+    /// `Error: ` prefix — the caller prints `Error: {msg}`.
+    pub fn validate_plan_mode_instructions_args(&self) -> Result<(), String> {
+        if self.plan_mode_instructions.is_some() && !self.print {
+            return Err("--plan-mode-instructions can only be used with --print mode.".to_string());
         }
         Ok(())
     }

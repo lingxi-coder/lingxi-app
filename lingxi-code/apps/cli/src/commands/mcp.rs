@@ -684,13 +684,32 @@ enum WriteOutcome {
     AlreadyExists,
 }
 
+/// TS `addMcpServer`'s reserved-name predicate `TEt(e)` =
+/// `lDe(e) || zbt(e) || i6n(e) || e === GCn`, recovered from the 2.1.206 binary:
+/// - `lDe(e)` = `Bc(e) === gE`            where `gE = "claude-in-chrome"`
+/// - `zbt(e)` = `Bc(e) === "computer-use"`
+/// - `i6n(e)` = `W2h.has(Bc(e))`          where `W2h = {Bc("Claude Preview"), Bc("Claude Browser")}`
+/// - `e === GCn`                          where `GCn = "workspace"` (matched RAW, not normalized)
+///
+/// `Bc` is [`mcp::normalization::normalize_name_for_mcp`] (byte-identical to the
+/// binary's `Bc`), so the Chrome-preview names are derived through it exactly
+/// like the `W2h` set is built, rather than hard-coding their normalized forms.
+fn is_reserved_mcp_server_name(name: &str) -> bool {
+    use mcp::normalization::normalize_name_for_mcp as bc;
+    let normalized = bc(name);
+    normalized == "claude-in-chrome"
+        || normalized == "computer-use"
+        || normalized == bc("Claude Preview")
+        || normalized == bc("Claude Browser")
+        || name == "workspace"
+}
+
 /// Write a server entry into the chosen scope's config file, returning whether
 /// it was newly added or already present.
-/// Validate an MCP server name the way TS `addMcpServer` does before any write:
-/// reject any char outside `[a-zA-Z0-9_-]` (TS `/[^a-zA-Z0-9_-]/`) with the
-/// byte-faithful message. (The reserved-name check — TS `TEt` = "computer-use" /
-/// "workspace" / the interned `gE`+`W2h` sets under a `Bc` normalizer — is
-/// deferred; those predicates are not recoverable from static extraction.)
+/// Validate an MCP server name the way TS `addMcpServer` does before any write,
+/// in the same order: first reject any char outside `[a-zA-Z0-9_-]`
+/// (TS `/[^a-zA-Z0-9_-]/`), then reject a reserved name (TS `TEt`, see
+/// [`is_reserved_mcp_server_name`]) — both with the byte-faithful message.
 fn validate_mcp_server_name(name: &str) -> Result<(), String> {
     if name
         .chars()
@@ -698,6 +717,11 @@ fn validate_mcp_server_name(name: &str) -> Result<(), String> {
     {
         return Err(format!(
             "Invalid name {name}. Names can only contain letters, numbers, hyphens, and underscores."
+        ));
+    }
+    if is_reserved_mcp_server_name(name) {
+        return Err(format!(
+            "Cannot add MCP server \"{name}\": this name is reserved."
         ));
     }
     Ok(())
@@ -1622,7 +1646,7 @@ mod url_redaction_tests {
 
 #[cfg(test)]
 mod name_validation_tests {
-    use super::validate_mcp_server_name;
+    use super::{is_reserved_mcp_server_name, validate_mcp_server_name};
 
     #[test]
     fn rejects_invalid_name_chars_with_byte_exact_message() {
@@ -1640,6 +1664,45 @@ mod name_validation_tests {
         for ok in ["srv", "my-server_1", "ABC123", "a", "___", "---"] {
             assert!(validate_mcp_server_name(ok).is_ok(), "valid name rejected: {ok}");
         }
+    }
+
+    #[test]
+    fn rejects_reserved_names_with_byte_exact_message() {
+        // TS `TEt`: gE / "computer-use" / W2h (Chrome preview/browser) / "workspace".
+        // Chrome-preview names carry a space so they're matched via `Bc`-normalized
+        // input; `workspace` is matched raw. All are valid-char, so they pass the
+        // char check and hit the reserved check.
+        for reserved in [
+            "claude-in-chrome",
+            "computer-use",
+            "Claude_Preview",
+            "Claude_Browser",
+            "workspace",
+        ] {
+            let err =
+                validate_mcp_server_name(reserved).expect_err("reserved name must be rejected");
+            assert_eq!(
+                err,
+                format!("Cannot add MCP server \"{reserved}\": this name is reserved.")
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_predicate_matches_via_normalizer_and_raw() {
+        // `Bc`-normalized matches (a raw space normalizes to `_`).
+        assert!(is_reserved_mcp_server_name("Claude Preview"));
+        assert!(is_reserved_mcp_server_name("Claude Browser"));
+        assert!(is_reserved_mcp_server_name("computer-use"));
+        assert!(is_reserved_mcp_server_name("claude-in-chrome"));
+        // `workspace` is the only RAW (un-normalized) match — a decorated variant
+        // normalizes differently and is NOT reserved.
+        assert!(is_reserved_mcp_server_name("workspace"));
+        assert!(!is_reserved_mcp_server_name("workspaces"));
+        assert!(!is_reserved_mcp_server_name("my-workspace"));
+        // Ordinary names stay allowed.
+        assert!(!is_reserved_mcp_server_name("filesystem"));
+        assert!(!is_reserved_mcp_server_name("sentry"));
     }
 }
 

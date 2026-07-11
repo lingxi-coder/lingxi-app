@@ -25,9 +25,24 @@ pub const RETENTION_PERIOD_ENV: &str = "LINGXI_RETENTION_PERIOD_DAYS";
 /// claude-code `cleanupPeriodDays` default (`dWu = 30`).
 pub const DEFAULT_CLEANUP_PERIOD_DAYS: u64 = 30;
 
-/// Housekeeping directories swept, relative to config-home — claude's
-/// `["todos","statsig","logs"]`.
-const SWEPT_SUBDIRS: &[&str] = &["todos", "statsig", "logs"];
+/// Entry-level housekeeping directories — every stale entry (file or dir) is
+/// removed (claude's `["todos","statsig","logs"]` loop).
+const SWEPT_ENTRY_DIRS: &[&str] = &["todos", "statsig", "logs"];
+
+/// Subdirectory-level housekeeping directories — every stale *subdirectory* is
+/// removed (claude's `VRt(...)` cleanups: `file-history`, `session-env`,
+/// `tasks`, `uploads`, `skills/.staging`).
+const SWEPT_SUBDIR_TREES: &[&str] = &[
+    "file-history",
+    "session-env",
+    "tasks",
+    "uploads",
+    "skills/.staging",
+];
+
+/// Directory whose stale `.md` files are removed (claude's `hVg` = `aj(plans,
+/// ".md")`).
+const PLANS_DIR: &str = "plans";
 
 /// Result of a sweep (claude's `{messages, errors}` accumulator; `messages` is
 /// the deleted-entry count).
@@ -84,36 +99,107 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
     let Some(cutoff) = SystemTime::now().checked_sub(period) else {
         return report;
     };
-    for sub in SWEPT_SUBDIRS {
-        let dir = config_home.join(sub);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue; // absent / unreadable directory → skip
+    // Entry-level sweep (todos/statsig/logs): remove every stale file/dir.
+    for sub in SWEPT_ENTRY_DIRS {
+        report = merge(report, sweep_stale_entries(&config_home.join(sub), cutoff, true));
+    }
+    // Subdirectory-level sweep (VRt): remove stale subdirectories, then prune the
+    // named dir if it emptied.
+    for sub in SWEPT_SUBDIR_TREES {
+        report = merge(report, sweep_stale_entries(&config_home.join(sub), cutoff, false));
+    }
+    // Plans: remove stale `.md` files (aj).
+    report = merge(
+        report,
+        sweep_stale_files_by_ext(&config_home.join(PLANS_DIR), ".md", cutoff),
+    );
+    report
+}
+
+/// Merge two reports (claude `Vnt`).
+fn merge(a: RetentionReport, b: RetentionReport) -> RetentionReport {
+    RetentionReport {
+        session_files_deleted: a.session_files_deleted + b.session_files_deleted,
+        errors: a.errors + b.errors,
+    }
+}
+
+/// `rmdir` `dir` if it is now empty — best-effort (claude `sj`).
+fn prune_if_empty(dir: &Path) {
+    let _ = std::fs::remove_dir(dir);
+}
+
+/// Remove stale entries under `dir` whose mtime is older than `cutoff`. When
+/// `include_files` is true every entry (file or dir) is eligible (the
+/// todos/statsig/logs loop); when false only subdirectories are (claude `VRt`,
+/// which then prunes the emptied parent).
+fn sweep_stale_entries(dir: &Path, cutoff: SystemTime, include_files: bool) -> RetentionReport {
+    let mut report = RetentionReport::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return report; // absent / unreadable directory → skip
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            report.errors += 1;
+            continue;
         };
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else {
-                report.errors += 1;
-                continue;
-            };
-            let Ok(mtime) = meta.modified() else {
-                report.errors += 1;
-                continue;
-            };
-            // Keep anything modified at or after the cutoff (claude `mtime>=e`).
-            if mtime >= cutoff {
-                continue;
-            }
-            let path = entry.path();
-            let removed = if meta.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            match removed {
-                Ok(()) => report.session_files_deleted += 1,
-                Err(_) => report.errors += 1,
-            }
+        if !include_files && !meta.is_dir() {
+            continue; // VRt considers subdirectories only
+        }
+        let Ok(mtime) = meta.modified() else {
+            report.errors += 1;
+            continue;
+        };
+        // Keep anything modified at or after the cutoff (claude `mtime>=e` /
+        // `mtime<n`).
+        if mtime >= cutoff {
+            continue;
+        }
+        let path = entry.path();
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => report.session_files_deleted += 1,
+            Err(_) => report.errors += 1,
         }
     }
+    if !include_files {
+        prune_if_empty(dir);
+    }
+    report
+}
+
+/// Remove stale files directly under `dir` whose name ends with `ext` and whose
+/// mtime is older than `cutoff`, then prune the dir if it emptied (claude `aj`).
+fn sweep_stale_files_by_ext(dir: &Path, ext: &str, cutoff: SystemTime) -> RetentionReport {
+    let mut report = RetentionReport::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return report;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            report.errors += 1;
+            continue;
+        };
+        if !meta.is_file() || !entry.file_name().to_string_lossy().ends_with(ext) {
+            continue;
+        }
+        let Ok(mtime) = meta.modified() else {
+            report.errors += 1;
+            continue;
+        };
+        if mtime >= cutoff {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => report.session_files_deleted += 1,
+            Err(_) => report.errors += 1,
+        }
+    }
+    prune_if_empty(dir);
     report
 }
 
@@ -203,6 +289,48 @@ mod tests {
         let report = run_retention_sweep_in(root.path(), day_period(30));
         assert_eq!(report.session_files_deleted, 0);
         assert!(keep.exists(), "non-swept directory must never be touched");
+    }
+
+    #[test]
+    fn sweeps_stale_subdirectories_but_not_stale_files_in_vrt_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let fh = root.path().join("file-history");
+        fs::create_dir_all(&fh).unwrap();
+        // A stale SUBDIR is removed; a stale FILE at this level is NOT (VRt only
+        // considers subdirectories).
+        let old_dir = fh.join("old-session");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("edit.json"), b"{}").unwrap();
+        set_old(&old_dir, Duration::from_secs(45 * 86400));
+        let stray_file = fh.join("stray.txt");
+        fs::write(&stray_file, b"x").unwrap();
+        set_old(&stray_file, Duration::from_secs(45 * 86400));
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        assert_eq!(report.session_files_deleted, 1);
+        assert!(!old_dir.exists(), "stale subdir must be swept");
+        assert!(stray_file.exists(), "a file in a VRt dir must be left alone");
+    }
+
+    #[test]
+    fn sweeps_stale_md_plans_only() {
+        let root = tempfile::tempdir().unwrap();
+        let plans = root.path().join("plans");
+        fs::create_dir_all(&plans).unwrap();
+        let old_md = plans.join("2020-old.md");
+        let fresh_md = plans.join("today.md");
+        let other = plans.join("keep.txt");
+        for p in [&old_md, &fresh_md, &other] {
+            fs::write(p, b"x").unwrap();
+        }
+        set_old(&old_md, Duration::from_secs(60 * 86400));
+        set_old(&other, Duration::from_secs(60 * 86400)); // old but not .md
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        assert_eq!(report.session_files_deleted, 1);
+        assert!(!old_md.exists(), "stale .md plan must be swept");
+        assert!(fresh_md.exists(), "fresh .md plan must be kept");
+        assert!(other.exists(), "non-.md file must be kept");
     }
 
     #[test]

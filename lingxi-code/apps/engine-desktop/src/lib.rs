@@ -3778,6 +3778,14 @@ pub async fn build(
     // (no server removed) when no managed config/policy is present, so a default
     // deployment is byte-identical.
     mcp::enterprise_policy::apply_enterprise_mcp_policy(&mut mcp_configs);
+    // MCP config-load diagnostics (claude-code `F7t`): surface per-entry config
+    // problems (unknown type, url-without-type, invalid entry, reserved name,
+    // missing env vars, `servers`-vs-`mcpServers`) to stderr at startup, the way
+    // claude logs them. Silent when every config is clean, so a healthy setup
+    // prints nothing.
+    for w in mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global_mcp_path)) {
+        eprintln!("{}", w.to_stderr_line());
+    }
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
     // BOTH the `McpTransport` (discovery) and the `RawConnectionProvider`
     // (live-client bridge), so a connected server yields a working `McpClient`

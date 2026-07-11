@@ -87,8 +87,30 @@ pub async fn run(_cli: &Cli) -> i32 {
         .unwrap_or_else(|| project_mcp_path.clone());
     let servers = mcp::json_config::load_mcp_servers(&project_mcp_path, &global_for_load, &cwd);
     report_mcp_servers(&servers);
+    report_mcp_config_warnings(&cwd, global_config.as_deref());
 
     SUCCESS
+}
+
+/// Report MCP config-load diagnostics (claude-code `F7t`): per-entry problems
+/// that cause a server to be skipped (unknown type, url-without-type, invalid
+/// entry, reserved name, missing env vars) plus the `servers`-vs-`mcpServers`
+/// shape error. Nothing is printed when every config is clean.
+fn report_mcp_config_warnings(cwd: &std::path::Path, global_config: Option<&std::path::Path>) {
+    let warnings = mcp::config_diagnostics::collect_all_mcp_config_warnings(cwd, global_config);
+    if warnings.is_empty() {
+        return;
+    }
+    println!("MCP config warnings: {}", warnings.len());
+    for w in &warnings {
+        match &w.file {
+            Some(f) => println!("  - [{}] {}", f, w.message),
+            None => println!("  - {}", w.message),
+        }
+        if let Some(s) = &w.suggestion {
+            println!("      {s}");
+        }
+    }
 }
 
 /// Print the configured MCP servers (name, transport kind, scope, enabled

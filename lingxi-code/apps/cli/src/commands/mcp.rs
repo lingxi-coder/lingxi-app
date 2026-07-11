@@ -684,25 +684,7 @@ enum WriteOutcome {
     AlreadyExists,
 }
 
-/// TS `addMcpServer`'s reserved-name predicate `TEt(e)` =
-/// `lDe(e) || zbt(e) || i6n(e) || e === GCn`, recovered from the 2.1.206 binary:
-/// - `lDe(e)` = `Bc(e) === gE`            where `gE = "claude-in-chrome"`
-/// - `zbt(e)` = `Bc(e) === "computer-use"`
-/// - `i6n(e)` = `W2h.has(Bc(e))`          where `W2h = {Bc("Claude Preview"), Bc("Claude Browser")}`
-/// - `e === GCn`                          where `GCn = "workspace"` (matched RAW, not normalized)
-///
-/// `Bc` is [`mcp::normalization::normalize_name_for_mcp`] (byte-identical to the
-/// binary's `Bc`), so the Chrome-preview names are derived through it exactly
-/// like the `W2h` set is built, rather than hard-coding their normalized forms.
-fn is_reserved_mcp_server_name(name: &str) -> bool {
-    use mcp::normalization::normalize_name_for_mcp as bc;
-    let normalized = bc(name);
-    normalized == "claude-in-chrome"
-        || normalized == "computer-use"
-        || normalized == bc("Claude Preview")
-        || normalized == bc("Claude Browser")
-        || name == "workspace"
-}
+use mcp::normalization::is_reserved_mcp_server_name;
 
 /// Write a server entry into the chosen scope's config file, returning whether
 /// it was newly added or already present.

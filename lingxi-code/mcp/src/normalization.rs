@@ -89,9 +89,39 @@ fn collapse_and_trim_underscores(s: &str) -> String {
     trimmed.strip_suffix('_').unwrap_or(&trimmed).to_string()
 }
 
+/// Whether `name` is a reserved MCP server name — claude-code 2.1.206's `TEt`
+/// predicate, `lDe(e) || zbt(e) || i6n(e) || e === GCn`:
+/// - `Bc(e) === "claude-in-chrome"` (`gE`)
+/// - `Bc(e) === "computer-use"`
+/// - `Bc(e) ∈ {Bc("Claude Preview"), Bc("Claude Browser")}` (`W2h`)
+/// - `e === "workspace"` (`GCn`, matched RAW — not normalized)
+///
+/// `Bc` is [`normalize_name_for_mcp`]; the Chrome-preview names are derived
+/// through it exactly as the `W2h` set is built.
+#[must_use]
+pub fn is_reserved_mcp_server_name(name: &str) -> bool {
+    let normalized = normalize_name_for_mcp(name);
+    normalized == "claude-in-chrome"
+        || normalized == "computer-use"
+        || normalized == normalize_name_for_mcp("Claude Preview")
+        || normalized == normalize_name_for_mcp("Claude Browser")
+        || name == "workspace"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_names_match_normalizer_and_raw() {
+        assert!(is_reserved_mcp_server_name("claude-in-chrome"));
+        assert!(is_reserved_mcp_server_name("computer-use"));
+        assert!(is_reserved_mcp_server_name("Claude Preview"));
+        assert!(is_reserved_mcp_server_name("Claude Browser"));
+        assert!(is_reserved_mcp_server_name("workspace"));
+        assert!(!is_reserved_mcp_server_name("workspaces"));
+        assert!(!is_reserved_mcp_server_name("filesystem"));
+    }
 
     #[test]
     fn replaces_invalid_chars_with_underscore() {

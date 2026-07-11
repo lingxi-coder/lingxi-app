@@ -11,7 +11,11 @@
 //! the tool call and decides whether to end (2nd consecutive call) or return the
 //! re-read reminder (1st call).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use protocol::{ContentBlock, ConversationMessage};
 use serde_json::{json, Value};
 use tool_api::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
@@ -20,6 +24,12 @@ use tool_api::{
 
 use crate::prompt::end_conversation as ec;
 
+/// Shared flag the tool raises when a SECOND consecutive `EndConversation` call
+/// actually ends the conversation. The turn loop reads it after tool execution
+/// to terminate + emit [`ec::END_CONVERSATION_ENDED_MESSAGE`]. Mirrors
+/// `StructuredOutputTool`'s captured-slot pattern (no shared-struct change).
+pub type EndConversationSlot = Arc<AtomicBool>;
+
 /// The `EndConversation` tool. `enabled` mirrors claude-code
 /// `isEndConversationToolEnabled` (model floor `NWn` && GB `tengu_umber_kestrel`)
 /// — the composition root computes it; DEFAULT `false` keeps the tool
@@ -27,24 +37,55 @@ use crate::prompt::end_conversation as ec;
 pub struct EndConversationTool {
     schema: Value,
     enabled: bool,
+    /// Raised by [`Self::call`] when the conversation is actually ended (the
+    /// 2nd consecutive call). The turn loop consumes it.
+    end_requested: EndConversationSlot,
 }
 
 impl EndConversationTool {
-    /// Build the tool. `enabled` should be the resolved
-    /// `isEndConversationToolEnabled` signal (default OFF).
+    /// Build the tool. `enabled` = the resolved `isEndConversationToolEnabled`
+    /// signal (default OFF); `end_requested` is the slot the turn loop reads.
     #[must_use]
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, end_requested: EndConversationSlot) -> Self {
         Self {
             schema: ec::input_schema(),
             enabled,
+            end_requested,
         }
+    }
+
+    /// The shared end-request slot (for the composition root / turn loop).
+    #[must_use]
+    pub fn slot(&self) -> EndConversationSlot {
+        self.end_requested.clone()
     }
 }
 
 impl Default for EndConversationTool {
     fn default() -> Self {
-        Self::new(false)
+        Self::new(false, Arc::new(AtomicBool::new(false)))
     }
+}
+
+/// claude-code `lastAssistantTurnCalledEndConversation`: did the assistant turn
+/// PRECEDING the current one call `EndConversation`? The current (in-flight)
+/// assistant message is the last `Assistant` entry in `messages`; this checks
+/// the one before it. A `true` result means the incoming call is the SECOND
+/// consecutive one → actually end (vs. the 1st → return the re-read reminder).
+#[must_use]
+fn prior_assistant_turn_called_end_conversation(messages: &[ConversationMessage]) -> bool {
+    let assistant_calls: Vec<bool> = messages
+        .iter()
+        .filter_map(|m| match m {
+            ConversationMessage::Assistant { content, .. } => Some(content.iter().any(|b| {
+                matches!(b, ContentBlock::ToolUse { name, .. }
+                    if name == ec::END_CONVERSATION_TOOL_NAME)
+            })),
+            _ => None,
+        })
+        .collect();
+    // The last assistant entry is the current turn; look at the one before it.
+    assistant_calls.len() >= 2 && assistant_calls[assistant_calls.len() - 2]
 }
 
 #[async_trait]
@@ -110,30 +151,68 @@ impl Tool for EndConversationTool {
     async fn call(
         &self,
         _input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        // CHUNK A: report the end result per the `v0y` output schema
-        // ({ended, message}). The turn loop's two-call gate (CHUNK B) decides
-        // whether this call actually terminates the conversation (2nd
-        // consecutive call) or is converted to the re-read reminder (1st call).
-        Ok(ToolCallResult {
-            data: json!({
-                "ended": true,
-                "message": ec::END_CONVERSATION_ENDED_MESSAGE,
-            }),
-            model_content: None,
-            new_messages: Vec::new(),
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-        })
+        let tool = ec::END_CONVERSATION_TOOL_NAME;
+        if prior_assistant_turn_called_end_conversation(&ctx.messages) {
+            // SECOND consecutive call → actually end. Raise the slot so the turn
+            // loop terminates + surfaces the end message; return {ended,message}.
+            self.end_requested.store(true, Ordering::SeqCst);
+            Ok(ToolCallResult {
+                data: json!({
+                    "ended": true,
+                    "message": ec::END_CONVERSATION_ENDED_MESSAGE,
+                }),
+                model_content: None,
+                new_messages: Vec::new(),
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        } else {
+            // FIRST call → do NOT end; return the re-read reminder (guidance
+            // appended) so the model must confirm by calling again.
+            let reminder = ec::render_reread_reminder(tool, &ec::render_prompt(tool));
+            Ok(ToolCallResult {
+                data: json!({ "ended": false, "message": reminder }),
+                model_content: Some(reminder),
+                new_messages: Vec::new(),
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::MessageId;
+
+    fn tool() -> EndConversationTool {
+        EndConversationTool::new(true, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn asst_calling_endconv() -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: Default::default(),
+                name: "EndConversation".into(),
+                input: json!({}),
+                provider_id: None,
+            }],
+            stop_reason: None,
+        }
+    }
+
+    fn ctx_with(messages: Vec<ConversationMessage>) -> ToolUseContext {
+        let mut c = ToolUseContext::model_seed("x".into());
+        c.messages = messages;
+        c
+    }
 
     #[test]
     fn default_is_disabled_and_shaped() {
@@ -149,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn description_and_prompt_are_the_full_g2r() {
-        let t = EndConversationTool::new(true);
+        let t = tool();
         let d = t
             .description(&json!({}), &DescriptionOptions { is_non_interactive_session: false })
             .await;
@@ -160,17 +239,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_reports_ended_true_with_end_message() {
-        let t = EndConversationTool::new(true);
+    async fn first_call_returns_reminder_and_does_not_end() {
+        // Only the current turn calls EndConversation (no prior) → 1st call.
+        let t = tool();
         let (tx, _rx) = tool_api::progress::progress_channel();
         let r = t
-            .call(json!({}), ToolUseContext::model_seed("x".into()), tx)
+            .call(json!({}), ctx_with(vec![asst_calling_endconv()]), tx)
             .await
             .expect("ok");
+        assert_eq!(r.data["ended"], false);
+        assert!(r
+            .model_content
+            .as_deref()
+            .unwrap()
+            .starts_with("Re-read the EndConversation tool guidance below."));
+        assert!(!t.end_requested.load(Ordering::SeqCst), "must NOT end on 1st call");
+    }
+
+    #[tokio::test]
+    async fn second_consecutive_call_ends_and_raises_slot() {
+        // A prior assistant turn ALSO called EndConversation → 2nd consecutive.
+        let t = tool();
+        let (tx, _rx) = tool_api::progress::progress_channel();
+        let msgs = vec![
+            asst_calling_endconv(),                                  // prior turn
+            ConversationMessage::user(MessageId::new(), "reminder ack".into()),
+            asst_calling_endconv(),                                  // current turn
+        ];
+        let r = t.call(json!({}), ctx_with(msgs), tx).await.expect("ok");
         assert_eq!(r.data["ended"], true);
         assert_eq!(
             r.data["message"],
             "Claude ended the conversation. To continue, please start a new session."
         );
+        assert!(t.end_requested.load(Ordering::SeqCst), "slot raised on 2nd call");
     }
 }

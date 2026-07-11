@@ -80,6 +80,18 @@ Some background tasks (memory consolidation, summaries, suggestions) run as fork
     )
 }
 
+/// The FIRST-call response of the two-call confirmation flow (claude-code
+/// `I4i`): the tool returns this re-read reminder instead of ending, and only a
+/// SECOND consecutive call (see `lastAssistantTurnCalledEndConversation`)
+/// actually ends. `guidance` is appended verbatim after the `---` rule (the
+/// tool's guidance — pass [`render_guidance`] or [`render_prompt`]).
+#[must_use]
+pub fn render_reread_reminder(tool: &str, guidance: &str) -> String {
+    format!(
+        "Re-read the {tool} tool guidance below. Confirm this conversation meets those criteria and that you are certain you want to end it. If so, call {tool} again immediately to actually end the conversation. Otherwise, continue the conversation instead.\n\n---\n{guidance}"
+    )
+}
+
 /// Render the `# Using the <tool> tool` welfare-guidance section.
 #[must_use]
 pub fn render_guidance(tool: &str) -> String {
@@ -127,6 +139,15 @@ mod tests {
         assert!(p.contains("but it is the only channel a fork has.\n\n# Using the EndConversation tool\n- Do not issue a warning"));
         // Ends with the guidance section's final bullet.
         assert!(p.ends_with("the assistant can explain the reason for ending the conversation and then use the EndConversation tool to do so."));
+    }
+
+    #[test]
+    fn reread_reminder_byte_locks_206() {
+        let r = render_reread_reminder(END_CONVERSATION_TOOL_NAME, "GUIDE");
+        assert_eq!(
+            r,
+            "Re-read the EndConversation tool guidance below. Confirm this conversation meets those criteria and that you are certain you want to end it. If so, call EndConversation again immediately to actually end the conversation. Otherwise, continue the conversation instead.\n\n---\nGUIDE"
+        );
     }
 
     #[test]

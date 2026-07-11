@@ -1248,8 +1248,15 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // hooks compaction lifecycle: PreCompact fires before the reactive
         // summary pass. The reactive 413/PTL fallback is part of the automatic
         // recovery pipeline, so the trigger is `auto` (TS treats reactive
-        // overflow recovery as a non-manual compact). Best-effort.
-        orch.fire_pre_compact("auto").await;
+        // overflow recovery as a non-manual compact). TS reactive arm: a
+        // blocking PreCompact hook logs `Reactive compact blocked by PreCompact
+        // hook: <blockedBy>` and aborts recovery — with no compaction the prompt
+        // is still over the limit, so we surface the prompt-too-long outcome
+        // (the same value this fn falls through to).
+        if let Some(detail) = orch.fire_pre_compact("auto").await {
+            tracing::warn!("Reactive compact blocked by PreCompact hook: {detail}");
+            return Ok(PtlCallOutcome::PromptTooLong);
+        }
         let compact_result = {
             let mut tracking = orch.compaction_tracking.lock().await;
             compactor

@@ -16,3 +16,6 @@ Cargo.lock.*
 /pypi/src/lingxi_cli_bin/lingxi-package.json
 /pypi/.pytest_cache/
 /out/
+
+# LingXi scratch/cache (workflow saved-script staging, etc.)
+.lingxi-scratch/

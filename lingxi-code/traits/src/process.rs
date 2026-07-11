@@ -44,6 +44,38 @@ pub trait ProcessRunner: Send + Sync {
 
     /// Whether this runner can spawn processes on the current host.
     fn is_available(&self) -> bool;
+
+    /// Run a hook command with runtime async detection (claude-code
+    /// `hooks.ts:1117-1166`): the child's FIRST stdout line is inspected, and if
+    /// it parses as `{"async": true, "asyncTimeout"?: <ms>}` the hook is
+    /// backgrounded (left running, detached, bounded by `asyncTimeout` or
+    /// `default_async_timeout`) and [`HookRunOutcome::Backgrounded`] is returned
+    /// immediately, so the hook never blocks the turn. Otherwise the hook runs to
+    /// completion and its buffered output is returned as
+    /// [`HookRunOutcome::Completed`].
+    ///
+    /// The default implementation performs NO streaming: it defers to
+    /// [`ProcessRunner::run`] and always reports `Completed`, so a platform
+    /// without a streaming runner keeps its current (buffered, never-backgrounded)
+    /// behavior. Only runners that can stream stdout override this.
+    async fn run_hook_with_async_detection(
+        &self,
+        cmd: &SandboxedCommand,
+        _default_async_timeout: std::time::Duration,
+    ) -> Result<HookRunOutcome, ProcessError> {
+        Ok(HookRunOutcome::Completed(self.run(cmd).await?))
+    }
+}
+
+/// Outcome of [`ProcessRunner::run_hook_with_async_detection`].
+#[derive(Debug, Clone)]
+pub enum HookRunOutcome {
+    /// The hook ran to completion; carries its buffered output.
+    Completed(ProcessOutput),
+    /// The hook's first stdout line was `{"async": true, …}`; it has been
+    /// backgrounded (detached, bounded by its async timeout) and produced no
+    /// synchronous result for this turn.
+    Backgrounded,
 }
 
 /// Collected output of a completed process.

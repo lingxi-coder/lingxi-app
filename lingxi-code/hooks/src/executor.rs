@@ -1024,8 +1024,34 @@ impl Dispatcher {
                 // `shouldSkipHookDueToTrust`), so an audited bypass is the
                 // parity-honest construction here.
                 let sandboxed = sandbox.bypass_with_audit(pcmd, "hook_command");
-                let (result, timed_out) =
-                    map_command_output(hook, process.run(&sandboxed).await, expected_event);
+                // Runtime `{"async":true}` first-line detection (claude-code
+                // `hooks.ts:1117-1166`): a hook whose first stdout line is that
+                // marker is backgrounded and contributes no synchronous decision.
+                // A runner without a streaming implementation reports `Completed`
+                // for every hook (the default trait method), so non-async hooks —
+                // i.e. every hook that does not print the marker — behave exactly
+                // as the buffered path did.
+                let default_async_timeout =
+                    Duration::from_millis(crate::async_registry::DEFAULT_ASYNC_HOOK_TIMEOUT_MS);
+                let (result, timed_out) = match process
+                    .run_hook_with_async_detection(&sandboxed, default_async_timeout)
+                    .await
+                {
+                    Ok(traits::HookRunOutcome::Backgrounded) => (
+                        HookResult {
+                            outcome: HookOutcome::Success,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_code: None,
+                            response: None,
+                        },
+                        false,
+                    ),
+                    Ok(traits::HookRunOutcome::Completed(output)) => {
+                        map_command_output(hook, Ok(output), expected_event)
+                    }
+                    Err(e) => map_command_output(hook, Err(e), expected_event),
+                };
                 if timed_out {
                     emit_command_timeout(hook, effective_timeout);
                 }

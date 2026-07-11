@@ -19,10 +19,11 @@ use crate::process::wrap::{
 use async_trait::async_trait;
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use traits::{
-    ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand, SandboxedTag,
+    HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand,
+    SandboxedTag,
 };
 
 /// Audit reason stamped on a hook command by the hooks crate
@@ -283,6 +284,111 @@ impl ProcessRunner for PosixProcess {
         })
     }
 
+    async fn run_hook_with_async_detection(
+        &self,
+        cmd: &SandboxedCommand,
+        default_async_timeout: std::time::Duration,
+    ) -> Result<HookRunOutcome, ProcessError> {
+        let inner = cmd.inner();
+        let mut tcmd = Self::build_command(cmd);
+        tcmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // As in `run`: a dropped `Child` (timeout / early return) must SIGKILL
+            // the process so a timed-out hook is not orphaned.
+            .kill_on_drop(true);
+
+        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        if let Some(stdin_text) = &inner.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(stdin_text.as_bytes())
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+            }
+            // `stdin` drops here → the child sees EOF on stdin.
+        }
+
+        let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        // A single deadline bounds the whole operation, matching `run`'s single
+        // `timeout(wait_with_output)` budget.
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProcessError::Io("hook child has no stdout pipe".into()))?;
+        let mut reader = BufReader::new(stdout);
+        let mut first_line: Vec<u8> = Vec::new();
+        match tokio::time::timeout_at(deadline, reader.read_until(b'\n', &mut first_line)).await {
+            Err(_) => return Err(ProcessError::Timeout),
+            Ok(Err(e)) => return Err(ProcessError::Io(e.to_string())),
+            Ok(Ok(_)) => {}
+        }
+
+        // Runtime async detection: a first line of `{"async":true,...}` backgrounds
+        // the hook (claude-code `hooks.ts:1117-1166`).
+        if let Some(async_timeout) = parse_async_first_line(&first_line, default_async_timeout) {
+            let stderr = child.stderr.take();
+            // Detach: drain remaining output (so the pipe never blocks the child)
+            // and reap it, bounded by the async timeout; on timeout the child is
+            // dropped → `kill_on_drop` SIGKILLs it.
+            tokio::spawn(async move {
+                let mut child = child;
+                let drain_and_wait = async {
+                    let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+                    if let Some(mut se) = stderr {
+                        let _ = tokio::io::copy(&mut se, &mut tokio::io::sink()).await;
+                    }
+                    let _ = child.wait().await;
+                };
+                let _ = tokio::time::timeout(async_timeout, drain_and_wait).await;
+            });
+            return Ok(HookRunOutcome::Backgrounded);
+        }
+
+        // Not async: read the rest of stdout and all of stderr CONCURRENTLY (as
+        // `wait_with_output` does, so a large stderr can't deadlock the stdout
+        // read), then wait — all bounded by the same deadline.
+        let mut stderr_pipe = child.stderr.take();
+        let complete = async {
+            let mut rest: Vec<u8> = Vec::new();
+            let mut stderr_buf: Vec<u8> = Vec::new();
+            let stderr_read = async {
+                if let Some(se) = stderr_pipe.as_mut() {
+                    se.read_to_end(&mut stderr_buf).await
+                } else {
+                    Ok(0)
+                }
+            };
+            let (rest_res, stderr_res) =
+                tokio::join!(reader.read_to_end(&mut rest), stderr_read);
+            rest_res.map_err(|e| ProcessError::Io(e.to_string()))?;
+            stderr_res.map_err(|e| ProcessError::Io(e.to_string()))?;
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| ProcessError::Io(e.to_string()))?;
+            Ok::<_, ProcessError>((rest, stderr_buf, status))
+        };
+
+        match tokio::time::timeout_at(deadline, complete).await {
+            Err(_) => Err(ProcessError::Timeout),
+            Ok(Err(e)) => Err(e),
+            Ok(Ok((rest, stderr_buf, status))) => {
+                // Reconstruct stdout exactly: consumed first line + the rest.
+                let mut stdout_bytes = first_line;
+                stdout_bytes.extend_from_slice(&rest);
+                Ok(HookRunOutcome::Completed(ProcessOutput {
+                    stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+                    exit_code: status.code().unwrap_or(-1),
+                    timed_out: false,
+                }))
+            }
+        }
+    }
+
     async fn spawn_background(
         &self,
         cmd: &SandboxedCommand,
@@ -346,6 +452,31 @@ impl ProcessRunner for PosixProcess {
     }
 }
 
+/// Parse a hook's first stdout line for the async-response marker
+/// `{"async": true, "asyncTimeout"?: <ms>}` (claude-code's `FZe` schema).
+/// Returns the effective background timeout (`asyncTimeout` ms, or
+/// `default_async_timeout` when absent/zero — claude's `asyncTimeout || 15000`),
+/// or `None` when the line is not that marker.
+fn parse_async_first_line(
+    line: &[u8],
+    default_async_timeout: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let text = std::str::from_utf8(line).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("async") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    let timeout = value
+        .get("asyncTimeout")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&ms| ms > 0)
+        .map_or(default_async_timeout, std::time::Duration::from_millis);
+    Some(timeout)
+}
+
 /// Generate a unique task id of the form `local_bash_<nanos-hex>`.
 fn generate_task_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -354,6 +485,102 @@ fn generate_task_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("local_bash_{nanos:x}")
+}
+
+#[cfg(test)]
+mod async_hook_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use traits::ProcessCommand;
+
+    fn sh(script: &str) -> SandboxedCommand {
+        let pcmd = ProcessCommand {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            timeout: Some(Duration::from_secs(5)),
+            stdin: None,
+        };
+        SandboxedCommand::__new_sandboxed(
+            pcmd,
+            SandboxedTag::BypassAuditedWithReason {
+                reason: HOOK_COMMAND_AUDIT_REASON.to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn parse_async_first_line_recognizes_marker_and_timeout() {
+        let def = Duration::from_millis(15_000);
+        // Not the marker.
+        assert!(parse_async_first_line(b"hello\n", def).is_none());
+        assert!(parse_async_first_line(b"{\"async\":false}\n", def).is_none());
+        assert!(parse_async_first_line(b"", def).is_none());
+        // Marker without timeout → default; with 0 → default; with N → N.
+        assert_eq!(parse_async_first_line(b"{\"async\":true}\n", def), Some(def));
+        assert_eq!(
+            parse_async_first_line(b"{\"async\":true,\"asyncTimeout\":0}", def),
+            Some(def)
+        );
+        assert_eq!(
+            parse_async_first_line(b"{\"async\":true,\"asyncTimeout\":250}\n", def),
+            Some(Duration::from_millis(250))
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_hook_output_is_reconstructed_exactly() {
+        // A multi-line, non-marker hook: stdout/stderr/exit must match `run`.
+        let cmd = sh("printf 'line1\\nline2\\n'; printf 'err1\\n' 1>&2; exit 3");
+        let outcome = PosixProcess::new()
+            .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
+            .await
+            .expect("runs");
+        match outcome {
+            HookRunOutcome::Completed(o) => {
+                assert_eq!(o.stdout, "line1\nline2\n");
+                assert_eq!(o.stderr, "err1\n");
+                assert_eq!(o.exit_code, 3);
+            }
+            HookRunOutcome::Backgrounded => panic!("normal hook must not background"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_output_hook_completes() {
+        let cmd = sh("exit 0");
+        let outcome = PosixProcess::new()
+            .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
+            .await
+            .expect("runs");
+        match outcome {
+            HookRunOutcome::Completed(o) => {
+                assert_eq!(o.stdout, "");
+                assert_eq!(o.exit_code, 0);
+            }
+            HookRunOutcome::Backgrounded => panic!("empty hook must not background"),
+        }
+    }
+
+    #[tokio::test]
+    async fn async_marker_backgrounds_without_blocking() {
+        // Prints the marker, then sleeps far longer than the async timeout. The
+        // call must return Backgrounded immediately (well under the sleep).
+        let cmd = sh("echo '{\"async\":true,\"asyncTimeout\":100}'; sleep 30");
+        let start = tokio::time::Instant::now();
+        let outcome = PosixProcess::new()
+            .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
+            .await
+            .expect("runs");
+        assert!(matches!(outcome, HookRunOutcome::Backgrounded));
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "async hook must not block the turn (took {:?})",
+            start.elapsed()
+        );
+    }
 }
 
 #[cfg(test)]

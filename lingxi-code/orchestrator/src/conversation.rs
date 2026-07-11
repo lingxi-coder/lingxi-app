@@ -6268,7 +6268,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // response carries NO tool_uses and falls through to the recovery/
                 // terminal arms below. Subsumes the former
                 // `Some("tool_use") if !pumped.tool_uses.is_empty()` arm.
-                _ if !pumped.tool_uses.is_empty() => continue,
+                _ if !pumped.tool_uses.is_empty() => {
+                    // EndConversation (2.1.206, streaming twin): a 2nd
+                    // consecutive EndConversation call raised the shared
+                    // end-request slot during tool dispatch above. Consume it;
+                    // if raised, surface the end message and terminate instead
+                    // of continuing. Default-OFF (no slot wired) → strict no-op
+                    // → byte-identical to before.
+                    if self
+                        .end_conversation_slot
+                        .as_ref()
+                        .is_some_and(|s| s.swap(false, std::sync::atomic::Ordering::SeqCst))
+                    {
+                        self.output
+                            .emit_text(
+                                crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE,
+                            )
+                            .await;
+                        return Ok(ConversationOutcome::EndTurn {
+                            turn_count,
+                            final_message_id: assistant_id,
+                        });
+                    }
+                    continue;
+                }
                 Some("end_turn") => {
                     // #78 thinking-only nudge (claude-code `bin/claude.exe`
                     // offset ~202946760): an `end_turn` response with no visible

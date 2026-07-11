@@ -686,11 +686,31 @@ enum WriteOutcome {
 
 /// Write a server entry into the chosen scope's config file, returning whether
 /// it was newly added or already present.
+/// Validate an MCP server name the way TS `addMcpServer` does before any write:
+/// reject any char outside `[a-zA-Z0-9_-]` (TS `/[^a-zA-Z0-9_-]/`) with the
+/// byte-faithful message. (The reserved-name check — TS `TEt` = "computer-use" /
+/// "workspace" / the interned `gE`+`W2h` sets under a `Bc` normalizer — is
+/// deferred; those predicates are not recoverable from static extraction.)
+fn validate_mcp_server_name(name: &str) -> Result<(), String> {
+    if name
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        return Err(format!(
+            "Invalid name {name}. Names can only contain letters, numbers, hyphens, and underscores."
+        ));
+    }
+    Ok(())
+}
+
 fn write_server(
     name: &str,
     entry: &serde_json::Value,
     scope: Scope,
 ) -> Result<WriteOutcome, String> {
+    // TS `addMcpServer` validates the name BEFORE any scope write; both `mcp add`
+    // and `mcp add-json` route through here.
+    validate_mcp_server_name(name)?;
     match scope {
         Scope::User => write_user_server(name, entry),
         Scope::Local => write_local_server(name, entry),
@@ -1597,6 +1617,29 @@ mod url_redaction_tests {
     fn non_url_input_falls_back_to_raw() {
         // No `://` ⟶ return the raw string unchanged (graceful fallback).
         assert_eq!(redact_url_for_display("not-a-url"), "not-a-url");
+    }
+}
+
+#[cfg(test)]
+mod name_validation_tests {
+    use super::validate_mcp_server_name;
+
+    #[test]
+    fn rejects_invalid_name_chars_with_byte_exact_message() {
+        for bad in ["my server", "srv!", "a/b", "dot.name", "caf\u{00e9}"] {
+            let err = validate_mcp_server_name(bad).expect_err("invalid name must be rejected");
+            assert_eq!(
+                err,
+                format!("Invalid name {bad}. Names can only contain letters, numbers, hyphens, and underscores.")
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_name_chars() {
+        for ok in ["srv", "my-server_1", "ABC123", "a", "___", "---"] {
+            assert!(validate_mcp_server_name(ok).is_ok(), "valid name rejected: {ok}");
+        }
     }
 }
 

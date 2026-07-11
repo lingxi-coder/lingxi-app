@@ -2636,6 +2636,7 @@ dependencies = [
  "migrations",
  "protocol",
  "rand 0.9.4",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -2645,6 +2646,7 @@ dependencies = [
  "tracing",
  "traits",
  "unicode-normalization",
+ "url",
  "urlencoding",
 ]
 

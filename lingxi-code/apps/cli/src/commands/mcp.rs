@@ -742,6 +742,16 @@ fn write_server(
     if mcp::enterprise_policy::enterprise_mcp_active() {
         return Err(mcp::enterprise_policy::ENTERPRISE_EXCLUSIVE_CONTROL_MESSAGE.to_string());
     }
+    // 3. `bPe`/`gPe` — enterprise allow/deny policy (from the managed settings
+    //    tiers). Inert when no policy is configured (nothing denied, all
+    //    allowed).
+    let policy = mcp::enterprise_policy::read_managed_mcp_policy();
+    if mcp::enterprise_policy::is_denied(name, entry, &policy) {
+        return Err(mcp::enterprise_policy::denied_message(name));
+    }
+    if !mcp::enterprise_policy::is_allowed(name, entry, &policy) {
+        return Err(mcp::enterprise_policy::not_allowed_message(name));
+    }
     match scope {
         Scope::User => write_user_server(name, entry),
         Scope::Local => write_local_server(name, entry),

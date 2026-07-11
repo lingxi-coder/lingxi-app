@@ -84,6 +84,38 @@ pub struct TaskRecord {
     pub is_backgrounded: Option<bool>,
 }
 
+/// A `local_workflow` run projected for the interactive `/workflows` picker
+/// ("Browse running and completed workflows"). Richer than [`TaskRecord`]: it
+/// surfaces the `wf_…` run id, the launcher-minted current phase step, and the
+/// start/end wall-clock (epoch millis) so the picker can show elapsed time.
+/// These come from the concrete [`crate::task_registry::TaskRegistryHandle`]
+/// impl's access to the full task state; the trait's default `list_workflows`
+/// fills only what the reduced [`TaskRecord`] carries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowRecord {
+    /// 9-char task id (`w…`) — the handle key for `output`/`kill`.
+    pub task_id: String,
+    /// The effective `wf_…` run id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Display name — the workflow's `meta.name` / `workflow_id`.
+    pub name: String,
+    /// Status wire string (`pending`/`running`/`completed`/`failed`/`killed`).
+    pub status: String,
+    /// The workflow's launch description (script summary), when present.
+    #[serde(default)]
+    pub description: String,
+    /// Index of the currently-executing phase step (0-based).
+    #[serde(default)]
+    pub current_step: usize,
+    /// Wall-clock start (epoch millis), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    /// Wall-clock end (epoch millis) for a terminal run, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<u64>,
+}
+
 /// Agent-run usage for a `local_agent` task-notification's optional `<usage>`
 /// section — mirrors claude-code's `enqueueAgentNotification` usage object
 /// (`{ totalTokens, toolUses, durationMs }`, rendered as
@@ -208,6 +240,30 @@ pub trait TaskRegistryHandle: Send + Sync {
 
     /// List tasks, optionally filtered.
     async fn list(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError>;
+
+    /// List `local_workflow` runs (running AND completed-but-not-evicted) for the
+    /// `/workflows` picker. The default impl derives them from [`Self::list`],
+    /// filling only the reduced [`TaskRecord`] fields; the concrete
+    /// `TaskRegistry` impl overrides this to add the `wf_…` run id, phase step,
+    /// and start/end timestamps from the full task state. Defaulted so existing
+    /// mock handles compile unchanged (frozen-trait idiom).
+    async fn list_workflows(&self) -> Result<Vec<WorkflowRecord>, TaskRegistryError> {
+        let records = self.list(TaskListFilter::default()).await?;
+        Ok(records
+            .into_iter()
+            .filter(|r| r.task_type == "local_workflow")
+            .map(|r| WorkflowRecord {
+                task_id: r.task_id,
+                run_id: None,
+                name: r.name.unwrap_or_else(|| r.description.clone()),
+                status: r.status,
+                description: r.description,
+                current_step: 0,
+                started_at_ms: None,
+                ended_at_ms: None,
+            })
+            .collect())
+    }
 
     /// Apply a patch (currently: status transition).
     async fn update(

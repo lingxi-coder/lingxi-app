@@ -4,10 +4,10 @@
 
 use crate::multiagent::adapter::MultiAgentFeed;
 use crate::multiagent::event::MultiAgentEvent;
-use crate::multiagent::state::TaskRow;
+use crate::multiagent::state::{TaskRow, WorkflowRow};
 use async_trait::async_trait;
 use std::sync::Arc;
-use traits::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle};
+use traits::task_registry::{TaskListFilter, TaskRecord, TaskRegistryHandle, WorkflowRecord};
 
 /// Maps a `TaskRecord` (the trait's wire shape) onto a `TaskRow` (the TUI's
 /// presentation shape). Total — every `TaskRecord` field has a `TaskRow` home.
@@ -19,6 +19,27 @@ pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
         status: r.status,
         description: r.description,
         command: r.command,
+    }
+}
+
+/// Maps a `WorkflowRecord` onto a `WorkflowRow` (the picker's presentation
+/// shape). Total — every field has a home.
+#[must_use]
+pub fn workflow_row_from_record(r: WorkflowRecord) -> WorkflowRow {
+    WorkflowRow {
+        task_id: r.task_id,
+        run_id: r.run_id,
+        name: r.name,
+        status: r.status,
+        description: r.description,
+        current_step: r.current_step,
+        started_at_ms: r.started_at_ms,
+        ended_at_ms: r.ended_at_ms,
+        // Enriched separately from the run's output spool (the record carries
+        // no progress data); `cmd_workflows` fills these via
+        // `parse_workflow_spool`.
+        agent_count: 0,
+        phases: Vec::new(),
     }
 }
 

@@ -1936,6 +1936,47 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
+    /// `/workflows`: open the interactive "Dynamic workflows" picker over a
+    /// snapshot of `local_workflow` runs (running AND completed) — the same
+    /// `block_on`-snapshot idiom as [`Self::cmd_tasks`], reading the richer
+    /// [`traits::task_registry::TaskRegistryHandle::list_workflows`] projection
+    /// and enriching each row with the agent-count + phase/agent tree parsed
+    /// from its output spool. Opens the dialog even when empty (its own
+    /// "No dynamic workflows in this session." state), matching the oracle.
+    pub(crate) fn cmd_workflows(&mut self, _args: &str) -> ChatOutcome {
+        let Some(registry) = self.task_registry.clone() else {
+            return self
+                .show_system_text("/workflows is unavailable (no engine handle wired)", true);
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => return self.show_system_text(&format!("/workflows failed: {err}"), true),
+        };
+        let records = runtime
+            .block_on(registry.list_workflows())
+            .unwrap_or_default();
+        let rows: Vec<tui_core::multiagent::WorkflowRow> = records
+            .into_iter()
+            .map(|rec| {
+                let task_id = rec.task_id.clone();
+                let mut row = tui_core::multiagent::workflow_row_from_record(rec);
+                // Enrich with agent-count + phase/agent tree from the run spool.
+                if let Ok(chunk) = runtime.block_on(registry.output(&task_id, None)) {
+                    let (agents, phases) =
+                        tui_core::multiagent::parse_workflow_spool(&chunk.content);
+                    row.agent_count = agents;
+                    row.phases = phases;
+                }
+                row
+            })
+            .collect();
+        self.bottom_pane.show_workflows(rows);
+        ChatOutcome::Continue
+    }
+
     /// `/plugin` (aliases `/plugins`, `/marketplace`): open the interactive
     /// plugin manager, seeded from the shared snapshot (installed plugins +
     /// enabled state, preloaded at startup and refreshed by the async

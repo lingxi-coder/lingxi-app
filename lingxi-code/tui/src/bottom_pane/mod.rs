@@ -33,6 +33,7 @@ pub mod tasks_view;
 pub mod screen_view;
 pub mod theme_picker_view;
 pub mod view;
+pub mod workflows_view;
 pub mod web_config_view;
 pub mod web_picker_view;
 
@@ -524,6 +525,12 @@ impl BottomPane {
     pub fn show_tasks(&mut self, rows: Vec<tui_core::multiagent::TaskRow>) {
         self.view_stack
             .push(Box::new(tasks_view::TasksView::new(rows, self.theme)));
+    }
+
+    /// Open the `/workflows` picker over a snapshot of workflow runs.
+    pub fn show_workflows(&mut self, rows: Vec<tui_core::multiagent::WorkflowRow>) {
+        self.view_stack
+            .push(Box::new(workflows_view::WorkflowsView::new(rows, self.theme)));
     }
 
     /// Open the `/plugin` manager over `snapshot` (installed plugins + enabled

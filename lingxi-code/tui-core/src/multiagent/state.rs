@@ -24,6 +24,62 @@ pub struct TaskRow {
     pub command: Option<String>,
 }
 
+/// One agent within a workflow phase, parsed from the run's output spool
+/// (`[workflow_agent] {json}` lines). `state` is the latest lifecycle state seen
+/// for the agent (`start`/`done`/`error`/`cached`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowAgentRow {
+    /// The agent's display label (from `agent()`'s label/prompt).
+    pub label: String,
+    /// Latest lifecycle state: `start` / `done` / `error` / `cached`.
+    pub state: String,
+}
+
+/// One phase of a workflow run, with the agents that ran under it. Parsed from
+/// the spool's `[{index}] === {title} ===` phase markers + `[workflow_agent]`
+/// lines carrying a matching `phaseIndex`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowPhase {
+    /// Phase index as emitted by `phase()` (0-based).
+    pub index: usize,
+    /// Phase title.
+    pub title: String,
+    /// Agents that ran under this phase, in first-seen order.
+    pub agents: Vec<WorkflowAgentRow>,
+}
+
+/// One workflow run as surfaced to the `/workflows` picker. Mirrors
+/// `traits::task_registry::WorkflowRecord` (identity + timing) and is further
+/// enriched by [`crate::multiagent::parse_workflow_spool`] with the agent count
+/// and phase/agent tree parsed from the run's output spool. Elapsed is not
+/// stored — the picker derives it from `started_at_ms`/`ended_at_ms` against the
+/// wall clock at render time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowRow {
+    /// 9-char task id (`w…`).
+    pub task_id: String,
+    /// The effective `wf_…` run id, when known.
+    pub run_id: Option<String>,
+    /// Display name (workflow `meta.name`).
+    pub name: String,
+    /// Status wire string (`running`/`completed`/`failed`/…).
+    pub status: String,
+    /// Launch description (script summary).
+    pub description: String,
+    /// Current phase step (0-based).
+    pub current_step: usize,
+    /// Wall-clock start (epoch millis), when known.
+    pub started_at_ms: Option<u64>,
+    /// Wall-clock end (epoch millis) for a terminal run, when known.
+    pub ended_at_ms: Option<u64>,
+    /// Distinct agents launched by the run (parsed from the spool). `0` until
+    /// enriched.
+    pub agent_count: usize,
+    /// Phase/agent tree parsed from the run's output spool. Empty until enriched
+    /// (or when the run emitted no `phase()`/`agent()` progress).
+    pub phases: Vec<WorkflowPhase>,
+}
+
 /// One teammate/worker row. Populated from the coordinator surface in M9-06;
 /// in M9-01 it is filled only by fixtures/tests (no coordinator dependency).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

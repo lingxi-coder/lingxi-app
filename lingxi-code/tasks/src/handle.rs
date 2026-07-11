@@ -16,7 +16,7 @@ use crate::task_trait::{TaskError, TaskSpawnInput};
 use async_trait::async_trait;
 use traits::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
-    TaskRegistryHandle, TaskUpdatePatch,
+    TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
 };
 
 fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
@@ -266,6 +266,34 @@ impl TaskRegistryHandle for TaskRegistry {
                 }
             }
             out.push(state_to_record(&state));
+        }
+        Ok(out)
+    }
+
+    /// Rich `local_workflow` projection for the `/workflows` picker: surfaces the
+    /// `wf_…` run id, current phase step, and start/end wall-clock (epoch millis)
+    /// straight from [`LocalWorkflowTaskState`], which the reduced [`TaskRecord`]
+    /// drops. Newest-first, matching the registry's inherent ordering.
+    async fn list_workflows(&self) -> Result<Vec<WorkflowRecord>, TaskRegistryError> {
+        fn epoch_ms(t: std::time::SystemTime) -> Option<u64> {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        }
+        let mut out = Vec::new();
+        for state in self.list().await {
+            if let TaskState::LocalWorkflow(w) = &state {
+                out.push(WorkflowRecord {
+                    task_id: w.base.id.clone(),
+                    run_id: w.run_id.clone(),
+                    name: w.workflow_id.clone(),
+                    status: status_to_wire(w.base.status).to_string(),
+                    description: w.base.description.clone(),
+                    current_step: w.current_step,
+                    started_at_ms: epoch_ms(w.base.start_time),
+                    ended_at_ms: w.base.end_time.and_then(epoch_ms),
+                });
+            }
         }
         Ok(out)
     }

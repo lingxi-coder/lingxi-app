@@ -193,6 +193,21 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_tasks,
     },
     SlashCommand {
+        // 2.1.205 `name:"workflows"` (`local-jsx`, `immediate`). LingXi ships
+        // the workflow subsystem always-on (the `allow_workflows` /
+        // `tengu_workflows_enabled` / plan gates have no LingXi equivalent — the
+        // Workflow tool is registered unconditionally), so this is advertised
+        // unconditionally too.
+        name: "/workflows",
+        aliases: &[],
+        description: "Browse running and completed workflows",
+        dynamic_description: None,
+        hint: "",
+        args: ArgSpec::None,
+        advertised: true,
+        run: ChatWidget::cmd_workflows,
+    },
+    SlashCommand {
         name: "/hooks",
         aliases: &[],
         description: "View hook configurations for tool events",

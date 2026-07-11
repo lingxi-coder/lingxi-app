@@ -5201,6 +5201,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // call (claude-code `aborted_streaming` — query.ts:1015).
         let mut last_message_id = user_msg.id();
         loop {
+            // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE
+            // every terminal top-of-loop guard, including `max_turns`. A message
+            // can arrive while the previous model/tool step is running; returning
+            // for the cap before this consume-once source is polled would discard
+            // it. Claude Code 2.1.205 preserves that message when `--max-turns`
+            // ends the turn, so inject it into the persisted history first.
+            // With no source wired this remains a strict no-op.
+            self.drain_mid_turn_input().await;
+
             if self.config.max_turns != 0 && turn_count >= self.config.max_turns {
                 return Err(OrchestratorError::MaxTurnsReached {
                     max_turns: self.config.max_turns,
@@ -5212,30 +5221,6 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 });
             }
             turn_count = turn_count.saturating_add(1);
-
-            // MID-TURN DRAIN (claude-code query.ts ~1570-1580): BEFORE the
-            // top-of-loop cancel guard, pull any queued main-thread, non-slash
-            // user input and inject it as a meta user message so this iteration's
-            // model call sees it. A strict no-op when no source is wired (the
-            // default) — the locked streaming fixtures are unaffected. Drained
-            // BEFORE the cancel check so the injected input is in history even if
-            // the very next thing observed is a `Now`-driven cancellation. A
-            // mid-turn drain pulls `Next`+`Now` text; the separate `Now`-abort
-            // branch below handles the urgent-command-aborts-the-turn UX.
-            //
-            // ORDERING IS LOAD-BEARING — DO NOT REORDER past the cancel guard
-            // below. The drain MUST run before the cancel check on EVERY iteration
-            // so that any `Next`/`Now` text enqueued during the previous
-            // iteration's streaming is folded into history before this iteration
-            // can observe the (possibly already-cancelled) token and break. The
-            // abort-reason flag read by the cancel guard is set at ENQUEUE time
-            // (by the queue adapter, before it fires the token) and reset at TURN
-            // START (driver `reset()`), never by this drain — so it is monotonic
-            // within a turn and the guard never reads a stale value regardless of
-            // when the drain consumes. A `Now`-priority command is intentionally
-            // NOT mid-turn-injected here; it aborts the turn and is run by the
-            // between-turn drain, so leaving it queued past this point is correct.
-            self.drain_mid_turn_input().await;
 
             // DEFERRED-3 / esc-interrupt FIX: top-of-loop user-interrupt guard
             // (faithful port of claude-code `query.ts:1015` — the `aborted_streaming`
@@ -8101,7 +8086,7 @@ As you answer the user's questions, you can use the following context:\n\
             let s = self.session.lock().await;
             (s.model.clone(), s.model_profile.clone())
         };
-        tool_api::wire::tools_to_wire(
+        let mut wire = tool_api::wire::tools_to_wire(
             &tools,
             &PromptOptions {
                 include_examples: true,
@@ -8109,7 +8094,25 @@ As you answer the user's questions, you can use the following context:\n\
                 model_profile,
             },
         )
-        .await
+        .await;
+        // Structured-output strict mode (claude-code `tengu_structured_output_strict`
+        // + `strictInputJSONSchema`): when the flag is on, mark the forced
+        // `StructuredOutput` tool `strict` so the Anthropic codec sends its
+        // schema in strict form. Default-OFF ⇒ no tool is marked ⇒ wire bytes
+        // unchanged. Provider-gated downstream (only the Anthropic codec acts on
+        // `strict`).
+        if telemetry::flag_bool("tengu_structured_output_strict", false) {
+            for t in &mut wire {
+                if t.get("name").and_then(serde_json::Value::as_str)
+                    == Some(crate::structured_output::STRUCTURED_OUTPUT_TOOL_NAME)
+                {
+                    if let Some(obj) = t.as_object_mut() {
+                        obj.insert("strict".to_string(), serde_json::Value::Bool(true));
+                    }
+                }
+            }
+        }
+        wire
     }
 
     /// Borrow the in-memory session (read-write lock surrogate). Useful for tests.

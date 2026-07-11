@@ -453,11 +453,35 @@ fn encode_tool(tool: &ToolDeclaration) -> Value {
         }
         return Value::Object(obj);
     }
-    serde_json::json!({
-        "name": tool.name,
-        "description": tool.description,
-        "input_schema": tool.input_schema,
-    })
+    // Caller-defined tool. When `strict` is set (structured-output strict mode)
+    // and the schema converts, send the strict schema + `strict: true`; on a
+    // non-convertible schema, warn and fall back to a normal (non-strict) tool.
+    // With `strict == false` (every tool by default) this produces the exact
+    // `{name, description, input_schema}` object as before — byte-unchanged.
+    let mut obj = serde_json::Map::new();
+    obj.insert("name".to_string(), Value::String(tool.name.clone()));
+    obj.insert(
+        "description".to_string(),
+        Value::String(tool.description.clone()),
+    );
+    if tool.strict {
+        match crate::strict_schema::to_strict_schema(&tool.input_schema) {
+            Ok(strict_schema) => {
+                obj.insert("input_schema".to_string(), strict_schema);
+                obj.insert("strict".to_string(), Value::Bool(true));
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    "Tool {} has strict: true but its schema is not strict-compatible ({reason}); sending non-strict",
+                    tool.name
+                );
+                obj.insert("input_schema".to_string(), tool.input_schema.clone());
+            }
+        }
+    } else {
+        obj.insert("input_schema".to_string(), tool.input_schema.clone());
+    }
+    Value::Object(obj)
 }
 
 /// Anthropic beta header for the hosted computer-use tool. Ported 1:1 from

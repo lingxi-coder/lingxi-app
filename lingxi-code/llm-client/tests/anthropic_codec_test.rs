@@ -247,6 +247,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
         input_schema: serde_json::Value::Null,
         tool_type: Some("computer_use_20250124".to_string()),
         extra,
+        strict: false,
     });
 
     let provider_request = codec.encode_request(&request).unwrap();
@@ -503,6 +504,48 @@ fn encode_omits_empty_tools_array() {
     });
     let encoded = codec.encode_request(&with_tools).unwrap();
     assert_eq!(encoded.body_json["tools"][0]["name"], "Read");
+    // Default (strict == false) omits the `strict` field entirely — wire bytes
+    // are the plain `{name, description, input_schema}` object.
+    assert!(encoded.body_json["tools"][0].get("strict").is_none());
+}
+
+#[test]
+fn encode_strict_tool_sends_converted_schema_and_strict_flag() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    request.tools.push(ToolDeclaration {
+        name: "StructuredOutput".to_string(),
+        description: "emit".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }),
+        strict: true,
+        ..Default::default()
+    });
+    let tool = &codec.encode_request(&request).unwrap().body_json["tools"][0];
+    assert_eq!(tool["strict"], serde_json::json!(true));
+    // The converted schema closes the object with additionalProperties:false.
+    assert_eq!(tool["input_schema"]["additionalProperties"], serde_json::json!(false));
+}
+
+#[test]
+fn encode_strict_tool_with_bad_schema_falls_back_to_non_strict() {
+    let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+    let mut request = LlmRequest::new("claude-sonnet-4-20250514");
+    // A root that is not an object cannot be made strict → non-strict fallback.
+    let schema = serde_json::json!({ "type": "string" });
+    request.tools.push(ToolDeclaration {
+        name: "Bad".to_string(),
+        description: "d".to_string(),
+        input_schema: schema.clone(),
+        strict: true,
+        ..Default::default()
+    });
+    let tool = &codec.encode_request(&request).unwrap().body_json["tools"][0];
+    assert!(tool.get("strict").is_none());
+    assert_eq!(tool["input_schema"], schema);
 }
 
 #[test]

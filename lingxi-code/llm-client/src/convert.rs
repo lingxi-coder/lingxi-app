@@ -561,10 +561,19 @@ fn convert_tool_declaration(value: Value) -> Result<ToolDeclaration, LlmError> {
             message: "Tool declaration missing required field: input_schema".to_string(),
         })?;
 
+    // Structured-output strict mode: a wire tool may carry `"strict": true`
+    // (set by its producer when `tengu_structured_output_strict` is on). Absent
+    // ⇒ `false`, so a normal tool is unaffected.
+    let strict = value
+        .get("strict")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     Ok(ToolDeclaration {
         name,
         description,
         input_schema,
+        strict,
         ..Default::default()
     })
 }

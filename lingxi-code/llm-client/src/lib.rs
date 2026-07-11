@@ -36,6 +36,7 @@ pub mod service;
 pub mod sigv4;
 pub mod sse;
 pub mod ssl;
+pub mod strict_schema;
 pub mod transport;
 pub mod transport_bridge;
 pub mod types;

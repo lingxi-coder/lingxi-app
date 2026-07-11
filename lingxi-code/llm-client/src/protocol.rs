@@ -612,6 +612,13 @@ pub struct ToolDeclaration {
     /// caller-defined tools.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, Value>,
+    /// Structured-output strict mode (claude `tool.strict`): when `true` and the
+    /// model supports it, the Anthropic codec converts `input_schema` to its
+    /// strict form ([`crate::strict_schema`]) and sends `strict: true`. Default
+    /// `false` for every caller-defined tool, so the encoded wire bytes are
+    /// unchanged until a tool opts in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict: bool,
 }
 
 /// Tool-choice policy.

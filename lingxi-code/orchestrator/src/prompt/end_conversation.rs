@@ -16,6 +16,16 @@
 /// The tool's wire name (claude-code `SN`).
 pub const END_CONVERSATION_TOOL_NAME: &str = "EndConversation";
 
+/// `modelMeetsEndConversationFloor` (claude-code `fJc = pJc(e, LJh)`): the model
+/// half of `isEndConversationToolEnabled`. The floor is the SAME `LJh` version
+/// table as the `# Communicating with the user` section — opus>=4.8, sonnet>=5,
+/// fable>=5, mythos>=5 — so the composition root only registers the tool for a
+/// current-gen model (in addition to the `tengu_umber_kestrel` GB gate).
+#[must_use]
+pub fn meets_end_conversation_floor(model: &str) -> bool {
+    crate::prompt::body_sections::is_communicating_model(model)
+}
+
 /// Input schema — claude-code `E0y = E.strictObject({})`: NO parameters
 /// (an empty strict object → no properties, `additionalProperties: false`).
 #[must_use]

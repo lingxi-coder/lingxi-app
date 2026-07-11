@@ -5100,13 +5100,18 @@ pub async fn build(
         });
 
     // EndConversation (2.1.206): register the tool + create the shared
-    // end-request slot when the feature is enabled. claude-code gates it on
-    // `isEndConversationToolEnabled` (a model floor + the `tengu_umber_kestrel`
-    // GB flag). The LingXi equivalent — like the memdir-prefetch gate above — is
-    // a default-OFF env flag; unset leaves the registry + the turn loop
-    // byte-identical (`end_conversation_slot.is_none()`).
+    // end-request slot when the feature is enabled. claude-code
+    // `isEndConversationToolEnabled` (`NWn`) = `modelMeetsEndConversationFloor`
+    // (`fJc`, the `LJh` version table) AND the `tengu_umber_kestrel` GB flag.
+    // The LingXi equivalent of the GB flag — like the memdir-prefetch gate above
+    // — is a default-OFF env flag; the model floor is enforced faithfully via
+    // `meets_end_conversation_floor`. Either half failing (default: env unset)
+    // leaves the registry + turn loop byte-identical
+    // (`end_conversation_slot.is_none()`).
+    let end_conversation_enabled = is_env_truthy("LINGXI_END_CONVERSATION")
+        && orchestrator::prompt::end_conversation::meets_end_conversation_floor(&orch_cfg.model);
     let end_conversation_slot: Option<orchestrator::end_conversation_tool::EndConversationSlot> =
-        is_env_truthy("LINGXI_END_CONVERSATION").then(|| {
+        end_conversation_enabled.then(|| {
             let slot: orchestrator::end_conversation_tool::EndConversationSlot =
                 Arc::new(std::sync::atomic::AtomicBool::new(false));
             tools_inner.register_builtin(Arc::new(

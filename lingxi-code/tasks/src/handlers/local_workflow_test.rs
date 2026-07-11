@@ -280,6 +280,90 @@ async fn run_bridge(script: &str, spawner: Arc<EchoSpawner>) -> workflow::RunOut
     .expect("workflow runs to completion")
 }
 
+/// Reproduction for the "/workflows task stuck running" report: the production
+/// path wires a progress channel (`Some(ptx)`) and joins the run future with a
+/// `drain` that reads the channel until all senders drop — the exact pattern the
+/// `spawn` worker uses (`tokio::join!(run, drain)`). The other bridge tests pass
+/// `None` for the progress sender, so this path (and any sender that outlives the
+/// run) was never exercised. Uses an ASYNC spawner that actually yields, closer
+/// to the real engine dispatch than the synchronous `EchoSpawner`.
+#[tokio::test]
+async fn run_with_progress_drain_completes_and_does_not_hang() {
+    struct YieldSpawner;
+    #[async_trait]
+    impl SubagentSpawner for YieldSpawner {
+        async fn agent_listing(&self) -> Vec<traits::subagent_spawn::SubagentListingEntry> {
+            Vec::new()
+        }
+        async fn spawn(
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            // Yield + a tiny sleep so the spawn genuinely awaits (real dispatch
+            // suspends on the network), rather than returning synchronously.
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            Ok(SubagentResult::Completed {
+                agent_id: protocol::AgentId::new(),
+                content: Value::String(format!("echo:{}", request.prompt)),
+                usage: SubagentUsage {
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+                total_tool_use_count: 0,
+                total_duration_ms: 0,
+                total_tokens: 0,
+                assistant_message_count: 0,
+                response_char_count: 0,
+                last_request_id: None,
+            })
+        }
+    }
+
+    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // The `spawn` worker's drainer: read progress lines until every sender drops.
+    let drain = async move {
+        let mut lines = 0usize;
+        while prx.recv().await.is_some() {
+            lines += 1;
+        }
+        lines
+    };
+    let script = "export const meta = { name: 'x', description: 'y', phases: [{ title: 'A' }, { title: 'B' }] };\n\
+                  phase('A'); const a = await agent('p1'); phase('B'); const b = await agent('p2'); return { a, b };";
+    let run = run_workflow_script(
+        script,
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(YieldSpawner),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        Some(ptx),
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    );
+    // If a progress sender outlives `run`, `drain` never ends and this join hangs.
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(run, drain)
+    })
+    .await;
+    assert!(
+        joined.is_ok(),
+        "workflow with a progress drain HUNG — join!(run, drain) never completed"
+    );
+    let (outcome, drained_lines) = joined.unwrap();
+    assert!(outcome.is_ok(), "run failed: {:?}", outcome.err());
+    // 2 phases + 2 agents (start+done each) → several progress lines drained.
+    assert!(drained_lines >= 4, "expected progress lines, got {drained_lines}");
+}
+
 /// The 1000-agent lifetime cap: the 1001st REAL spawn rejects with the
 /// byte-exact `WorkflowAgentCapError` message, terminating the run.
 #[tokio::test]

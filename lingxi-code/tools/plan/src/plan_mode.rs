@@ -323,6 +323,11 @@ impl Tool for EnterPlanModeTool {
                 ));
             }
             guard.plan_mode = true;
+            // Replay the FULL (206 `LU_`) plan-mode reminder on this fresh entry:
+            // reset the full-vs-sparse tracker so the next turn injects `full`
+            // before switching to `sparse`. Mirrors 206 `reminderType` being
+            // "full" on the first plan-mode reminder after entry.
+            guard.plan_reminder_shown = false;
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;

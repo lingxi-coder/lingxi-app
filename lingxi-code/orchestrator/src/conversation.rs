@@ -5336,6 +5336,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 snapshot.push(reminder);
             }
 
+            // PLANMODE (streaming twin): per-turn, transient `plan_mode` reminder
+            // (206 `xEg` attachment). Emitted ONLY while `session.plan_mode` is
+            // active (after `EnterPlanMode`), so the DEFAULT build stays
+            // byte-identical and the locked streaming fixtures still pass. Placed
+            // right after the output-style reminder and BEFORE the skill-listing
+            // reminder — identical position to the batched twin (`turn_loop.rs`)
+            // and to 206 `KJn` (`l=await xEg(t)` spread before the invoked-skills
+            // bodies and tool/mcp deltas). claude-code has ONE main loop, so both
+            // LingXi twins must inject this reminder. Appended to THIS turn's
+            // OUTGOING snapshot only (never `session.history` / JSONL) and BEFORE
+            // the blocking-limit estimate below so its tokens are counted in the
+            // prompt size. See [`Self::plan_mode_reminder_message`].
+            if let Some(reminder) = self.plan_mode_reminder_message().await {
+                snapshot.push(reminder);
+            }
+
             // SKILLLIST.1 (streaming twin): per-turn, transient `skill_listing`
             // reminder so the model can discover skills. Appended to THIS turn's
             // OUTGOING snapshot only (never to `session.history` / JSONL), after
@@ -7368,6 +7384,74 @@ As you answer the user's questions, you can use the following context:\n\
     /// reminder that turn). 1:1 with TS `sentSkillNames` (attachments.ts:2607,
     /// 2699): the budgeter still runs over the delta subset, so the rendered
     /// bytes match what TS would send for that turn's new-skill set.
+    /// The per-turn, transient plan-mode reminder (206 `plan_mode` attachment,
+    /// builder `xEg`), or `None` when plan mode is not active.
+    ///
+    /// 1:1 with the binary's `xEg(t)`: gated on `permissionMode === "plan"`
+    /// (here `session.plan_mode`), it returns the `{type:"plan_mode",
+    /// reminderType, isSubAgent, planFilePath, planExists, ...customInstructions}`
+    /// attachment which `KJn` assembles (`l=await xEg(t)`) BEFORE the
+    /// invoked-skills bodies (`REg`) and the tool/mcp deltas (`gYt`/`YJn`), i.e.
+    /// before the skill-listing reminder in the port's per-turn sequence.
+    ///
+    /// `reminderType` is `"full"` (206 `LU_`) on the FIRST plan-mode turn and
+    /// `"sparse"` (206 `MU_`) thereafter — tracked by `plan_reminder_shown`,
+    /// which is reset to `false` on plan-mode ENTRY. `isSubAgent` is ALWAYS
+    /// `false` here: subagents never run through `ConversationOrchestrator`
+    /// (every orchestrator is a depth-0 main thread), so the `NU_` variant is
+    /// unreachable via this path. `customInstructions` stays `None` (wired by a
+    /// later unit). Appended ONLY to the per-turn OUTGOING snapshot (never
+    /// `session.history` / JSONL) so it never accumulates; `None` keeps the
+    /// locked turn-loop fixtures byte-identical (default: plan mode OFF).
+    pub(crate) async fn plan_mode_reminder_message(&self) -> Option<ConversationMessage> {
+        let (path, exists, sparse) = {
+            let mut s = self.session.lock().await;
+            if !s.plan_mode {
+                return None;
+            }
+            let path = Self::plan_file_path(&s.session_id);
+            let exists = std::path::Path::new(&path).exists();
+            // "full" on the first plan-mode turn (206 reminderType), "sparse"
+            // after. Read-then-arm under the lock so concurrent turns can't both
+            // render "full".
+            let sparse = s.plan_reminder_shown;
+            s.plan_reminder_shown = true;
+            (path, exists, sparse)
+        };
+        let params = crate::prompt::plan_reminder::PlanReminderParams {
+            plan_file_path: &path,
+            plan_exists: exists,
+            custom_instructions: None,
+            is_subagent: false,
+            reminder_type_sparse: sparse,
+        };
+        let content = crate::prompt::plan_reminder::render_plan_mode_reminder(&params);
+        Some(ConversationMessage::user(MessageId::new(), content))
+    }
+
+    /// Resolve this session's plan file path (206 `ON(agentId)` →
+    /// `<plansDir>/<slug>.md`). 206's `plansDir` defaults to `~/.claude/plans/`;
+    /// the port rebrands the config-home to `$LINGXI_CONFIG_DIR ?? ~/.lingxi`
+    /// (`memory::lingxi_md::user_config_dir`), so the plans dir is
+    /// `<config-home>/plans/`. The slug is the session's UUID (206's slug is
+    /// likewise session-specific — exact bytes are not observable, the structure
+    /// is). Uses the bare UUID (not the `sess:` display form) so the filename has
+    /// no `:` separator, matching `computed_transcript_path`.
+    fn plan_file_path(session_id: &SessionId) -> String {
+        let config_home = dirs::home_dir()
+            .map(|h| memory::lingxi_md::user_config_dir(&h))
+            .unwrap_or_else(|| {
+                // No home: honor an explicit `$LINGXI_CONFIG_DIR`, else cwd-relative.
+                std::env::var_os(branding::CONFIG_DIR_ENV)
+                    .map_or_else(|| std::path::PathBuf::from(".lingxi"), std::path::PathBuf::from)
+            });
+        config_home
+            .join("plans")
+            .join(format!("{}.md", session_id.as_uuid()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.skill_listing.as_ref()?;
         // Gate on the Skill tool being available this turn (attachments.ts:2668).
@@ -10720,6 +10804,76 @@ mod skill_listing_reminder_tests {
         reg.register_builtin(Arc::new(NamedTool("Skill")));
         let orch = orch_with(reg, None);
         assert!(orch.skill_listing_reminder_message().await.is_none());
+    }
+
+    // ── PLANMODE (plan_mode_reminder_message) ──────────────────────────────
+
+    #[tokio::test]
+    async fn plan_mode_reminder_none_when_plan_mode_off() {
+        // Default session: plan mode OFF ⇒ no reminder (keeps the default build
+        // byte-identical).
+        let orch = orch_with(ToolRegistry::new(), None);
+        assert!(orch.session().lock().await.plan_mode == false);
+        assert!(orch.plan_mode_reminder_message().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_mode_reminder_full_then_sparse() {
+        let orch = orch_with(ToolRegistry::new(), None);
+        {
+            let sess = orch.session();
+            let mut s = sess.lock().await;
+            s.plan_mode = true;
+            // EnterPlanMode resets this; assert the reset default explicitly.
+            s.plan_reminder_shown = false;
+        }
+
+        // First plan-mode turn ⇒ FULL (206 `LU_`): the aIp banner + the 5-phase
+        // workflow scaffold.
+        let t0 = orch
+            .plan_mode_reminder_message()
+            .await
+            .expect("plan-mode full reminder")
+            .text_content();
+        assert!(
+            t0.starts_with("Plan mode is active. The user indicated"),
+            "turn-0 must be the FULL reminder, got: {t0}"
+        );
+        assert!(t0.contains("## Plan Workflow"), "full reminder scaffold: {t0}");
+        assert!(t0.contains("### Phase 5: Call ExitPlanMode"), "full reminder phases: {t0}");
+        // No plan file on disk for a fresh temp session.
+        assert!(t0.contains("No plan file exists yet."), "planExists=false: {t0}");
+        // Injection armed the sparse flag.
+        assert!(orch.session().lock().await.plan_reminder_shown);
+
+        // Second plan-mode turn ⇒ SPARSE (206 `MU_`).
+        let t1 = orch
+            .plan_mode_reminder_message()
+            .await
+            .expect("plan-mode sparse reminder")
+            .text_content();
+        assert!(
+            t1.starts_with("Plan mode still active (see full instructions earlier in conversation)."),
+            "turn-1 must be the SPARSE reminder, got: {t1}"
+        );
+        assert!(t1.contains("Follow 5-phase workflow."), "sparse body: {t1}");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_reminder_reset_replays_full() {
+        // After a sparse turn, re-entering plan mode (reset flag) replays FULL.
+        let orch = orch_with(ToolRegistry::new(), None);
+        orch.session().lock().await.plan_mode = true;
+        let _full = orch.plan_mode_reminder_message().await.expect("full");
+        let _sparse = orch.plan_mode_reminder_message().await.expect("sparse");
+        // Simulate EnterPlanMode / set_plan_mode(true) re-arming the tracker.
+        orch.session().lock().await.plan_reminder_shown = false;
+        let again = orch
+            .plan_mode_reminder_message()
+            .await
+            .expect("full again after reset")
+            .text_content();
+        assert!(again.starts_with("Plan mode is active. The user indicated"), "got: {again}");
     }
 
     // ── SKILLLIST.1 delta (sent-tracking) ──────────────────────────────────

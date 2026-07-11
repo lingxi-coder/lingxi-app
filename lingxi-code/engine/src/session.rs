@@ -80,6 +80,15 @@ pub struct SessionState {
     /// `ExitPlanModeTool`. Defaults to `false` on deserialize.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Full-vs-sparse plan-mode reminder tracking — the per-turn plan-mode
+    /// reminder is `full` (206 `LU_`) on the FIRST plan-mode turn and `sparse`
+    /// (206 `MU_`) after (206 `reminderType`). Reset to `false` on plan-mode
+    /// ENTRY (`EnterPlanModeTool` / `set_plan_mode(true)`) so a re-entered plan
+    /// mode replays the full reminder. The orchestrator sets it `true` after the
+    /// first injection. Never persisted meaningfully (transient like the todo
+    /// counters); defaults to `false` on deserialize.
+    #[serde(default)]
+    pub plan_reminder_shown: bool,
     /// Finding #73 — assistant turns since the last `TodoWrite` (V1) /
     /// `TaskCreate`|`TaskUpdate` (V2) tool call. The per-turn todo-reminder
     /// (`L4p`/`N4p` `turnsSinceLastTodoWrite`/`turnsSinceLastTaskManagement`)
@@ -124,6 +133,7 @@ impl SessionState {
             model_profile: None,
             todos: Vec::new(),
             plan_mode: false,
+            plan_reminder_shown: false,
             turns_since_last_todo_write: 0,
             turns_since_last_reminder: 0,
             injected_message_sources: HashMap::new(),

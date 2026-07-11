@@ -38,11 +38,29 @@ const SWEPT_SUBDIR_TREES: &[&str] = &[
     "tasks",
     "uploads",
     "skills/.staging",
+    "shares", // wVg (also `.zip`-file-swept)
 ];
 
-/// Directory whose stale `.md` files are removed (claude's `hVg` = `aj(plans,
-/// ".md")`).
-const PLANS_DIR: &str = "plans";
+/// Subdirectory-level dir also swept for stale `.zip` files (claude `wVg`).
+/// Kept out of [`SWEPT_SUBDIR_TREES`]'s comment list only for clarity — it is
+/// appended below.
+///
+/// `(dir, extension)` file sweeps — claude's `aj(<dir>, <ext>)` cleanups. Every
+/// direct child file whose name ends with `ext` and whose mtime is older than
+/// the cutoff is removed, then the dir is pruned if it emptied.
+const SWEPT_FILE_EXTS: &[(&str, &str)] = &[
+    ("plans", ".md"),               // hVg
+    ("telemetry", ".json"),         // AVg
+    ("traces", ".json"),            // OVg
+    ("startup-perf", ".txt"),       // OVg
+    ("shell-snapshots", ".sh"),     // xVg
+    ("feedback-bundles", ".zip"),   // PVg
+    ("dump-prompts", ".jsonl"),     // RVg (claude caps this shorter; we use the base period — keeps longer, safe)
+    ("shares", ".zip"),             // wVg (also VRt-swept below)
+];
+
+/// Single cache files removed when stale (claude `fVg` / `mVg`).
+const SWEPT_SINGLE_FILES: &[&str] = &["hfi-auth.json", "mcp-needs-auth-cache.json"];
 
 /// Result of a sweep (claude's `{messages, errors}` accumulator; `messages` is
 /// the deleted-entry count).
@@ -108,11 +126,17 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
     for sub in SWEPT_SUBDIR_TREES {
         report = merge(report, sweep_stale_entries(&config_home.join(sub), cutoff, false));
     }
-    // Plans: remove stale `.md` files (aj).
-    report = merge(
-        report,
-        sweep_stale_files_by_ext(&config_home.join(PLANS_DIR), ".md", cutoff),
-    );
+    // File-extension sweeps (aj): stale `<dir>/*<ext>` files.
+    for (dir, ext) in SWEPT_FILE_EXTS {
+        report = merge(
+            report,
+            sweep_stale_files_by_ext(&config_home.join(dir), ext, cutoff),
+        );
+    }
+    // Single stale cache files (fVg / mVg).
+    for name in SWEPT_SINGLE_FILES {
+        report = merge(report, sweep_stale_file(&config_home.join(name), cutoff));
+    }
     report
 }
 
@@ -127,6 +151,27 @@ fn merge(a: RetentionReport, b: RetentionReport) -> RetentionReport {
 /// `rmdir` `dir` if it is now empty — best-effort (claude `sj`).
 fn prune_if_empty(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
+}
+
+/// Remove a single file when its mtime is older than `cutoff` (claude
+/// `fVg`/`mVg`, one-file `Xae`). Absent file → no-op.
+fn sweep_stale_file(path: &Path, cutoff: SystemTime) -> RetentionReport {
+    let mut report = RetentionReport::default();
+    let Ok(meta) = std::fs::metadata(path) else {
+        return report; // absent → nothing to do
+    };
+    if !meta.is_file() {
+        return report;
+    }
+    match meta.modified() {
+        Ok(mtime) if mtime < cutoff => match std::fs::remove_file(path) {
+            Ok(()) => report.session_files_deleted += 1,
+            Err(_) => report.errors += 1,
+        },
+        Ok(_) => {}
+        Err(_) => report.errors += 1,
+    }
+    report
 }
 
 /// Remove stale entries under `dir` whose mtime is older than `cutoff`. When
@@ -331,6 +376,34 @@ mod tests {
         assert!(!old_md.exists(), "stale .md plan must be swept");
         assert!(fresh_md.exists(), "fresh .md plan must be kept");
         assert!(other.exists(), "non-.md file must be kept");
+    }
+
+    #[test]
+    fn sweeps_stale_single_cache_files_and_ext_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        // Single cache file, stale → removed.
+        let cache = root.path().join("mcp-needs-auth-cache.json");
+        fs::write(&cache, b"{}").unwrap();
+        set_old(&cache, Duration::from_secs(45 * 86400));
+        // A fresh single cache file is kept.
+        let fresh_cache = root.path().join("hfi-auth.json");
+        fs::write(&fresh_cache, b"{}").unwrap();
+        // File-ext dir: stale telemetry .json removed, non-.json kept.
+        let tele = root.path().join("telemetry");
+        fs::create_dir_all(&tele).unwrap();
+        let old_json = tele.join("old.json");
+        let keep_txt = tele.join("readme.txt");
+        fs::write(&old_json, b"{}").unwrap();
+        fs::write(&keep_txt, b"x").unwrap();
+        set_old(&old_json, Duration::from_secs(45 * 86400));
+        set_old(&keep_txt, Duration::from_secs(45 * 86400));
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        assert_eq!(report.session_files_deleted, 2); // cache + old.json
+        assert!(!cache.exists());
+        assert!(fresh_cache.exists());
+        assert!(!old_json.exists());
+        assert!(keep_txt.exists(), "non-matching ext must be kept");
     }
 
     #[test]

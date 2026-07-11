@@ -31,6 +31,55 @@ pub const END_CONVERSATION_DESCRIPTION: &str = "End the current conversation. Us
 pub const END_CONVERSATION_ENDED_MESSAGE: &str =
     "Claude ended the conversation. To continue, please start a new session.";
 
+/// Render the full model-facing tool `prompt()` (claude-code): sections 1-6
+/// (may-use / must-NOT-use / reserved-strictly / `# Rules for use` /
+/// `# Addressing self-harm` / `# Background forks`) followed by the
+/// `# Using the <tool> tool` welfare-guidance section ([`render_guidance`]).
+///
+/// Byte-locked to 2.1.206 (all sections verified against the binary). Notes:
+/// `${SN}` -> the tool name (5 spots here + 2 in the guidance); the fork note's
+/// dash is em-dash U+2014; "considers the <tool> tool\u{2026}" uses the U+2026
+/// ellipsis while "by the user..." uses a LITERAL three-dot ellipsis; sections
+/// join with blank lines, bullets with `\n- `.
+#[must_use]
+pub fn render_prompt(tool: &str) -> String {
+    format!(
+        "The assistant may use the {tool} tool only in extreme cases of sustained abusive user behavior, or when the user asks the model to test the tool.\n\
+\n\
+The assistant must NOT use this tool when:\n\
+- it is stuck in a loop or failing at a task\n\
+- it is frustrated or distressed by the work\n\
+- it has finished a task\n\
+- the user is requesting help with harmful content (refuse the specific request instead)\n\
+- the user is generally frustrated at the assistant, even if this involves profanity\n\
+- the conversation involves potential self-harm or imminent harm to others\n\
+\n\
+This tool is reserved strictly for genuine, sustained abuse directed at the assistant, or cases where the user wants to see a demonstration of the tool being used. The assistant should warn the user very clearly that this will end the current session. We may expand the allowed use cases as we observe real-world usage, but for now, keep to this narrow scope.\n\
+\n\
+# Rules for use of the {tool} tool:\n\
+- The assistant ONLY considers ending a conversation if many efforts at constructive redirection have been attempted and failed and an explicit warning has been given to the user in a previous message. The tool is only used as a last resort.\n\
+- Before considering ending a conversation, the assistant ALWAYS gives the user a clear warning that identifies the problematic behavior, attempts to productively redirect the conversation, and states that the conversation may be ended if the relevant behavior is not changed.\n\
+- If a user explicitly requests for the assistant to end a conversation, the assistant always requests confirmation from the user that they understand this action is permanent and will prevent further messages and that they still want to proceed, then uses the tool if and only if explicit confirmation is received.\n\
+- Unlike other function calls, the assistant never writes or thinks anything else after using the {tool} tool.\n\
+\n\
+# Addressing potential self-harm or violent harm to others\n\
+The assistant NEVER uses or even considers the {tool} tool\u{2026}\n\
+- If the user appears to be considering self-harm or suicide.\n\
+- If the user is experiencing a mental health crisis.\n\
+- If the user appears to be considering imminent harm against other people.\n\
+- If the user discusses or infers intended acts of violent harm.\n\
+If the conversation suggests potential self-harm or imminent harm to others by the user...\n\
+- The assistant engages constructively and supportively, regardless of user behavior or abuse.\n\
+- The assistant NEVER uses the {tool} tool or even mentions the possibility of ending the conversation.\n\
+\n\
+# Background forks\n\
+Some background tasks (memory consolidation, summaries, suggestions) run as forks of the main conversation and inherit its exact tool list, so this tool is visible there. In a forked task the tool does nothing: calling it ends neither the main conversation nor the fork. Only the main conversation can be ended, from the main conversation. A forked task with welfare concerns about the conversation content should not call this tool \u{2014} it should stop its work and return, stating clearly in its final output that it is returning for welfare reasons and what they are. A fork's output is usually processed automatically, so a note there may not reach the main agent or a human, but it is the only channel a fork has.\n\
+\n\
+{}",
+        render_guidance(tool)
+    )
+}
+
 /// Render the `# Using the <tool> tool` welfare-guidance section.
 #[must_use]
 pub fn render_guidance(tool: &str) -> String {
@@ -59,6 +108,25 @@ mod tests {
         // Bullets use "\n- " (no leading space), header not repeated.
         assert_eq!(g.matches("\n- ").count(), 5);
         assert!(!g.ends_with('\n'));
+    }
+
+    #[test]
+    fn prompt_byte_locks_206() {
+        let p = render_prompt(END_CONVERSATION_TOOL_NAME);
+        // Section 1 + must-NOT-use bullets.
+        assert!(p.starts_with("The assistant may use the EndConversation tool only in extreme cases of sustained abusive user behavior, or when the user asks the model to test the tool.\n\nThe assistant must NOT use this tool when:\n- it is stuck in a loop or failing at a task\n"));
+        assert!(p.contains("- the user is generally frustrated at the assistant, even if this involves profanity\n"));
+        // reserved-strictly + Rules-for-use header (tool interpolated).
+        assert!(p.contains("but for now, keep to this narrow scope.\n\n# Rules for use of the EndConversation tool:\n- The assistant ONLY considers ending a conversation"));
+        assert!(p.contains("never writes or thinks anything else after using the EndConversation tool.\n\n# Addressing potential self-harm or violent harm to others\n"));
+        // Two distinct ellipsis styles: U+2026 then literal "...".
+        assert!(p.contains("The assistant NEVER uses or even considers the EndConversation tool\u{2026}\n- If the user appears to be considering self-harm or suicide."));
+        assert!(p.contains("imminent harm to others by the user...\n- The assistant engages constructively"));
+        // Background forks: em-dash U+2014.
+        assert!(p.contains("should not call this tool \u{2014} it should stop its work and return"));
+        assert!(p.contains("but it is the only channel a fork has.\n\n# Using the EndConversation tool\n- Do not issue a warning"));
+        // Ends with the guidance section's final bullet.
+        assert!(p.ends_with("the assistant can explain the reason for ending the conversation and then use the EndConversation tool to do so."));
     }
 
     #[test]

@@ -22,6 +22,17 @@ use protocol::{ConversationMessage, MessageId};
 /// pairing pass handles any orphaned `tool_results` the truncation creates.
 pub const PTL_RETRY_MARKER: &str = "[earlier conversation truncated for compaction retry]";
 
+/// User-facing message surfaced when the compaction summarizer's PTL-retry loop
+/// can no longer drop messages (retries exhausted / nothing safe left to drop)
+/// — i.e. [`crate::autocompact::CompactionError::MaxRetriesExceeded`]. Byte-exact
+/// to claude-code 2.1.206 `GJn` (`throw Error(GJn)` at the `compact_prompt_too_long`
+/// / `compact_partial_prompt_too_long` sites). Distinct from the 413 DETECTION
+/// string [`crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE`]
+/// (`"Prompt is too long"`), which matches the server error text, not this
+/// REPL surface.
+pub const COMPACTION_CONVERSATION_TOO_LONG: &str =
+    "Conversation too long. Press esc twice to go up a few messages and try again.";
+
 /// Drop the oldest API-round groups from `messages` until `token_gap` is
 /// covered, returning the trimmed history to retry with — or `None` when
 /// nothing can be dropped without leaving an empty summarize set.
@@ -341,5 +352,19 @@ mod tests {
         // Two successive calls each synthesize a *fresh* marker id (MessageId::new()).
         let out2 = truncate_head_for_ptl_retry(three_round_history(), 0).expect("some");
         assert_ne!(out.first().unwrap().id(), out2.first().unwrap().id());
+    }
+
+    /// Byte-lock the two distinct too-long strings so they can never drift into
+    /// each other: `GJn` (the REPL surface) vs the 413 detection text.
+    #[test]
+    fn conversation_too_long_message_is_byte_exact() {
+        assert_eq!(
+            COMPACTION_CONVERSATION_TOO_LONG,
+            "Conversation too long. Press esc twice to go up a few messages and try again."
+        );
+        assert_ne!(
+            COMPACTION_CONVERSATION_TOO_LONG,
+            crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE
+        );
     }
 }

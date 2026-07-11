@@ -2252,7 +2252,20 @@ impl ConversationOrchestrator {
                 ));
             }
             r = compactor.process_iteration(history_before, 0) => r
-                .map_err(|e| traits::HandleError::ActionFailed(format!("compaction failed: {e}")))?,
+                .map_err(|e| match e {
+                    // TS throws `Error(GJn)` when the summarizer's PTL-retry loop
+                    // exhausts (nothing safe left to drop) — the port models that
+                    // as `MaxRetriesExceeded`. Surface the byte-exact GJn message
+                    // rather than the generic "compaction failed: …".
+                    compaction::autocompact::CompactionError::MaxRetriesExceeded => {
+                        traits::HandleError::ActionFailed(
+                            compaction::ptl_retry::COMPACTION_CONVERSATION_TOO_LONG.to_string(),
+                        )
+                    }
+                    other => {
+                        traits::HandleError::ActionFailed(format!("compaction failed: {other}"))
+                    }
+                })?,
         };
 
         // hooks compaction lifecycle: capture the summary + freed-token count

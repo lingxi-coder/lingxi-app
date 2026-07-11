@@ -883,7 +883,15 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             .spawn(
                 tasks::TaskType::LocalWorkflow,
                 tasks::TaskSpawnInput::LocalWorkflow {
-                    workflow_id: spec.name.clone().unwrap_or_default(),
+                    // Display name = the script's `meta.name` (claude-code
+                    // `workflowName`), so an INLINE workflow shows its real name
+                    // in `/workflows` rather than the empty fallback; a named
+                    // workflow falls back to its saved `spec.name`.
+                    workflow_id: workflow_name
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| spec.name.clone())
+                        .unwrap_or_default(),
                     script,
                     resume_from_run_id: spec.resume_from_run_id.clone(),
                     // The `args` global, serialised to a JSON string for the runtime.

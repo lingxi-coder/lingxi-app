@@ -732,9 +732,16 @@ fn write_server(
     entry: &serde_json::Value,
     scope: Scope,
 ) -> Result<WriteOutcome, String> {
-    // TS `addMcpServer` validates the name BEFORE any scope write; both `mcp add`
-    // and `mcp add-json` route through here.
+    // TS `addMcpServer` (`TPe`) runs these gates BEFORE any scope write, in this
+    // order; both `mcp add` and `mcp add-json` route through here.
+    // 1. name char + reserved-name validation.
     validate_mcp_server_name(name)?;
+    // 2. `D1()` — when a managed MCP configuration is active it has exclusive
+    //    control and every add is refused (this fires before the allow/deny
+    //    matchers, so those never run while it holds).
+    if mcp::enterprise_policy::enterprise_mcp_active() {
+        return Err(mcp::enterprise_policy::ENTERPRISE_EXCLUSIVE_CONTROL_MESSAGE.to_string());
+    }
     match scope {
         Scope::User => write_user_server(name, entry),
         Scope::Local => write_local_server(name, entry),

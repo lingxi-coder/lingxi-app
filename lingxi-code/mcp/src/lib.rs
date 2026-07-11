@@ -15,6 +15,7 @@ pub mod approval;
 pub mod capabilities;
 pub mod client;
 pub mod connection;
+pub mod enterprise_policy;
 pub mod env_expansion;
 pub mod hook_dispatch;
 pub mod identity;

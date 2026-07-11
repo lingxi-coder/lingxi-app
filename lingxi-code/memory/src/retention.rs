@@ -49,14 +49,20 @@ const SWEPT_SUBDIR_TREES: &[&str] = &[
 /// direct child file whose name ends with `ext` and whose mtime is older than
 /// the cutoff is removed, then the dir is pruned if it emptied.
 const SWEPT_FILE_EXTS: &[(&str, &str)] = &[
-    ("plans", ".md"),               // hVg
-    ("telemetry", ".json"),         // AVg
-    ("traces", ".json"),            // OVg
-    ("startup-perf", ".txt"),       // OVg
-    ("shell-snapshots", ".sh"),     // xVg
-    ("feedback-bundles", ".zip"),   // PVg
-    ("dump-prompts", ".jsonl"),     // RVg (claude caps this shorter; we use the base period — keeps longer, safe)
-    ("shares", ".zip"),             // wVg (also VRt-swept below)
+    ("plans", ".md"),                       // hVg
+    ("telemetry", ".json"),                 // AVg
+    ("traces", ".json"),                    // OVg
+    ("startup-perf", ".txt"),               // OVg
+    ("startup-perf", ".json"),              // OVg
+    ("shell-snapshots", ".sh"),             // xVg
+    ("feedback-bundles", ".zip"),           // PVg
+    ("dump-prompts", ".jsonl"),             // RVg (claude caps this shorter; we use the base period — keeps longer, safe)
+    ("shares", ".zip"),                     // wVg (also VRt-swept below)
+    ("backups", ""),                        // HVg (every file)
+    ("jobs/settled", ".json"),              // IVg
+    ("daemon/dispatch/rejected", ".json"),  // IVg
+    ("daemon/dispatch", ".json"),           // IVg
+    ("daemon/auth", ".json"),               // IVg
 ];
 
 /// Single cache files removed when stale (claude `fVg` / `mVg`).
@@ -130,9 +136,14 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
     for (dir, ext) in SWEPT_FILE_EXTS {
         report = merge(
             report,
-            sweep_stale_files_by_ext(&config_home.join(dir), ext, cutoff),
+            sweep_stale_files_by_ext(&config_home.join(dir), ext, cutoff, None),
         );
     }
+    // Debug dir (DVg): every stale file except `latest`.
+    report = merge(
+        report,
+        sweep_stale_files_by_ext(&config_home.join("debug"), "", cutoff, Some("latest")),
+    );
     // Single stale cache files (fVg / mVg).
     for name in SWEPT_SINGLE_FILES {
         report = merge(report, sweep_stale_file(&config_home.join(name), cutoff));
@@ -217,19 +228,30 @@ fn sweep_stale_entries(dir: &Path, cutoff: SystemTime, include_files: bool) -> R
     report
 }
 
-/// Remove stale files directly under `dir` whose name ends with `ext` and whose
-/// mtime is older than `cutoff`, then prune the dir if it emptied (claude `aj`).
-fn sweep_stale_files_by_ext(dir: &Path, ext: &str, cutoff: SystemTime) -> RetentionReport {
+/// Remove stale files directly under `dir` whose name ends with `ext` (an empty
+/// `ext` matches every file) and whose mtime is older than `cutoff`, skipping
+/// any file named `keep`, then prune the dir if it emptied (claude `aj` /
+/// `DVg`). `ext` of `""` matches all files.
+fn sweep_stale_files_by_ext(
+    dir: &Path,
+    ext: &str,
+    cutoff: SystemTime,
+    keep: Option<&str>,
+) -> RetentionReport {
     let mut report = RetentionReport::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return report;
     };
     for entry in entries.flatten() {
+        let name = entry.file_name();
+        if keep.is_some_and(|k| name.to_string_lossy() == k) {
+            continue;
+        }
         let Ok(meta) = entry.metadata() else {
             report.errors += 1;
             continue;
         };
-        if !meta.is_file() || !entry.file_name().to_string_lossy().ends_with(ext) {
+        if !meta.is_file() || !name.to_string_lossy().ends_with(ext) {
             continue;
         }
         let Ok(mtime) = meta.modified() else {
@@ -404,6 +426,24 @@ mod tests {
         assert!(fresh_cache.exists());
         assert!(!old_json.exists());
         assert!(keep_txt.exists(), "non-matching ext must be kept");
+    }
+
+    #[test]
+    fn debug_sweep_removes_stale_files_but_keeps_latest() {
+        let root = tempfile::tempdir().unwrap();
+        let debug = root.path().join("debug");
+        fs::create_dir_all(&debug).unwrap();
+        let old = debug.join("2020-run.log");
+        let latest = debug.join("latest");
+        fs::write(&old, b"x").unwrap();
+        fs::write(&latest, b"x").unwrap();
+        set_old(&old, Duration::from_secs(90 * 86400));
+        set_old(&latest, Duration::from_secs(90 * 86400)); // old, but named `latest`
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        assert_eq!(report.session_files_deleted, 1);
+        assert!(!old.exists());
+        assert!(latest.exists(), "`latest` debug file must be preserved");
     }
 
     #[test]

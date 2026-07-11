@@ -2225,9 +2225,19 @@ impl ConversationOrchestrator {
 
         // hooks compaction lifecycle: PreCompact fires before the summary pass.
         // This is the explicit `/compact` entry point, so the trigger is
-        // `manual` (TS `isAutoCompact ? 'auto' : 'manual'`). Best-effort — a
-        // hook failure/Block never aborts compaction.
-        self.fire_pre_compact("manual").await;
+        // `manual` (TS `isAutoCompact ? 'auto' : 'manual'`). TS `VJn`: a
+        // blocking PreCompact hook ABORTS the compaction, throwing
+        // `"Compaction blocked by PreCompact hook: <blockedBy>"`. We surface the
+        // same message as the `/compact` failure result.
+        if let Some(detail) = self.fire_pre_compact("manual").await {
+            let msg = if detail.is_empty() {
+                "Compaction blocked by PreCompact hook".to_string()
+            } else {
+                format!("Compaction blocked by PreCompact hook: {detail}")
+            };
+            tracing::warn!("{msg}");
+            return Err(traits::HandleError::ActionFailed(msg));
+        }
 
         // Run the 5-layer compactor, racing against the cancel token.
         // process_iteration takes no CancellationToken; drop-on-cancel
@@ -2781,9 +2791,13 @@ impl ConversationOrchestrator {
         // hooks compaction lifecycle: PreCompact fires once we have crossed the
         // autocompact threshold and are about to run the summary pass (TS
         // `executePreCompactHooks` BEFORE the summary request, `compact.ts:413`).
-        // The proactive trigger is always the `auto` arm. Best-effort — a hook
-        // failure/Block never aborts compaction.
-        self.fire_pre_compact("auto").await;
+        // The proactive trigger is always the `auto` arm. TS precomputed arm: a
+        // blocking PreCompact hook logs `Precomputed compact blocked by
+        // PreCompact hook: <blockedBy>` and skips compaction (history untouched).
+        if let Some(detail) = self.fire_pre_compact("auto").await {
+            tracing::warn!("Precomputed compact blocked by PreCompact hook: {detail}");
+            return;
+        }
 
         // Run the orchestrator pass under the per-conversation tracking lock so
         // the circuit-breaker state is read + written atomically for this turn.
@@ -4480,26 +4494,32 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `trigger` is the `auto` / `manual` discriminator carried verbatim into
     /// the wire payload's `trigger` field (TS `compactData.trigger`): `auto` for
     /// the proactive pre-call autocompact and the reactive 413/PTL fallback,
-    /// `manual` for an explicit `/compact`. Best-effort: a hook failure (or a
-    /// hook returning a `Block` decision) must NEVER abort compaction — we fire
-    /// and continue, mirroring how the `PostToolUse` hooks are best-effort
-    /// (`turn_loop.rs`). Strict no-op when no `PreCompact` hook is registered.
+    /// `manual` for an explicit `/compact`. Strict no-op when no `PreCompact`
+    /// hook is registered.
+    ///
+    /// Returns `Some(blockedBy)` when a PreCompact hook BLOCKED the compaction
+    /// (TS `executePreCompactHooks` = `xhe`: `blockedBy` is set when any hook
+    /// result has `blocked`), and `None` when compaction should proceed. A block
+    /// ABORTS the pass in every path (TS `VJn` throws
+    /// `"Compaction blocked by PreCompact hook: <blockedBy>"` on the manual
+    /// route; the proactive / reactive routes log and skip). The returned
+    /// string is the port's aggregate `reason` (the closest equivalent of TS's
+    /// `[cmd]: output` join); callers own the surfacing so the log wording
+    /// matches each route (manual / `Precomputed` / `Reactive`).
     ///
     /// DEFERRED (documented divergence, not a parity gap): TS
-    /// `executePreCompactHooks` returns `newCustomInstructions` which the caller
-    /// merges into the summary prompt (`compact.ts:420`). This port does NOT
-    /// thread that back into the summarizer: the `HookEvent::PreCompact` wire
+    /// `executePreCompactHooks` also returns `newCustomInstructions` which the
+    /// caller merges into the summary prompt (`compact.ts:420`). This port does
+    /// NOT thread that back into the summarizer: the `HookEvent::PreCompact` wire
     /// builder hard-codes `custom_instructions: None` (`hooks/executor.rs:755`)
     /// and the compaction seam (`process_iteration` / `process_iteration_tracked`)
     /// accepts no custom-instruction argument, so there is no clean seam to feed
-    /// the aggregate's instructions into the summary request. Firing the hook so
-    /// it RUNS is the byte-faithful behaviour for the event itself; consuming its
-    /// returned instructions is left for a future batch that widens the seam.
-    pub(crate) async fn fire_pre_compact(&self, trigger: &str) {
+    /// the aggregate's instructions into the summary request. Honoring the block
+    /// is the byte-faithful behaviour; consuming the returned instructions is
+    /// left for a future batch that widens the seam.
+    pub(crate) async fn fire_pre_compact(&self, trigger: &str) -> Option<String> {
         let ctx = self.lifecycle_hook_ctx(false).await;
-        // Best-effort: we deliberately discard the aggregate. A PreCompact hook
-        // cannot block compaction (see DEFERRED note re: custom_instructions).
-        let _ = self
+        let agg = self
             .hooks
             .execute(
                 HookEvent::PreCompact {
@@ -4508,6 +4528,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
+        // TS `xhe`: a PreCompact hook that BLOCKS aborts compaction. Surface the
+        // block detail (`blockedBy`) so the caller can log/throw per its route;
+        // `None` = no block → proceed. `reason` is the port's block detail.
+        if matches!(agg.decision, Some(hooks::response::HookDecision::Block)) {
+            Some(agg.reason.clone().unwrap_or_default())
+        } else {
+            None
+        }
     }
 
     /// Fire the `PostCompact` lifecycle hooks immediately AFTER a compaction pass
@@ -8354,6 +8382,31 @@ mod turn_recovery_tests {
         }
     }
 
+    /// `PreCompact` hook that ALWAYS blocks — exercises the compaction abort
+    /// (TS `xhe` sets `blockedBy` from the blocked result; `VJn` / proactive /
+    /// reactive all honor it by aborting the pass).
+    struct BlockingPreCompactHandler;
+    #[async_trait]
+    impl BuiltinHookHandler for BlockingPreCompactHandler {
+        fn id(&self) -> &str {
+            "block-precompact"
+        }
+        async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            let response = matches!(event, HookEvent::PreCompact { .. }).then(|| HookResponse {
+                decision: Some(HookDecision::Block),
+                reason: Some("[guard] compaction not allowed".into()),
+                ..Default::default()
+            });
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response,
+            }
+        }
+    }
+
     /// `SessionStart` hook that emits `hookSpecificOutput.additionalContext`
     /// (`Some`) or nothing (`None`) — exercises the SESSIONSTART.CTX consumption.
     struct SessionStartCtxHandler {
@@ -8436,6 +8489,52 @@ mod turn_recovery_tests {
             HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(BlockingStopHandler));
         Arc::new(exec)
+    }
+
+    async fn exec_blocking_pre_compact() -> Arc<HookExecutorImpl> {
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(builtin_hook("block-precompact", HookEventType::PreCompact));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(BlockingPreCompactHandler));
+        Arc::new(exec)
+    }
+
+    fn compact_orch(hooks: Arc<HookExecutorImpl>) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    }
+
+    // A blocking PreCompact hook aborts compaction in every route (TS `xhe` /
+    // `VJn`): `fire_pre_compact` surfaces the block detail so the caller can
+    // throw ("Compaction blocked by PreCompact hook: …") / log + skip.
+    #[tokio::test]
+    async fn pre_compact_block_returns_detail_else_none() {
+        let blocked = compact_orch(exec_blocking_pre_compact().await)
+            .fire_pre_compact("manual")
+            .await;
+        assert_eq!(
+            blocked.as_deref(),
+            Some("[guard] compaction not allowed"),
+            "a blocking PreCompact hook must surface its blockedBy detail"
+        );
+
+        // No PreCompact hook registered → None → compaction proceeds unchanged.
+        let proceed = compact_orch(noop_hook_executor())
+            .fire_pre_compact("auto")
+            .await;
+        assert_eq!(proceed, None, "no block → compaction proceeds");
     }
 
     /// A Stop hook that blocks EXACTLY ONCE, then passes. Used by tests that need

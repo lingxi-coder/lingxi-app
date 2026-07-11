@@ -36,6 +36,7 @@ orchestrator = { path = "../../orchestrator" }
 # / `-c` / the resume screen (all backed by `session::jsonl::loader`) can find
 # sessions the desktop/CLI TUI itself created.
 session = { path = "../../session" }
+memory = { path = "../../memory" }
 # `global_config::get_or_create_user_id` for the metadata.user_id device_id.
 migrations = { path = "../../migrations" }
 # Task 10: DefaultLlmClient construction + LlmTransportBridge.

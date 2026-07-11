@@ -11,6 +11,7 @@ pub mod file;
 pub mod lingxi_md;
 pub mod memdir;
 pub mod prefetch;
+pub mod retention;
 pub mod secret_scan;
 pub mod selector;
 pub mod session_memory;

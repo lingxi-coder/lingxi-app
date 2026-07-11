@@ -1337,6 +1337,7 @@ dependencies = [
  "llm-client",
  "lsp",
  "mcp",
+ "memory",
  "migrations",
  "nix",
  "orchestrator",

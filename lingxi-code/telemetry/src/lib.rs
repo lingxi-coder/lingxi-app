@@ -110,6 +110,33 @@ pub fn emit_skill_discovery_collected(hidden_by_main_turn: bool) {
     );
 }
 
+/// Emit `tengu_retention_sweep` — the on-disk data-retention housekeeping event
+/// (claude-code `fWu`). `skipped` with a `skip_reason` records a no-op run;
+/// otherwise the counts describe what was removed. The port sweeps the
+/// session-file dirs (`todos`/`statsig`/`logs`) only, so `transcripts_deleted`
+/// is reported for field-parity but is `0`.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_retention_sweep(
+    skipped: bool,
+    skip_reason: Option<&str>,
+    transcripts_deleted: u64,
+    session_files_deleted: u64,
+    errors: u64,
+    period_days: u64,
+    used_default: bool,
+) {
+    tracing::info!(
+        event = "tengu_retention_sweep",
+        skipped = skipped,
+        skip_reason = skip_reason.unwrap_or(""),
+        transcripts_deleted = transcripts_deleted,
+        session_files_deleted = session_files_deleted,
+        errors = errors,
+        period_days = period_days,
+        used_default = used_default,
+    );
+}
+
 // -- Kairos (`/loop`) autonomous-loop emit helper ----------------------------
 
 /// Emit `tengu_kairos_loop_persistent_activated` with the `variant` field.

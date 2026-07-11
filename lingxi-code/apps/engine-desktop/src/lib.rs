@@ -2738,6 +2738,12 @@ pub async fn build(
 ) -> Result<DesktopRuntime, BuildError> {
     let cwd = cfg.cwd.clone();
 
+    // On-disk data-retention sweep (claude-code `fWu`). DELETES stale
+    // session-file entries (todos/statsig/logs older than the retention period),
+    // so it is flag-gated and default-OFF: a no-op unless `LINGXI_RETENTION_SWEEP`
+    // is truthy. Runs once at boot on a blocking pool so it never delays startup.
+    tokio::task::spawn_blocking(memory::retention::run_startup_retention_sweep);
+
     // FIX A/B/C: mint the boot-canonical MAIN session id ONCE and derive the
     // session's transcript path + subagents dir from `(lingxi_home, cwd, id)`.
     // claude-code's `createBaseHookInput` (utils/hooks.ts:322) ALWAYS stamps

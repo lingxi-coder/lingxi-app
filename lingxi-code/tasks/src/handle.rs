@@ -668,6 +668,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_workflows_projects_running_and_completed_and_skips_others() {
+        let (_d, registry) = make_registry();
+
+        let mk_wf = |id: &str, status: TaskStatus, run: &str, ended: bool| {
+            TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
+                base: crate::state::TaskStateBase {
+                    id: id.into(),
+                    task_type: crate::id::TaskType::LocalWorkflow,
+                    status,
+                    description: "review the diff".into(),
+                    tool_use_id: None,
+                    start_time: std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_millis(1_000),
+                    end_time: ended.then(|| {
+                        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(5_000)
+                    }),
+                    total_paused_ms: 0,
+                    output_file: PathBuf::from(format!("/tmp/{id}.output")),
+                    output_offset: 0,
+                    notified: false,
+                },
+                workflow_id: format!("wf-{id}"),
+                script: String::new(),
+                resume_from_run_id: None,
+                args: None,
+                run_id: Some(run.into()),
+                current_step: 2,
+            })
+        };
+        registry
+            .insert_state_for_test(mk_wf("w0000run0", TaskStatus::Running, "wf_run", false))
+            .await;
+        registry
+            .insert_state_for_test(mk_wf("w0000done0", TaskStatus::Completed, "wf_done", true))
+            .await;
+        // An unrelated task must NOT appear in the workflow projection.
+        let base = crate::state::TaskStateBase {
+            id: "b0000bash0".into(),
+            task_type: crate::id::TaskType::LocalBash,
+            status: TaskStatus::Running,
+            description: "cargo build".into(),
+            tool_use_id: None,
+            start_time: std::time::SystemTime::UNIX_EPOCH,
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: PathBuf::from("/tmp/bash.output"),
+            output_offset: 0,
+            notified: false,
+        };
+        registry
+            .insert_state_for_test(TaskState::LocalBash(crate::state::LocalBashTaskState {
+                base,
+                command: "cargo build".into(),
+                pid: None,
+                exit_code: None,
+            }))
+            .await;
+
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let mut wfs = h.list_workflows().await.unwrap();
+        wfs.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+
+        assert_eq!(wfs.len(), 2, "only the two workflow runs, not the bash task");
+        let done = wfs.iter().find(|w| w.task_id == "w0000done0").unwrap();
+        assert_eq!(done.name, "wf-w0000done0");
+        assert_eq!(done.run_id.as_deref(), Some("wf_done"));
+        assert_eq!(done.status, "completed");
+        assert_eq!(done.current_step, 2);
+        assert_eq!(done.started_at_ms, Some(1_000));
+        assert_eq!(done.ended_at_ms, Some(5_000), "terminal run carries an end");
+        let run = wfs.iter().find(|w| w.task_id == "w0000run0").unwrap();
+        assert_eq!(run.status, "running");
+        assert_eq!(run.ended_at_ms, None, "a running run has no end");
+    }
+
+    #[tokio::test]
     async fn get_local_bash_record_carries_command() {
         // T10: a `local_bash` record surfaces its shell COMMAND (claude-code
         // `LocalShellTaskState.command`), distinct from its description, so

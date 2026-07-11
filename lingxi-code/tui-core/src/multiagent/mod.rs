@@ -15,7 +15,9 @@ pub mod workflow_spool;
 pub use adapter::{pump_once, MultiAgentFeed};
 pub use event::MultiAgentEvent;
 pub use fixture::FixtureFeed;
-pub use poller::{task_row_from_record, workflow_row_from_record, PollerFeed};
+pub use poller::{
+    sort_workflows_newest_first, task_row_from_record, workflow_row_from_record, PollerFeed,
+};
 pub use state::{
     MultiAgentState, TaskRow, WorkerRow, WorkflowAgentRow, WorkflowPhase, WorkflowRow,
 };

@@ -22,6 +22,7 @@
 //! not ported; the detail view shows the phase/agent tree (its primary value).
 
 use std::any::Any;
+use std::cell::Cell;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -154,6 +155,8 @@ impl WorkflowsView {
     fn lines(&self) -> Vec<Line<'static>> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let accent = crate::style_adapter::to_ratatui(self.theme.suggestion);
+        let success = crate::style_adapter::to_ratatui(self.theme.success);
+        let error = crate::style_adapter::to_ratatui(self.theme.error);
         let dim_style = Style::default().fg(dim);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.rows.len() + 5);
         lines.push(Line::from(Span::styled(
@@ -172,24 +175,34 @@ impl WorkflowsView {
             )));
         }
         for (i, r) in self.rows.iter().enumerate() {
-            let marker = if i == self.selected {
-                "\u{276f} "
-            } else {
-                "  "
+            let selected = i == self.selected;
+            let marker = if selected { "\u{276f} " } else { "  " };
+            // Oracle `Voa`: the status glyph is colored (✔ success / ✘ error, ⟳
+            // uncolored); the name uses the accent color + bold when selected;
+            // the meta block is dim. Build discrete spans so each keeps its own
+            // style (a single baked string loses all of this).
+            let glyph_style = match r.status.as_str() {
+                "completed" => Style::default().fg(success),
+                "failed" | "killed" => Style::default().fg(error),
+                _ => Style::default(),
             };
-            let meta = Self::row_meta(r);
-            let meta = if meta.is_empty() {
-                String::new()
-            } else {
-                format!("  \u{00b7}  {meta}")
-            };
-            let text = format!("{marker}{} {}{meta}", list_glyph(&r.status), row_name(r));
-            let style = if i == self.selected {
-                Style::default().add_modifier(Modifier::BOLD)
+            let name_style = if selected {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            lines.push(Line::from(Span::styled(text, style)));
+            let mut spans = vec![
+                Span::styled(marker, name_style),
+                Span::styled(list_glyph(&r.status), glyph_style),
+                Span::raw(" "),
+                Span::styled(row_name(r), name_style),
+            ];
+            let meta = Self::row_meta(r);
+            if !meta.is_empty() {
+                // Oracle gap between name and meta is exactly two spaces (no dot).
+                spans.push(Span::styled(format!("  {meta}"), dim_style));
+            }
+            lines.push(Line::from(spans));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(self.footer(), dim_style)));
@@ -339,6 +352,11 @@ pub struct WorkflowDetailView {
     /// Lines scrolled down from the top (`↑`/`↓`), so a tall phase/agent tree
     /// is reachable rather than clipped.
     scroll: u16,
+    /// The inner viewport height from the last `render`, so the `↓` handler can
+    /// clamp `scroll` to the same max the render clamp uses (otherwise `scroll`
+    /// runs past the bottom and the first N `↑` presses only bleed off dead
+    /// state without moving the view).
+    last_viewport: Cell<u16>,
 }
 
 impl WorkflowDetailView {
@@ -349,7 +367,14 @@ impl WorkflowDetailView {
             row,
             theme,
             scroll: 0,
+            last_viewport: Cell::new(0),
         }
+    }
+
+    /// Max scroll offset given the current line count and last-rendered viewport.
+    fn max_scroll(&self) -> u16 {
+        let total = u16::try_from(self.lines().len()).unwrap_or(u16::MAX);
+        total.saturating_sub(self.last_viewport.get())
     }
 
     fn lines(&self) -> Vec<Line<'static>> {
@@ -400,7 +425,10 @@ impl WorkflowDetailView {
                     "\u{27f3}" // ⟳ in progress / no agents
                 };
                 let title = if phase.title.is_empty() {
-                    format!("Phase {}", phase.index.saturating_add(1))
+                    // `phase.index` is already 1-based (the workflow `phase()`
+                    // counter increments BEFORE emitting), so show it verbatim —
+                    // no `+1`. (The synthetic no-phase bucket is index 0.)
+                    format!("Phase {}", phase.index)
                 } else {
                     phase.title.clone()
                 };
@@ -437,6 +465,8 @@ impl Renderable for WorkflowDetailView {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
+        // Record the viewport so the `↓` key handler clamps to the same max.
+        self.last_viewport.set(inner.height);
         let lines = self.lines();
         // Clamp the scroll so the last line can't be scrolled past the top.
         let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
@@ -461,10 +491,10 @@ impl BottomPaneView for WorkflowDetailView {
                 ViewOutcome::Pending
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                // Bounded loosely by the line count; render clamps to the real
-                // viewport-relative max each frame.
-                let max = u16::try_from(self.lines().len()).unwrap_or(u16::MAX);
-                self.scroll = self.scroll.saturating_add(1).min(max);
+                // Clamp to the same max the render uses, so `scroll` never runs
+                // past the bottom (before the first render `last_viewport` is 0,
+                // giving `total` — render still clamps the displayed offset).
+                self.scroll = self.scroll.saturating_add(1).min(self.max_scroll());
                 ViewOutcome::Pending
             }
             _ => ViewOutcome::Pending,
@@ -672,6 +702,80 @@ mod tests {
         v.render(area, &mut buf);
         let text = buf_text(&buf, area);
         assert!(text.contains("No dynamic workflows in this session"), "{text}");
+    }
+
+    #[test]
+    fn list_glyph_covers_every_status() {
+        assert_eq!(list_glyph("completed"), "\u{2714}"); // ✔
+        assert_eq!(list_glyph("failed"), "\u{2718}"); // ✘
+        assert_eq!(list_glyph("killed"), "\u{2718}"); // ✘
+        assert_eq!(list_glyph("running"), "\u{27f3}"); // ⟳
+        assert_eq!(list_glyph("pending"), "\u{27f3}"); // ⟳
+        assert_eq!(list_glyph("nonsense"), "\u{27f3}"); // fallback ⟳
+    }
+
+    #[test]
+    fn row_elapsed_uses_fixed_span_when_ended() {
+        // Terminal run: elapsed is ended - started, independent of the clock.
+        let mut r = row("w1", "completed", "done");
+        r.started_at_ms = Some(1_000);
+        r.ended_at_ms = Some(84_000); // 83s
+        assert_eq!(row_elapsed(&r).as_deref(), Some("1m 23s"));
+        // Running run: no end -> uses now (just assert it produces something).
+        r.ended_at_ms = None;
+        assert!(row_elapsed(&r).is_some());
+        // No start -> no elapsed.
+        r.started_at_ms = None;
+        assert_eq!(row_elapsed(&r), None);
+    }
+
+    #[test]
+    fn scroll_offset_keeps_the_selected_row_visible() {
+        let mut v = view((0..40).map(|i| row(&format!("w{i:02}"), "running", "r")).collect());
+        // Selection at top -> no scroll.
+        assert_eq!(v.scroll_offset(45, 10), 0);
+        // Selection near the end -> scrolls so it stays within the viewport.
+        v.selected = 39;
+        let off = v.scroll_offset(45, 10);
+        assert!(off > 0, "should scroll for a late selection");
+        assert!(v.selected_line_index() >= off as usize, "selection at/after top");
+        assert!(
+            v.selected_line_index() < (off as usize) + 10,
+            "selection within the viewport"
+        );
+    }
+
+    #[test]
+    fn detail_titleless_phase_label_is_one_based() {
+        // A real (1-based) phase with an empty title must render "Phase 1".
+        let mut r = row("w1", "running", "x");
+        r.phases = vec![WorkflowPhase {
+            index: 1,
+            title: String::new(),
+            agents: vec![],
+        }];
+        let v = WorkflowDetailView::new(r, Theme::dark());
+        let area = Rect::new(0, 0, 60, 16);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let text = buf_text(&buf, area);
+        assert!(text.contains("Phase 1"), "1-based label: {text}");
+        assert!(!text.contains("Phase 2"), "no off-by-one: {text}");
+    }
+
+    #[test]
+    fn row_separates_name_and_meta_with_two_spaces_not_a_dot() {
+        let mut r = row("w00000001", "running", "deploy-site");
+        r.started_at_ms = Some(1_000);
+        r.ended_at_ms = Some(46_000); // 45s
+        let v = view(vec![r]);
+        let area = Rect::new(0, 0, 70, 8);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let text = buf_text(&buf, area);
+        // Oracle gap is two spaces, no leading dot before the meta.
+        assert!(text.contains("deploy-site  3 agents"), "{text}");
+        assert!(!text.contains("deploy-site  \u{00b7}"), "no spurious dot: {text}");
     }
 
     fn buf_text(buf: &Buffer, area: Rect) -> String {

@@ -1973,15 +1973,8 @@ impl ChatWidget {
                 row
             })
             .collect();
-        // Newest-first (oracle `zoa` sorts `b.task.startTime - a.task.startTime`).
-        // The registry backs runs in a `HashMap` with no inherent order, so sort
-        // here: started runs by start desc, never-started (`None`) last, `task_id`
-        // as a stable tiebreak.
-        rows.sort_by(|a, b| {
-            b.started_at_ms
-                .cmp(&a.started_at_ms)
-                .then_with(|| a.task_id.cmp(&b.task_id))
-        });
+        // Newest-first — the backing registry (a HashMap) has no inherent order.
+        tui_core::multiagent::sort_workflows_newest_first(&mut rows);
         self.bottom_pane.show_workflows(rows);
         ChatOutcome::Continue
     }

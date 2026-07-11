@@ -43,6 +43,19 @@ pub fn workflow_row_from_record(r: WorkflowRecord) -> WorkflowRow {
     }
 }
 
+/// Sort workflow rows newest-first for the `/workflows` picker (oracle `zoa`
+/// sorts `b.task.startTime - a.task.startTime`). The backing `TaskRegistry` is a
+/// `HashMap` with no inherent order, so this is the sole ordering: started runs
+/// by `started_at_ms` descending, never-started (`None`) last, `task_id` as a
+/// stable tiebreak.
+pub fn sort_workflows_newest_first(rows: &mut [WorkflowRow]) {
+    rows.sort_by(|a, b| {
+        b.started_at_ms
+            .cmp(&a.started_at_ms)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+}
+
 /// Live feed: each `poll()` lists the registry and emits one `TasksRefreshed`.
 pub struct PollerFeed {
     tasks: Arc<dyn TaskRegistryHandle>,
@@ -195,5 +208,23 @@ mod tests {
         assert_eq!(stub.killed.lock().unwrap().as_slice(), ["b00000001"]);
         // Unknown id -> the registry's NotFound surfaces as Err.
         assert!(feed.kill("nonexistent").await.is_err());
+    }
+
+    #[test]
+    fn sort_workflows_newest_first_orders_by_start_desc_then_id() {
+        let mk = |id: &str, start: Option<u64>| WorkflowRow {
+            task_id: id.to_string(),
+            started_at_ms: start,
+            ..WorkflowRow::default()
+        };
+        let mut rows = vec![
+            mk("wc", Some(100)),
+            mk("wa", None),        // never-started -> last
+            mk("wb", Some(300)),   // newest
+            mk("wd", Some(300)),   // tie with wb -> id breaks it (wb < wd)
+        ];
+        sort_workflows_newest_first(&mut rows);
+        let ids: Vec<&str> = rows.iter().map(|r| r.task_id.as_str()).collect();
+        assert_eq!(ids, ["wb", "wd", "wc", "wa"]);
     }
 }

@@ -69,11 +69,12 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
                     .unwrap_or(0),
             )
             .unwrap_or(0);
-            // Prefer a stable agentId; fall back to the workflow-global index.
-            let key = v
-                .get("agentId")
-                .and_then(serde_json::Value::as_str)
-                .map_or_else(|| format!("#{index}"), str::to_string);
+            // Key on the workflow-global `index`, which is IDENTICAL across an
+            // agent's lifecycle events. `agentId` is NOT usable as the key: the
+            // `start` event carries no `agentId` (None) while `done`/`error`
+            // carry the spawned id (see `format_progress`), so keying on it would
+            // split one agent into two and double the count.
+            let key = format!("#{index}");
             distinct.entry(key.clone()).or_insert(());
             see_phase(phase_index, &mut order);
             let bucket = agents.entry(phase_index).or_default();
@@ -119,19 +120,23 @@ mod tests {
 
     #[test]
     fn phases_and_agents_group_with_latest_state() {
+        // Uses the REAL `format_progress` emission shape: the `start` event has
+        // NO `agentId`, the `done` event carries the spawned id — both share the
+        // stable `index`. The parser must collapse them to one agent (keyed on
+        // `index`), not double-count.
         let spool = "\
-[0] === Scan ===
-[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"grep\",\"state\":\"start\",\"phaseIndex\":0,\"agentId\":\"a1\"}
-[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"grep\",\"state\":\"done\",\"phaseIndex\":0,\"agentId\":\"a1\"}
-[1] === Fix ===
-[workflow_agent] {\"type\":\"workflow_agent\",\"index\":1,\"label\":\"patch\",\"state\":\"start\",\"phaseIndex\":1,\"agentId\":\"a2\"}
+[1] === Scan ===
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"grep\",\"state\":\"start\",\"phaseIndex\":1}
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":0,\"label\":\"grep\",\"state\":\"done\",\"phaseIndex\":1,\"agentId\":\"a1-uuid\"}
+[2] === Fix ===
+[workflow_agent] {\"type\":\"workflow_agent\",\"index\":1,\"label\":\"patch\",\"state\":\"start\",\"phaseIndex\":2}
 some free-form log line
 ";
         let (n, phases) = parse_workflow_spool(spool);
-        assert_eq!(n, 2, "two distinct agents");
+        assert_eq!(n, 2, "two distinct agents (start+done of one collapse)");
         assert_eq!(phases.len(), 2);
         assert_eq!(phases[0].title, "Scan");
-        assert_eq!(phases[0].agents.len(), 1);
+        assert_eq!(phases[0].agents.len(), 1, "start+done collapsed to one row");
         assert_eq!(phases[0].agents[0].label, "grep");
         assert_eq!(phases[0].agents[0].state, "done", "collapsed to latest");
         assert_eq!(phases[1].title, "Fix");

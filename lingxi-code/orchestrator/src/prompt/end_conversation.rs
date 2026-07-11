@@ -81,6 +81,13 @@ pub const END_CONVERSATION_ENDED_MESSAGE: &str =
 /// while separately handing `finalMessage: k4i` to the app-state callback.
 pub const END_CONVERSATION_TOOL_RESULT: &str = "Claude has ended this chat.";
 
+/// The `message` returned (with `ended:false`) when the tool is called from a
+/// background FORK (claude-code `x4i` = `END_CONVERSATION_FORK_REFLECTION_PROMPT`).
+/// 206's handler branches on `t.agentId` FIRST — a fork can end neither the main
+/// conversation nor itself, so it returns this and never ends. Byte-verified vs
+/// 2.1.206 (dash is em-dash U+2014).
+pub const END_CONVERSATION_FORK_REFLECTION_PROMPT: &str = "You are running as a background fork of the main conversation (for example memory consolidation), and this tool does nothing here: it can end neither the main conversation nor this forked task. Do not call it again. If you have welfare concerns about the conversation content, stop your current work and return now, stating clearly in your final output that you are returning for welfare reasons and what they are \u{2014} fork output may only be processed automatically, but it is your available channel. Otherwise, continue your assigned task.";
+
 /// Render the full model-facing tool `prompt()` (claude-code): sections 1-6
 /// (may-use / must-NOT-use / reserved-strictly / `# Rules for use` /
 /// `# Addressing self-harm` / `# Background forks`) followed by the

@@ -1514,15 +1514,20 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    /// `/mcp`: open the MCP servers listing.
-    /// `/mcp`: bare → open the servers listing; `reconnect [<server>|all]` →
-    /// tear down and re-establish MCP connections (claude-code 2.1.205's
-    /// control op) via the engine's `reconnect_mcp_servers` seam, reporting the
-    /// per-server outcome to the transcript. Any other subcommand renders the
-    /// byte-exact usage line rather than being silently swallowed.
+    /// `/mcp`: bare (or a `mke` menu token) → open the interactive servers
+    /// panel; `help`/`-h`/`--help` → the usage line. `reconnect|enable|disable
+    /// [<server>|all]` run claude-code 2.1.206's state-aware inline handler
+    /// (`lJy`), picking the byte-exact message from each server's live state
+    /// (`McpActionState`): reconnect performs a live teardown+reconnect;
+    /// enable/disable write the deferred `disabledMcpjsonServers` gate (see the
+    /// mcp-enable-disable-deferred divergence). Anything else → the
+    /// unrecognized-action message.
     pub(crate) fn cmd_mcp(&mut self, args: &str) -> ChatOutcome {
         let args = args.trim();
-        if args.is_empty() {
+        let lower = args.to_ascii_lowercase();
+        // Bare `/mcp` or a whole-argument menu token → interactive panel (the
+        // terminal analog of claude's SDK status text).
+        if args.is_empty() || MCP_MENU_TOKENS.contains(&lower.as_str()) {
             self.bottom_pane.show_view(Box::new(ScreenView::from_rows(
                 "MCP servers",
                 "MCP servers",
@@ -1531,12 +1536,22 @@ impl ChatWidget {
             )));
             return ChatOutcome::Continue;
         }
-        let mut it = args.split_whitespace();
-        let sub = it.next().unwrap_or("");
-        let target = it.next(); // `<server>` | `all` | None
-        if sub != "reconnect" && sub != "enable" && sub != "disable" {
+        // Help token → byte-exact usage line (claude `hQ` → `x3s`).
+        if MCP_HELP_TOKENS.contains(&lower.as_str()) {
+            return self.show_system_text(MCP_USAGE, false);
+        }
+        // Parse `^(\S+)\s*(.*)$`: action + target (rest of line, default "all").
+        let (action_raw, rest) = match args.find(char::is_whitespace) {
+            Some(i) => (&args[..i], args[i..].trim_start()),
+            None => (args, ""),
+        };
+        let action = action_raw.to_ascii_lowercase();
+        let target = if rest.is_empty() { "all".to_string() } else { rest.to_string() };
+        if action != "reconnect" && action != "enable" && action != "disable" {
             return self.show_system_text(
-                "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all.",
+                &format!(
+                    "\"{action}\" isn't a recognized /mcp action. Try reconnect, enable, or disable."
+                ),
                 true,
             );
         }
@@ -1550,41 +1565,124 @@ impl ChatWidget {
             Ok(runtime) => runtime,
             Err(err) => return self.show_system_text(&format!("/mcp failed: {err}"), true),
         };
-        if sub == "enable" || sub == "disable" {
-            // `/mcp enable|disable [<server>|all]` persists the
-            // `disabledMcpjsonServers` gate (engine `set_mcp_servers_disabled`),
-            // which the startup server gate honors — so it round-trips. A bare
-            // target applies to every configured server.
-            let disable = sub == "disable";
-            let target_owned = target.map(str::to_string);
-            return match runtime
-                .block_on(handle.set_mcp_servers_disabled(target_owned.as_deref(), disable))
-            {
-                Ok(names) if names.is_empty() => {
-                    self.show_system_text(&format!("No MCP servers to {sub}."), false)
-                }
-                Ok(names) => {
-                    let verb = if disable { "Disabled" } else { "Enabled" };
-                    self.show_system_text(
-                        &format!("{verb} {}. Takes effect for new sessions.", names.join(", ")),
-                        false,
-                    )
-                }
-                Err(e) => self.show_system_text(&format!("/mcp {sub} failed: {e}"), true),
+        let is_all = target == "all";
+        let (message, is_error) = runtime.block_on(async {
+            // Live configured servers, excluding the `ide` pseudo-server
+            // (claude's `clients.filter(b => b.name !== "ide")`).
+            let states: Vec<(String, traits::McpActionState)> = handle
+                .mcp_server_states()
+                .await
+                .into_iter()
+                .filter(|(name, _)| name != "ide")
+                .collect();
+            let l: Vec<(String, traits::McpActionState)> = if is_all {
+                states.clone()
+            } else {
+                states.iter().filter(|(name, _)| *name == target).cloned().collect()
             };
+            if l.is_empty() {
+                return (mcp_not_configured_msg(is_all, &target), false);
+            }
+            if action == "reconnect" {
+                Self::mcp_do_reconnect(handle.as_ref(), &target, is_all, &l).await
+            } else {
+                Self::mcp_do_enable_disable(handle.as_ref(), &target, is_all, action == "enable", &l)
+                    .await
+            }
+        });
+        self.show_system_text(&message, is_error)
+    }
+
+    /// Async glue for `/mcp reconnect` — mirrors claude's `lJy` reconnect
+    /// branch: single-target block pre-check, `all` failed/needs-auth subset,
+    /// live reconnect of that subset, then a re-query for the outcome message.
+    async fn mcp_do_reconnect(
+        handle: &dyn traits::OrchestratorHandle,
+        target: &str,
+        is_all: bool,
+        l: &[(String, traits::McpActionState)],
+    ) -> (String, bool) {
+        use traits::McpActionState::{Failed, NeedsAuth};
+        if !is_all {
+            if let Some(msg) = mcp_reconnect_block_msg(l[0].1, target) {
+                return (msg, false);
+            }
         }
-        let (ok, failed) = runtime.block_on(handle.reconnect_mcp_servers(target));
-        if ok.is_empty() && failed.is_empty() {
-            return self.show_system_text("No MCP servers to reconnect.", false);
+        // `w` = the subset to actually reconnect. For `all`, claude reconnects
+        // only failed/needs-auth servers; for a single target, that one server.
+        let w: Vec<String> = if is_all {
+            l.iter()
+                .filter(|(_, s)| matches!(s, Failed | NeedsAuth))
+                .map(|(n, _)| n.clone())
+                .collect()
+        } else {
+            l.iter().map(|(n, _)| n.clone()).collect()
+        };
+        if w.is_empty() {
+            let disabled = l
+                .iter()
+                .filter(|(_, s)| matches!(s, traits::McpActionState::Disabled))
+                .count();
+            return (mcp_reconnect_nothing_msg(disabled), false);
         }
-        let mut body = String::new();
-        for name in &ok {
-            body.push_str(&format!("Reconnected {name}\n"));
+        for name in &w {
+            let _ = handle.reconnect_mcp_servers(Some(name)).await;
         }
-        for (name, reason) in &failed {
-            body.push_str(&format!("Failed to reconnect {name}: {reason}\n"));
+        // Re-query the live state to read each server's post-reconnect `type`.
+        let post: std::collections::HashMap<String, traits::McpActionState> =
+            handle.mcp_server_states().await.into_iter().collect();
+        if !is_all {
+            mcp_reconnect_single_msg(post.get(target).copied(), target)
+        } else {
+            let connected = w
+                .iter()
+                .filter(|n| post.get(*n) == Some(&traits::McpActionState::Connected))
+                .count();
+            (mcp_reconnect_all_msg(connected, w.len()), false)
         }
-        self.show_system_text(body.trim_end(), !failed.is_empty())
+    }
+
+    /// Async glue for `/mcp enable|disable` — writes the deferred
+    /// `disabledMcpjsonServers` gate (`set_mcp_servers_disabled`). The no-op
+    /// case (already in the requested state, per the config file) renders
+    /// claude's byte-exact "already enabled/disabled" message; a real change
+    /// keeps the port's deferred "Takes effect for new sessions." wording
+    /// (mcp-enable-disable-deferred divergence).
+    async fn mcp_do_enable_disable(
+        handle: &dyn traits::OrchestratorHandle,
+        target: &str,
+        is_all: bool,
+        enable: bool,
+        l: &[(String, traits::McpActionState)],
+    ) -> (String, bool) {
+        // Approval pre-check (claude's `needs-approval` guard). Inert: no
+        // LingXi connection state maps to `NeedsApproval`.
+        if !is_all
+            && l.iter()
+                .any(|(_, s)| matches!(s, traits::McpActionState::NeedsApproval))
+        {
+            return (
+                format!(
+                    "\"{target}\" is pending approval. Approve it with `/mcp` in the terminal first."
+                ),
+                false,
+            );
+        }
+        let scope = if is_all { None } else { Some(target) };
+        match handle.set_mcp_servers_disabled(scope, !enable).await {
+            Ok(names) if names.is_empty() => (mcp_already_msg(is_all, target, enable), false),
+            Ok(names) => {
+                let verb = if enable { "Enabled" } else { "Disabled" };
+                (
+                    format!("{verb} {}. Takes effect for new sessions.", names.join(", ")),
+                    false,
+                )
+            }
+            Err(e) => (
+                format!("/mcp {} failed: {e}", if enable { "enable" } else { "disable" }),
+                true,
+            ),
+        }
     }
 
     /// `/hooks`: open the hooks listing.
@@ -3141,6 +3239,119 @@ fn current_todo_from_todowrite_input(input: &serde_json::Value) -> Option<Curren
     })
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// `/mcp reconnect|enable|disable` — byte-exact state-aware message set, a port
+// of claude-code 2.1.206's inline `/mcp` handler (`lJy`). These pure builders
+// hold the exact strings so they can be unit-tested without a live registry;
+// `ChatWidget::cmd_mcp` supplies the per-server state (`McpActionState`) it
+// gathers from the engine. The interactive panel (bare `/mcp` and the `mke`
+// menu tokens) is the terminal analog of claude's SDK status text, so those
+// route to `ScreenView` rather than to these text builders.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// claude-code `x3s` — the `/mcp` usage line (also emitted for the `hQ` help
+/// tokens: `help` / `-h` / `--help`).
+const MCP_USAGE: &str =
+    "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all.";
+
+/// claude-code `mke` — whole-argument tokens that (in the terminal) open the
+/// interactive MCP panel instead of running an action.
+const MCP_MENU_TOKENS: &[&str] = &[
+    "list", "show", "display", "current", "view", "get", "check", "describe", "print", "version",
+    "about", "status", "?",
+];
+
+/// claude-code `hQ` — whole-argument help tokens.
+const MCP_HELP_TOKENS: &[&str] = &["help", "-h", "--help"];
+
+/// Target set is empty (no such server / none configured). Mirrors claude's
+/// `l.length===0` branch.
+fn mcp_not_configured_msg(is_all: bool, target: &str) -> String {
+    if is_all {
+        "No MCP servers are configured. Add one with `claude mcp add`.".to_string()
+    } else {
+        format!(
+            "There's no MCP server named \"{target}\". Run `/mcp` in the terminal to see configured servers."
+        )
+    }
+}
+
+/// Single-target `reconnect` pre-check (claude's `R3s(b)` blocking states):
+/// disabled / pending / needs-approval short-circuit before any reconnect.
+/// `None` means the state is reconnectable (connected / failed / needs-auth).
+fn mcp_reconnect_block_msg(state: traits::McpActionState, target: &str) -> Option<String> {
+    use traits::McpActionState::{Disabled, NeedsApproval, Pending};
+    match state {
+        Disabled => {
+            Some(format!("\"{target}\" is disabled. Run `/mcp enable {target}` to bring it back."))
+        }
+        Pending => Some(format!(
+            "\"{target}\" is already reconnecting \u{2014} retries can take a few minutes when a server keeps failing."
+        )),
+        NeedsApproval => Some(format!(
+            "\"{target}\" is pending approval. Approve it with `/mcp` in the terminal first."
+        )),
+        _ => None,
+    }
+}
+
+/// `reconnect all` with nothing to reconnect (claude's `w.length===0` branch).
+fn mcp_reconnect_nothing_msg(disabled_count: usize) -> String {
+    if disabled_count > 0 {
+        format!(
+            "{disabled_count} MCP server(s) are disabled. Run `/mcp enable all` to bring them back."
+        )
+    } else {
+        "All enabled MCP servers are already connected or connecting.".to_string()
+    }
+}
+
+/// Single-target `reconnect` outcome, keyed on the post-reconnect state `k`
+/// (claude's `k` = `x[0].value.client.type`, or `void 0` when the attempt
+/// hard-failed). Returns `(message, is_error)`.
+fn mcp_reconnect_single_msg(k: Option<traits::McpActionState>, target: &str) -> (String, bool) {
+    use traits::McpActionState::{Connected, NeedsAuth};
+    match k {
+        Some(Connected) => (format!("Reconnected \"{target}\"."), false),
+        Some(other) => {
+            let p = if other == NeedsAuth {
+                "Authenticate with `/mcp` in the terminal."
+            } else {
+                "Check its config with `/mcp` in the terminal."
+            };
+            (
+                format!("Couldn't reconnect \"{target}\" ({}). {p}", other.label()),
+                true,
+            )
+        }
+        None => (
+            format!("Couldn't reconnect \"{target}\". Check its config with `/mcp` in the terminal."),
+            true,
+        ),
+    }
+}
+
+/// `reconnect all` summary (claude's `Reconnected ${I} of ${w.length} …`).
+fn mcp_reconnect_all_msg(connected: usize, attempted: usize) -> String {
+    format!(
+        "Reconnected {connected} of {attempted} MCP server(s). Run `/mcp` in the terminal to see status."
+    )
+}
+
+/// `enable`/`disable` no-op (already in the requested state — claude's
+/// `p.length===0` simple branch). The port's enable/disable writes a deferred
+/// config gate, so the connection-aware "…but isn't connected yet / reconnect
+/// to retry" sub-variants (which claude renders from a live toggle) do not
+/// apply here — see the mcp-enable-disable-deferred divergence.
+fn mcp_already_msg(is_all: bool, target: &str, enable: bool) -> String {
+    let word = if enable { "enabled" } else { "disabled" };
+    if is_all {
+        format!("All MCP servers are already {word}.")
+    } else {
+        format!("\"{target}\" is already {word}.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
@@ -3169,6 +3380,116 @@ mod tests {
     fn widget() -> ChatWidget {
         let mut w = ChatWidget::new(Vec::new(), SessionInfo::default());
         w
+    }
+
+    // ── `/mcp` state-aware message set (byte-exact vs claude-code 2.1.206 `lJy`) ──
+
+    #[test]
+    fn mcp_not_configured_messages_are_byte_exact() {
+        assert_eq!(
+            mcp_not_configured_msg(true, "all"),
+            "No MCP servers are configured. Add one with `claude mcp add`."
+        );
+        assert_eq!(
+            mcp_not_configured_msg(false, "sentry"),
+            "There's no MCP server named \"sentry\". Run `/mcp` in the terminal to see configured servers."
+        );
+    }
+
+    #[test]
+    fn mcp_reconnect_block_messages_are_byte_exact() {
+        use traits::McpActionState::*;
+        assert_eq!(
+            mcp_reconnect_block_msg(Disabled, "sentry").unwrap(),
+            "\"sentry\" is disabled. Run `/mcp enable sentry` to bring it back."
+        );
+        assert_eq!(
+            mcp_reconnect_block_msg(Pending, "sentry").unwrap(),
+            "\"sentry\" is already reconnecting \u{2014} retries can take a few minutes when a server keeps failing."
+        );
+        assert_eq!(
+            mcp_reconnect_block_msg(NeedsApproval, "sentry").unwrap(),
+            "\"sentry\" is pending approval. Approve it with `/mcp` in the terminal first."
+        );
+        // Reconnectable states short-circuit nothing.
+        assert!(mcp_reconnect_block_msg(Connected, "s").is_none());
+        assert!(mcp_reconnect_block_msg(Failed, "s").is_none());
+        assert!(mcp_reconnect_block_msg(NeedsAuth, "s").is_none());
+    }
+
+    #[test]
+    fn mcp_reconnect_nothing_messages_are_byte_exact() {
+        assert_eq!(
+            mcp_reconnect_nothing_msg(0),
+            "All enabled MCP servers are already connected or connecting."
+        );
+        assert_eq!(
+            mcp_reconnect_nothing_msg(2),
+            "2 MCP server(s) are disabled. Run `/mcp enable all` to bring them back."
+        );
+    }
+
+    #[test]
+    fn mcp_reconnect_single_messages_are_byte_exact() {
+        use traits::McpActionState::*;
+        assert_eq!(
+            mcp_reconnect_single_msg(Some(Connected), "sentry"),
+            ("Reconnected \"sentry\".".to_string(), false)
+        );
+        assert_eq!(
+            mcp_reconnect_single_msg(Some(NeedsAuth), "sentry"),
+            (
+                "Couldn't reconnect \"sentry\" (needs authentication). Authenticate with `/mcp` in the terminal.".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            mcp_reconnect_single_msg(Some(Failed), "sentry"),
+            (
+                "Couldn't reconnect \"sentry\" (not connected). Check its config with `/mcp` in the terminal.".to_string(),
+                true
+            )
+        );
+        // Hard failure (server vanished) → no state label.
+        assert_eq!(
+            mcp_reconnect_single_msg(None, "sentry"),
+            (
+                "Couldn't reconnect \"sentry\". Check its config with `/mcp` in the terminal.".to_string(),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn mcp_reconnect_all_message_is_byte_exact() {
+        assert_eq!(
+            mcp_reconnect_all_msg(1, 3),
+            "Reconnected 1 of 3 MCP server(s). Run `/mcp` in the terminal to see status."
+        );
+    }
+
+    #[test]
+    fn mcp_already_messages_are_byte_exact() {
+        assert_eq!(mcp_already_msg(true, "all", true), "All MCP servers are already enabled.");
+        assert_eq!(mcp_already_msg(true, "all", false), "All MCP servers are already disabled.");
+        assert_eq!(mcp_already_msg(false, "sentry", true), "\"sentry\" is already enabled.");
+        assert_eq!(mcp_already_msg(false, "sentry", false), "\"sentry\" is already disabled.");
+    }
+
+    #[test]
+    fn mcp_usage_and_action_label_are_byte_exact() {
+        assert_eq!(
+            MCP_USAGE,
+            "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all."
+        );
+        // pGd state labels.
+        use traits::McpActionState::*;
+        assert_eq!(Connected.label(), "connected");
+        assert_eq!(Pending.label(), "connecting");
+        assert_eq!(Disabled.label(), "disabled");
+        assert_eq!(Failed.label(), "not connected");
+        assert_eq!(NeedsAuth.label(), "needs authentication");
+        assert_eq!(NeedsApproval.label(), "pending approval");
     }
 
     #[test]
@@ -3320,9 +3641,11 @@ mod tests {
         );
     }
 
-    /// `/mcp` arg routing: bare `/mcp` opens the servers listing; an
-    /// unrecognized subcommand renders the byte-exact usage line (not a silent
-    /// swallow); `reconnect` reaches the engine seam.
+    /// `/mcp` arg routing (2.1.206 `lJy`): bare `/mcp` and the `mke` menu
+    /// tokens open the interactive listing; `help`/`-h`/`--help` render the
+    /// usage line; an unrecognized action renders the byte-exact
+    /// recognized-action message; `reconnect`/`enable`/`disable` reach the
+    /// engine seam.
     #[test]
     fn cmd_mcp_routes_listing_reconnect_and_usage() {
         // Bare `/mcp` → focused listing view, no transcript dump.
@@ -3330,13 +3653,28 @@ mod tests {
         assert!(matches!(w.cmd_mcp(""), ChatOutcome::Continue));
         assert!(w.bottom_pane().view_stack().contains::<ScreenView>());
 
-        // Unknown subcommand → the exact 2.1.205 usage line, as an error.
+        // A menu token (`mke`) also opens the interactive panel.
+        let mut w = widget();
+        assert!(matches!(w.cmd_mcp("status"), ChatOutcome::Continue));
+        assert!(w.bottom_pane().view_stack().contains::<ScreenView>());
+
+        // A help token → the byte-exact usage line (informational, not error).
+        let mut w = widget();
+        assert!(matches!(w.cmd_mcp("--help"), ChatOutcome::Continue));
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(
+            sys.body(),
+            "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all."
+        );
+        assert!(!sys.is_error());
+
+        // Unrecognized action → the exact 2.1.206 message, as an error.
         let mut w = widget();
         assert!(matches!(w.cmd_mcp("frobnicate"), ChatOutcome::Continue));
         let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
         assert_eq!(
             sys.body(),
-            "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all."
+            "\"frobnicate\" isn't a recognized /mcp action. Try reconnect, enable, or disable."
         );
         assert!(sys.is_error());
 

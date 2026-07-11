@@ -366,6 +366,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
         (ok, failed)
     }
 
+    async fn mcp_server_states(&self) -> Vec<(String, traits::McpActionState)> {
+        match self.mcp_registry.as_ref() {
+            Some(reg) => reg.action_states().await,
+            None => Vec::new(),
+        }
+    }
+
     async fn set_mcp_servers_disabled(
         &self,
         server: Option<&str>,

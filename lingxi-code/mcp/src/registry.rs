@@ -1105,6 +1105,21 @@ impl McpRegistry {
         out
     }
 
+    /// Fine-grained `(name, McpActionState)` pairs for the `/mcp` action
+    /// handler (`reconnect|enable|disable`). Unlike [`Self::snapshot`], this
+    /// preserves the full state vocabulary (pending / disabled / needs-auth /
+    /// failed) the handler needs to pick claude-code's byte-exact state-aware
+    /// message. Sorted by name for stable display.
+    pub async fn action_states(&self) -> Vec<(String, traits::McpActionState)> {
+        let conns = self.connections.read().await;
+        let mut out: Vec<(String, traits::McpActionState)> = conns
+            .values()
+            .map(|s| (s.name().to_string(), project_action_state(s)))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// The set of MCP server names that currently expose at least one tool —
     /// i.e. servers that are connected AND authenticated (an unauthenticated
     /// server has no tools). Port of claude-code's `serversWithTools` derivation
@@ -1510,6 +1525,33 @@ fn state_is_disabled(state: &McpConnectionState) -> bool {
         | McpConnectionState::Reconnecting { config, .. }
         | McpConnectionState::Failed { config, .. }
         | McpConnectionState::Stopped { config } => config.disabled,
+    }
+}
+
+/// Project a [`McpConnectionState`] onto the fine-grained
+/// [`traits::McpActionState`] used by the `/mcp reconnect|enable|disable`
+/// action handler — a faithful mirror of claude-code's client `type`
+/// discriminant. The `config.disabled` gate takes precedence (a disabled
+/// server reports `"disabled"` regardless of its last live state), then:
+/// `Connected`/`HealthChecking` → connected, `Connecting`/`Reconnecting` →
+/// pending, `AwaitingOAuth` → needs-auth, everything else (`Failed`,
+/// `Disconnected`, `Stopped`) → failed ("not connected").
+fn project_action_state(state: &McpConnectionState) -> traits::McpActionState {
+    use traits::McpActionState;
+    if state_is_disabled(state) {
+        return McpActionState::Disabled;
+    }
+    match state {
+        McpConnectionState::Connected { .. } | McpConnectionState::HealthChecking { .. } => {
+            McpActionState::Connected
+        }
+        McpConnectionState::Connecting { .. } | McpConnectionState::Reconnecting { .. } => {
+            McpActionState::Pending
+        }
+        McpConnectionState::AwaitingOAuth { .. } => McpActionState::NeedsAuth,
+        McpConnectionState::Failed { .. }
+        | McpConnectionState::Disconnected { .. }
+        | McpConnectionState::Stopped { .. } => McpActionState::Failed,
     }
 }
 

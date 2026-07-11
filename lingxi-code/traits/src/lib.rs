@@ -11,10 +11,10 @@
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
-/// (`claude-code_2-1-183_agent`) and the WebFetch `User-Agent`
-/// (`claude-code/2.1.183`). LingXi is a 1:1 copy, so it presents the same string.
+/// (`claude-code_2-1-206_agent`) and the WebFetch `User-Agent`
+/// (`claude-code/2.1.206`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.183";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.206";
 
 pub mod agent_name_registry;
 pub mod auth;
@@ -89,7 +89,8 @@ pub use orchestrator::{
     provider_fallback_order, provider_has_curated_list, AgentInfo,
     CheckStatus,
     CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
-    DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpServerInfo, McpStatus,
+    DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState,
+    McpServerInfo, McpStatus,
     MemoryEditorOutcome, ModelListing, OrchestratorHandle, OutputEvent, OutputStream,
     RateLimitSnapshot, RecapOutcome, RewindRowData, StatusSnapshot, TurnOutcome,
 };

@@ -209,6 +209,46 @@ pub enum McpStatus {
     Error(String),
 }
 
+/// Fine-grained MCP server state for the `/mcp reconnect|enable|disable` action
+/// handler — a faithful mirror of claude-code 2.1.206's MCP client `type`
+/// discriminant (`f8e`/`R3s`). The coarser [`McpStatus`] projection (used by
+/// `/status` and the `/mcp` listing) collapses several of these into
+/// `Disconnected`; the action handler needs the full vocabulary to pick the
+/// byte-exact state-aware message (e.g. a `Disabled` server routes to
+/// "…enable it first", a `Pending` one to "…already reconnecting").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpActionState {
+    /// Connected and healthy (claude `"connected"`).
+    Connected,
+    /// Still connecting / reconnecting (claude `"pending"`).
+    Pending,
+    /// Turned off via the `disabledMcpjsonServers` gate (claude `"disabled"`).
+    Disabled,
+    /// Tried to connect and failed / never connected (claude `"failed"`).
+    Failed,
+    /// Awaiting OAuth authentication (claude `"needs-auth"`).
+    NeedsAuth,
+    /// Awaiting manual approval before it may connect (claude `"needs-approval"`).
+    /// No LingXi connection state currently produces this; the variant exists so
+    /// the ported handler's approval branch stays byte-faithful and inert.
+    NeedsApproval,
+}
+
+impl McpActionState {
+    /// Human-readable label — a byte-exact port of claude-code's `pGd` map,
+    /// used inside the reconnect failure message `(… ${pGd[k]} …)`.
+    pub fn label(self) -> &'static str {
+        match self {
+            McpActionState::Connected => "connected",
+            McpActionState::Pending => "connecting",
+            McpActionState::Disabled => "disabled",
+            McpActionState::Failed => "not connected",
+            McpActionState::NeedsAuth => "needs authentication",
+            McpActionState::NeedsApproval => "pending approval",
+        }
+    }
+}
+
 /// One hook entry returned by [`OrchestratorHandle::list_hooks`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HookInfo {
@@ -828,6 +868,17 @@ pub trait OrchestratorHandle: Send + Sync {
         _name: Option<&str>,
     ) -> (Vec<String>, Vec<(String, String)>) {
         (Vec::new(), Vec::new())
+    }
+
+    /// Fine-grained per-server state for the `/mcp reconnect|enable|disable`
+    /// action handler (`McpActionState` mirrors claude-code's client `type`
+    /// discriminant). Returns `(name, state)` pairs — the `"ide"` pseudo-server
+    /// is included; the caller filters it, matching claude's
+    /// `clients.filter(b => b.name !== "ide")`. The default (no MCP registry
+    /// wired) returns an empty vector, so the handler falls through to its
+    /// "no servers configured" path.
+    async fn mcp_server_states(&self) -> Vec<(String, McpActionState)> {
+        Vec::new()
     }
 
     /// Enable/disable a project MCP server (`/mcp enable|disable [<server>|all]`)

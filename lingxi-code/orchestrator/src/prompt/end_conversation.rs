@@ -16,6 +16,34 @@
 /// The tool's wire name (claude-code `SN`).
 pub const END_CONVERSATION_TOOL_NAME: &str = "EndConversation";
 
+/// Input schema — claude-code `E0y = E.strictObject({})`: NO parameters
+/// (an empty strict object → no properties, `additionalProperties: false`).
+#[must_use]
+pub fn input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    })
+}
+
+/// Output schema — claude-code `v0y = E.object({ended: E.boolean(), message:
+/// E.string()})`.
+#[must_use]
+pub fn output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "ended": { "type": "boolean" },
+            "message": { "type": "string" }
+        },
+        "required": ["ended", "message"]
+    })
+}
+
+/// `maxResultSizeChars` on the tool def (claude-code `1e4`).
+pub const END_CONVERSATION_MAX_RESULT_SIZE_CHARS: usize = 10_000;
+
 /// The GrowthBook flag gating the feature (`JUi`; default OFF → tool absent +
 /// this section omitted, byte-identical to a build without the feature).
 pub const END_CONVERSATION_GB_FLAG: &str = "tengu_umber_kestrel";
@@ -154,6 +182,20 @@ mod tests {
             r,
             "Re-read the EndConversation tool guidance below. Confirm this conversation meets those criteria and that you are certain you want to end it. If so, call EndConversation again immediately to actually end the conversation. Otherwise, continue the conversation instead.\n\n---\nGUIDE"
         );
+    }
+
+    #[test]
+    fn schemas_match_206() {
+        // E0y = strictObject({}) — no params.
+        let s = input_schema();
+        assert_eq!(s["type"], "object");
+        assert_eq!(s["properties"], serde_json::json!({}));
+        assert_eq!(s["additionalProperties"], false);
+        // v0y = object({ended: boolean, message: string}).
+        let o = output_schema();
+        assert_eq!(o["properties"]["ended"]["type"], "boolean");
+        assert_eq!(o["properties"]["message"]["type"], "string");
+        assert_eq!(END_CONVERSATION_MAX_RESULT_SIZE_CHARS, 10_000);
     }
 
     #[test]

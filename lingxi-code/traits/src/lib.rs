@@ -85,7 +85,8 @@ pub use mailbox::{
 pub use mcp::*;
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
-    curated_model_names, is_curated_model, parse_model_ref, provider_has_curated_list, AgentInfo,
+    curated_model_names, is_curated_model, parse_model_ref, provider_default_model,
+    provider_fallback_order, provider_has_curated_list, AgentInfo,
     CheckStatus,
     CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
     DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpServerInfo, McpStatus,

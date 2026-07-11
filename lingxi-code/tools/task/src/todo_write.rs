@@ -335,6 +335,10 @@ impl Tool for TodoWriteTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("manage the session task checklist")
+    }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
     }

@@ -1124,6 +1124,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
 ///     default_model: "claude-sonnet-5".to_string(),
+///     default_model_explicit: false,
+///     recent_models: Vec::new(),
 ///     fallback_model: None,
 ///     provider_profiles: Some(BTreeMap::new()),
 ///     routing: None,
@@ -1177,6 +1179,16 @@ pub struct DesktopConfig {
     pub lingxi_home: std::path::PathBuf,
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
+    /// `true` when [`Self::default_model`] is an EXPLICIT per-session choice
+    /// (`--model` flag) rather than the built-in default or the persisted
+    /// `settings.model`. An explicit choice is never overridden by the
+    /// boot-time connected-provider fallback ([`connected_provider_fallback`]).
+    pub default_model_explicit: bool,
+    /// `settings.recentModels` (most-recent-first), read by the host — `build()`
+    /// itself stays off host config files (F2-01). Feeds the connected-provider
+    /// fallback's preference pass. Empty ⟶ no recents (fallback uses the static
+    /// provider order only).
+    pub recent_models: Vec<RecentModelRef>,
     /// Fallback model id (`OrchestratorConfig.fallback_model`). `None` ⟶ no
     /// fallback, so the 529-overload interception in `turn_loop` stays a strict
     /// no-op. Mirrors `Argv::fallback_model`, which claude-code only HONORS in
@@ -1541,6 +1553,8 @@ impl Default for DesktopConfig {
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
+            default_model_explicit: false,
+            recent_models: Vec::new(),
             fallback_model: None,
             provider_profiles: None,
             routing: None,
@@ -1825,6 +1839,12 @@ pub struct DesktopRuntime {
     /// picker's Connect badge (a sibling map, NOT a field on the frozen
     /// `ModelListing`). The tui joins it by provider/profile name.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
+    /// Set when the boot-time connected-provider fallback rerouted the session
+    /// default model (its configured provider was definitively disconnected).
+    /// Hosts surface it: the CLI prints a stderr notice pre-alt-screen; the
+    /// bridge relies on the `tracing::warn!` `build()` already emitted. `None`
+    /// ⟶ the configured default booted unchanged.
+    pub default_model_fallback: Option<DefaultModelFallbackNotice>,
     /// (T2a) Per-provider login method tag, keyed by profile_name, derived from
     /// the real catalog auth strategy: "api_key" | "copilot_device" | "oauth".
     /// Threaded into the TUI so the /connect picker shows the real method.
@@ -2117,6 +2137,127 @@ fn anthropic_models_for(
             capabilities: caps,
         })
         .collect()
+}
+
+/// One `settings.recentModels` entry threaded in by the host (the CLI reads the
+/// file; F2-01 keeps `build()` off the filesystem for host config): a prior
+/// `/model` pick, most-recent-first. `provider` is the catalog profile name;
+/// `model` is the BARE wire `request_model` (the on-disk schema splits them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentModelRef {
+    /// Catalog profile name (`ModelListing::provider_id`).
+    pub provider: String,
+    /// Bare wire model id (`ModelListing::request_model`).
+    pub model: String,
+}
+
+/// Host-facing notice that the boot-time connected-provider fallback rerouted
+/// the session default model. Surfaced on [`DesktopRuntime`]; both refs are in
+/// display form (`profile/model`-qualified for non-anthropic routes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultModelFallbackNotice {
+    /// The configured default that did NOT boot (verbatim as configured).
+    pub from: String,
+    /// The connected-provider model the session booted on instead.
+    pub to: String,
+}
+
+/// Outcome of [`connected_provider_fallback`]: what the session boots on
+/// instead of the configured (disconnected-provider) default model.
+struct DefaultModelFallback {
+    /// Bare wire id of the fallback model.
+    model: String,
+    /// Provider profile the fallback routes to — ALWAYS set (anthropic
+    /// included), so the `switch_model` seeding at the end of `build()` scopes
+    /// the session and a wire id that exists under several providers (e.g.
+    /// `claude-fable-5` on anthropic AND github-copilot) resolves
+    /// unambiguously instead of failing every turn with "ambiguous across
+    /// profiles".
+    profile: String,
+}
+
+/// Boot-time connected-provider default-model fallback (`LingXi` multi-provider
+/// divergence — upstream claude-code is Anthropic-only and has no analog):
+/// when the configured default model's provider is DEFINITIVELY disconnected
+/// (`availability[provider] == false`; an ABSENT entry means the probe is
+/// blind to that provider, so the default is conservatively kept) and at least
+/// one other provider IS connected, boot on that provider instead of into
+/// guaranteed first-turn auth failures.
+///
+/// Preference: (1) the most recent `/model` pick (`settings.recentModels`) on
+/// a connected provider whose model still exists in the catalog; (2) the first
+/// connected provider in [`traits::provider_fallback_order`], on its
+/// [`traits::provider_default_model`]; (3) any remaining connected provider
+/// (user-defined — no curated default), on its first listed model. Every
+/// candidate is validated against the live `listings` so the reroute can never
+/// select an id `switch_model`/the wire would reject.
+///
+/// `anthropic_probe_definitive` is `false` on gateway installs (a custom
+/// `api_base` / `ANTHROPIC_AUTH_TOKEN` serves Claude WITHOUT a local key or
+/// OAuth): there `availability["anthropic"] == false` is probe-blindness, not
+/// disconnection — an anthropic-routed default is then kept as-is (the same
+/// protection the TUI `/model` picker's `connected_model_rows` gives the
+/// current model's provider).
+fn connected_provider_fallback(
+    default_model_id: &str,
+    default_model_profile: Option<&str>,
+    anthropic_probe_definitive: bool,
+    model_providers: &std::collections::BTreeMap<String, (String, String)>,
+    availability: &std::collections::BTreeMap<String, bool>,
+    listings: &[traits::ModelListing],
+    recents: &[RecentModelRef],
+) -> Option<DefaultModelFallback> {
+    // Effective provider of the configured default — the same resolution the
+    // session_provider_first_party gate uses (explicit profile, else the
+    // model_providers grouping, else the native anthropic route).
+    let default_provider = default_model_profile
+        .map(str::to_string)
+        .or_else(|| {
+            model_providers
+                .get(default_model_id)
+                .map(|(p, _)| p.clone())
+        })
+        .unwrap_or_else(|| "anthropic".to_string());
+    if default_provider == "anthropic" && !anthropic_probe_definitive {
+        return None; // gateway/auth-override install — the probe can't see its auth
+    }
+    if availability.get(default_provider.as_str()) != Some(&false) {
+        return None; // connected — or the probe doesn't know this provider
+    }
+    let connected = |p: &str| availability.get(p) == Some(&true);
+    let in_listings =
+        |p: &str, m: &str| listings.iter().any(|l| l.provider_id == p && l.request_model == m);
+    let route = |model: String, provider: &str| DefaultModelFallback {
+        model,
+        profile: provider.to_string(),
+    };
+    // (1) The most recent /model pick on a connected provider.
+    for r in recents {
+        if connected(&r.provider) && in_listings(&r.provider, &r.model) {
+            return Some(route(r.model.clone(), &r.provider));
+        }
+    }
+    // (2) Deterministic provider order, each on its curated boot default.
+    for p in traits::provider_fallback_order() {
+        if !connected(p) {
+            continue;
+        }
+        if let Some(m) = traits::provider_default_model(p) {
+            if in_listings(p, m) {
+                return Some(route(m.to_string(), p));
+            }
+        }
+    }
+    // (3) Any remaining connected provider (user-defined): first listed model.
+    for (p, on) in availability {
+        if !on {
+            continue;
+        }
+        if let Some(l) = listings.iter().find(|l| &l.provider_id == p) {
+            return Some(route(l.request_model.clone(), p));
+        }
+    }
+    None
 }
 
 /// Load the merged `settings.outputStyle` (project + user + env layers) for the
@@ -2946,38 +3087,24 @@ pub async fn build(
             })
         })
         .collect();
-    let (default_model_id, default_model_profile) =
+    let (mut default_model_id, mut default_model_profile) =
         traits::parse_model_ref(&cfg.default_model, &default_listings);
 
-    // (M10 cc2.1.198) LingXi multi-provider half of the Explore `GAe`/`obm`
-    // firstParty gate: `false` when the session's default model routes to a
-    // NON-Anthropic provider profile (OpenAI/Gemini/…) so the built-in Explore
-    // agent resolves to `inherit` (the opus cap never fires for a foreign
-    // provider — same behavior as the TS `fr() !== "firstParty"` branch). The
-    // env half (Bedrock/Vertex/Foundry) is checked inside
-    // `agent::model_resolution::resolve_builtin_explore_model`. Must be
-    // computed while `assembled.client_config.providers` is still owned.
-    let session_provider_first_party = {
-        let profile_name = default_model_profile.clone().or_else(|| {
-            model_providers
-                .get(&default_model_id)
-                .map(|(profile, _)| profile.clone())
-        });
-        match profile_name {
-            Some(name) => assembled
-                .client_config
-                .providers
-                .iter()
-                .find(|p| p.profile_name == name)
-                // Unknown profile name → the built-in Anthropic route.
-                .map_or(true, |p| {
-                    matches!(p.provider_id, llm_client::ProviderId::AnthropicFirstParty)
-                }),
-            // No configured profile serves the default model → the built-in
-            // Anthropic route (plain api-key / OAuth install).
-            None => true,
-        }
-    };
+    // Per-profile firstParty-ness, captured while `assembled.client_config.
+    // providers` is still owned (`from_config` moves it below). The Explore
+    // firstParty gate itself is evaluated AFTER the connected-provider
+    // fallback so it reflects the model the session actually boots on.
+    let profile_first_party: std::collections::BTreeMap<String, bool> = assembled
+        .client_config
+        .providers
+        .iter()
+        .map(|p| {
+            (
+                p.profile_name.clone(),
+                matches!(p.provider_id, llm_client::ProviderId::AnthropicFirstParty),
+            )
+        })
+        .collect();
 
     let mut client = DefaultLlmClient::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-client config: {e}")))?;
@@ -3004,6 +3131,113 @@ pub async fn build(
     if let Some(d) = openai_chatgpt_delegate {
         oauth_delegates.insert("openai-chatgpt".to_string(), d);
     }
+
+    // Phase 2a §6.2: per-profile availability from the assembled credential
+    // sources (each profile is "available" iff its keychain entry / env var
+    // resolves). Computed HERE — the earliest point all five inputs exist — so
+    // the connected-provider default-model fallback below can consult it; the
+    // same map later drives the `/model` picker's Connect badge via
+    // `DesktopRuntime.provider_availability`. Nothing between here and the
+    // runtime literal mutates credentials, so early == late computation.
+    let mut provider_availability: std::collections::BTreeMap<String, bool> =
+        provider_config::compute_availability(
+            &credentials,
+            &assembled.credential_sources,
+            has_api_key,
+            has_oauth,
+            has_openai_chatgpt,
+        )
+        .await
+        .into_iter()
+        .map(|a| (a.profile_name, a.available))
+        .collect();
+    // `assemble` emits NO anthropic credential source in the unauthenticated
+    // (no key / no oauth) path, so `compute_availability` yields no "anthropic"
+    // entry there. The picker's Connect badge still needs anthropic represented,
+    // so surface it unconditionally from the engine's resolved auth state.
+    provider_availability
+        .entry("anthropic".to_string())
+        .or_insert(has_api_key || has_oauth);
+
+    // ── Boot-time connected-provider default-model fallback ─────────────────
+    // (LingXi multi-provider divergence — upstream is Anthropic-only.) When the
+    // configured default model's provider is definitively disconnected and
+    // another provider IS connected, boot on the connected provider instead of
+    // into guaranteed first-turn auth failures. Skipped when the model was an
+    // EXPLICIT `--model` choice (the user asked for exactly that model), and on
+    // env-routed Bedrock/Vertex/Foundry installs (anthropic models are served
+    // WITHOUT anthropic key/oauth there, so "anthropic disconnected" is
+    // meaningless and the reroute would break a working setup).
+    let mut default_model_fallback: Option<DefaultModelFallbackNotice> = None;
+    if !cfg.default_model_explicit && api_provider() == ApiProvider::FirstParty {
+        // The anthropic probe is DEFINITIVE only on the stock first-party base
+        // URL with no gateway auth override. A custom `api_base`
+        // (`LINGXI_API_BASE_URL` — an enterprise/auth-free gateway serving
+        // Claude with no local key) or an `ANTHROPIC_AUTH_TOKEN` works today
+        // with `has_api_key == has_oauth == false`, so the forced
+        // `availability["anthropic"] = false` above must not reroute those
+        // installs (the same probe-blindness `connected_model_rows` guards in
+        // the TUI picker).
+        let anthropic_probe_definitive = cfg.api_base == DesktopConfig::default().api_base
+            && std::env::var("ANTHROPIC_AUTH_TOKEN").map_or(true, |v| v.is_empty());
+        if let Some(fb) = connected_provider_fallback(
+            &default_model_id,
+            default_model_profile.as_deref(),
+            anthropic_probe_definitive,
+            &model_providers,
+            &provider_availability,
+            &default_listings,
+            &cfg.recent_models,
+        ) {
+            let to = format!("{}/{}", fb.profile, fb.model);
+            tracing::warn!(
+                from = %cfg.default_model,
+                to = %to,
+                "default model's provider is not connected; booting on a connected provider"
+            );
+            default_model_fallback = Some(DefaultModelFallbackNotice {
+                from: cfg.default_model.clone(),
+                to,
+            });
+            default_model_id = fb.model;
+            default_model_profile = Some(fb.profile);
+        }
+    }
+
+    // The raw "user model setting" seam (the opusplan/haiku plan-mode swap
+    // anchor threaded into subagent/teammate model resolution). When the
+    // fallback rerouted the session, the persisted alias no longer describes
+    // the booted main loop — thread the rerouted ref instead so a plan-mode
+    // `AgentModel::Inherit` spawn cannot swap back onto the provider the
+    // fallback just declared disconnected.
+    let model_setting_for_spawns = default_model_fallback
+        .as_ref()
+        .map_or_else(|| cfg.default_model.clone(), |n| n.to.clone());
+
+    // (M10 cc2.1.198) LingXi multi-provider half of the Explore `GAe`/`obm`
+    // firstParty gate: `false` when the session's default model routes to a
+    // NON-Anthropic provider profile (OpenAI/Gemini/…) so the built-in Explore
+    // agent resolves to `inherit` (the opus cap never fires for a foreign
+    // provider — same behavior as the TS `fr() !== "firstParty"` branch). The
+    // env half (Bedrock/Vertex/Foundry) is checked inside
+    // `agent::model_resolution::resolve_builtin_explore_model`. Evaluated over
+    // the POST-fallback default (the model the session actually boots on),
+    // via the `profile_first_party` capture taken before `from_config`.
+    let session_provider_first_party = {
+        let profile_name = default_model_profile.clone().or_else(|| {
+            model_providers
+                .get(&default_model_id)
+                .map(|(profile, _)| profile.clone())
+        });
+        match profile_name {
+            // Unknown profile name → the built-in Anthropic route.
+            Some(name) => profile_first_party.get(&name).copied().unwrap_or(true),
+            // No configured profile serves the default model → the built-in
+            // Anthropic route (plain api-key / OAuth install).
+            None => true,
+        }
+    };
+
     let composite = provider_config::MultiCredentialProvider::new(
         credentials.clone(),
         assembled.credential_sources.clone(),
@@ -3325,7 +3559,8 @@ pub async fn build(
         // #15: the parent model handed to the spawner must be the RESOLVED
         // main-loop wire id (claude `getMainLoopModel()`), NOT the raw alias —
         // `orch_cfg.model` is `cfg.default_model` with only a `profile/` prefix
-        // stripped, so an `opusplan`/`sonnet` install leaves it a bare alias. An
+        // stripped (or the connected-provider fallback's rerouted id), so an
+        // `opusplan`/`sonnet` install leaves it a bare alias. An
         // `AgentModel::Inherit` spawn in DEFAULT mode returns the parent verbatim,
         // which would be a bogus wire id that fails at the provider. Resolve it
         // here; the raw alias is still threaded via `with_model_setting` below for
@@ -3334,15 +3569,18 @@ pub async fn build(
             &orch_cfg.model,
         ))
         // #15: thread the live permission mode + the RAW user model setting
-        // (e.g. "opusplan" / "haiku" — `cfg.default_model` is claude-code's
+        // (e.g. "opusplan" / "haiku" — claude-code's
         // `getUserSpecifiedModelSetting()`, the UN-resolved alias) into the
         // spawner so `resolve_agent_model`'s `getRuntimeMainLoopModel` branch
         // actually fires for an `AgentModel::Inherit` spawn: an `opusplan` install
         // in plan mode resolves the subagent to Opus (not the resolved Sonnet
         // main-loop model). Without these the Inherit branch returns the parent
         // model unchanged (default mode → byte-identical to before this seam).
+        // `model_setting_for_spawns` = `cfg.default_model` unless the
+        // connected-provider fallback rerouted the session (then the plan-mode
+        // swap must not resurrect the disconnected anthropic route).
         .with_permission_mode(cfg.permission_mode)
-        .with_model_setting(cfg.default_model.clone())
+        .with_model_setting(model_setting_for_spawns.clone())
         // (M10 cc2.1.198) Explore `GAe` firstParty gate, multi-provider half:
         // a non-Anthropic default profile behaves like the TS non-firstParty
         // branch (Explore → inherit, never the opus cap).
@@ -4211,9 +4449,11 @@ pub async fn build(
     // #15: thread the live permission mode + the RAW user model setting (the
     // un-resolved alias, e.g. "opusplan") so the teammate's `Inherit` resolution
     // gets the same `getRuntimeMainLoopModel` plan-mode swap as the spawner above
-    // (opusplan + plan → Opus). Default mode → byte-identical to before.
+    // (opusplan + plan → Opus). Default mode → byte-identical to before. Uses
+    // the post-fallback `model_setting_for_spawns` (same reasoning as the
+    // spawner seam).
     .with_permission_mode(cfg.permission_mode)
-    .with_model_setting(cfg.default_model.clone())
+    .with_model_setting(model_setting_for_spawns.clone())
     .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
     // Fire the `TeammateIdle` hook (claude-code `executeTeammateIdleHooks`,
     // `stopHooks.ts:403`) each time a teammate finishes a turn-set and parks
@@ -5551,28 +5791,10 @@ pub async fn build(
         }
     };
 
-    // Phase 2a §6.2: per-profile availability from the assembled credential
-    // sources (each profile is "available" iff its keychain entry / env var
-    // resolves). Drives the `/model` picker's Connect badge.
-    let mut provider_availability: std::collections::BTreeMap<String, bool> =
-        provider_config::compute_availability(
-            &credentials,
-            &assembled.credential_sources,
-            has_api_key,
-            has_oauth,
-            has_openai_chatgpt,
-        )
-        .await
-        .into_iter()
-        .map(|a| (a.profile_name, a.available))
-        .collect();
-    // `assemble` emits NO anthropic credential source in the unauthenticated
-    // (no key / no oauth) path, so `compute_availability` yields no "anthropic"
-    // entry there. The picker's Connect badge still needs anthropic represented,
-    // so surface it unconditionally from the engine's resolved auth state.
-    provider_availability
-        .entry("anthropic".to_string())
-        .or_insert(has_api_key || has_oauth);
+    // Phase 2a §6.2: `provider_availability` is computed EARLY in build() (the
+    // connected-provider default-model fallback consults it before the
+    // orchestrator exists) and reused verbatim here for the `/model` picker's
+    // Connect badge — nothing between the two points mutates credentials.
 
     // T2a: per-profile login-method tag derived from the builtin catalog auth
     // strategy.  AuthStrategy::None providers are not connectable → skipped.
@@ -5613,6 +5835,7 @@ pub async fn build(
         file_history,
         plugin_runtime,
         provider_availability,
+        default_model_fallback,
         provider_auth_methods,
         model_providers,
         provider_adapter: provider_adapter_handle,
@@ -6186,6 +6409,11 @@ mod tests {
             cwd: cwd.clone(),
             lingxi_home,
             default_model: "claude-sonnet-4-20250514".to_string(),
+            // Boot tests must stay deterministic across HOST machines: a dev
+            // keychain with real provider keys would otherwise trigger the
+            // connected-provider fallback and change the booted model.
+            default_model_explicit: true,
+            recent_models: Vec::new(),
             fallback_model: None,
             provider_profiles: None,
             routing: None,
@@ -6570,6 +6798,101 @@ mod tests {
             rt.model_providers.get("claude-sonnet-4-6"),
             Some(&("anthropic".to_string(), "Anthropic".to_string())),
         );
+    }
+
+    /// Boot-time connected-provider fallback: with NO anthropic key/oauth and a
+    /// connected user provider (env-key), `build()` reroutes the default model
+    /// off the disconnected anthropic route and surfaces the notice. Assertions
+    /// are host-robust: a dev keychain may connect OTHER providers too, so the
+    /// exact fallback target is not pinned — only the mechanism is.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serialize env mutation across async tests
+    async fn build_reroutes_disconnected_default_to_connected_provider() {
+        // The reroute is gated on `api_provider() == FirstParty`, which reads
+        // the CLAUDE_CODE_USE_* env the deprecation tests mutate — serialize on
+        // their lock and clear the flags so a parallel test can't flip the gate.
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.default_model_explicit = false;
+        cfg.provider_profiles = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "groq".to_string(),
+                serde_json::json!({
+                    "type": "openai",
+                    "baseUrl": "https://api.groq.com/openai/v1",
+                    "apiKeyEnv": "LINGXI_TEST_REROUTE_KEY",
+                    "models": ["llama-3.3-70b-versatile"]
+                }),
+            );
+            m
+        });
+        // Unique test-only var: guarantees ≥1 connected provider on any host.
+        std::env::set_var("LINGXI_TEST_REROUTE_KEY", "k");
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        std::env::remove_var("LINGXI_TEST_REROUTE_KEY");
+
+        let notice = rt
+            .default_model_fallback
+            .clone()
+            .expect("disconnected anthropic default must reroute");
+        assert_eq!(notice.from, "claude-sonnet-4-20250514");
+        // The booted model is the notice's target (bare id after the profile split)…
+        let bare = notice
+            .to
+            .split_once('/')
+            .map_or(notice.to.as_str(), |(_, m)| m);
+        assert_eq!(rt.orchestrator.default_model(), bare);
+        // …and its provider is genuinely connected per the same availability map.
+        if let Some((profile, _)) = notice.to.split_once('/') {
+            assert_eq!(
+                rt.provider_availability.get(profile),
+                Some(&true),
+                "fallback target's provider must be connected: {:?}",
+                rt.provider_availability
+            );
+        }
+    }
+
+    /// An EXPLICIT `--model` choice is never overridden by the fallback, even
+    /// with the same connected user provider present.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serialize env mutation across async tests
+    async fn build_keeps_explicit_model_despite_disconnected_provider() {
+        // Same env-serialization as the reroute test above (this test's env-var
+        // write must also not leak into a parallel availability assertion).
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.default_model_explicit = true;
+        cfg.provider_profiles = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "groq".to_string(),
+                serde_json::json!({
+                    "type": "openai",
+                    "baseUrl": "https://api.groq.com/openai/v1",
+                    "apiKeyEnv": "LINGXI_TEST_REROUTE_KEY_EXPLICIT",
+                    "models": ["llama-3.3-70b-versatile"]
+                }),
+            );
+            m
+        });
+        std::env::set_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT", "k");
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        std::env::remove_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT");
+
+        assert!(rt.default_model_fallback.is_none());
+        assert_eq!(rt.orchestrator.default_model(), "claude-sonnet-4-20250514");
     }
 
     /// T2a: a default `build()` surfaces `provider_auth_methods` keyed by
@@ -8647,5 +8970,320 @@ mod tests {
             manager.loaded_plugin_ids().await.is_empty(),
             "rejected plugin must not be marked loaded"
         );
+    }
+}
+
+#[cfg(test)]
+mod connected_fallback_tests {
+    use super::{connected_provider_fallback, RecentModelRef};
+    use std::collections::BTreeMap;
+
+    fn listing(provider_id: &str, request_model: &str) -> traits::ModelListing {
+        traits::ModelListing {
+            display_model: request_model.to_string(),
+            request_model: request_model.to_string(),
+            provider_id: provider_id.to_string(),
+            provider_label: provider_id.to_string(),
+            description: None,
+            supports_reasoning: false,
+        }
+    }
+
+    /// Catalog fixture: anthropic + a few presets + a user-defined "groq".
+    fn listings() -> Vec<traits::ModelListing> {
+        vec![
+            listing("anthropic", "claude-sonnet-5"),
+            listing("anthropic", "claude-opus-4-8"),
+            listing("openai", "gpt-5.5"),
+            listing("deepseek", "deepseek-chat"),
+            listing("deepseek", "deepseek-reasoner"),
+            listing("zai", "glm-5.1"),
+            listing("zai", "glm-5"),
+            listing("github-copilot", "claude-opus-4.8"),
+            listing("openrouter", "openrouter/auto"),
+            listing("groq", "llama-3.3-70b-versatile"),
+        ]
+    }
+
+    fn avail(pairs: &[(&str, bool)]) -> BTreeMap<String, bool> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), *v))
+            .collect()
+    }
+
+    /// `model_providers` fixture mapping bare ids to their profile.
+    fn providers() -> BTreeMap<String, (String, String)> {
+        listings()
+            .into_iter()
+            .map(|l| (l.request_model, (l.provider_id.clone(), l.provider_id)))
+            .collect()
+    }
+
+    fn recent(provider: &str, model: &str) -> RecentModelRef {
+        RecentModelRef {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        }
+    }
+
+    /// Default's provider connected ⇒ no fallback, even with others connected.
+    #[test]
+    fn connected_default_is_kept() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", true), ("deepseek", true)]),
+            &listings(),
+            &[],
+        );
+        assert!(fb.is_none());
+    }
+
+    /// Provider ABSENT from the availability map (probe blind) ⇒ conservative
+    /// keep — only a definitive `false` reroutes.
+    #[test]
+    fn probe_unknown_provider_is_kept() {
+        let fb = connected_provider_fallback(
+            "llama-3.3-70b-versatile",
+            Some("groq"),
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("deepseek", true)]),
+            &listings(),
+            &[],
+        );
+        assert!(fb.is_none());
+    }
+
+    /// The headline case: fresh anthropic default, no anthropic creds, one
+    /// connected API-key provider ⇒ boot on that provider's default model.
+    #[test]
+    fn disconnected_anthropic_falls_to_connected_provider() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("deepseek", true)]),
+            &listings(),
+            &[],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "deepseek-chat");
+        assert_eq!(fb.profile, "deepseek");
+    }
+
+    /// A stale profile-qualified default (e.g. persisted copilot pick) with
+    /// anthropic connected ⇒ anthropic wins (first in the fallback order) and
+    /// keeps the legacy bare/no-profile shape.
+    #[test]
+    fn disconnected_qualified_default_prefers_anthropic() {
+        let fb = connected_provider_fallback(
+            "claude-opus-4.8",
+            Some("github-copilot"),
+            true,
+            &providers(),
+            &avail(&[
+                ("anthropic", true),
+                ("deepseek", true),
+                ("github-copilot", false),
+            ]),
+            &listings(),
+            &[],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "claude-sonnet-5");
+        assert_eq!(
+            fb.profile, "anthropic",
+            "profile-scoped so shared wire ids resolve unambiguously"
+        );
+    }
+
+    /// The most recent `/model` pick on a CONNECTED provider wins over the
+    /// static provider order.
+    #[test]
+    fn recents_win_over_provider_order() {
+        let fb = connected_provider_fallback(
+            "claude-opus-4.8",
+            Some("github-copilot"),
+            true,
+            &providers(),
+            &avail(&[
+                ("anthropic", false),
+                ("deepseek", true),
+                ("zai", true),
+                ("github-copilot", false),
+            ]),
+            &listings(),
+            &[recent("zai", "glm-5")],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "glm-5");
+        assert_eq!(fb.profile, "zai");
+    }
+
+    /// Recents on a DISCONNECTED provider are skipped.
+    #[test]
+    fn recents_on_disconnected_provider_skipped() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("openai", false), ("deepseek", true)]),
+            &listings(),
+            &[recent("openai", "gpt-5.5")],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "deepseek-chat");
+    }
+
+    /// Recents whose model vanished from the catalog are skipped.
+    #[test]
+    fn recents_model_missing_from_listings_skipped() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("deepseek", true)]),
+            &listings(),
+            &[recent("deepseek", "deepseek-legacy")],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "deepseek-chat");
+    }
+
+    /// Nothing connected ⇒ keep the configured default (onboarding handles it).
+    #[test]
+    fn nothing_connected_keeps_default() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("deepseek", false)]),
+            &listings(),
+            &[],
+        );
+        assert!(fb.is_none());
+    }
+
+    /// A connected user-defined provider (no curated default) falls back to its
+    /// first listed model.
+    #[test]
+    fn user_provider_falls_to_first_listing() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("groq", true)]),
+            &listings(),
+            &[],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "llama-3.3-70b-versatile");
+        assert_eq!(fb.profile, "groq");
+    }
+
+    /// OpenRouter-only install boots on the `auto` meta-router.
+    #[test]
+    fn openrouter_only_falls_to_auto_router() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("openrouter", true)]),
+            &listings(),
+            &[],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "openrouter/auto");
+        assert_eq!(fb.profile, "openrouter");
+    }
+
+    /// A BARE default id resolves its provider through `model_providers`
+    /// (same lookup the firstParty gate uses).
+    #[test]
+    fn bare_id_provider_resolved_via_model_providers() {
+        let fb = connected_provider_fallback(
+            "gpt-5.5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("openai", false), ("deepseek", true)]),
+            &listings(),
+            &[],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "deepseek-chat");
+    }
+
+    /// Gateway install (custom base URL / `ANTHROPIC_AUTH_TOKEN`): the anthropic
+    /// probe is NOT definitive, so an anthropic-routed default is kept even
+    /// with other providers connected — Claude works through the gateway.
+    #[test]
+    fn gateway_install_keeps_anthropic_default() {
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            false,
+            &providers(),
+            &avail(&[("anthropic", false), ("deepseek", true)]),
+            &listings(),
+            &[],
+        );
+        assert!(fb.is_none());
+    }
+
+    /// The gateway flag only shields ANTHROPIC-routed defaults: a default on a
+    /// disconnected non-anthropic provider still reroutes (the gateway serves
+    /// Claude, not that provider).
+    #[test]
+    fn gateway_flag_does_not_shield_non_anthropic_defaults() {
+        let fb = connected_provider_fallback(
+            "claude-opus-4.8",
+            Some("github-copilot"),
+            false,
+            &providers(),
+            &avail(&[
+                ("anthropic", false),
+                ("deepseek", true),
+                ("github-copilot", false),
+            ]),
+            &listings(),
+            &[],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "deepseek-chat");
+        assert_eq!(fb.profile, "deepseek");
+    }
+
+    /// A connected provider whose curated default is missing from the live
+    /// catalog is skipped by the order pass; the first-listing pass still
+    /// serves it.
+    #[test]
+    fn curated_default_missing_from_catalog_falls_to_first_listing() {
+        let listings: Vec<traits::ModelListing> = vec![
+            listing("anthropic", "claude-sonnet-5"),
+            listing("deepseek", "deepseek-reasoner"), // no deepseek-chat
+        ];
+        let fb = connected_provider_fallback(
+            "claude-sonnet-5",
+            None,
+            true,
+            &providers(),
+            &avail(&[("anthropic", false), ("deepseek", true)]),
+            &listings,
+            &[],
+        )
+        .expect("must reroute");
+        assert_eq!(fb.model, "deepseek-reasoner");
+        assert_eq!(fb.profile, "deepseek");
     }
 }

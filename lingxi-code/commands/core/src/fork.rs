@@ -109,7 +109,7 @@ impl BuiltinCommandHandler for ForkHandler {
         let directive = args.raw_args.trim();
         if directive.is_empty() {
             return CommandResult::Done {
-                display: Some("Usage: /fork <directive>".to_string()),
+                display: Some("Usage: /fork \\<directive\\>".to_string()),
             };
         }
 
@@ -193,7 +193,7 @@ mod tests {
         for raw in ["", "   "] {
             match handler().handle(&args(raw)).await {
                 CommandResult::Done { display: Some(s) } => {
-                    assert_eq!(s, "Usage: /fork <directive>");
+                    assert_eq!(s, "Usage: /fork \\<directive\\>");
                 }
                 other => panic!("expected Done, got {other:?}"),
             }
@@ -218,7 +218,7 @@ mod tests {
     async fn whitespace_only_directive_is_treated_as_empty() {
         match handler().handle(&args("   \t  ")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Usage: /fork <directive>");
+                assert_eq!(s, "Usage: /fork \\<directive\\>");
             }
             other => panic!("expected Done, got {other:?}"),
         }

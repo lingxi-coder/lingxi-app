@@ -81,7 +81,7 @@ pub trait ClaudeAiAuthProvider: Send + Sync {
     }
 }
 
-/// `RemoteTriggerTool` — manage scheduled remote agent triggers via the
+/// `RemoteTriggerTool` — manage scheduled cloud agent routines via the
 /// claude.ai CCR API. Drives the network over `ctx.http`.
 pub struct RemoteTriggerTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
@@ -162,7 +162,7 @@ impl Tool for RemoteTriggerTool {
     }
 
     fn search_hint(&self) -> Option<&str> {
-        Some("manage scheduled remote agent triggers")
+        Some("manage scheduled cloud agent routines")
     }
 
     fn input_schema(&self) -> &Value {

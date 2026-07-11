@@ -33,14 +33,12 @@ use crate::schedule_cron::cron_file_path;
 /// Tool name byte-lock.
 pub const CRON_DELETE_TOOL_NAME: &str = "CronDelete";
 
-/// Model-facing description (CronDeleteTool.ts description()).
-///
-/// PARITY-GAP: TS `CRON_DELETE_DESCRIPTION` is the terse `'Cancel a scheduled
-/// cron job by ID'`; the durability-aware `buildCronDeletePrompt` is the longer
-/// "Cancel a cron job previously scheduled with CronCreate. …" form. This seam
-/// has no durability feature gate, so we pin the description to the stable
-/// "Cancel a cron job previously scheduled with CronCreate." wording.
-const CRON_DELETE_DESCRIPTION: &str = "Cancel a cron job previously scheduled with CronCreate.";
+/// Model-facing description (CronDeleteTool.ts `description()`). Byte-verified
+/// against 2.1.206: the terse `CRON_DELETE_DESCRIPTION` form ("Cancel a
+/// scheduled cron job by ID", 2 hits) is what the binary emits — the earlier
+/// verbose "Cancel a cron job previously scheduled with CronCreate." seam had 0
+/// hits in 206.
+const CRON_DELETE_DESCRIPTION: &str = "Cancel a scheduled cron job by ID";
 
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
@@ -99,6 +97,10 @@ impl CronDeleteTool {
 impl Tool for CronDeleteTool {
     fn name(&self) -> &str {
         CRON_DELETE_TOOL_NAME
+    }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("cancel a scheduled cron job")
     }
     fn input_schema(&self) -> &Value {
         &SCHEMA

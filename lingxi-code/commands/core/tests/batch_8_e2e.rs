@@ -121,7 +121,7 @@ async fn autocompact_with_no_env_reports_auto_window() {
 #[tokio::test]
 async fn fork_without_directive_renders_usage() {
     let (d, _h, root) = fresh("fork");
-    assert_eq!(handled(&d, "/fork").await, "Usage: /fork <directive>");
+    assert_eq!(handled(&d, "/fork").await, "Usage: /fork \\<directive\\>");
     std::fs::remove_dir_all(root).ok();
 }
 

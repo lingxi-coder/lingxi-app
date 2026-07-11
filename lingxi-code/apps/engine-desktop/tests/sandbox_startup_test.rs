@@ -78,6 +78,10 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         cwd: cwd.clone(),
         lingxi_home,
         default_model: "claude-sonnet-4-20250514".to_string(),
+        // Deterministic across host machines: a dev keychain with real provider
+        // keys must not trigger the connected-provider fallback mid-test.
+        default_model_explicit: true,
+        recent_models: Vec::new(),
         fallback_model: None,
         provider_profiles: None,
         routing: None,

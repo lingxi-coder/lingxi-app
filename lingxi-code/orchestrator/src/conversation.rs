@@ -1683,13 +1683,31 @@ impl ConversationOrchestrator {
         for _ in 0..MAX_DRAIN_BATCHES {
             match source.take_mid_turn_input().await {
                 Some(text) => {
-                    self.inject_meta_user_message(&text).await;
+                    let wrapped = Self::wrap_mid_turn_user_message(&text);
+                    self.inject_meta_user_message(&wrapped).await;
                     injected = true;
                 }
                 None => break,
             }
         }
         injected
+    }
+
+    /// Wrap joined mid-turn user input in the 2.1.206 envelope (`YAt`, binary
+    /// @225654300) before injection. The `human` / `auto-continuation` / unset
+    /// arm — the only source the port's `MsgQueueMidTurnInput` produces (all
+    /// mid-turn input is user-typed) — prefixes `jca` ("The user sent a new
+    /// message while you were working:\n") and appends the explainer. Em-dash is
+    /// U+2014; "Claude Code" -> "LingXi" per the brand rebrand. (206 dropped the
+    /// 201 "IMPORTANT: After completing your current task…" suffix — 0 hits in
+    /// 206.) A non-user source would instead use
+    /// `"[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]\n{text}"`, but the port
+    /// has no such mid-turn source today.
+    #[must_use]
+    fn wrap_mid_turn_user_message(text: &str) -> String {
+        format!(
+            "The user sent a new message while you were working:\n{text}\n\nThis is how LingXi surfaces messages the user sends mid-turn \u{2014} within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn."
+        )
     }
 
     /// Finding #73: wire the V2 task source consulted by the per-turn
@@ -2986,20 +3004,23 @@ impl ConversationOrchestrator {
             s.model_profile = None;
             prev
         };
-        // User-visible warning. Byte-exact reproduction of the binary's swap
-        // warning `INn(original, fallback, "other")` (≡ `baa`) =
-        //   `${Jct(n) ? Cio(e) : Rio(e,n)} Switched to ${vp(fallback)}. ${Yct}`
-        // for the common `category == "other"` path: `Jct("other")` is false, so
-        // `Rio(e,"other")` fires, and with no friendly label it returns `tlp =
-        // "This model's safeguards flagged this message. …"`. (The cyber/bio
-        // `Cio` variant and the `vp` label resolver are residuals — the raw
-        // fallback id stands in for the friendly label.) `Yct` is the feedback
-        // line. 2.1.195 reworded the old "… has safety measures that flagged
-        // something in this session" phrasing to "… 's safeguards flagged this
-        // message" everywhere.
+        // User-visible warning. 2.1.206 `VPn(e,t,r)` =
+        //   `${f_t(r) ? mmi(e) : hmi(e,r)} Switched to ${Mf(t)}. ${bxr(e)}`
+        // for the common `category == "other"` path: `f_t("other")` is false, so
+        // `hmi(e,"other")` fires with the generic `$7m` prefix ("This model's
+        // safeguards flagged this message. This sometimes happens with safe,
+        // normal conversations."); `bxr(e)` is the feedback line. `Mf(t)` = the
+        // fallback's MARKETING NAME (byte-verified: 206 uses the friendly name,
+        // not the raw id) — resolve it, falling back to the id for an unknown
+        // model. (The cyber/bio `mmi(e)` "intentionally broad" variant needs the
+        // refusal category routed through here — deferred with the typed
+        // model_refusal_fallback system frame.)
+        let fallback_display = crate::prompt::env_meta::marketing_name_for_model(&fallback)
+            .map(String::from)
+            .unwrap_or_else(|| fallback.clone());
         let warning = format!(
             "This model's safeguards flagged this message. \
-This sometimes happens with safe, normal conversations. Switched to {fallback}. \
+This sometimes happens with safe, normal conversations. Switched to {fallback_display}. \
 Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
         );
         self.output.emit_text(&warning).await;
@@ -7012,6 +7033,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             file_tree: tree,
             memory_files,
             tool_names,
+            // `nz()` non-empty: at least one model-invocable prompt skill
+            // exists. Sourced from the attached skill-listing provider (same
+            // source as the per-turn skill reminder); `None` provider ⇒ false.
+            skills_available: match &self.skill_listing {
+                Some(provider) => !provider.skill_entries().await.is_empty(),
+                None => false,
+            },
+            // `# Memory` section gate (claude-code `tengu_moth_copse`, default
+            // OFF): the memory feature is active iff a memory prefetch is wired
+            // (`memory_prefetch.is_some()`), and the section points the model at
+            // exactly the user memdir the prefetch scans. `None` ⇒ section
+            // omitted (byte-identical to the pre-memory prompt).
+            memory_dir: self
+                .memory_prefetch
+                .as_ref()
+                .and_then(|p| p.user_memdir())
+                .map(std::path::Path::to_path_buf),
             // `--exclude-dynamic-system-prompt-sections`: when set, `assemble`
             // OMITS the env block from the system prompt (it is re-emitted in the
             // first-user-message context reminder via `env_reminder_section`).
@@ -11860,13 +11898,13 @@ mod refusal_fallback_tests {
         assert!(orch.maybe_swap_to_refusal_fallback().await);
         let texts = out.text_events().await;
         assert_eq!(texts.len(), 1, "exactly one warning emitted");
-        // Byte-exact reproduction of the binary's swap warning
-        // `INn(original, fallback, "other")` (≡ `baa`) for category == "other"
-        // (2.1.195 `Rio`→`tlp` rewording: "'s safeguards flagged this message").
+        // Byte-exact reproduction of 2.1.206 `VPn` for category == "other":
+        // the generic `$7m`/`hmi` prefix, then "Switched to {Mf(fallback)}" — the
+        // fallback's MARKETING NAME ("Sonnet 4.6"), not the raw id — then `bxr`.
         assert_eq!(
             texts[0],
             "This model's safeguards flagged this message. \
-This sometimes happens with safe, normal conversations. Switched to claude-sonnet-4-6. \
+This sometimes happens with safe, normal conversations. Switched to Sonnet 4.6. \
 Send feedback with /feedback or learn more: https://support.claude.com/en/articles/15363606"
         );
     }

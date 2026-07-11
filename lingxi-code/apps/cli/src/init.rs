@@ -344,7 +344,8 @@ pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
 }
 
 /// Load the persisted `settings.model` (the `/model` picker writes it via
-/// `tui::recent_models::record_default_model`). Used as the default model when
+/// `tui_core::recent_models::record_default_model`, wired in `mode.rs`'s
+/// `on_switch_model`). Used as the default model when
 /// `--model` is absent, so the picker choice survives a restart. `None` when
 /// unset / on any load failure → the caller keeps the built-in default.
 fn load_settings_model(include_user: bool, include_project: bool) -> Option<String> {
@@ -527,6 +528,25 @@ pub(crate) fn resolve_desktop_config(
         cwd,
         lingxi_home,
         default_model,
+        // Only a `--model` flag is an EXPLICIT choice; the persisted
+        // `settings.model` and the built-in default remain eligible for the
+        // engine's boot-time connected-provider fallback.
+        default_model_explicit: argv.model.is_some(),
+        // Prior `/model` picks (settings `recentModels`, most-recent-first) —
+        // the fallback's first-preference pass. Best-effort read; empty on any
+        // failure. `recentModels` lives in the USER settings.json, so the read
+        // honors the same `--setting-sources` gate as the sibling loaders.
+        recent_models: if incl_user {
+            tui_core::recent_models::load_recent_models()
+                .into_iter()
+                .map(|r| engine_desktop::RecentModelRef {
+                    provider: r.provider_id,
+                    model: r.request_model,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         fallback_model,
         provider_profiles: load_provider_profiles(incl_user, incl_project),
         routing: load_routing(incl_user, incl_project),
@@ -687,6 +707,17 @@ pub async fn build_runtime_from_config(
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(NoopPermissionRequestSink);
     let rt = build(cfg, output, permission_sink).await?;
+    // Boot-time connected-provider fallback notice: one stderr line, emitted at
+    // the shared choke point every mode's runtime flows through — before the
+    // interactive TUI enters the alt-screen, and off stdout so `--print`/
+    // stream-json output stays parseable.
+    if let Some(n) = &rt.default_model_fallback {
+        eprintln!(
+            "Note: default model {} is unavailable (its provider is not connected). \
+             Using {} instead — run /model to change it, or /connect to reconnect the provider.",
+            n.from, n.to
+        );
+    }
     Ok(Runtime {
         orchestrator: rt.orchestrator,
         dispatcher: rt.dispatcher,

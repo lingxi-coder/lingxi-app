@@ -9,12 +9,14 @@ pub mod async_hook_response;
 pub mod bg_session;
 pub mod body_sections;
 pub mod conditional_rules;
+pub mod end_conversation;
 pub mod env_block;
 pub mod env_meta;
 pub mod file_tree;
 pub mod git_status;
 pub mod locked_templates;
 pub mod memory_block;
+pub mod memory_section;
 pub mod mid_turn_input;
 pub mod skill_listing;
 pub mod subagent_env;
@@ -135,6 +137,8 @@ pub fn assemble_system_prompt_with_style(
         /* is_interactive = */ true,
         /* has_agent_tool = */ has_agent,
         /* fork_mode_enabled = */ fork_mode,
+        /* model = */ &ctx.model,
+        /* skills_available = */ ctx.skills_available,
     ));
 
     // `--exclude-dynamic-system-prompt-sections`: OMIT the per-machine env
@@ -176,6 +180,15 @@ pub fn assemble_system_prompt_with_style(
     if let Some(bg) = bg_session::from_env() {
         push_section_separator(&mut s);
         s.push_str(&bg);
+    }
+
+    // `# Memory` (2.1.206) — the file-based-memory WRITE instructions. Emitted
+    // only when the memory feature is active (the prefetch is wired →
+    // `ctx.memory_dir` is `Some`); default `None` omits it, byte-identical to a
+    // build without memory. Dynamic post-env section, before context_management.
+    if let Some(dir) = &ctx.memory_dir {
+        push_section_separator(&mut s);
+        s.push_str(&memory_section::render(&dir.to_string_lossy()));
     }
 
     // GAP-2: `# Context management` (iIm) — always, unconditional.
@@ -270,6 +283,15 @@ pub struct SystemPromptContext {
     /// Available tool names — alphabetic order. Sorting happens here,
     /// NOT in `tools_block::format`.
     pub tool_names: Vec<String>,
+    /// Whether at least one user-invocable (model-invocable) skill exists —
+    /// claude-code `nz()`/skill-list non-empty. Gates the `# Session-specific
+    /// guidance` Skill-invocation bullet (with the Skill tool present).
+    pub skills_available: bool,
+    /// Resolved user-memdir path when the file-based memory feature is active
+    /// (the memory prefetch is wired — claude-code `tengu_moth_copse`, default
+    /// OFF). `Some(path)` emits the `# Memory` write-instructions section;
+    /// `None` (the default) omits it — byte-identical to a build without memory.
+    pub memory_dir: Option<PathBuf>,
     /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
     /// per-machine `env_block` is OMITTED from the assembled system prompt (it
     /// is emitted in the first-user-message context reminder instead). `false`
@@ -370,6 +392,8 @@ mod tests {
             },
             memory_files: Vec::new(),
             tool_names: Vec::new(),
+            skills_available: false,
+            memory_dir: None,
             exclude_dynamic_sections: false,
         };
         assert_eq!(ctx.cwd, PathBuf::from("/tmp"));
@@ -420,6 +444,8 @@ mod tests {
             file_tree: FileTree::default(),
             memory_files: Vec::new(),
             tool_names: vec!["Read".into(), "Write".into()],
+            skills_available: false,
+            memory_dir: None,
             exclude_dynamic_sections: false,
         }
     }
@@ -455,7 +481,7 @@ mod tests {
         // `# Context management` section's last line (no `Notes:` FOOTER — R-P1b).
         assert!(default.starts_with("You are LingXi, an agentic command-line coding assistant."));
         assert!(!default.contains("Notes:"));
-        assert!(default.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(default.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
     #[test]
@@ -489,7 +515,7 @@ mod tests {
             "context management must come AFTER output-style"
         );
         // The prompt now ends with context management, not the output-style body.
-        assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
     #[test]
@@ -509,7 +535,7 @@ mod tests {
         // The style is NOT the last section — context management follows.
         assert!(out.contains("# Output Style: Learning\nP"));
         // GAP-2: context management is now the true last section.
-        assert!(out.ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+        assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
     // ---- system-prompt cache-block split (splitSysPromptPrefix parity) ----
@@ -540,6 +566,6 @@ mod tests {
         assert!(!blocks[1].text.contains("Notes:"));
         assert!(blocks[1]
             .text
-            .ends_with("you don\u{2019}t need to wrap up early or hand off mid-task."));
+            .ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 }

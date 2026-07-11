@@ -72,9 +72,7 @@ mod terminal_sequence_tests {
 }
 #[cfg(test)]
 mod terminal_api_error_tests {
-    use crate::turn_loop::{
-        refusal_exemption_url, refusal_explanation_clause, terminal_api_error_text,
-    };
+    use crate::turn_loop::{refusal_explanation_clause, terminal_api_error_text};
     use llm_client::StopDetails;
 
     fn details(category: &str, explanation: Option<&str>) -> StopDetails {
@@ -153,80 +151,54 @@ mod terminal_api_error_tests {
         }
     }
 
-    /// NO-LABEL branch + cyber category → the exemption-URL variant; the URL is
-    /// extracted from the explanation, else the fallback.
+    /// NO-LABEL branch + cyber category → the 2.1.206 Cyber Verification Program
+    /// interstitial (replaced the pre-206 "apply for an exemption" message). The
+    /// help-center URL is fixed; the feedback tail is interactive-only; there is
+    /// no `\n\n{m}\n\n{f}` tail.
     #[test]
-    fn refusal_nolabel_cyber_exemption_url() {
+    fn refusal_nolabel_cyber_verification_program_206() {
         // A model with NO marketing name → the no-label branch. Use a bare id
         // that `marketing_name_for_model` does not resolve.
-        let sd = details("cyber", Some("see https://claude.com/form/abc123, thanks"));
-        let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
-            .expect("refusal");
-        assert!(
-            t.contains("This model's safeguards flagged this message for a cybersecurity topic"),
-            "got: {t}"
-        );
-        // Extracted URL (trailing comma stripped) — DOUBLE newline separator.
-        assert!(
-            t.contains("exemption: https://claude.com/form/abc123\n\n"),
-            "double newline; got: {t}"
-        );
-        assert!(
-            !t.contains("abc123,"),
-            "trailing punct must be stripped; got: {t}"
-        );
-    }
-
-    /// NO-LABEL branch + `military_weapons` category → the weapons-safeguards
-    /// variant (binary `else if (f === "military_weapons")`). The feedback clause
-    /// is interactive-only.
-    #[test]
-    fn refusal_nolabel_military_weapons_variant() {
-        let sd = details("military_weapons", None);
-        // Interactive → includes the "send feedback" clause.
+        let sd = details("cyber", None);
+        // Interactive → includes the feedback tail.
         let ti = terminal_api_error_text("unknown-model-xyz", true, "refusal", None, Some(&sd))
             .expect("refusal");
         assert!(
-            ti.starts_with("API Error: This model has added safeguards for weapons-related content, which blocked this request. Not weapons-related? This may be a false positive.\n\n"),
+            ti.starts_with("API Error: This model has safety measures that flagged this message for a cybersecurity topic. To learn about the Cyber Verification Program and apply for access, visit our help center: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude."),
             "got: {ti}"
         );
         assert!(
-            ti.contains(
-                "\n\nIf you believe this was flagged in error, send feedback with /feedback."
+            ti.ends_with(
+                ".\n\nIf you were not engaging in a cybersecurity topic, please send feedback via /feedback."
             ),
-            "interactive feedback clause (double newline); got: {ti}"
+            "interactive feedback tail; got: {ti}"
         );
-        // Non-interactive → NO "send feedback" clause.
+        // 206 dropped the pre-206 exemption wording entirely.
+        assert!(!ti.contains("apply for an exemption"), "got: {ti}");
+        // Non-interactive → NO feedback tail; ends at the help-center URL.
         let tn = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
             .expect("refusal");
         assert!(
-            tn.contains("has added safeguards for weapons-related content"),
-            "got: {tn}"
+            tn.ends_with("14604842-real-time-cyber-safeguards-on-claude."),
+            "non-interactive omits the feedback tail; got: {tn}"
         );
-        assert!(
-            !tn.contains("If you believe this was flagged in error"),
-            "non-interactive must omit the feedback clause; got: {tn}"
-        );
-        // Must NOT fall through to the generic Usage-Policy message.
-        assert!(!tn.contains("violate our Usage Policy"), "got: {tn}");
+        assert!(!tn.contains("please send feedback"), "got: {tn}");
     }
 
-    /// `oUi` exemption-URL extraction: form URL extracted (trailing punctuation
-    /// stripped), else the fallback.
+    /// NO-LABEL branch + `military_weapons` category → 2.1.206 REMOVED the
+    /// dedicated weapons arm, so it now falls through to the generic
+    /// Usage-Policy message ('weapons-related content' = 0 hits in 206).
     #[test]
-    fn exemption_url_extraction() {
-        assert_eq!(
-            refusal_exemption_url(Some("apply at https://claude.com/form/cyber-x).")),
-            "https://claude.com/form/cyber-x"
+    fn refusal_nolabel_military_weapons_falls_through_to_generic_206() {
+        let sd = details("military_weapons", None);
+        let t = terminal_api_error_text("unknown-model-xyz", false, "refusal", None, Some(&sd))
+            .expect("refusal");
+        assert!(
+            t.contains("is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup)."),
+            "got: {t}"
         );
-        assert_eq!(
-            refusal_exemption_url(None),
-            "https://claude.com/form/cyber-use-case"
-        );
-        assert_eq!(
-            refusal_exemption_url(Some("no url here")),
-            "https://claude.com/form/cyber-use-case"
-        );
+        assert!(!t.contains("weapons-related content"), "206 removed the weapons arm; got: {t}");
+        assert!(!t.contains("added safeguards for"), "got: {t}");
     }
 
     /// `U2e` explanation clause `${a}` — leading space + terminal-`.` when the

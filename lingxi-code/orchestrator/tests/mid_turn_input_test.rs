@@ -241,6 +241,17 @@ async fn mid_turn_source_injects_queued_text_into_first_model_call() {
     assert!(all.contains("seed"), "seed prompt present: {texts:?}");
     assert!(all.contains("queued one"), "first drained item: {texts:?}");
     assert!(all.contains("queued two"), "second drained item: {texts:?}");
+    // 2.1.206 YAt envelope: each drained user message is wrapped with the
+    // "The user sent a new message while you were working:" prefix and the
+    // mid-turn explainer suffix (em-dash U+2014).
+    assert!(
+        all.contains("The user sent a new message while you were working:\nqueued one"),
+        "envelope prefix wraps the drained text: {texts:?}"
+    );
+    assert!(
+        all.contains("This is how LingXi surfaces messages the user sends mid-turn \u{2014} within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn."),
+        "envelope explainer suffix present: {texts:?}"
+    );
 }
 
 /// NO SOURCE WIRED: the drain is a strict no-op — the outgoing request carries

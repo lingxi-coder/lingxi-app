@@ -90,6 +90,15 @@ impl MemoryPrefetch {
         }
     }
 
+    /// The user memdir path this prefetcher scans (`<config-home>/memdir/`), when
+    /// wired with real roots (`Self::new`). `None` for the fixed-result/inert
+    /// construction. Used by the system-prompt builder so the `# Memory` section
+    /// points the model at exactly the directory the prefetch reads back.
+    #[must_use]
+    pub fn user_memdir(&self) -> Option<&std::path::Path> {
+        self.roots.as_ref().map(|r| r.user_memdir.as_path())
+    }
+
     /// Construct a prefetcher that resolves to a PRE-SELECTED surfaced set,
     /// bypassing the selector body. Used by a composition root that has already
     /// picked the relevant memories, and by the orchestrator's surfacing tests

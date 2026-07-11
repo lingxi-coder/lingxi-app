@@ -661,6 +661,10 @@ impl Tool for AskUserQuestionTool {
     fn name(&self) -> &str {
         ASK_USER_QUESTION_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("prompt the user with a multiple-choice question")
+    }
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }

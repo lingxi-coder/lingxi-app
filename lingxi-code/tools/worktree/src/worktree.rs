@@ -205,6 +205,10 @@ impl Tool for EnterWorktreeTool {
     fn name(&self) -> &str {
         ENTER_TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("create an isolated git worktree and switch into it")
+    }
     fn input_schema(&self) -> &Value {
         &ENTER_INPUT_SCHEMA
     }
@@ -398,6 +402,10 @@ impl ExitWorktreeTool {
 impl Tool for ExitWorktreeTool {
     fn name(&self) -> &str {
         EXIT_TOOL_NAME
+    }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("exit a worktree session and return to the original directory")
     }
     fn input_schema(&self) -> &Value {
         &EXIT_INPUT_SCHEMA

@@ -208,6 +208,12 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         cwd,
         lingxi_home,
         default_model,
+        // Only a `--model` arg is an explicit per-session choice; the built-in
+        // default stays eligible for the engine's connected-provider fallback.
+        default_model_explicit: args.model.is_some(),
+        // The bridge does not read the TUI's `settings.recentModels`; the
+        // fallback uses the static provider order only.
+        recent_models: Vec::new(),
         // The Electron bridge does not expose --fallback-model (CLI --print
         // only); the Opus consecutive-529 fallback stays disabled here.
         fallback_model: None,
@@ -586,6 +592,10 @@ mod tests {
             cwd: cwd.clone(),
             lingxi_home: cwd.join(".lingxi"),
             default_model: "claude-sonnet-4-20250514".to_string(),
+            // Deterministic across host machines: a dev keychain with real
+            // provider keys must not trigger the connected-provider fallback.
+            default_model_explicit: true,
+            recent_models: Vec::new(),
             fallback_model: None,
             provider_profiles: None,
             routing: None,

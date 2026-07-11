@@ -535,7 +535,22 @@ pub(crate) async fn run_ratatui(
     let on_switch_model = move |model: String, profile: Option<String>| {
         let orch = switch_orch.clone();
         switch_handle.spawn(async move {
-            let _ = orch.switch_model(&model, profile.as_deref()).await;
+            // Persist the pick only when the live switch succeeded (best-effort
+            // writes; a failure never breaks the switch): `settings.model`
+            // (qualified) so the choice survives a restart — the boot path
+            // reads it back via `load_settings_model` — plus a `recentModels`
+            // entry, the boot connected-provider fallback's first-preference
+            // pass. This recording was lost in the iocraft-TUI deletion; the
+            // ratatui picker previously only mutated in-memory session state.
+            if orch.switch_model(&model, profile.as_deref()).await.is_ok() {
+                match profile.as_deref() {
+                    Some(p) => {
+                        tui_core::recent_models::record_default_model(&format!("{p}/{model}"));
+                        tui_core::recent_models::record_recent_model(p, &model);
+                    }
+                    None => tui_core::recent_models::record_default_model(&model),
+                }
+            }
         });
     };
     // (/web async effects) The picker/config views return `WebAction`s

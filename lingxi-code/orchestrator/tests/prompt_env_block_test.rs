@@ -18,6 +18,8 @@ fn ctx_minimal() -> SystemPromptContext {
         file_tree: FileTree::default(),
         memory_files: Vec::new(),
         tool_names: Vec::new(),
+        skills_available: false,
+        memory_dir: None,
         exclude_dynamic_sections: false,
     }
 }
@@ -47,7 +49,7 @@ When building AI applications, default to the latest and most capable Claude mod
 web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
         " - Fast mode for LingXi uses Claude Opus with faster output \
 (it does not downgrade to a smaller model). It can be toggled with /fast and is \
-available on Opus 4.8/4.7/4.6.",
+available on Opus 4.8/4.7.",
     ]
     .join("\n");
     assert_eq!(out, expected, "env_block byte-lock mismatch");

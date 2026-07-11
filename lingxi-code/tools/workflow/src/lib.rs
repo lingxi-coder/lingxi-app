@@ -209,6 +209,10 @@ impl Tool for WorkflowTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
+    /// 2.1.206 tool-definition `searchHint` (byte-verified).
+    fn search_hint(&self) -> Option<&str> {
+        Some("orchestrate subagents with deterministic JavaScript workflow")
+    }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
     }

@@ -902,8 +902,28 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         prior_assistant_used_structured_output(&s.history)
     };
 
+    // EndConversation (2.1.206): the tool's 2nd consecutive call raised the
+    // shared end-request slot during tool execution above. Consume it; if
+    // raised, terminate the conversation and surface the end message to the
+    // user. Default-OFF (no slot wired) → never raised → byte-identical.
+    let end_conversation_requested = orch
+        .end_conversation_slot
+        .as_ref()
+        .is_some_and(|s| s.swap(false, std::sync::atomic::Ordering::SeqCst));
+    if end_conversation_requested {
+        orch.output
+            .emit_text(crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE)
+            .await;
+    }
+
     // 6. Decide loop disposition.
-    let outcome = if hook_prevent_continuation {
+    let outcome = if end_conversation_requested {
+        // The model confirmed (2nd EndConversation call) — end the query.
+        TurnStepOutcome::Ended {
+            final_message_id: assistant_id,
+            stop_reason: "end_conversation".to_string(),
+        }
+    } else if hook_prevent_continuation {
         // HOOK.2: honor the PreToolUse `continue:false` request — end the turn
         // step so the driver stops the loop (TS `{ reason: 'hook_stopped' }`).
         // Takes precedence over the `stop_reason`-derived disposition (a step

@@ -719,21 +719,35 @@ pub fn is_runtime_hidden(name: &str) -> bool {
     name == "/sandbox" && !cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
-/// The live sandbox on/off cell, shared with the widget the CLI wires via
-/// `ChatWidget::set_sandbox_toggle` (which registers it here for the popup's
-/// state-dependent `/sandbox` row). `None` = sandboxing unsupported/unwired.
-fn sandbox_toggle() -> Option<&'static std::sync::Arc<std::sync::atomic::AtomicBool>> {
-    SANDBOX_TOGGLE.get()
+/// The live sandbox on/off state for the popup's `/sandbox` row, read from the
+/// currently-registered toggle. `false` when sandboxing is unsupported/unwired.
+fn sandbox_enabled() -> bool {
+    SANDBOX_TOGGLE
+        .lock()
+        .ok()
+        .and_then(|slot| {
+            slot.as_ref()
+                .map(|t| t.load(std::sync::atomic::Ordering::Relaxed))
+        })
+        .unwrap_or(false)
 }
 
-static SANDBOX_TOGGLE: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-    std::sync::OnceLock::new();
+/// The live sandbox on/off cell, shared with the widget the CLI wires via
+/// `ChatWidget::set_sandbox_toggle`. Held in a `Mutex` (not a `OnceLock`) so
+/// [`register_sandbox_toggle`] can REPLACE it: the CLI builds a fresh runtime
+/// (and a fresh toggle `Arc`) on every in-process session switch (`/resume`,
+/// `/branch`, `/rewind`), so a first-registration-wins cell would freeze the
+/// popup's `/sandbox` state to session A while `cmd_sandbox` flips session B's.
+static SANDBOX_TOGGLE: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+    std::sync::Mutex::new(None);
 
-/// Register the live sandbox toggle for `/sandbox`'s dynamic description and
-/// visibility gate. Idempotent (first registration wins — one CLI wiring per
-/// process).
+/// Register (REPLACING any prior) the live sandbox toggle for `/sandbox`'s
+/// dynamic description. Every call overwrites, so the popup row always tracks
+/// the CURRENT session's toggle across in-process session switches.
 pub fn register_sandbox_toggle(toggle: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    let _ = SANDBOX_TOGGLE.set(toggle);
+    if let Ok(mut slot) = SANDBOX_TOGGLE.lock() {
+        *slot = Some(toggle);
+    }
 }
 
 /// `/sandbox` dynamic description — claude-code 2.1.205:
@@ -742,10 +756,7 @@ pub fn register_sandbox_toggle(toggle: std::sync::Arc<std::sync::atomic::AtomicB
 /// LingXi doesn't model dependency checks or the auto-allow/fallback/managed
 /// flags yet, so those segments are omitted until the R2 behavior pass).
 fn desc_sandbox() -> String {
-    let enabled = sandbox_toggle()
-        .map(|t| t.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(false);
-    let (glyph, state) = if enabled {
+    let (glyph, state) = if sandbox_enabled() {
         ("\u{2714}", "sandbox enabled")
     } else {
         ("\u{25EF}", "sandbox disabled")
@@ -972,13 +983,18 @@ mod tests {
         let before = sandbox.describe();
         assert!(before.ends_with("(\u{23CE} to configure)"), "{before}");
         // ...and once a toggle is wired the row un-hides and tracks its state.
-        // (The registry cell is a process-wide OnceLock; a parallel widget
-        // test may have registered its own Arc first and may keep flipping it,
-        // so the exact-state assertions only run when OUR Arc won the race.)
+        // (The registry cell is a process-wide Mutex; `register_sandbox_toggle`
+        // now overwrites, so ours wins — but a parallel widget test may register
+        // AFTER us, so the exact-state assertions only run while ours is live.)
         let ours = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         register_sandbox_toggle(ours.clone());
         assert!(!is_runtime_hidden("/sandbox"));
-        if SANDBOX_TOGGLE.get().is_some_and(|live| std::sync::Arc::ptr_eq(live, &ours)) {
+        let is_ours = SANDBOX_TOGGLE
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|live| std::sync::Arc::ptr_eq(live, &ours)))
+            .unwrap_or(false);
+        if is_ours {
             ours.store(true, std::sync::atomic::Ordering::Relaxed);
             assert_eq!(sandbox.describe(), "\u{2714} sandbox enabled (\u{23CE} to configure)");
             ours.store(false, std::sync::atomic::Ordering::Relaxed);

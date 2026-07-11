@@ -183,11 +183,6 @@ impl ScreenView {
         )
     }
 
-    /// The `/stats` screen: statistics for the CURRENT session, computed
-    /// from live widget state (plan Phase 8). Lifetime usage aggregation
-    /// (claude-code `Stats.tsx`) needs the session-transcript store, which
-    /// this backend does not read yet — the screen scopes itself honestly.
-    #[must_use]
     /// The `/usage` (aliases `/cost`, `/stats`) interactive screen — the
     /// claude-code 2.1.205 tabbed Usage/Stats dialog (`oje`), populated from
     /// the live [`CostSnapshot`]. `default_tab` picks the initially-shown tab

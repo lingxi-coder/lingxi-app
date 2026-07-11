@@ -157,9 +157,11 @@ impl RewindPickerView {
         }
 
         lines.push(Line::from(String::new()));
+        // `scope_label` already begins with "Restore …" (the 2.1.205 scope text),
+        // so it is shown directly — no redundant "Restore: " prefix.
         lines.push(Line::from(Span::styled(
             format!(
-                "Restore: {}   (Tab to change · Enter to confirm · Esc to cancel)",
+                "{}   (Tab to change · Enter to confirm · Esc to cancel)",
                 scope_label(self.scope)
             ),
             dim,
@@ -359,7 +361,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("rewind me please"), "{text}");
-        assert!(text.contains("Restore:"), "{text}");
+        // Footer shows the scope label directly (no doubled "Restore: Restore …").
+        assert!(text.contains("Restore code and conversation"), "{text}");
+        assert!(!text.contains("Restore: Restore"), "{text}");
     }
 }
 

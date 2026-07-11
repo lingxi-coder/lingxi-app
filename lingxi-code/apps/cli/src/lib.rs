@@ -476,6 +476,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::ARGV_ERROR;
     }
 
+    // (C5) `--plan-mode-instructions` is `--print`-only; same surfacing so the
+    // final stderr is byte-exact `Error: --plan-mode-instructions can only be
+    // used with --print mode.`
+    if let Err(msg) = parsed.validate_plan_mode_instructions_args() {
+        eprintln!("Error: {msg}");
+        return exit_codes::ARGV_ERROR;
+    }
+
     // stream-json: `--output-format stream-json --verbose` (print-only, no
     // SinkAdapter/OutputSink layer — the StreamJsonStream IS the OutputStream).
     //

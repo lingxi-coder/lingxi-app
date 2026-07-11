@@ -565,6 +565,14 @@ pub(crate) fn resolve_desktop_config(
         // CLI `--max-turns` / `--max-budget-usd` → orchestrator caps in `build()`
         // (print-gated above; interactive sessions leave both unset).
         max_turns,
+        // CLI `--plan-mode-instructions` (print-mode only): custom plan-mode
+        // workflow body threaded to `OrchestratorConfig::plan_mode_instructions`.
+        // `None` in interactive mode ⟶ the default 5-phase plan reminder.
+        plan_mode_instructions: if argv.print {
+            argv.plan_mode_instructions.clone()
+        } else {
+            None
+        },
         max_budget_usd,
         // `--json-schema` structured output (print-gated above): `build()` forces
         // the StructuredOutput tool + surfaces a capture slot when this is `Some`.

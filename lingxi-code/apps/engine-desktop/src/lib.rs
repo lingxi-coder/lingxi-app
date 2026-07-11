@@ -1233,6 +1233,11 @@ pub struct DesktopConfig {
     /// [`orchestrator::OrchestratorConfig::max_turns`] in `build()`. `None` (the
     /// default) = unbounded.
     pub max_turns: Option<u32>,
+    /// CLI `--plan-mode-instructions <instructions>` (print-only): custom plan-mode
+    /// workflow body, mapped to
+    /// [`orchestrator::OrchestratorConfig::plan_mode_instructions`] in `build()`.
+    /// `None` (the default) = the default 5-phase plan reminder.
+    pub plan_mode_instructions: Option<String>,
     /// CLI `--max-budget USD`: cost ceiling in USD, mapped to
     /// [`orchestrator::OrchestratorConfig::max_budget_nano_usd`] (× 1e9) in
     /// `build()`. `None` (the default) = no cap.
@@ -1570,6 +1575,7 @@ impl Default for DesktopConfig {
             use_noop_permission_gate: true,
             deny_unresolved_ask: false,
             max_turns: None,
+            plan_mode_instructions: None,
             max_budget_usd: None,
             json_schema: None,
             injected_permission_gate: None,
@@ -3500,6 +3506,11 @@ pub async fn build(
     if let Some(override_prompt) = cfg.system_prompt_override.clone() {
         orch_cfg.system_prompt_override = Some(override_prompt);
     }
+    // CLI `--plan-mode-instructions` (print-gated in init.rs): custom plan-mode
+    // workflow body. `None` keeps the default 5-phase plan reminder.
+    orch_cfg
+        .plan_mode_instructions
+        .clone_from(&cfg.plan_mode_instructions);
     // CLI `--exclude-dynamic-system-prompt-sections`: move the per-machine env
     // block out of the (cacheable) system prompt into the first user message.
     orch_cfg.exclude_dynamic_system_prompt_sections = cfg.exclude_dynamic_system_prompt_sections;
@@ -6474,6 +6485,7 @@ mod tests {
             use_noop_permission_gate: use_noop,
             deny_unresolved_ask: false,
             max_turns: None,
+            plan_mode_instructions: None,
             max_budget_usd: None,
             json_schema: None,
             injected_permission_gate: None,

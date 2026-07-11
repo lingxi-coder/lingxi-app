@@ -94,6 +94,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         permission_mode: permission::PermissionMode::Default,
         connect_prompt: None,
         max_turns: None,
+        plan_mode_instructions: None,
         max_budget_usd: None,
         json_schema: None,
         system_prompt_override: None,

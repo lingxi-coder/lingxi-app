@@ -245,6 +245,12 @@ pub struct OrchestratorConfig {
     /// OAuth/account profile.
     #[serde(default)]
     pub user_email: Option<String>,
+
+    /// CLI `--plan-mode-instructions` (206 `options.planModeInstructions`): custom
+    /// plan-mode workflow body. Honored only in `--print` mode (print-gated in
+    /// init.rs). `None` = the default 5-phase workflow.
+    #[serde(default)]
+    pub plan_mode_instructions: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -268,6 +274,7 @@ impl Default for OrchestratorConfig {
             transcript_classifier_enabled: false,
             refusal_fallback_model: None,
             user_email: None,
+            plan_mode_instructions: None,
         }
     }
 }
@@ -317,6 +324,7 @@ mod tests {
             transcript_classifier_enabled: true,
             refusal_fallback_model: Some("claude-sonnet-4-6".into()),
             user_email: Some("u@example.com".into()),
+            plan_mode_instructions: Some("MY BODY".into()),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -343,6 +351,14 @@ mod tests {
             Some("claude-sonnet-4-6")
         );
         assert_eq!(back.user_email.as_deref(), Some("u@example.com"));
+        assert_eq!(back.plan_mode_instructions.as_deref(), Some("MY BODY"));
+    }
+
+    #[test]
+    fn default_plan_mode_instructions_is_none() {
+        assert!(OrchestratorConfig::default()
+            .plan_mode_instructions
+            .is_none());
     }
 
     #[test]

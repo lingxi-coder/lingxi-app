@@ -5098,6 +5098,28 @@ pub async fn build(
             ));
             slot
         });
+
+    // EndConversation (2.1.206): register the tool + create the shared
+    // end-request slot when the feature is enabled. claude-code
+    // `isEndConversationToolEnabled` (`NWn`) = `modelMeetsEndConversationFloor`
+    // (`fJc`, the `LJh` version table) AND the `tengu_umber_kestrel` GB flag.
+    // The LingXi equivalent of the GB flag — like the memdir-prefetch gate above
+    // — is a default-OFF env flag; the model floor is enforced faithfully via
+    // `meets_end_conversation_floor`. Either half failing (default: env unset)
+    // leaves the registry + turn loop byte-identical
+    // (`end_conversation_slot.is_none()`).
+    let end_conversation_enabled = is_env_truthy("LINGXI_END_CONVERSATION")
+        && orchestrator::prompt::end_conversation::meets_end_conversation_floor(&orch_cfg.model);
+    let end_conversation_slot: Option<orchestrator::end_conversation_tool::EndConversationSlot> =
+        end_conversation_enabled.then(|| {
+            let slot: orchestrator::end_conversation_tool::EndConversationSlot =
+                Arc::new(std::sync::atomic::AtomicBool::new(false));
+            tools_inner.register_builtin(Arc::new(
+                orchestrator::end_conversation_tool::EndConversationTool::new(true, slot.clone()),
+            ));
+            slot
+        });
+
     let tools = Arc::new(tools_inner);
 
     // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
@@ -5354,6 +5376,14 @@ pub async fn build(
             ))
         }
         _ => orch_builder,
+    };
+
+    // EndConversation: hand the orchestrator the SAME end-request slot the tool
+    // holds, so the turn loop can terminate on a confirmed (2nd) call. `None`
+    // (feature disabled, the default) leaves the turn loop byte-identical.
+    let orch_builder = match end_conversation_slot.clone() {
+        Some(slot) => orch_builder.with_end_conversation_slot(slot),
+        None => orch_builder,
     };
 
     // EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch ACTIVATION (gated,

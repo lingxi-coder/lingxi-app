@@ -155,14 +155,33 @@ impl Tool for EndConversationTool {
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let tool = ec::END_CONVERSATION_TOOL_NAME;
+        if ctx.agent_id.is_some() {
+            // FORK branch (206 checks `t.agentId` FIRST): a background fork can
+            // end neither the main conversation nor itself. Return the fork
+            // reflection prompt with ended:false and NEVER raise the slot.
+            return Ok(ToolCallResult {
+                data: json!({
+                    "ended": false,
+                    "message": ec::END_CONVERSATION_FORK_REFLECTION_PROMPT,
+                }),
+                model_content: Some(ec::END_CONVERSATION_FORK_REFLECTION_PROMPT.to_string()),
+                new_messages: Vec::new(),
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            });
+        }
         if prior_assistant_turn_called_end_conversation(&ctx.messages) {
             // SECOND consecutive call → actually end. Raise the slot so the turn
-            // loop terminates + surfaces the end message; return {ended,message}.
+            // loop terminates + surfaces the user-facing finalMessage (k4i). The
+            // tool's own `message` returned to the MODEL is the tool RESULT
+            // (MWn), NOT the finalMessage — matching 206's
+            // `{data:{ended:true, message: MWn}}` + `finalMessage: k4i`.
             self.end_requested.store(true, Ordering::SeqCst);
             Ok(ToolCallResult {
                 data: json!({
                     "ended": true,
-                    "message": ec::END_CONVERSATION_ENDED_MESSAGE,
+                    "message": ec::END_CONVERSATION_TOOL_RESULT,
                 }),
                 model_content: None,
                 new_messages: Vec::new(),
@@ -268,10 +287,30 @@ mod tests {
         ];
         let r = t.call(json!({}), ctx_with(msgs), tx).await.expect("ok");
         assert_eq!(r.data["ended"], true);
-        assert_eq!(
-            r.data["message"],
-            "Claude ended the conversation. To continue, please start a new session."
-        );
+        // Tool RESULT (MWn), returned to the model — NOT the user-facing
+        // finalMessage (k4i, emitted separately by the turn loop).
+        assert_eq!(r.data["message"], "Claude has ended this chat.");
         assert!(t.end_requested.load(Ordering::SeqCst), "slot raised on 2nd call");
+    }
+
+    #[tokio::test]
+    async fn fork_call_never_ends_and_returns_fork_reflection() {
+        // agent_id set (background fork) → 206 branches on `t.agentId` FIRST:
+        // even a 2nd-consecutive call must NOT end; returns x4i with ended:false.
+        let t = tool();
+        let (tx, _rx) = tool_api::progress::progress_channel();
+        let mut ctx = ctx_with(vec![
+            asst_calling_endconv(),
+            ConversationMessage::user(MessageId::new(), "ack".into()),
+            asst_calling_endconv(),
+        ]);
+        ctx.agent_id = Some(protocol::AgentId::new());
+        let r = t.call(json!({}), ctx, tx).await.expect("ok");
+        assert_eq!(r.data["ended"], false, "a fork can never end the conversation");
+        assert!(r.data["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("You are running as a background fork"));
+        assert!(!t.end_requested.load(Ordering::SeqCst), "fork must NOT raise the slot");
     }
 }

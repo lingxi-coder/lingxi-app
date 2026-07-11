@@ -140,7 +140,7 @@ fn anti_verbosity_section(model: &str) -> String {
 /// (the port's `env_meta` idiom); the listed ids are exactly the first-party
 /// ids at/above each family threshold today.
 #[must_use]
-fn is_communicating_model(model: &str) -> bool {
+pub(crate) fn is_communicating_model(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
     m.contains("claude-fable-5")
         || m.contains("claude-mythos-5")

@@ -948,8 +948,11 @@ mod tests {
 
     #[test]
     fn plan_mode_asks_on_mutating_tool() {
-        // Plan + Edit → Ask tagged with Plan mode (NOT deny), even with no rules.
-        let p = PermissionPolicy::new(PermissionMode::Plan);
+        // Plan + Edit → Ask tagged with Plan mode (NOT deny). A file-WRITE tool
+        // (Editor kind) carries the byte-exact 206 write message
+        // `Cannot write to ${path} while in plan mode.` (needs roots to resolve
+        // the path).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Plan);
         match p.authorize("Edit", &edit("/proj/src/x.rs")) {
             PermissionResult::Ask { reason, prompt, .. } => {
                 assert!(
@@ -961,10 +964,10 @@ mod tests {
                     ),
                     "Plan-mutation ask must be tagged with Plan mode"
                 );
-                assert!(
-                    prompt.message.contains("Plan mode"),
-                    "Plan-mutation ask carries the plan-specific message: {}",
-                    prompt.message
+                assert_eq!(
+                    prompt.message,
+                    "Cannot write to /proj/src/x.rs while in plan mode.",
+                    "Editor-tool plan-mode ask is the byte-exact 206 write message"
                 );
             }
             other => panic!("expected Ask(Plan), got {other:?}"),
@@ -973,15 +976,19 @@ mod tests {
 
     #[test]
     fn plan_mode_asks_on_bash() {
-        // Plan + Bash → Ask (Bash is not plan-safe).
+        // Plan + Bash → Ask (Bash is not plan-safe). A non-write tool carries the
+        // byte-exact 206 general message `Cannot call ${name} while in plan mode.`
         let p = PermissionPolicy::new(PermissionMode::Plan);
         match p.authorize("Bash", &bash("rm -rf /")) {
-            PermissionResult::Ask { reason, .. } => assert!(matches!(
-                reason,
-                PermissionDecisionReason::PermissionMode {
-                    mode: PermissionMode::Plan
-                }
-            )),
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Plan
+                    }
+                ));
+                assert_eq!(prompt.message, "Cannot call Bash while in plan mode.");
+            }
             other => panic!("expected Ask(Plan), got {other:?}"),
         }
     }

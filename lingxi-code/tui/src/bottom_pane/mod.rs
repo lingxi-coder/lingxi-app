@@ -527,10 +527,18 @@ impl BottomPane {
             .push(Box::new(tasks_view::TasksView::new(rows, self.theme)));
     }
 
-    /// Open the `/workflows` picker over a snapshot of workflow runs.
+    /// Open the `/workflows` picker over a snapshot of workflow runs. Oracle
+    /// `NH_`: with EXACTLY one run, jump straight into its detail view instead
+    /// of the list (the snapshot is synchronous, so there is no loading gate).
     pub fn show_workflows(&mut self, rows: Vec<tui_core::multiagent::WorkflowRow>) {
-        self.view_stack
-            .push(Box::new(workflows_view::WorkflowsView::new(rows, self.theme)));
+        if rows.len() == 1 {
+            self.view_stack.push(Box::new(
+                workflows_view::WorkflowDetailView::new(rows[0].clone(), self.theme),
+            ));
+        } else {
+            self.view_stack
+                .push(Box::new(workflows_view::WorkflowsView::new(rows, self.theme)));
+        }
     }
 
     /// Open the `/plugin` manager over `snapshot` (installed plugins + enabled

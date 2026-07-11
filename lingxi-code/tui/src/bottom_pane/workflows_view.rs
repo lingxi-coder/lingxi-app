@@ -65,12 +65,16 @@ fn row_elapsed(row: &WorkflowRow) -> Option<String> {
     Some(format_elapsed(end.saturating_sub(started)))
 }
 
-/// A run's display name, `meta.name` preferred, capped at 50 chars (49 + `…`).
+/// A run's display name (oracle `Hvp = workflowName ?? summary ?? description`),
+/// capped at 50 chars (49 + `…`). LingXi: `name` (workflow_id / meta.name), then
+/// the script `description` summary, then the literal fallback.
 fn row_name(row: &WorkflowRow) -> String {
-    let raw = if row.name.is_empty() {
-        "Dynamic workflow"
-    } else {
+    let raw = if !row.name.is_empty() {
         row.name.as_str()
+    } else if !row.description.is_empty() {
+        row.description.as_str()
+    } else {
+        "Dynamic workflow"
     };
     if raw.chars().count() > 50 {
         let head: String = raw.chars().take(49).collect();
@@ -98,6 +102,11 @@ fn list_glyph(status: &str) -> &'static str {
     }
 }
 
+/// Chrome lines around the windowed row list (title + subtitle + 2 spacers +
+/// footer) plus a 2-line reserve for the `↑/↓ N more` indicators — the analog of
+/// the oracle's `vvp - 7` (`window = clamp(rows - 7, 3, len)`).
+const LIST_CHROME: u16 = 7;
+
 /// The `/workflows` interactive run picker (list mode).
 pub struct WorkflowsView {
     /// Snapshot of the runs (newest-first — `cmd_workflows` sorts by start desc).
@@ -106,6 +115,9 @@ pub struct WorkflowsView {
     selected: usize,
     /// Active render palette (accent header + dim footer hint).
     theme: Theme,
+    /// Inner viewport height from the last `render`, so `lines()` can size the
+    /// scroll window the same way the oracle does (`clamp(rows-7, 3, len)`).
+    last_viewport: Cell<u16>,
 }
 
 impl WorkflowsView {
@@ -116,7 +128,27 @@ impl WorkflowsView {
             rows,
             selected: 0,
             theme,
+            last_viewport: Cell::new(0),
         }
+    }
+
+    /// Windowed row bounds (oracle `Tar`): the `[start, end)` slice of rows to
+    /// show plus how many are hidden above/below. `window = clamp(rows-7, 3, len)`
+    /// (`Ky`: min-then-max), `start = clamp(selected-window+1, 0, len-window)`.
+    fn window_bounds(&self) -> (usize, usize, usize, usize) {
+        let len = self.rows.len();
+        if len == 0 {
+            return (0, 0, 0, 0);
+        }
+        let avail = usize::from(self.last_viewport.get().saturating_sub(LIST_CHROME));
+        // Ky(avail, 3, len): min applied before max → at least 3, at most len,
+        // but a window may still exceed len (the slice below clamps to len).
+        let window = avail.min(len).max(3);
+        let max_start = len.saturating_sub(window);
+        let raw_start = (self.selected + 1).saturating_sub(window);
+        let start = raw_start.min(max_start);
+        let end = (start + window).min(len);
+        (start, end, start, len - end)
     }
 
     /// The dim `N running · M completed` subtitle (oracle `epr`/`Lnn`). Empty
@@ -174,7 +206,17 @@ impl WorkflowsView {
                 dim_style,
             )));
         }
-        for (i, r) in self.rows.iter().enumerate() {
+        // Oracle `Tar` windowing: show only a slice, with dim `↑/↓ N more`
+        // indicators when rows are hidden — a fixed-height window, not a
+        // scrolling paragraph.
+        let (start, end, more_above, more_below) = self.window_bounds();
+        if more_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  \u{2191} {more_above} more above"),
+                dim_style,
+            )));
+        }
+        for (i, r) in self.rows.iter().enumerate().take(end).skip(start) {
             let selected = i == self.selected;
             let marker = if selected { "\u{276f} " } else { "  " };
             // Oracle `Voa`: the status glyph is colored (✔ success / ✘ error, ⟳
@@ -204,6 +246,12 @@ impl WorkflowsView {
             }
             lines.push(Line::from(spans));
         }
+        if more_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  \u{2193} {more_below} more below"),
+                dim_style,
+            )));
+        }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(self.footer(), dim_style)));
         lines
@@ -228,25 +276,6 @@ impl WorkflowsView {
         parts.join(" \u{00b7} ")
     }
 
-    /// Line index of the selected row (title + optional subtitle + spacer).
-    fn selected_line_index(&self) -> usize {
-        let header = if self.subtitle().is_empty() { 2 } else { 3 };
-        self.selected.saturating_add(header)
-    }
-
-    /// Scroll offset keeping the selected row visible in a `viewport`-tall area.
-    fn scroll_offset(&self, total: u16, viewport: u16) -> u16 {
-        if viewport == 0 || total <= viewport {
-            return 0;
-        }
-        let max_scroll = total - viewport;
-        let selected = u16::try_from(self.selected_line_index()).unwrap_or(0);
-        selected
-            .saturating_add(1)
-            .saturating_sub(viewport)
-            .min(max_scroll)
-    }
-
     /// Test/inspection access to the snapshot rows.
     #[must_use]
     pub fn rows(&self) -> &[WorkflowRow] {
@@ -263,23 +292,27 @@ impl Renderable for WorkflowsView {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let lines = self.lines();
-        let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-        let scroll = self.scroll_offset(total, inner.height);
-        Paragraph::new(lines).scroll((scroll, 0)).render(inner, buf);
+        // Record the viewport so `lines()` sizes the scroll window the next call.
+        self.last_viewport.set(inner.height);
+        // The window already fits the viewport — no paragraph scroll needed.
+        Paragraph::new(self.lines()).render(inner, buf);
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
-        u16::try_from(self.lines().len())
+        // Request enough height for the full list + chrome; the window inside
+        // `lines()` clamps to whatever the layout actually grants.
+        u16::try_from(self.rows.len())
             .unwrap_or(u16::MAX)
-            .saturating_add(2)
+            .saturating_add(LIST_CHROME)
     }
 }
 
 impl BottomPaneView for WorkflowsView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
+        // Oracle `zoa` keymap: only `escape`/space close, only `x` stops (no
+        // `d`/`Delete`/`q` — those were non-parity convenience keys).
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => ViewOutcome::Cancelled,
+            KeyCode::Esc | KeyCode::Char(' ') => ViewOutcome::Cancelled,
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 ViewOutcome::Pending
@@ -296,19 +329,17 @@ impl BottomPaneView for WorkflowsView {
                 }
                 None => ViewOutcome::Cancelled,
             },
-            KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Delete => {
-                match self.rows.get(self.selected) {
-                    Some(r) if is_running(&r.status) => {
-                        let task_id = r.task_id.clone();
-                        // Optimistic: reflect the stop immediately; the real
-                        // kill runs off-loop and its result lands in the
-                        // transcript via `TurnEvent::SystemNotice`.
-                        self.rows[self.selected].status = "killed".to_string();
-                        ViewOutcome::RunTaskAction(TaskAction::Kill { task_id })
-                    }
-                    _ => ViewOutcome::Pending,
+            KeyCode::Char('x') => match self.rows.get(self.selected) {
+                Some(r) if is_running(&r.status) => {
+                    let task_id = r.task_id.clone();
+                    // Optimistic: reflect the stop immediately; the real kill
+                    // runs off-loop and its result lands in the transcript via
+                    // `TurnEvent::SystemNotice`.
+                    self.rows[self.selected].status = "killed".to_string();
+                    ViewOutcome::RunTaskAction(TaskAction::Kill { task_id })
                 }
-            }
+                _ => ViewOutcome::Pending,
+            },
             _ => ViewOutcome::Pending,
         }
     }
@@ -323,12 +354,13 @@ impl BottomPaneView for WorkflowsView {
     }
 }
 
-/// The human label for a parsed agent lifecycle state (oracle status labels).
+/// The human label for a parsed agent lifecycle state (oracle `eRo` labels).
+/// A `cached` (journal-replayed) agent is `done` in CC's model — there is no
+/// "Cached" label — so it maps to "Completed" for strict parity.
 fn agent_state_label(state: &str) -> &'static str {
     match state {
-        "done" => "Completed",
+        "done" | "cached" => "Completed",
         "error" => "Failed",
-        "cached" => "Cached",
         "start" => "Running",
         _ => "Queued",
     }
@@ -380,6 +412,8 @@ impl WorkflowDetailView {
     fn lines(&self) -> Vec<Line<'static>> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let accent = crate::style_adapter::to_ratatui(self.theme.suggestion);
+        let success = crate::style_adapter::to_ratatui(self.theme.success);
+        let error = crate::style_adapter::to_ratatui(self.theme.error);
         let dim_style = Style::default().fg(dim);
         let label = |k: &str, v: String| -> Line<'static> {
             Line::from(vec![Span::styled(format!("{k:<10}"), dim_style), Span::raw(v)])
@@ -414,35 +448,58 @@ impl WorkflowDetailView {
                 "Phases".to_string(),
                 Style::default().add_modifier(Modifier::BOLD),
             )));
-            for phase in &self.row.phases {
+            for (ord, phase) in self.row.phases.iter().enumerate() {
                 let done = phase_done(phase);
                 let total = phase.agents.len();
-                let glyph = if total > 0 && done == total {
-                    "\u{2714}" // ✔ all done
-                } else if phase.agents.iter().any(|a| a.state == "error") {
-                    "\u{2718}" // ✘ a failure
+                let all_done = total > 0 && done == total;
+                let any_error = phase.agents.iter().any(|a| a.state == "error");
+                // Oracle `kfo`: ✔ when done, ✘ on failure, else the 1-based phase
+                // ORDINAL (its list position) — NOT a spinner. Colored to match.
+                let (glyph, glyph_style) = if all_done {
+                    ("\u{2714}".to_string(), Style::default().fg(success))
+                } else if any_error {
+                    ("\u{2718}".to_string(), Style::default().fg(error))
                 } else {
-                    "\u{27f3}" // ⟳ in progress / no agents
+                    ((ord + 1).to_string(), Style::default())
                 };
                 let title = if phase.title.is_empty() {
-                    // `phase.index` is already 1-based (the workflow `phase()`
-                    // counter increments BEFORE emitting), so show it verbatim —
-                    // no `+1`. (The synthetic no-phase bucket is index 0.)
-                    format!("Phase {}", phase.index)
+                    format!("Phase {}", ord + 1)
                 } else {
                     phase.title.clone()
                 };
-                lines.push(Line::from(format!("  {glyph} {title}  {done}/{total}")));
+                // Oracle: the `{done}/{total}` count shows ONLY when total > 0
+                // (never `0/0`).
+                let count = if total > 0 {
+                    format!("  {done}/{total}")
+                } else {
+                    String::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(glyph, glyph_style),
+                    Span::raw(format!(" {title}{count}")),
+                ]));
                 for agent in &phase.agents {
                     let name = if agent.label.is_empty() {
                         "agent"
                     } else {
                         agent.label.as_str()
                     };
-                    lines.push(Line::from(Span::styled(
-                        format!("      {name} \u{00b7} {}", agent_state_label(&agent.state)),
-                        dim_style,
-                    )));
+                    // Per-agent status glyph (oracle `Oen`), colored by category:
+                    // ✔ done/cached (success), ✘ error (error), · otherwise.
+                    let (ag_glyph, ag_style) = match agent.state.as_str() {
+                        "done" | "cached" => ("\u{2714}", Style::default().fg(success)),
+                        "error" => ("\u{2718}", Style::default().fg(error)),
+                        _ => ("\u{00b7}", dim_style),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("      "),
+                        Span::styled(ag_glyph, ag_style),
+                        Span::styled(
+                            format!(" {name} \u{00b7} {}", agent_state_label(&agent.state)),
+                            dim_style,
+                        ),
+                    ]));
                 }
             }
         }
@@ -730,27 +787,39 @@ mod tests {
     }
 
     #[test]
-    fn scroll_offset_keeps_the_selected_row_visible() {
+    fn windowing_shows_a_slice_with_more_above_below_indicators() {
+        // 40 rows in a short viewport → only a window renders, with "N more
+        // above"/"below" indicators, and the selected row stays visible.
         let mut v = view((0..40).map(|i| row(&format!("w{i:02}"), "running", "r")).collect());
-        // Selection at top -> no scroll.
-        assert_eq!(v.scroll_offset(45, 10), 0);
-        // Selection near the end -> scrolls so it stays within the viewport.
+        let area = Rect::new(0, 0, 60, 15); // inner height ~13
+        let render = |v: &WorkflowsView| {
+            let mut buf = Buffer::empty(area);
+            v.render(area, &mut buf);
+            buf_text(&buf, area)
+        };
+        // Selection at top → nothing hidden above, some hidden below.
+        let text = render(&v);
+        assert!(!text.contains("more above"), "top: {text}");
+        assert!(text.contains("more below"), "top should hide rows below: {text}");
+        // Move selection to the end → rows hidden above, none below.
         v.selected = 39;
-        let off = v.scroll_offset(45, 10);
-        assert!(off > 0, "should scroll for a late selection");
-        assert!(v.selected_line_index() >= off as usize, "selection at/after top");
-        assert!(
-            v.selected_line_index() < (off as usize) + 10,
-            "selection within the viewport"
-        );
+        let text = render(&v);
+        assert!(text.contains("more above"), "end should hide rows above: {text}");
+        assert!(!text.contains("more below"), "end: {text}");
+        // The windowed slice is far smaller than all 40 rows.
+        let (start, end, _, _) = v.window_bounds();
+        assert!(end - start < 40, "window slices the list: {start}..{end}");
+        assert!(start <= v.selected && v.selected < end, "selected in window");
     }
 
     #[test]
-    fn detail_titleless_phase_label_is_one_based() {
-        // A real (1-based) phase with an empty title must render "Phase 1".
+    fn detail_titleless_phase_label_uses_ordinal_position() {
+        // A titleless phase renders "Phase {ordinal}" using its 1-based LIST
+        // position (oracle `kfo` uses array index + 1), independent of the
+        // parsed phase.index.
         let mut r = row("w1", "running", "x");
         r.phases = vec![WorkflowPhase {
-            index: 1,
+            index: 7, // parsed index is ignored for the label
             title: String::new(),
             agents: vec![],
         }];
@@ -759,8 +828,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         v.render(area, &mut buf);
         let text = buf_text(&buf, area);
-        assert!(text.contains("Phase 1"), "1-based label: {text}");
-        assert!(!text.contains("Phase 2"), "no off-by-one: {text}");
+        assert!(text.contains("Phase 1"), "ordinal label: {text}");
+        assert!(!text.contains("Phase 7"), "not the parsed index: {text}");
     }
 
     #[test]

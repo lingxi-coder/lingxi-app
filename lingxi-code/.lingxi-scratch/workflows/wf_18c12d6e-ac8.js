@@ -1,1 +1,0 @@
-export const meta = { name: 'smoke-demo', description: 'tiny demo workflow', phases: [{title:'Scan'},{title:'Report'}] }; phase('Scan'); const a = await agent('Reply with exactly one word: apple'); phase('Report'); const b = await agent('Reply with exactly one word: banana'); return { a, b }

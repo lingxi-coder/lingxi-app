@@ -79,9 +79,12 @@ fn row_name(row: &WorkflowRow) -> String {
     }
 }
 
-/// Whether `status` denotes a still-running run that can be stopped.
+/// Whether `status` denotes a run that can be stopped. Oracle `Rcr`/`zoa` gate
+/// the `x` chord on `status === "running"` exactly (a `pending` run is not yet
+/// stoppable), so match that — and keep it consistent with the subtitle's
+/// running/completed split.
 fn is_running(status: &str) -> bool {
-    matches!(status, "running" | "pending" | "queued")
+    status == "running"
 }
 
 /// The list-row status glyph (oracle `Voa`): `✔` completed, `✘` failed/killed,
@@ -96,7 +99,7 @@ fn list_glyph(status: &str) -> &'static str {
 
 /// The `/workflows` interactive run picker (list mode).
 pub struct WorkflowsView {
-    /// Snapshot of the runs (newest-first as the registry orders them).
+    /// Snapshot of the runs (newest-first — `cmd_workflows` sorts by start desc).
     rows: Vec<WorkflowRow>,
     /// Index of the highlighted row.
     selected: usize,
@@ -333,13 +336,20 @@ fn phase_done(phase: &WorkflowPhase) -> usize {
 pub struct WorkflowDetailView {
     row: WorkflowRow,
     theme: Theme,
+    /// Lines scrolled down from the top (`↑`/`↓`), so a tall phase/agent tree
+    /// is reachable rather than clipped.
+    scroll: u16,
 }
 
 impl WorkflowDetailView {
     /// Build a detail view over one run snapshot.
     #[must_use]
     pub fn new(row: WorkflowRow, theme: Theme) -> Self {
-        Self { row, theme }
+        Self {
+            row,
+            theme,
+            scroll: 0,
+        }
     }
 
     fn lines(&self) -> Vec<Line<'static>> {
@@ -410,7 +420,10 @@ impl WorkflowDetailView {
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("Esc to go back", dim_style)));
+        lines.push(Line::from(Span::styled(
+            "\u{2191}\u{2193} scroll \u{00b7} Esc back",
+            dim_style,
+        )));
         lines
     }
 }
@@ -424,7 +437,12 @@ impl Renderable for WorkflowDetailView {
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        Paragraph::new(self.lines()).render(inner, buf);
+        let lines = self.lines();
+        // Clamp the scroll so the last line can't be scrolled past the top.
+        let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        let max_scroll = total.saturating_sub(inner.height);
+        let scroll = self.scroll.min(max_scroll);
+        Paragraph::new(lines).scroll((scroll, 0)).render(inner, buf);
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
@@ -438,6 +456,17 @@ impl BottomPaneView for WorkflowDetailView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => ViewOutcome::Cancelled,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll = self.scroll.saturating_sub(1);
+                ViewOutcome::Pending
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                // Bounded loosely by the line count; render clamps to the real
+                // viewport-relative max each frame.
+                let max = u16::try_from(self.lines().len()).unwrap_or(u16::MAX);
+                self.scroll = self.scroll.saturating_add(1).min(max);
+                ViewOutcome::Pending
+            }
             _ => ViewOutcome::Pending,
         }
     }
@@ -581,6 +610,34 @@ mod tests {
     #[test]
     fn full_frame_contract_suppresses_the_status_line() {
         assert!(!view(vec![row("a", "running", "x")]).wants_status_line());
+    }
+
+    #[test]
+    fn detail_scrolls_and_clamps_at_top() {
+        let mut v = WorkflowDetailView::new(row("w1", "running", "deploy"), Theme::dark());
+        assert_eq!(v.scroll, 0);
+        v.handle_key(press(KeyCode::Down));
+        assert_eq!(v.scroll, 1);
+        v.handle_key(press(KeyCode::Up));
+        assert_eq!(v.scroll, 0);
+        v.handle_key(press(KeyCode::Up)); // clamp at top
+        assert_eq!(v.scroll, 0);
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn pending_run_is_not_stoppable() {
+        // Oracle gates `x` on status === "running"; a pending run shows no stop.
+        let mut v = view(vec![row("w1", "pending", "queued-run")]);
+        assert!(!v.footer().contains("x stop"));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Char('x'))),
+            ViewOutcome::Pending
+        ));
+        assert_eq!(v.rows()[0].status, "pending", "not killed");
     }
 
     #[test]

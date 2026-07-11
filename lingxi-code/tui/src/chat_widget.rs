@@ -1958,7 +1958,7 @@ impl ChatWidget {
         let records = runtime
             .block_on(registry.list_workflows())
             .unwrap_or_default();
-        let rows: Vec<tui_core::multiagent::WorkflowRow> = records
+        let mut rows: Vec<tui_core::multiagent::WorkflowRow> = records
             .into_iter()
             .map(|rec| {
                 let task_id = rec.task_id.clone();
@@ -1973,6 +1973,15 @@ impl ChatWidget {
                 row
             })
             .collect();
+        // Newest-first (oracle `zoa` sorts `b.task.startTime - a.task.startTime`).
+        // The registry backs runs in a `HashMap` with no inherent order, so sort
+        // here: started runs by start desc, never-started (`None`) last, `task_id`
+        // as a stable tiebreak.
+        rows.sort_by(|a, b| {
+            b.started_at_ms
+                .cmp(&a.started_at_ms)
+                .then_with(|| a.task_id.cmp(&b.task_id))
+        });
         self.bottom_pane.show_workflows(rows);
         ChatOutcome::Continue
     }

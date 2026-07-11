@@ -273,7 +273,8 @@ impl TaskRegistryHandle for TaskRegistry {
     /// Rich `local_workflow` projection for the `/workflows` picker: surfaces the
     /// `wf_…` run id, current phase step, and start/end wall-clock (epoch millis)
     /// straight from [`LocalWorkflowTaskState`], which the reduced [`TaskRecord`]
-    /// drops. Newest-first, matching the registry's inherent ordering.
+    /// drops. Order is the registry's `HashMap` order (unspecified); the caller
+    /// (`cmd_workflows`) sorts newest-first for display.
     async fn list_workflows(&self) -> Result<Vec<WorkflowRecord>, TaskRegistryError> {
         fn epoch_ms(t: std::time::SystemTime) -> Option<u64> {
             t.duration_since(std::time::UNIX_EPOCH)

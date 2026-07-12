@@ -726,6 +726,11 @@ fn parse_data_uri(s: &str) -> Option<(String, String)> {
     Some((media_type.to_string(), payload.to_string()))
 }
 
+/// Image magic-byte sniff (claude `Wfe`) — shared impl in
+/// [`tool_api::util::image_sniff`]; the Bash gate and the dispatch loop's
+/// `hKn` mapper must agree, so both use the same fn.
+pub use tool_api::util::image_sniff::sniff_image_media_type;
+
 // ===== BASH.1 — extended-glob disable prefix (SECURITY) =====================
 
 /// Return the shell command that disables extended-glob expansion for the
@@ -1588,7 +1593,19 @@ impl Tool for BashTool {
                 // parity-critical behavior. Only the optional re-encode/resize
                 // is deferred.
                 if is_image_output(&normalized) {
-                    if let Some((media_type, payload)) = parse_data_uri(&normalized) {
+                    // Gate on the binary's FULL `hKn` predicate: data-URI parse
+                    // AND magic-byte sniff of the decoded payload (`Wfe`). A
+                    // URI whose payload is not a recognized image falls through
+                    // to the normal TEXT path — exactly claude's `if(g)` miss.
+                    let sniffed = parse_data_uri(&normalized).and_then(|(_claimed, payload)| {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(&payload)
+                            .ok()
+                            .and_then(|bytes| sniff_image_media_type(&bytes))
+                            .map(|_| payload)
+                    });
+                    if let Some(payload) = sniffed {
                         let mut meta: LogEventMetadata = HashMap::new();
                         meta.insert("request_id".into(), AnalyticsValue::String(request_id));
                         meta.insert(
@@ -1611,19 +1628,6 @@ impl Tool for BashTool {
                         meta.insert("truncated".into(), AnalyticsValue::Bool(false));
                         self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
 
-                        // The data-URI payload is ALREADY valid base64 of the
-                        // image bytes — emit it directly, no decode/re-encode.
-                        let source = protocol::ImageSource::Base64 {
-                            media_type: media_type.clone(),
-                            data: payload,
-                        };
-                        // Pure image: no leading text block (TS attaches none),
-                        // matching FileRead's empty-text case (`read.rs:729`).
-                        let msg = protocol::ConversationMessage::user_with_images(
-                            protocol::MessageId::new(),
-                            String::new(),
-                            vec![source],
-                        );
                         let interp = crate::command_semantics::interpret_command_result(
                             &cmd_str,
                             out.exit_code,
@@ -1632,10 +1636,12 @@ impl Tool for BashTool {
                             // Image output: the binary's result data is the main
                             // shape with `isImage: true`. `isImage` flags that
                             // `stdout` CONTAINS the image (the data-URI) — the
-                            // result mapper builds the image block FROM `stdout`
-                            // (`mapToolResultToToolResultBlockParam`). So `stdout`
-                            // carries the (untruncated) URI; the model also gets
-                            // the image as a separate content block via `new_messages`.
+                            // result mapper (`hKn`, ported as the dispatch loop's
+                            // `bash_image_tool_result_blocks`) builds the
+                            // tool_result image block FROM `stdout`, with the
+                            // media type SNIFFED from the decoded bytes. The
+                            // image therefore reaches the model INSIDE the
+                            // tool_result content array — no injected message.
                             data: bash_result_data(
                                 &normalized,
                                 &stderr_clean,
@@ -1645,10 +1651,12 @@ impl Tool for BashTool {
                                 crate::silent::is_silent_bash_command(&cmd_str),
                                 None,
                             ),
+                            // Display-only (egress ignores it when content_blocks
+                            // is Some); claude's wire form has no text.
                             model_content: Some(
-                                "[Image content provided in the following message.]".to_string(),
+                                "[Image content provided in tool result.]".to_string(),
                             ),
-                            new_messages: vec![msg],
+                            new_messages: vec![],
                             context_modifier: None,
                             is_error: false,
                             mcp_meta: None,
@@ -2969,12 +2977,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn image_stdout_emits_image_message_not_text() {
-        // A command whose stdout is a valid `data:image/png;base64,…` URI is
-        // returned as an IMAGE: the payload rides on `new_messages` via
-        // `ImageSource::Base64` and `data.isImage == true`. The model sees the
-        // image block (not the URI text); the URI itself stays in `data.stdout`
-        // (binary: `isImage` flags that stdout contains the image).
+    async fn image_stdout_is_flagged_for_the_tool_result_image_block() {
+        // A command whose stdout is a valid `data:image/png;base64,…` URI whose
+        // payload SNIFFS as a real image: `data.isImage == true` and the URI
+        // stays in `data.stdout` — the dispatch loop's `hKn` port derives the
+        // tool_result image block FROM that stdout, so the tool injects NO
+        // follow-up message (the image rides INSIDE the tool_result).
         let uri = format!("data:image/png;base64,{TINY_PNG_B64}");
         let out = ProcessOutput {
             stdout: format!("{uri}\n"),
@@ -2989,43 +2997,43 @@ mod tests {
             .expect("ok");
 
         // `data` is the main result shape with `isImage: true`; no LingXi-only
-        // `type`/`media_type`/`truncated` keys, and the model placeholder rides
+        // `type`/`media_type`/`truncated` keys, and the display placeholder rides
         // on `model_content`, not inside `data`.
         assert_eq!(res.data["isImage"], true);
         assert_eq!(res.data["interrupted"], false);
         assert_eq!(
             res.model_content.as_deref(),
-            Some("[Image content provided in the following message.]")
+            Some("[Image content provided in tool result.]")
         );
         assert!(res.data.get("type").is_none());
         assert!(res.data.get("media_type").is_none());
         assert!(res.data.get("truncated").is_none());
         // `isImage` flags that `stdout` CONTAINS the image: the (untruncated)
-        // data-URI rides in `stdout`, and the result mapper derives the image
-        // block from it. (The model also receives the image via `new_messages`.)
+        // data-URI rides in `stdout` for the mapper to derive the block from.
         assert_eq!(res.data["stdout"], uri);
+        // NO injected message — the image reaches the model inside the
+        // tool_result content array, byte-faithful to the binary's `hKn`.
+        assert!(res.new_messages.is_empty());
+    }
 
-        // Exactly one follow-up message carrying the image as base64.
-        assert_eq!(res.new_messages.len(), 1);
-        match &res.new_messages[0] {
-            protocol::ConversationMessage::User { content, .. } => {
-                // Pure image: no leading text block, exactly one Image block.
-                assert_eq!(content.len(), 1, "expected only the image block");
-                match &content[0] {
-                    protocol::ContentBlock::Image {
-                        source: protocol::ImageSource::Base64 { media_type, data },
-                    } => {
-                        assert_eq!(media_type, "image/png");
-                        assert_eq!(
-                            data, TINY_PNG_B64,
-                            "payload must be the URI's base64 verbatim"
-                        );
-                    }
-                    other => panic!("expected Image/Base64 block, got {other:?}"),
-                }
-            }
-            other => panic!("expected a User message with the image, got {other:?}"),
-        }
+    #[tokio::test]
+    async fn image_uri_with_unsniffable_payload_falls_through_to_text() {
+        // A syntactically valid data-URI whose payload is NOT a recognized image
+        // (magic sniff fails) must take the normal TEXT path — the binary's
+        // `hKn` returns null and the mapper falls through. `aGVsbG8=` = "hello".
+        let out = ProcessOutput {
+            stdout: "data:image/png;base64,aGVsbG8=\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "echo fake"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(res.data["isImage"], false, "unsniffable payload is TEXT");
+        assert!(res.new_messages.is_empty());
     }
 
     #[tokio::test]

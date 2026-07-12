@@ -3336,12 +3336,15 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // Non-MCP `{type:"image"}` results (Read on an image file, rendered PDF
         // pages) get the binary result-mapper's `case "image"` form: the image
         // block INSIDE the tool_result content (`image_tool_result_blocks`).
+        // Bash `{isImage:true}` results get the binary's `hKn` form — the image
+        // block derived from the stdout data-URI (`bash_image_tool_result_blocks`).
         let content_blocks = if mutated {
             None
         } else if tool_handle.is_mcp() {
             emit_payload.as_array().cloned()
         } else {
             image_tool_result_blocks(&emit_payload)
+                .or_else(|| bash_image_tool_result_blocks(&emit_payload))
         };
         results.push(ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
@@ -3519,6 +3522,46 @@ fn image_tool_result_blocks(data: &serde_json::Value) -> Option<Vec<serde_json::
     })])
 }
 
+/// The binary's Bash image mapper `hKn`: an `{isImage:true, stdout:<data-URI>}`
+/// result becomes a tool_result whose content is `[{type:"image", source:
+/// {type:"base64", media_type:<SNIFFED>, data}}]` — the media type comes from
+/// magic-byte sniffing of the DECODED payload (`Wfe`), NOT the URI's claimed
+/// type; `data` is the URI's original base64. Any miss (no isImage, no data-URI
+/// match on `/^data:([^;]+);base64,(.+)$/`, undecodable base64, unrecognized
+/// magic) returns `None` — the tool_result falls back to the text `content`,
+/// exactly the binary's `if(g)` fall-through.
+fn bash_image_tool_result_blocks(data: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    use base64::Engine as _;
+    if data.get("isImage") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    let stdout = data.get("stdout").and_then(serde_json::Value::as_str)?;
+    // `Xyu`: /^data:([^;]+);base64,(.+)$/ on the trimmed string.
+    let rest = stdout.trim().strip_prefix("data:")?;
+    let semi = rest.find(';')?;
+    if semi == 0 {
+        return None;
+    }
+    let payload = rest[semi..].strip_prefix(";base64,")?;
+    if payload.is_empty() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    // `Wfe` — magic-byte sniff (shared impl in tool-api, same fn the Bash
+    // tool's image gate uses, so gate and mapper always agree).
+    let media_type = tool_api::util::image_sniff::sniff_image_media_type(&bytes)?;
+    Some(vec![serde_json::json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": payload,
+        },
+    })])
+}
+
 #[cfg(test)]
 mod image_tool_result_tests {
     use super::image_tool_result_blocks;
@@ -3537,6 +3580,48 @@ mod image_tool_result_tests {
             serde_json::to_string(&blocks).unwrap(),
             r#"[{"type":"image","source":{"type":"base64","data":"QUJD","media_type":"image/png"}}]"#
         );
+    }
+
+    #[test]
+    fn bash_isimage_result_maps_stdout_data_uri_with_sniffed_media_type() {
+        use super::bash_image_tool_result_blocks;
+        // `iVBORw0KGgo=` = base64 of the 8-byte PNG magic. The URI CLAIMS jpeg —
+        // the mapper must emit the SNIFFED type (image/png), per `hKn`/`Wfe`.
+        let data = json!({
+            "stdout": "data:image/jpeg;base64,iVBORw0KGgo=",
+            "stderr": "",
+            "interrupted": false,
+            "isImage": true,
+        });
+        let blocks = bash_image_tool_result_blocks(&data).expect("sniffable data-URI maps");
+        assert_eq!(
+            serde_json::to_string(&blocks).unwrap(),
+            r#"[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]"#
+        );
+    }
+
+    #[test]
+    fn bash_isimage_misses_fall_back_to_none() {
+        use super::bash_image_tool_result_blocks;
+        // Not flagged as image.
+        assert!(bash_image_tool_result_blocks(
+            &json!({"stdout":"data:image/png;base64,iVBORw0KGgo=","isImage":false})
+        )
+        .is_none());
+        // Flagged, but stdout is not a data-URI → text fallback (`hKn` null).
+        assert!(
+            bash_image_tool_result_blocks(&json!({"stdout":"plain text","isImage":true})).is_none()
+        );
+        // Valid URI shape but undecodable base64.
+        assert!(bash_image_tool_result_blocks(
+            &json!({"stdout":"data:image/png;base64,@@not-base64@@","isImage":true})
+        )
+        .is_none());
+        // Decodable but unrecognized magic (claimed image, actually text bytes).
+        assert!(bash_image_tool_result_blocks(
+            &json!({"stdout":"data:image/png;base64,aGVsbG8gd29ybGQh","isImage":true})
+        )
+        .is_none());
     }
 
     #[test]

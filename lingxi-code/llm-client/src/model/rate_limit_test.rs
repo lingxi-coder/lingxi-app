@@ -1367,3 +1367,109 @@ mod from_429_error_headers {
         );
     }
 }
+
+/// Task 5: `credits_required` error-BODY derivation — claude-code `Nqi(e)`
+/// (`if error.error.details.error_code==="credits_required"` →
+/// `overageDisabledReason = details.disabled_reason`).
+#[cfg(test)]
+mod from_429_error_body {
+    use super::*;
+
+    /// The exact body shape from the task brief: no unified headers at all,
+    /// just the credits-required error body. The body alone must pass the
+    /// gate (claude-code derives `Nqi` from a separate error-catch site than
+    /// the header-only `errors.ts:471-516` object) and populate both
+    /// `credits_required` and the body-derived `overage_disabled_reason`.
+    #[test]
+    fn credits_required_body_sets_flag_and_disabled_reason() {
+        let body = serde_json::json!({
+            "error": {
+                "error": {
+                    "details": {
+                        "error_code": "credits_required",
+                        "disabled_reason": "out_of_credits"
+                    }
+                }
+            }
+        });
+        let info = RateLimitInfo::from_429_error(&[], Some(&body)).expect("body alone passes gate");
+        assert!(info.credits_required, "Nqi sets credits_required=true");
+        assert_eq!(
+            info.overage_disabled_reason.as_deref(),
+            Some("out_of_credits")
+        );
+        assert_eq!(
+            info.status.as_deref(),
+            Some("rejected"),
+            "forced rejected status, same as the header path"
+        );
+    }
+
+    /// No body at all → identical to `from_429_error_headers` (delegation
+    /// preserves every existing header-only behaviour).
+    #[test]
+    fn no_body_behaves_like_header_only() {
+        assert_eq!(RateLimitInfo::from_429_error(&[], None), None);
+        let headers: Vec<(String, String)> = vec![(
+            "anthropic-ratelimit-unified-representative-claim".to_string(),
+            "seven_day".to_string(),
+        )];
+        let with_body = RateLimitInfo::from_429_error(&headers, None);
+        let via_headers_fn = RateLimitInfo::from_429_error_headers(&headers);
+        assert_eq!(with_body, via_headers_fn);
+    }
+
+    /// A body with a non-`credits_required` `error_code` (or no `details` at
+    /// all) never sets the flag and never passes the gate on its own.
+    #[test]
+    fn unrelated_error_code_does_not_set_flag() {
+        let body = serde_json::json!({
+            "error": {"error": {"details": {"error_code": "something_else"}}}
+        });
+        assert_eq!(RateLimitInfo::from_429_error(&[], Some(&body)), None);
+
+        let no_details = serde_json::json!({"error": {"error": {}}});
+        assert_eq!(RateLimitInfo::from_429_error(&[], Some(&no_details)), None);
+    }
+
+    /// When BOTH the header and the body carry a disabled reason, the header
+    /// wins (documented precedence — the header-driven parse runs first and
+    /// only falls back to the body's reason when absent).
+    #[test]
+    fn header_disabled_reason_takes_precedence_over_body() {
+        let headers: Vec<(String, String)> = vec![
+            (
+                "anthropic-ratelimit-unified-representative-claim".to_string(),
+                "seven_day".to_string(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-disabled-reason".to_string(),
+                "header_reason".to_string(),
+            ),
+        ];
+        let body = serde_json::json!({
+            "error": {
+                "error": {
+                    "details": {
+                        "error_code": "credits_required",
+                        "disabled_reason": "body_reason"
+                    }
+                }
+            }
+        });
+        let info = RateLimitInfo::from_429_error(&headers, Some(&body)).expect("gate passes");
+        assert!(info.credits_required);
+        assert_eq!(
+            info.overage_disabled_reason.as_deref(),
+            Some("header_reason")
+        );
+    }
+
+    /// `RateLimitInfo::default()` (the success-path baseline, and any struct
+    /// built without going through the 429-error constructors) leaves
+    /// `credits_required` at its default `false`.
+    #[test]
+    fn credits_required_defaults_false() {
+        assert!(!RateLimitInfo::default().credits_required);
+    }
+}

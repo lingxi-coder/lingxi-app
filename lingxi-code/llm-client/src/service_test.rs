@@ -1848,7 +1848,7 @@ mod tests {
             );
             h
         };
-        adapter.record_rate_limit_from_429(&headers);
+        adapter.record_rate_limit_from_429(&headers, None);
         // Sanity: the slot is genuinely staged before we clear it.
         assert!(
             adapter.pending_429.lock().unwrap().is_some(),

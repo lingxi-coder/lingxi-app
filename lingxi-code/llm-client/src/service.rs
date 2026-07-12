@@ -1425,13 +1425,22 @@ impl ApiService {
     /// pending slot is cleared (`None`); the copy slot is likewise cleared
     /// (the generic 429 surface applies) — TS only updates inside the gated
     /// branch.
-    fn record_rate_limit_from_429(&self, headers: &std::collections::BTreeMap<String, String>) {
-        self.record_rate_limit_from_429_at(headers, Self::now_ms());
+    /// `body` is the 429's parsed JSON error body, when available — Task 5
+    /// threads it through to [`crate::RateLimitInfo::from_429_error`] so the
+    /// `Nqi(e)` `credits_required` / body-derived `overage_disabled_reason`
+    /// can be recovered from the error BODY (not just the response headers).
+    fn record_rate_limit_from_429(
+        &self,
+        headers: &std::collections::BTreeMap<String, String>,
+        body: Option<&serde_json::Value>,
+    ) {
+        self.record_rate_limit_from_429_at(headers, body, Self::now_ms());
     }
 
     fn record_rate_limit_from_429_at(
         &self,
         headers: &std::collections::BTreeMap<String, String>,
+        body: Option<&serde_json::Value>,
         ts_ms: u128,
     ) {
         let hvec: Vec<(String, String)> = headers
@@ -1441,7 +1450,7 @@ impl ApiService {
         // `extractRawUtilization(headersToUse)` (claudeAiLimits.ts:500) runs
         // for ANY error headers, independent of the limits gate below.
         let raw = RawUtilization::from_headers(&hvec);
-        let info = RateLimitInfo::from_429_error_headers(&hvec);
+        let info = RateLimitInfo::from_429_error(&hvec, body);
 
         // MESSAGE composition ports errors.ts:482-516 (a LOCAL limits object
         // built from the error headers) — kept verbatim; it is NOT staged and
@@ -1715,7 +1724,10 @@ impl ApiService {
                                 // Task 6 (batch 5): capture the 429's OWN
                                 // unified headers (errors.ts:471-516) so a
                                 // terminal 429 can surface the limits copy.
-                                self.record_rate_limit_from_429(&provider_resp.headers);
+                                self.record_rate_limit_from_429(
+                                    &provider_resp.headers,
+                                    Some(&provider_resp.body_json),
+                                );
                                 let delay = Self::resolve_retry_after(&provider_resp.headers);
                                 telemetry::emit_rate_limited(
                                     &self.analytics,
@@ -2227,12 +2239,12 @@ impl ApiService {
                                 Err(e) => return Err(e),
                             }
                         }
-                        let body_json =
+                        let body_json: serde_json::Value =
                             serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
                         let err_response = crate::ProviderResponse {
                             status: streaming.status,
                             headers: response_headers.clone(),
-                            body_json,
+                            body_json: body_json.clone(),
                             request_id: None,
                         };
                         let decode_err = match prepared.route.codec.decode_response(err_response) {
@@ -2248,7 +2260,7 @@ impl ApiService {
                         let effective_err = if let LlmError::RateLimited { .. } = &decode_err {
                             // Task 6 (batch 5): same 429-error-header capture
                             // as the non-stream path (errors.ts:471-516).
-                            self.record_rate_limit_from_429(&response_headers);
+                            self.record_rate_limit_from_429(&response_headers, Some(&body_json));
                             LlmError::RateLimited {
                                 retry_after: Some(Self::resolve_retry_after(&response_headers)),
                                 scope: None,

@@ -438,6 +438,14 @@ pub struct RateLimitInfo {
     /// fraction; 2.1.206: `Number(header(…))` when finite). `None` when the
     /// header is absent or non-finite.
     pub overage_period_channel_utilization: Option<f64>,
+    /// `true` when the 429 error BODY's `error.error.details.error_code`
+    /// equals `"credits_required"` — the crate's analogue of claude-code
+    /// `Nqi(e)`, which reads the raw error body (not the response headers).
+    /// Set only by [`Self::from_429_error`] when a body is supplied; defaults
+    /// `false` (mirrors the TS falsy/absent case). Feeds the composer's
+    /// `jid` upsell-suppression gate:
+    /// `rateLimitType==="seven_day_overage_included" || credits_required`.
+    pub credits_required: bool,
 }
 
 /// Map a representative-claim value to the abbreviation used in the per-claim
@@ -810,6 +818,10 @@ impl RateLimitInfo {
                 headers,
                 "anthropic-ratelimit-unified-overage-period-channel-utilization",
             ),
+            // The success-path header parse never sees a 429 error body —
+            // `Nqi(e)` only runs on the error-catch site
+            // ([`Self::from_429_error`]).
+            credits_required: false,
         };
 
         // Final-status semantics (claudeAiLimits.ts:411-424) — the early
@@ -875,6 +887,28 @@ impl RateLimitInfo {
     /// truthiness check).
     #[must_use]
     pub fn from_429_error_headers(headers: &[(String, String)]) -> Option<Self> {
+        Self::from_429_error(headers, None)
+    }
+
+    /// [`Self::from_429_error_headers`] plus claude-code `Nqi(e)`: when the
+    /// 429's parsed JSON error `body` carries
+    /// `error.error.details.error_code === "credits_required"`, sets
+    /// [`Self::credits_required`] and — when no header already supplied one —
+    /// uses `details.disabled_reason` (if a string) as
+    /// [`Self::overage_disabled_reason`]. The header value takes precedence
+    /// over the body's when both are present (the header-driven
+    /// `overage_disabled_reason()` parse runs first below).
+    ///
+    /// `body` is independent of the header gate (`errors.ts:480`): a
+    /// `credits_required` body alone is enough to pass the gate and produce
+    /// `Some`, even with no unified headers on the response, since claude-code
+    /// derives it from a separate error-catch site (`Nqi`) than the header
+    /// object built at `errors.ts:471-516`.
+    #[must_use]
+    pub fn from_429_error(
+        headers: &[(String, String)],
+        body: Option<&serde_json::Value>,
+    ) -> Option<Self> {
         // `headers?.get?.(…)` + TS truthiness: empty string is falsy, so it
         // neither passes the gate nor is assigned onto the limits object.
         let rate_limit_type =
@@ -884,7 +918,10 @@ impl RateLimitInfo {
         let overage_status = header_value(headers, "anthropic-ratelimit-unified-overage-status")
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        if rate_limit_type.is_none() && overage_status.is_none() {
+        let (credits_required, body_disabled_reason) = body
+            .map(Self::credits_required_from_body)
+            .unwrap_or((false, None));
+        if rate_limit_type.is_none() && overage_status.is_none() && !credits_required {
             return None;
         }
         Some(Self {
@@ -903,11 +940,42 @@ impl RateLimitInfo {
                 "anthropic-ratelimit-unified-overage-reset",
             ),
             // `if (overageDisabledReason)` (errors.ts:511-516) — empty is falsy.
+            // Header takes precedence over the `Nqi` body-derived reason.
             overage_disabled_reason: overage_disabled_reason(headers)
                 .filter(|s| !s.is_empty())
-                .map(str::to_string),
+                .map(str::to_string)
+                .or(body_disabled_reason),
+            credits_required,
             ..Self::default()
         })
+    }
+
+    /// Dig a 429 error body for claude-code `Nqi(e)`'s
+    /// `error.error.details` — returns `(credits_required,
+    /// disabled_reason)`. `disabled_reason` is only meaningful when
+    /// `credits_required` is `true` (mirrors `Nqi` only reading
+    /// `details.disabled_reason` inside the `error_code==="credits_required"`
+    /// branch).
+    fn credits_required_from_body(body: &serde_json::Value) -> (bool, Option<String>) {
+        let details = body
+            .get("error")
+            .and_then(|e| e.get("error"))
+            .and_then(|e| e.get("details"));
+        let Some(details) = details else {
+            return (false, None);
+        };
+        let is_credits_required = details
+            .get("error_code")
+            .and_then(serde_json::Value::as_str)
+            == Some("credits_required");
+        if !is_credits_required {
+            return (false, None);
+        }
+        let disabled_reason = details
+            .get("disabled_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        (true, disabled_reason)
     }
 }
 

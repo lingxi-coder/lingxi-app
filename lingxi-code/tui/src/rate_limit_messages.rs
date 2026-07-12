@@ -97,6 +97,14 @@ pub struct RateLimitInfo {
     /// `anthropic-ratelimit-unified-fallback` == `available`. Unused by the
     /// composer (TS parity) — carried for completeness.
     pub fallback_available: Option<bool>,
+    /// `anthropic-ratelimit-unified-upgrade-paths` (2.1.206), parsed to a
+    /// list. Consumed by the upsell (`getUpsellMessage`) server-hide /
+    /// spend-nudge derivations (a later task); threaded here so the
+    /// composer has the input once that logic lands.
+    pub upgrade_paths: Option<Vec<String>>,
+    /// 2.1.206 `credits_required` derivation. Consumed by the upsell
+    /// suppression gate (`shouldShowUpsell`, a later task).
+    pub credits_required: bool,
 }
 
 /// A composed rate-limit notice: error/warning text plus the optional dim

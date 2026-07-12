@@ -325,6 +325,8 @@ mod tests {
             overage_resets_at: Some(1_760_000_200),
             overage_disabled_reason: Some("out_of_credits".to_string()),
             fallback_available: Some(true),
+            upgrade_paths: Some(vec!["overage".to_string()]),
+            credits_required: true,
         };
         let s = serde_json::to_string(&ev).unwrap();
         let back: OutputEvent = serde_json::from_str(&s).unwrap();
@@ -340,6 +342,8 @@ mod tests {
             overage_resets_at: None,
             overage_disabled_reason: None,
             fallback_available: None,
+            upgrade_paths: None,
+            credits_required: false,
         };
         let s = serde_json::to_string(&empty).unwrap();
         let back: OutputEvent = serde_json::from_str(&s).unwrap();
@@ -387,10 +391,14 @@ mod tests {
             Some(1_760_000_200),
             Some("out_of_credits"),
             Some(true),
+            Some(&["overage".to_string()]),
+            true,
         )
         .await;
-        sink.emit_rate_limit(None, None, None, None, None, None, None, None, None)
-            .await;
+        sink.emit_rate_limit(
+            None, None, None, None, None, None, None, None, None, None, false,
+        )
+        .await;
     }
 
     // ── OutputEvent::RawUtilization (llm-client future-work batch 5, Task 1) ─

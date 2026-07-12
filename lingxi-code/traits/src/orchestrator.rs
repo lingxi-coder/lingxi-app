@@ -1314,6 +1314,14 @@ pub enum OutputEvent {
         /// `anthropic-ratelimit-unified-fallback` strict-equals
         /// `"available"`; `None` when the header is absent.
         fallback_available: Option<bool>,
+        /// `anthropic-ratelimit-unified-upgrade-paths` — comma-separated
+        /// upgrade offers (e.g. `"overage"`), parsed to a list; `None` when
+        /// the header is absent or empty (2.1.206 `ClaudeAILimits`).
+        upgrade_paths: Option<Vec<String>>,
+        /// Whether the most recent 429's error body carried
+        /// `error.error.details.error_code === "credits_required"` (2.1.206),
+        /// or the representative claim is `seven_day_overage_included`.
+        credits_required: bool,
     },
     /// Raw per-window unified rate-limit utilization — claude-code
     /// `rawUtilization` (`claudeAiLimits.ts:145-179`), tracked on every API
@@ -1484,17 +1492,19 @@ pub trait OutputStream: Send + Sync {
     /// Added by llm-client future-work batch 3 (Task 8). Called by the
     /// orchestrator turn drivers after each completed API call whose
     /// rate-limit snapshot DIFFERS from the previously emitted one — the
-    /// orchestrator dedupes, so sinks only ever see changes. The nine
+    /// orchestrator dedupes, so sinks only ever see changes. The first nine
     /// arguments map field-for-field onto [`OutputEvent::RateLimit`]; see
     /// that variant's per-field docs for the `anthropic-ratelimit-unified-*`
     /// header each value is parsed from (claude-code `claudeAiLimits.ts`).
+    /// `upgrade_paths` / `credits_required` were added for 2.1.206 and map
+    /// onto the same variant's trailing two fields.
     ///
     /// **Default no-op**: pre-existing sinks (TUI, CLI, `MockOutputStream`)
     /// keep compiling unchanged. The TUI bridge overrides this to surface
     /// the rate-limit status message.
     #[allow(
         clippy::too_many_arguments,
-        reason = "mirrors OutputEvent::RateLimit's nine header-derived fields; the bare-argument shape matches the emit_usage convention on this trait"
+        reason = "mirrors OutputEvent::RateLimit's eleven header-derived fields; the bare-argument shape matches the emit_usage convention on this trait"
     )]
     async fn emit_rate_limit(
         &self,
@@ -1507,6 +1517,8 @@ pub trait OutputStream: Send + Sync {
         _overage_resets_at: Option<u64>,
         _overage_disabled_reason: Option<&str>,
         _fallback_available: Option<bool>,
+        _upgrade_paths: Option<&[String]>,
+        _credits_required: bool,
     ) {
     }
 

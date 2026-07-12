@@ -421,7 +421,7 @@ impl OutputStream for MockOutputStream {
     /// emission so tests can assert the emit-on-change behaviour.
     #[allow(
         clippy::too_many_arguments,
-        reason = "mirrors the nine-argument trait signature (see traits::OutputStream::emit_rate_limit)"
+        reason = "mirrors the eleven-argument trait signature (see traits::OutputStream::emit_rate_limit)"
     )]
     async fn emit_rate_limit(
         &self,
@@ -434,6 +434,8 @@ impl OutputStream for MockOutputStream {
         overage_resets_at: Option<u64>,
         overage_disabled_reason: Option<&str>,
         fallback_available: Option<bool>,
+        upgrade_paths: Option<&[String]>,
+        credits_required: bool,
     ) {
         self.events.lock().await.push(OutputEvent::RateLimit {
             status: status.map(str::to_string),
@@ -445,6 +447,8 @@ impl OutputStream for MockOutputStream {
             overage_resets_at,
             overage_disabled_reason: overage_disabled_reason.map(str::to_string),
             fallback_available,
+            upgrade_paths: upgrade_paths.map(<[String]>::to_vec),
+            credits_required,
         });
     }
     /// Task 2 (llm-client future-work batch 5): record the raw-utilization

@@ -804,12 +804,17 @@ impl OutputStream for StreamJsonStream {
     /// Wire `OutputStream::emit_rate_limit` → `rate_limit_event` NDJSON frame.
     ///
     /// The orchestrator calls this after every completed API turn via
-    /// `emit_rate_limit_if_changed` (deduped). We forward all nine parameters
-    /// to `emit_rate_limit_event` which maps them onto the GROUND-TRUTH shape.
-    /// The `overage_status`, `overage_resets_at`, `overage_disabled_reason`, and
-    /// `fallback_available` fields are Anthropic-overage metadata that is NOT
-    /// part of the `rate_limit_event` wire frame — they are used by the TUI
-    /// rate-limit composer only.
+    /// `emit_rate_limit_if_changed` (deduped). We forward the original nine
+    /// parameters to `emit_rate_limit_event` which maps them onto the
+    /// GROUND-TRUTH shape. The `overage_status`, `overage_resets_at`,
+    /// `overage_disabled_reason`, and `fallback_available` fields are
+    /// Anthropic-overage metadata that is NOT part of the `rate_limit_event`
+    /// wire frame — they are used by the TUI rate-limit composer only. The
+    /// 2.1.206 `upgrade_paths` / `credits_required` fields are likewise
+    /// TUI-composer-only inputs (the upsell/suppression logic in a later
+    /// task) with no `rate_limit_event` wire representation, so this impl
+    /// accepts and ignores them, satisfying the trait signature faithfully
+    /// without inventing new stream-json output.
     async fn emit_rate_limit(
         &self,
         status: Option<&str>,
@@ -821,6 +826,8 @@ impl OutputStream for StreamJsonStream {
         _overage_resets_at: Option<u64>,
         _overage_disabled_reason: Option<&str>,
         _fallback_available: Option<bool>,
+        _upgrade_paths: Option<&[String]>,
+        _credits_required: bool,
     ) {
         // Combine `status` and `overage_status` into the single `status` field
         // on the wire frame, preferring the more specific `overage_status` when
@@ -1801,6 +1808,8 @@ mod tests {
                 None,                    // overage_resets_at
                 None,                    // overage_disabled_reason
                 None,                    // fallback_available
+                Some(&["overage".to_string()]), // upgrade_paths
+                true,                    // credits_required
             )
             .await;
     }

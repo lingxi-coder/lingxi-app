@@ -2112,6 +2112,8 @@ impl ConversationOrchestrator {
                 info.overage_resets_at,
                 info.overage_disabled_reason.as_deref(),
                 info.fallback_available,
+                info.upgrade_paths.as_deref(),
+                info.credits_required,
             )
             .await;
         *last = Some(info);

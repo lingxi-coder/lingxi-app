@@ -139,6 +139,12 @@ pub enum TurnEvent {
         overage_disabled_reason: Option<String>,
         /// `anthropic-ratelimit-unified-fallback` == `available`.
         fallback_available: Option<bool>,
+        /// `anthropic-ratelimit-unified-upgrade-paths` (2.1.206), parsed to
+        /// a list; `None` when the header is absent or empty.
+        upgrade_paths: Option<Vec<String>>,
+        /// 2.1.206 `credits_required` derivation — see
+        /// `traits::OutputEvent::RateLimit::credits_required`.
+        credits_required: bool,
     },
     /// Raw per-window utilization snapshot (llm-client future-work batch 5,
     /// Task 4). Mirrors `traits::OutputEvent::RawUtilization`'s four fields —
@@ -352,7 +358,7 @@ impl OutputStream for BridgeOutputStream {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "mirrors the trait method's nine header-derived fields (see traits::OutputStream::emit_rate_limit)"
+        reason = "mirrors the trait method's eleven header-derived fields (see traits::OutputStream::emit_rate_limit)"
     )]
     async fn emit_rate_limit(
         &self,
@@ -365,6 +371,8 @@ impl OutputStream for BridgeOutputStream {
         overage_resets_at: Option<u64>,
         overage_disabled_reason: Option<&str>,
         fallback_available: Option<bool>,
+        upgrade_paths: Option<&[String]>,
+        credits_required: bool,
     ) {
         let _ = self.tx.send(TurnEvent::RateLimit {
             status: status.map(str::to_owned),
@@ -376,6 +384,8 @@ impl OutputStream for BridgeOutputStream {
             overage_resets_at,
             overage_disabled_reason: overage_disabled_reason.map(str::to_owned),
             fallback_available,
+            upgrade_paths: upgrade_paths.map(<[String]>::to_vec),
+            credits_required,
         });
     }
 
@@ -503,6 +513,8 @@ mod tests {
                 Some(1_900_000_200),
                 Some("out_of_credits"),
                 Some(true),
+                Some(&["overage".to_string()]),
+                true,
             )
             .await;
         match rx.try_recv().expect("bridge must forward a TurnEvent") {
@@ -516,6 +528,8 @@ mod tests {
                 overage_resets_at,
                 overage_disabled_reason,
                 fallback_available,
+                upgrade_paths,
+                credits_required,
             } => {
                 assert_eq!(status.as_deref(), Some("rejected"));
                 assert_eq!(rate_limit_type.as_deref(), Some("five_hour"));
@@ -526,6 +540,8 @@ mod tests {
                 assert_eq!(overage_resets_at, Some(1_900_000_200));
                 assert_eq!(overage_disabled_reason.as_deref(), Some("out_of_credits"));
                 assert_eq!(fallback_available, Some(true));
+                assert_eq!(upgrade_paths, Some(vec!["overage".to_string()]));
+                assert!(credits_required);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -536,7 +552,9 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
         bridge
-            .emit_rate_limit(None, None, None, None, None, None, None, None, None)
+            .emit_rate_limit(
+                None, None, None, None, None, None, None, None, None, None, false,
+            )
             .await;
         assert!(matches!(
             rx.try_recv().expect("bridge must forward a TurnEvent"),

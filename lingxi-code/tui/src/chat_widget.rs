@@ -995,8 +995,10 @@ impl ChatWidget {
                 overage_resets_at,
                 overage_disabled_reason,
                 fallback_available,
+                upgrade_paths,
+                credits_required,
             } => {
-                self.apply_rate_limit(&crate::rate_limit_messages::RateLimitInfo {
+                self.apply_rate_limit(&turn_rate_limit_into_composer_info(
                     status,
                     rate_limit_type,
                     utilization,
@@ -1006,7 +1008,9 @@ impl ChatWidget {
                     overage_resets_at,
                     overage_disabled_reason,
                     fallback_available,
-                });
+                    upgrade_paths,
+                    credits_required,
+                ));
             }
             // `RawUtilization`'s ONLY consumer is the configured statusline
             // command's `rate_limits` input: fold it into the shared pump slot
@@ -3160,6 +3164,44 @@ impl ChatWidget {
 /// `lines.len()` as a saturating `u16` (row heights are `u16` everywhere).
 fn line_count(lines: &[ratatui::text::Line<'static>]) -> u16 {
     u16::try_from(lines.len()).unwrap_or(u16::MAX)
+}
+
+/// Maps `TurnEvent::RateLimit`'s fields onto the composer's own
+/// [`crate::rate_limit_messages::RateLimitInfo`] shape — the two share the
+/// same field set (the `TurnEvent` variant is the bridge-crate twin of
+/// `traits::OutputEvent::RateLimit`), so this is a straight field-for-field
+/// carry, including the 206 `upgrade_paths` / `credits_required` overage
+/// fields threaded alongside the original nine.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the TurnEvent::RateLimit variant's eleven header-derived fields"
+)]
+fn turn_rate_limit_into_composer_info(
+    status: Option<String>,
+    rate_limit_type: Option<String>,
+    utilization: Option<f64>,
+    resets_at: Option<u64>,
+    claim_resets_at: Option<u64>,
+    overage_status: Option<String>,
+    overage_resets_at: Option<u64>,
+    overage_disabled_reason: Option<String>,
+    fallback_available: Option<bool>,
+    upgrade_paths: Option<Vec<String>>,
+    credits_required: bool,
+) -> crate::rate_limit_messages::RateLimitInfo {
+    crate::rate_limit_messages::RateLimitInfo {
+        status,
+        rate_limit_type,
+        utilization,
+        resets_at,
+        claim_resets_at,
+        overage_status,
+        overage_resets_at,
+        overage_disabled_reason,
+        fallback_available,
+        upgrade_paths,
+        credits_required,
+    }
 }
 
 /// Snapshot the registry-backed slash commands — the NON-builtin surface (user
@@ -5783,7 +5825,32 @@ mod tests {
             overage_resets_at: None,
             overage_disabled_reason: None,
             fallback_available: None,
+            upgrade_paths: None,
+            credits_required: false,
         }
+    }
+
+    /// Task 6 (206 overage header fields): `TurnEvent::RateLimit`'s new
+    /// `upgrade_paths` / `credits_required` fields reach the composer's own
+    /// `RateLimitInfo` unchanged, via the `apply_turn_event` match arm's call
+    /// into `turn_rate_limit_into_composer_info`.
+    #[test]
+    fn rate_limit_upgrade_paths_and_credits_required_reach_composer_info() {
+        let info = turn_rate_limit_into_composer_info(
+            Some("rejected".to_string()),
+            Some("five_hour".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["overage".to_string()]),
+            true,
+        );
+        assert_eq!(info.upgrade_paths, Some(vec!["overage".to_string()]));
+        assert!(info.credits_required);
     }
 
     #[test]
@@ -5822,6 +5889,8 @@ mod tests {
             overage_resets_at: None,
             overage_disabled_reason: None,
             fallback_available: None,
+            upgrade_paths: None,
+            credits_required: false,
         };
         let mut widget = widget();
         // Entering overage: no composed notice (isUsingOverage + allowed →
@@ -5855,6 +5924,8 @@ mod tests {
             overage_resets_at: None,
             overage_disabled_reason: None,
             fallback_available: None,
+            upgrade_paths: None,
+            credits_required: false,
         });
         assert!(!widget.has_shown_overage_notification);
         widget.apply_turn_event(overage());

@@ -50,6 +50,7 @@ fn sample_info() -> RateLimitInfo {
         upgrade_paths: Some(vec!["upgrade_plan".to_string(), "overage".to_string()]),
         overage_period_monthly_utilization: Some(0.42),
         overage_period_channel_utilization: Some(0.10),
+        credits_required: false,
     }
 }
 
@@ -98,6 +99,8 @@ async fn emits_rate_limit_on_first_snapshot() {
         overage_resets_at,
         overage_disabled_reason,
         fallback_available,
+        upgrade_paths,
+        credits_required,
     } = &events[0]
     else {
         panic!("expected RateLimit event");
@@ -111,6 +114,11 @@ async fn emits_rate_limit_on_first_snapshot() {
     assert_eq!(*overage_resets_at, Some(1_760_000_200));
     assert_eq!(overage_disabled_reason.as_deref(), Some("out_of_credits"));
     assert_eq!(*fallback_available, Some(true));
+    assert_eq!(
+        upgrade_paths.as_deref(),
+        Some(&["upgrade_plan".to_string(), "overage".to_string()][..])
+    );
+    assert!(!credits_required);
 }
 
 /// (b) An IDENTICAL snapshot across two turns must NOT be re-emitted —

@@ -61,6 +61,11 @@ impl SubscriptionSnapshot {
     /// Port of `isOverageProvisioningAllowed` (`auth.ts:1623-1643`): must be a
     /// subscriber with a billing type that can purchase extra usage (Stripe or
     /// mobile billing).
+    ///
+    /// Also serves as `QJe()` in the 2.1.206 rate-limit messages: the four
+    /// arms below (`stripe_subscription` / `stripe_subscription_contracted` /
+    /// `apple_subscription` / `google_play_subscription`) are exactly `QJe`'s
+    /// four billing types.
     #[must_use]
     pub fn is_overage_provisioning_allowed(&self) -> bool {
         if !self.is_subscriber {
@@ -80,6 +85,10 @@ impl SubscriptionSnapshot {
     /// Port of `hasClaudeAiBillingAccess` (`billing.ts:53-78`; the
     /// `/mock-limits` override is not ported). Consumer plans always have
     /// billing access; Team/Enterprise gate on the org role.
+    ///
+    /// Also serves as `tC()` / `hasBillingAccess` in the 2.1.206
+    /// `getUpsellMessage` (`Bo()&&(max|pro || orgRole∈…)`); byte-equivalent
+    /// given `Bo()≈is_subscriber`.
     #[must_use]
     pub fn has_claude_ai_billing_access(&self) -> bool {
         if !self.is_subscriber {
@@ -101,6 +110,13 @@ impl SubscriptionSnapshot {
     #[must_use]
     pub fn is_extra_usage_command_enabled(&self, disable_env_truthy: bool) -> bool {
         !disable_env_truthy && self.is_overage_provisioning_allowed()
+    }
+
+    /// Port of `A5()` (`Uc()?.billingType==="usage_based"`) — selects "usage limit"
+    /// vs "usage credit limit" wording in the 2.1.206 rate-limit messages.
+    #[must_use]
+    pub fn is_usage_based_billing(&self) -> bool {
+        self.billing_type.as_deref() == Some("usage_based")
     }
 }
 
@@ -294,5 +310,15 @@ mod tests {
         assert!(!no_billing.is_extra_usage_command_enabled(false));
 
         assert!(team.is_extra_usage_command_enabled(false));
+    }
+
+    #[test]
+    fn is_usage_based_billing_matches_a5() {
+        let mut s = SubscriptionSnapshot::default();
+        assert!(!s.is_usage_based_billing());
+        s.billing_type = Some("usage_based".into());
+        assert!(s.is_usage_based_billing());
+        s.billing_type = Some("stripe_subscription".into());
+        assert!(!s.is_usage_based_billing());
     }
 }

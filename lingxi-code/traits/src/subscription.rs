@@ -155,11 +155,15 @@ impl SubscriptionSnapshot {
     /// - `x5()==="default_claude_zero"` → `rate_limit_tier` (`x5()` =
     ///   `getRateLimitTier()`, binary @214254206).
     ///
-    /// Consumed ONLY by `Ucg`'s first guard `!(ZA(t)&&WBe()&&!B5())`; the
-    /// port's `WBe()` is a documented `false` (see
-    /// `tui::rate_limit_messages::overage_consent_required`), so that guard
-    /// collapses and `B5()` is currently unreachable — pinned faithfully so the
-    /// branch stays correct if `WBe()` ever gains a data source.
+    /// Within THIS task's rate-limit-message scope, `B5()` feeds `Ucg`'s first
+    /// guard `!(ZA(t)&&WBe()&&!B5())`; the port's `WBe()` is a documented
+    /// `false` (see `tui::rate_limit_messages::overage_consent_required`), so
+    /// for that guard the `!B5()` suppression term cannot take effect. Pinned
+    /// faithfully so the branch stays correct if `WBe()` ever gains a data
+    /// source. NOTE: `B5()` has many other 2.1.206 consumers
+    /// (`Gcg`/`Qfi`/`Y6l`/`x7m`/`Eid`/`WCt`, ~10 sites) that are OUT OF SCOPE
+    /// here and where the documented defaults are NOT no-ops — each must be
+    /// analyzed independently before relying on this predicate elsewhere.
     #[must_use]
     pub fn is_saffron_credits_only(&self, deployment_first_party: bool) -> bool {
         !deployment_first_party

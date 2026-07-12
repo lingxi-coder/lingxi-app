@@ -486,9 +486,15 @@ fn error_upsell(sub: &SubscriptionSnapshot, extra_usage_cmd_enabled: bool) -> Op
 //   (c) `Gid`'s upsell gate   `shouldShowUpsell = Eyt() || Bo()`
 // The subscription-consuming leaves (`B5`/`DBe`/`Bo` via `is_subscriber`,
 // `x5` via `rate_limit_tier`) live on [`SubscriptionSnapshot`]. The
-// model-based / flag-based / module-global leaves are pinned here. Every
-// documented default follows the byte-locked-but-unreachable convention used
-// by [`upsell::OPENING_OPTIONS`].
+// model-based / flag-based / module-global leaves are pinned here. Each
+// documented default follows the byte-locked convention used by
+// [`upsell::OPENING_OPTIONS`]. SCOPE: every "collapses" / "never fires"
+// observation below is about THIS task's three rate-limit-message branches
+// only. These predicates have many OTHER 2.1.206 consumers (ZA ~18 sites,
+// WBe ~7, B5 ~10, O9e ~4 — e.g. `WCt(limits, O9e())` filtering weekly-scoped
+// model-limit rows, the `Qfi`/`Gfi` Fable annotations) that are out of scope
+// here and where the same defaults are NOT no-ops; each must be analyzed
+// independently.
 
 /// `Eyt()` (2.1.206 binary @212992273: `function Eyt(){return!1}`) — a hard
 /// `false` constant in 2.1.206. It is one input to `Gid`'s
@@ -502,10 +508,12 @@ const EYT: bool = false;
 // 206 Rn(): the port is not Anthropic's first-party Claude Code binary and has
 // no deployment discriminator wired into the subscription layer, so
 // `deployment_first_party` defaults to `false` (⇒ `Rn()!=="firstParty"` is
-// `true`). Byte-locked-but-unreachable exactly like the OPENING_OPTIONS note:
-// `B5()` is only consumed by a guard that `overage_consent_required()` already
-// collapses. `Rn()` itself (binary @212986032) is an env-derived deployment
-// tag (gateway/bedrock/foundry/anthropicAws/mantle/vertex/firstParty); the
+// `true`). Byte-locked like the OPENING_OPTIONS note. For THIS task's `Ucg`
+// branch the `B5()` result is masked because `overage_consent_required()`
+// (WBe) already zeroes the `ZA&&WBe` factor; `B5()`'s other 2.1.206 consumers
+// are out of scope (see the block header) and this default is not a no-op for
+// them. `Rn()` itself (binary @212986032) is an env-derived deployment tag
+// (gateway/bedrock/foundry/anthropicAws/mantle/vertex/firstParty); the
 // composer intentionally does not thread that env state into this claude.ai
 // saffron gate.
 pub const DEPLOYMENT_FIRST_PARTY: bool = false;
@@ -530,9 +538,13 @@ pub fn should_show_upsell(sub: &SubscriptionSnapshot) -> bool {
 ///   ⇒ `false`.
 ///
 // 206 WBe: `false` because the port has neither a `tengu_saffron_lattice` flag
-// config nor fable-credits module state. This collapses `Ucg`'s first guard
-// `!(ZA(t) && WBe() && !B5())` to a constant `true`, so that guarded early
-// return never fires — and `ZA`/`B5` are consequently unreachable too.
+// config nor fable-credits module state. For THIS task's `Ucg` first guard
+// `!(ZA(t) && WBe() && !B5())`, a `false` WBe zeroes the `ZA&&WBe&&!B5`
+// suppression factor, so the suppression path never triggers here and `ZA`/`B5`
+// are not evaluated for this branch (the outer `return c` still fires on its
+// own conditions — only the ZA/WBe/B5 suppression is inert). WBe has ~7 other
+// 2.1.206 consumers (out of scope, see block header) where this default is NOT
+// a no-op.
 #[must_use]
 pub fn overage_consent_required() -> bool {
     false
@@ -554,9 +566,10 @@ fn normalize_model_id(model_id: &str) -> String {
 /// `ZA(t)` (2.1.206 binary @213182958:
 /// `Ns(so(e))==="claude-fable-5" || KQ(e)`) — is the model the Fable model.
 /// `KQ` (binary @213182868) compares the normalized id to
-/// `ANTHROPIC_DEFAULT_FABLE_MODEL`. Consumed by `Ucg`'s first guard alongside
-/// [`overage_consent_required`] (`WBe`, documented `false`), so this predicate
-/// is currently unreachable; pinned faithfully.
+/// `ANTHROPIC_DEFAULT_FABLE_MODEL`. In THIS task's `Ucg` first guard, `ZA(t)`
+/// is ANDed with [`overage_consent_required`] (`WBe`, documented `false`), so
+/// it has no effect on that branch; pinned faithfully. `ZA` has ~18 other
+/// 2.1.206 consumers (out of scope, see block header) where it is live.
 #[must_use]
 pub fn is_fable_model(model_id: &str) -> bool {
     let norm = normalize_model_id(model_id);
@@ -580,7 +593,10 @@ pub fn is_fable_model(model_id: &str) -> bool {
 ///
 // 206 O9e: empty because the port has no `tengu_usage_overage_included_models`
 // flag source (statsig default `[]`). With an empty set the membership test is
-// always false ⇒ the per-model usage-credits arm never fires.
+// always false ⇒ THIS task's per-model usage-credits arm (`a7n`) never fires.
+// O9e has ~4 other 2.1.206 consumers (out of scope, e.g. `WCt(limits, O9e())`
+// filtering weekly-scoped model-limit rows) where an empty set is NOT inert;
+// analyze independently.
 #[must_use]
 pub fn overage_included_models() -> Vec<String> {
     Vec::new()
@@ -1295,7 +1311,8 @@ mod tests {
         // binary, so `Rn()!=="firstParty"` is true ⇒ the flag is false.
         assert!(!DEPLOYMENT_FIRST_PARTY);
         // Threaded through B5 it forces the credits-only gate on regardless of
-        // the subscription (the guard it feeds is unreachable via WBe anyway).
+        // the subscription (for this task's Ucg branch the `!B5()` suppression
+        // term is masked by WBe==false; B5's other consumers are out of scope).
         let sub = SubscriptionSnapshot {
             is_subscriber: true,
             subscription_type: Some("pro".into()),

@@ -54,6 +54,29 @@ pub fn format_cost(usd: f64) -> String {
     }
 }
 
+/// Token-count formatter — port of claude-code `Bu` (Intl compact notation,
+/// lowercased, `maximumFractionDigits: 1`, trailing `.0` dropped). Identical
+/// output to the port's existing `format_tokens`.
+#[must_use]
+pub fn format_token_count(n: u64) -> String {
+    const UNITS: [(u64, char); 4] = [
+        (1_000_000_000_000, 't'),
+        (1_000_000_000, 'b'),
+        (1_000_000, 'm'),
+        (1_000, 'k'),
+    ];
+    for &(threshold, suffix) in &UNITS {
+        if n >= threshold {
+            #[allow(clippy::cast_precision_loss)]
+            let rounded = ((n as f64 / threshold as f64) * 10.0).round() / 10.0;
+            let s = format!("{rounded:.1}");
+            let s = s.strip_suffix(".0").unwrap_or(&s);
+            return format!("{s}{suffix}");
+        }
+    }
+    n.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +103,17 @@ mod tests {
         assert_eq!(format_cost(0.5001), "$0.50");       // > 0.5 -> 2dp rounded
         assert_eq!(format_cost(1.2345), "$1.23");
         assert_eq!(format_cost(12.999), "$13.00");
+    }
+
+    #[test]
+    fn bu_matches_cc_compact() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1k");
+        assert_eq!(format_token_count(1_500), "1.5k");
+        assert_eq!(format_token_count(12_345), "12.3k");
+        assert_eq!(format_token_count(50_000), "50k");
+        assert_eq!(format_token_count(1_000_000), "1m");
+        assert_eq!(format_token_count(1_500_000), "1.5m");
     }
 }

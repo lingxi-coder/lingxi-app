@@ -653,6 +653,41 @@ pub struct PsCommand {
     /// Simplified AST element types: `[0]` is the name's type; `[i + 1]` is the
     /// type of `args[i]`. A short vector reads as "unknown" for missing entries.
     pub element_types: Vec<String>,
+    /// This command's output redirections (claude-code `l.redirections`).
+    pub redirections: Vec<PsRedirection>,
+}
+
+/// A PowerShell output redirection (claude-code transformed `RedirectionAst`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PsRedirection {
+    /// The redirection target path (empty / merging redirections are skipped).
+    pub target: String,
+    /// A `2>&1`-style stream merge (no file target → skipped by `xgg`).
+    pub is_merging: bool,
+}
+
+/// One element of a pipeline statement (claude-code `e.commands` entry).
+#[derive(Debug, Clone)]
+pub enum PsElement {
+    /// A `CommandAst` — a cmdlet/command invocation to validate.
+    Command(PsCommand),
+    /// A non-`CommandAst` pipeline element (subexpression, script block, …) whose
+    /// output could feed a downstream command's path — a pipeline source.
+    Expression {
+        /// The element's source text (used for the pipeline deny-rule pre-check).
+        text: String,
+    },
+}
+
+/// A parsed PowerShell statement / pipeline (claude-code `xgg`'s input `e`).
+#[derive(Debug, Clone, Default)]
+pub struct PsStatement {
+    /// The pipeline's elements, in order.
+    pub commands: Vec<PsElement>,
+    /// Flattened nested commands (inside script blocks / control flow).
+    pub nested_commands: Vec<PsCommand>,
+    /// Statement-level output redirections.
+    pub redirections: Vec<PsRedirection>,
 }
 
 /// Result of [`extract_paths`] (claude-code `X_u`): the file-path arguments, the
@@ -1231,7 +1266,12 @@ pub fn classify_ps_path(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PsPathOutcome {
     /// The path resolves inside an allowed working directory — no constraint.
-    Allowed,
+    /// Carries the resolved path so `xgg`'s `Remove-Item` `TKt` guard (which
+    /// fires even on an allowed path) can inspect it.
+    Allowed {
+        /// The resolved path (inside the allowed working dirs).
+        resolved: String,
+    },
     /// Blocked by a string guard — ASK with `reason` used verbatim.
     AskReason {
         /// The reported blocked path.
@@ -1274,7 +1314,9 @@ pub fn check_ps_path(
             work_dirs.push(roots.cwd.clone());
             work_dirs.extend(additional.iter().cloned());
             if crate::filesystem::path_in_allowed_working_path(&resolved, &work_dirs, roots) {
-                PsPathOutcome::Allowed
+                PsPathOutcome::Allowed {
+                    resolved: resolved.to_string_lossy().into_owned(),
+                }
             } else {
                 PsPathOutcome::AskContainment {
                     resolved: resolved.to_string_lossy().into_owned(),
@@ -1282,6 +1324,399 @@ pub fn check_ps_path(
             }
         }
     }
+}
+
+/// A protected-system-path predicate for `Remove-Item` targets (claude-code
+/// `TKt`): the `*`/`/*` globs, filesystem root, the home dir, ANY top-level
+/// `/X` directory, and (on Windows) a drive root/child. `home` is the home dir
+/// string; `is_macos` enables the `/private/(etc|var|tmp|home)` normalization.
+fn is_protected_removal_resolved(path: &str, home: Option<&str>, is_macos: bool) -> bool {
+    // collapse runs of separators to a single '/'
+    let mut t = String::with_capacity(path.len());
+    let mut prev_sep = false;
+    for c in path.chars() {
+        let sep = c == '/' || c == '\\';
+        if sep {
+            if !prev_sep {
+                t.push('/');
+            }
+        } else {
+            t.push(c);
+        }
+        prev_sep = sep;
+    }
+    if t == "*" || t.ends_with("/*") {
+        return true;
+    }
+    let normalize_private = |c: &str| -> String {
+        if !is_macos {
+            return c.to_string();
+        }
+        // /private/(etc|var|tmp|home)(/|$) → /$1$2
+        for base in ["etc", "var", "tmp", "home"] {
+            let pfx = format!("/private/{base}");
+            if c == pfx {
+                return format!("/{base}");
+            }
+            if let Some(rest) = c.strip_prefix(&format!("{pfx}/")) {
+                return format!("/{base}/{rest}");
+            }
+        }
+        c.to_string()
+    };
+    let o = normalize_private(&t);
+    let i = if o == "/" { o.clone() } else { o.trim_end_matches('/').to_string() };
+    if i == "/" {
+        return true;
+    }
+    // XOy: ^[A-Za-z]:/?$  (Windows drive root)
+    if is_drive_root(&i) {
+        return true;
+    }
+    if let Some(h) = home {
+        let mut hs = String::with_capacity(h.len());
+        let mut ps = false;
+        for c in h.chars() {
+            let sep = c == '/' || c == '\\';
+            if sep {
+                if !ps {
+                    hs.push('/');
+                }
+            } else {
+                hs.push(c);
+            }
+            ps = sep;
+        }
+        let hs = normalize_private(&hs);
+        let hs = hs.trim_end_matches('/');
+        if casefold_path(&i) == casefold_path(hs) {
+            return true;
+        }
+    }
+    // dirname(i) === "/"  →  any single top-level dir (/etc, /foo, …)
+    if i.starts_with('/') && i.len() > 1 && !i[1..].contains('/') {
+        return true;
+    }
+    // QOy: ^[A-Za-z]:/[^/]+$  (Windows drive child)
+    is_drive_child(&i)
+}
+
+/// `XOy = /^[A-Za-z]:\/?$/` — a Windows drive root (`C:` / `C:/`).
+fn is_drive_root(i: &str) -> bool {
+    let b = i.as_bytes();
+    (b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        || (b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/')
+}
+
+/// `QOy = /^[A-Za-z]:\/[^/]+$/` — a Windows drive child (`C:/Users`).
+fn is_drive_child(i: &str) -> bool {
+    let b = i.as_bytes();
+    b.len() > 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b[2] == b'/'
+        && !i[3..].contains('/')
+}
+
+/// The raw-path protected check (claude-code `ZBr`): strip quotes, drop a `::`
+/// prefix, expand `~`, normalize backslashes, then [`is_protected_removal_resolved`].
+fn is_protected_removal_raw(path: &str, home: Option<&str>, is_macos: bool) -> bool {
+    let mut t = strip_surrounding_quotes(path).to_string();
+    if let Some(idx) = t.find("::") {
+        t = t[idx + 2..].to_string();
+    }
+    let t = expand_tilde(&t, home).replace('\\', "/");
+    is_protected_removal_resolved(&t, home, is_macos)
+}
+
+/// Whether an argument is a `-Recurse` parameter (claude-code's inline test in
+/// `xgg`): the dash-normalized, lowercased, colon-stripped token is a ≥2-char
+/// prefix of `-recurse`.
+fn is_recurse_flag(arg: &str) -> bool {
+    if arg.is_empty() {
+        return false;
+    }
+    let first_len = arg.chars().next().map_or(0, char::len_utf8);
+    let normalized = format!("-{}", &arg[first_len..]).to_lowercase();
+    let w = match normalized.find(':') {
+        Some(i) => &normalized[..i],
+        None => &normalized[..],
+    };
+    w.len() >= 2 && "-recurse".starts_with(w)
+}
+
+/// The result of PowerShell path containment (claude-code `Z_u`/`xgg` return).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PsContainmentResult {
+    /// No constraint fired — proceed to the normal permission flow.
+    Passthrough,
+    /// A path could not be validated — prompt the user (the first ask wins).
+    Ask {
+        /// The model-/user-facing ask message.
+        message: String,
+        /// The decision reason (equals `message` for the branches with no distinct reason).
+        reason: String,
+    },
+    /// A `Remove-Item` targets a protected system path — hard deny (`Hwt`).
+    Deny {
+        /// The deny message.
+        message: String,
+        /// The decision reason.
+        reason: String,
+    },
+}
+
+/// Allowed-working-directory string list for containment messages (cwd + the
+/// additional dirs, deduped) — the port analog of `allWorkingDirectories`/`vY`.
+fn ps_working_dir_list(
+    roots: &crate::filesystem::FsRoots,
+    additional: &[std::path::PathBuf],
+) -> Vec<String> {
+    let mut out = vec![roots.cwd.to_string_lossy().into_owned()];
+    for d in additional {
+        let s = d.to_string_lossy().into_owned();
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Context for [`validate_ps_statements`] — the roots + extra dirs + platform.
+pub struct PsCtx<'a> {
+    /// Filesystem roots (cwd/home) for path resolution + containment.
+    pub roots: &'a crate::filesystem::FsRoots,
+    /// The additional allowed working directories.
+    pub additional: &'a [std::path::PathBuf],
+    /// Windows guard variants (drive-relative, provider min length).
+    pub is_windows: bool,
+    /// macOS `/private` normalization for the removal-protected check.
+    pub is_macos: bool,
+}
+
+/// Validate a parsed PowerShell command (claude-code `Z_u`): run [`xgg`-style]
+/// [`validate_ps_statement`] over every statement, returning the first `deny`
+/// immediately and otherwise the first `ask`, else `passthrough`.
+///
+/// `compound_cd` mirrors claude-code's compound-`cd` flag: a compound command
+/// that changes the working directory makes relative paths unvalidatable.
+#[must_use]
+pub fn validate_ps_statements(
+    statements: &[PsStatement],
+    ctx: &PsCtx,
+    compound_cd: bool,
+) -> PsContainmentResult {
+    let mut first_ask: Option<PsContainmentResult> = None;
+    for stmt in statements {
+        match validate_ps_statement(stmt, ctx, compound_cd) {
+            deny @ PsContainmentResult::Deny { .. } => return deny,
+            ask @ PsContainmentResult::Ask { .. } => {
+                if first_ask.is_none() {
+                    first_ask = Some(ask);
+                }
+            }
+            PsContainmentResult::Passthrough => {}
+        }
+    }
+    first_ask.unwrap_or(PsContainmentResult::Passthrough)
+}
+
+/// Set the first-ask accumulator if empty (claude-code `o ??= …`).
+fn set_first_ask(ask: &mut Option<PsContainmentResult>, message: String) {
+    if ask.is_none() {
+        *ask = Some(PsContainmentResult::Ask {
+            reason: message.clone(),
+            message,
+        });
+    }
+}
+
+/// Validate a single PowerShell statement/pipeline (claude-code `xgg`).
+#[must_use]
+pub fn validate_ps_statement(
+    stmt: &PsStatement,
+    ctx: &PsCtx,
+    compound_cd: bool,
+) -> PsContainmentResult {
+    let dirs = ps_working_dir_list(ctx.roots, ctx.additional);
+    let mut ask: Option<PsContainmentResult> = None;
+
+    if compound_cd {
+        set_first_ask(&mut ask, "Compound command changes working directory (Set-Location/Push-Location/Pop-Location/New-PSDrive) \u{2014} relative paths cannot be validated against the original cwd and require manual approval".to_string());
+    }
+
+    // Main pipeline elements.
+    let mut pipeline_source = false;
+    let mut non_readonly_seen = false;
+    for element in &stmt.commands {
+        let l = match element {
+            PsElement::Expression { .. } => {
+                pipeline_source = true;
+                continue;
+            }
+            PsElement::Command(c) => c,
+        };
+        let prev = non_readonly_seen;
+        if !RGG.contains(normalize_cmdlet(&l.name).as_str()) {
+            non_readonly_seen = true;
+        }
+        if let Some(deny) = run_ps_command(l, ctx, &dirs, pipeline_source, prev, &mut ask) {
+            return deny;
+        }
+    }
+
+    // Nested commands (script blocks / control flow).
+    for l in &stmt.nested_commands {
+        if let Some(deny) = run_ps_command(l, ctx, &dirs, false, false, &mut ask) {
+            return deny;
+        }
+    }
+
+    // Redirections (nested + statement-level) → "create" containment.
+    for l in &stmt.nested_commands {
+        if let Some(deny) = check_redirections(&l.redirections, ctx, &dirs, &mut ask) {
+            return deny;
+        }
+    }
+    if let Some(deny) = check_redirections(&stmt.redirections, ctx, &dirs, &mut ask) {
+        return deny;
+    }
+
+    ask.unwrap_or(PsContainmentResult::Passthrough)
+}
+
+/// Run one command's path checks (claude-code `xgg`'s per-command body). Returns
+/// `Some(deny)` on a `Remove-Item` protected-path hit; otherwise updates the
+/// first-ask accumulator.
+fn run_ps_command(
+    l: &PsCommand,
+    ctx: &PsCtx,
+    dirs: &[String],
+    pipeline_source: bool,
+    prev_non_readonly: bool,
+    ask: &mut Option<PsContainmentResult>,
+) -> Option<PsContainmentResult> {
+    let roots = ctx.roots;
+    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+    let extraction = extract_paths(l);
+    let f = normalize_cmdlet(&l.name);
+    let is_path_cmdlet = FKN.contains_key(f.as_str());
+
+    if pipeline_source {
+        set_first_ask(ask, format!(
+            "{f} receives its path from a pipeline expression source that cannot be statically validated and requires manual approval"
+        ));
+    }
+    if extraction.has_unvalidatable_path_arg {
+        set_first_ask(ask, format!(
+            "{f} uses a parameter or complex path expression (array literal, subexpression, unknown parameter, etc.) that cannot be statically validated and requires manual approval"
+        ));
+    }
+    if extraction.operation_type != PsOperation::Read
+        && !extraction.optional_write
+        && extraction.paths.is_empty()
+        && is_path_cmdlet
+    {
+        set_first_ask(ask, format!(
+            "{f} is a write operation but no target path could be determined; requires manual approval"
+        ));
+        return None;
+    }
+    if prev_non_readonly && is_path_cmdlet {
+        set_first_ask(ask, format!(
+            "{f} may receive a path from an upstream pipeline command whose output cannot be statically validated and requires manual approval"
+        ));
+    }
+
+    let is_remove = f == "remove-item";
+    if is_remove && l.args.iter().any(|a| is_recurse_flag(a)) {
+        let cwd_fold = casefold_path(&roots.cwd.to_string_lossy());
+        for b in &extraction.paths {
+            let v = expand_tilde(&short_name_expand(b, ctx.is_windows), home.as_deref())
+                .replace('\\', "/");
+            let resolved = crate::filesystem::expand_path(&v, roots);
+            let x = casefold_path(&resolved.to_string_lossy());
+            if x == cwd_fold
+                || cwd_fold.starts_with(&format!("{x}/"))
+                || cwd_fold.starts_with(&format!("{x}\\"))
+            {
+                set_first_ask(ask, format!(
+                    "Remove-Item -Recurse targeting '{b}' would delete the working directory including .git and .claude \u{2014} requires manual approval"
+                ));
+                break;
+            }
+        }
+    }
+
+    for path in &extraction.paths {
+        if is_remove && is_protected_removal_raw(path, home.as_deref(), ctx.is_macos) {
+            return Some(deny_removal(path));
+        }
+        let outcome =
+            check_ps_path(path, extraction.operation_type, roots, ctx.additional, ctx.is_windows);
+        let resolved = match &outcome {
+            PsPathOutcome::Allowed { resolved }
+            | PsPathOutcome::AskReason { resolved, .. }
+            | PsPathOutcome::AskContainment { resolved } => resolved.clone(),
+        };
+        if is_remove && is_protected_removal_resolved(&resolved, home.as_deref(), ctx.is_macos) {
+            return Some(deny_removal(&resolved));
+        }
+        match outcome {
+            PsPathOutcome::Allowed { .. } => {}
+            PsPathOutcome::AskReason { reason, .. } => set_first_ask(ask, reason),
+            PsPathOutcome::AskContainment { resolved } => {
+                set_first_ask(ask, cmdlet_containment_message(&f, &resolved, dirs));
+            }
+        }
+    }
+    None
+}
+
+/// `Hwt` — a `Remove-Item` protected-path hard deny.
+fn deny_removal(path: &str) -> PsContainmentResult {
+    PsContainmentResult::Deny {
+        message: remove_item_protected_message(path),
+        reason: "Removal targets a protected system path".to_string(),
+    }
+}
+
+/// Validate a command's/statement's output redirections against the working dirs
+/// (claude-code: each `create`-op redirection target → the "Output redirection
+/// to '…' … write to files in …" message). Returns `Some(deny)` on a rule/deny,
+/// else updates the first-ask accumulator.
+fn check_redirections(
+    redirs: &[PsRedirection],
+    ctx: &PsCtx,
+    dirs: &[String],
+    ask: &mut Option<PsContainmentResult>,
+) -> Option<PsContainmentResult> {
+    for r in redirs {
+        if r.is_merging || r.target.is_empty() {
+            continue;
+        }
+        match check_ps_path(&r.target, PsOperation::Create, ctx.roots, ctx.additional, ctx.is_windows) {
+            PsPathOutcome::Allowed { .. } => {}
+            PsPathOutcome::AskReason { reason, .. } => {
+                if ask.is_none() {
+                    *ask = Some(PsContainmentResult::Ask {
+                        message: reason.clone(),
+                        reason,
+                    });
+                }
+            }
+            PsPathOutcome::AskContainment { resolved } => {
+                if ask.is_none() {
+                    let message = redirection_containment_message(&resolved, dirs);
+                    *ask = Some(PsContainmentResult::Ask {
+                        reason: message.clone(),
+                        message,
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

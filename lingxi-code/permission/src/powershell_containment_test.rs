@@ -119,6 +119,7 @@ fn cmd(name: &str, args: &[&str]) -> PsCommand {
         name: name.to_string(),
         args: args.iter().map(|s| (*s).to_string()).collect(),
         element_types: Vec::new(),
+        redirections: Vec::new(),
     }
 }
 
@@ -128,6 +129,7 @@ fn cmd_typed(name: &str, args: &[&str], types: &[&str]) -> PsCommand {
         name: name.to_string(),
         args: args.iter().map(|s| (*s).to_string()).collect(),
         element_types: types.iter().map(|s| (*s).to_string()).collect(),
+        redirections: Vec::new(),
     }
 }
 
@@ -422,15 +424,15 @@ fn ps_roots() -> crate::filesystem::FsRoots {
 fn check_ps_path_allows_inside_working_dir() {
     let roots = ps_roots();
     // A relative path resolves under cwd → allowed.
-    assert_eq!(
+    assert!(matches!(
         check_ps_path("notes.txt", PsOperation::Read, &roots, &[], false),
-        PsPathOutcome::Allowed
-    );
+        PsPathOutcome::Allowed { .. }
+    ));
     // An absolute path inside cwd → allowed.
-    assert_eq!(
+    assert!(matches!(
         check_ps_path("/proj/work/sub/a.txt", PsOperation::Read, &roots, &[], false),
-        PsPathOutcome::Allowed
-    );
+        PsPathOutcome::Allowed { .. }
+    ));
 }
 
 #[test]
@@ -446,10 +448,10 @@ fn check_ps_path_blocks_outside_working_dir_with_containment() {
 fn check_ps_path_honors_additional_working_dirs() {
     let roots = ps_roots();
     let extra = [std::path::PathBuf::from("/tmp/allowed")];
-    assert_eq!(
+    assert!(matches!(
         check_ps_path("/tmp/allowed/f.txt", PsOperation::Write, &roots, &extra, false),
-        PsPathOutcome::Allowed
-    );
+        PsPathOutcome::Allowed { .. }
+    ));
     // Still blocked outside both cwd and the extra dir.
     assert!(matches!(
         check_ps_path("/tmp/other/f.txt", PsOperation::Write, &roots, &extra, false),
@@ -468,6 +470,184 @@ fn check_ps_path_string_guard_wins_over_containment() {
     match check_ps_path("out*.log", PsOperation::Write, &roots, &[], false) {
         PsPathOutcome::AskReason { reason, .. } => assert_eq!(reason, ps_path_reasons::GLOB_WRITE),
         other => panic!("expected AskReason, got {other:?}"),
+    }
+}
+
+fn ctx_of<'a>(
+    roots: &'a crate::filesystem::FsRoots,
+    add: &'a [std::path::PathBuf],
+) -> PsCtx<'a> {
+    PsCtx { roots, additional: add, is_windows: false, is_macos: false }
+}
+
+fn one_cmd_stmt(command: PsCommand) -> PsStatement {
+    PsStatement {
+        commands: vec![PsElement::Command(command)],
+        nested_commands: Vec::new(),
+        redirections: Vec::new(),
+    }
+}
+
+fn validate_one(command: PsCommand) -> PsContainmentResult {
+    let roots = ps_roots();
+    validate_ps_statement(&one_cmd_stmt(command), &ctx_of(&roots, &[]), false)
+}
+
+#[test]
+fn xgg_allows_path_inside_cwd() {
+    // Get-Content of a file under cwd → passthrough.
+    assert_eq!(validate_one(cmd("Get-Content", &["notes.txt"])), PsContainmentResult::Passthrough);
+    assert_eq!(
+        validate_one(cmd("Set-Content", &["-Path", "/proj/work/out.txt", "-Value", "x"])),
+        PsContainmentResult::Passthrough
+    );
+}
+
+#[test]
+fn xgg_asks_with_template_b_outside_cwd() {
+    match validate_one(cmd("Get-Content", &["/etc/passwd"])) {
+        PsContainmentResult::Ask { message, .. } => assert_eq!(
+            message,
+            "get-content targeting '/etc/passwd' was blocked. For security, LingXi may only access files in the allowed working directories for this session: '/proj/work'."
+        ),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_string_guard_message_wins() {
+    // A tilde-user path asks with the guard reason (not template B).
+    match validate_one(cmd("Get-Content", &["~bob/secret"])) {
+        PsContainmentResult::Ask { message, .. } => assert_eq!(message, ps_path_reasons::TILDE_USER),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_remove_item_protected_path_denies() {
+    // Remove-Item of a top-level system dir → hard deny (Hwt).
+    match validate_one(cmd("Remove-Item", &["/etc"])) {
+        PsContainmentResult::Deny { message, .. } => assert_eq!(
+            message,
+            "Remove-Item on system path '/etc' is blocked. This path is protected from removal."
+        ),
+        other => panic!("expected Deny, got {other:?}"),
+    }
+    // Alias `rm` normalizes to remove-item.
+    assert!(matches!(validate_one(cmd("rm", &["/"])), PsContainmentResult::Deny { .. }));
+}
+
+#[test]
+fn xgg_remove_recurse_targeting_cwd_asks() {
+    // Remove-Item -Recurse of the working directory (or an ancestor) → ask.
+    match validate_one(cmd("Remove-Item", &["-Recurse", "/proj/work"])) {
+        // /proj/work is itself a top-level-ish path? No: dirname is /proj, not /.
+        // It equals cwd → the recurse guard asks about deleting the working dir.
+        PsContainmentResult::Ask { message, .. } => {
+            assert!(message.contains("would delete the working directory"), "{message}");
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_write_without_path_asks() {
+    // Out-File with no resolvable target path → ask (write-no-path). Out-File is
+    // NOT optional_write, unlike Invoke-WebRequest.
+    match validate_one(cmd("Out-File", &["-Encoding", "utf8"])) {
+        PsContainmentResult::Ask { message, .. } => {
+            assert!(message.contains("is a write operation but no target path"), "{message}");
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_non_path_cmdlet_passes_through() {
+    assert_eq!(validate_one(cmd("Write-Output", &["hello"])), PsContainmentResult::Passthrough);
+}
+
+#[test]
+fn xgg_pipeline_source_before_cmdlet_asks() {
+    let roots = ps_roots();
+    let stmt = PsStatement {
+        commands: vec![
+            PsElement::Expression { text: "$x".to_string() },
+            PsElement::Command(cmd("Set-Content", &["out.txt"])),
+        ],
+        nested_commands: Vec::new(),
+        redirections: Vec::new(),
+    };
+    match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
+        PsContainmentResult::Ask { message, .. } => {
+            assert!(message.contains("receives its path from a pipeline expression source"), "{message}");
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_redirection_outside_cwd_asks() {
+    let roots = ps_roots();
+    let stmt = PsStatement {
+        commands: vec![PsElement::Command(cmd("Get-Process", &[]))],
+        nested_commands: Vec::new(),
+        redirections: vec![PsRedirection { target: "/etc/evil".to_string(), is_merging: false }],
+    };
+    match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
+        PsContainmentResult::Ask { message, .. } => assert_eq!(
+            message,
+            "Output redirection to '/etc/evil' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: '/proj/work'."
+        ),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_merging_and_empty_redirections_skipped() {
+    let roots = ps_roots();
+    let stmt = PsStatement {
+        commands: vec![PsElement::Command(cmd("Get-Process", &[]))],
+        nested_commands: Vec::new(),
+        redirections: vec![
+            PsRedirection { target: String::new(), is_merging: true },
+            PsRedirection { target: String::new(), is_merging: false },
+        ],
+    };
+    assert_eq!(
+        validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
+        PsContainmentResult::Passthrough
+    );
+}
+
+#[test]
+fn zu_first_deny_wins_then_first_ask() {
+    let roots = ps_roots();
+    let ctx = ctx_of(&roots, &[]);
+    // Two statements: first asks, second denies → Z_u returns the DENY.
+    let asking = one_cmd_stmt(cmd("Get-Content", &["/etc/passwd"]));
+    let denying = one_cmd_stmt(cmd("Remove-Item", &["/etc"]));
+    assert!(matches!(
+        validate_ps_statements(&[asking.clone(), denying], &ctx, false),
+        PsContainmentResult::Deny { .. }
+    ));
+    // Two asking statements → first ask wins.
+    let a2 = one_cmd_stmt(cmd("Get-Content", &["/var/log/x"]));
+    match validate_ps_statements(&[asking, a2], &ctx, false) {
+        PsContainmentResult::Ask { message, .. } => assert!(message.contains("/etc/passwd")),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn zu_compound_cd_asks() {
+    let roots = ps_roots();
+    let stmt = one_cmd_stmt(cmd("Get-Content", &["notes.txt"]));
+    match validate_ps_statements(&[stmt], &ctx_of(&roots, &[]), true) {
+        PsContainmentResult::Ask { message, .. } => {
+            assert!(message.contains("Compound command changes working directory"), "{message}");
+        }
+        other => panic!("expected Ask, got {other:?}"),
     }
 }
 

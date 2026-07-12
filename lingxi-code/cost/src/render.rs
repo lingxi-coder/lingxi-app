@@ -77,33 +77,27 @@ pub fn format_token_count(n: u64) -> String {
     n.to_string()
 }
 
-use crate::pricing::ModelRef;
-use crate::summary::ModelCostSummary;
-
 /// `nano-USD → USD` (matches `cost/src/pricing.rs`'s `nano / 1e9`).
 #[allow(clippy::cast_precision_loss)]
 fn nano_to_usd(nano: u64) -> f64 {
     nano as f64 / 1_000_000_000.0
 }
 
-/// Model display name for the "Usage by model" label. Uses the provider-scoped
-/// model name as-is (the port's per-model key is already a display-usable
-/// ref); a catalog lookup can refine this later without changing the format.
-fn model_label(model_ref: &ModelRef) -> String {
-    model_ref.model.clone()
-}
-
 /// Usage-by-model block — port of claude-code `cbg()`. Empty usage renders the
 /// aligned zero line; otherwise a header plus one right-aligned line per model.
 /// The per-model web-search clause is omitted (no per-model web-search tracking).
+///
+/// Consumes `traits::ModelUsageRow` directly (the orchestrator projects the
+/// session's per-model usage onto these rows). The row's `model` field is the
+/// provider-scoped model name, used as-is for the `${model}:` label.
 #[must_use]
-pub fn usage_by_model_block(by_model: &[ModelCostSummary]) -> String {
+pub fn usage_by_model_block(by_model: &[traits::ModelUsageRow]) -> String {
     if by_model.is_empty() {
         return "Usage:                 0 input, 0 output, 0 cache read, 0 cache write".to_string();
     }
     let mut r = "Usage by model:".to_string();
     for m in by_model {
-        let label = format!("{}:", model_label(&m.model_ref));
+        let label = format!("{}:", m.model);
         // right-align label to width 21 (claude-code `padStart(21)`).
         let padded = format!("{label:>21}");
         let line = format!(
@@ -130,7 +124,7 @@ pub struct CostSummaryInput<'a> {
     pub wall_duration_ms: u64,
     pub code_lines_added: u64,
     pub code_lines_removed: u64,
-    pub by_model: &'a [ModelCostSummary],
+    pub by_model: &'a [traits::ModelUsageRow],
 }
 
 /// Byte-exact port of claude-code `i6e()`. Returns the plain block; the consumer
@@ -163,7 +157,7 @@ pub fn cost_summary(input: &CostSummaryInput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::ProviderId;
+    use traits::orchestrator::ModelUsageRow;
 
     #[test]
     fn cbg_empty_and_per_model() {
@@ -172,11 +166,8 @@ mod tests {
             usage_by_model_block(&[]),
             "Usage:                 0 input, 0 output, 0 cache read, 0 cache write"
         );
-        let rows = vec![ModelCostSummary {
-            model_ref: ModelRef {
-                provider: ProviderId::Anthropic,
-                model: "claude-opus-4-8".into(),
-            },
+        let rows = vec![ModelUsageRow {
+            model: "claude-opus-4-8".into(),
             total_nano_usd: 1_230_000_000, // $1.23
             input_tokens: 5_000,
             output_tokens: 2_000,
@@ -195,22 +186,16 @@ mod tests {
     #[test]
     fn cbg_multiple_models_joined() {
         let rows = vec![
-            ModelCostSummary {
-                model_ref: ModelRef {
-                    provider: ProviderId::Anthropic,
-                    model: "claude-opus-4-8".into(),
-                },
+            ModelUsageRow {
+                model: "claude-opus-4-8".into(),
                 total_nano_usd: 600_000_000, // $0.60
                 input_tokens: 1_000,
                 output_tokens: 500,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
-            ModelCostSummary {
-                model_ref: ModelRef {
-                    provider: ProviderId::Anthropic,
-                    model: "claude-sonnet-4-20250514".into(),
-                },
+            ModelUsageRow {
+                model: "claude-sonnet-4-20250514".into(),
                 total_nano_usd: 400_000_000, // $0.40
                 input_tokens: 2_000,
                 output_tokens: 100,

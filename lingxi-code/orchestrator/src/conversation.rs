@@ -2958,6 +2958,22 @@ impl ConversationOrchestrator {
             cache_creation_tokens,
             api_calls,
             session_duration,
+            api_duration: std::time::Duration::from_millis(state.total_api_duration_ms),
+            code_lines_added: state.total_lines_added,
+            code_lines_removed: state.total_lines_removed,
+            by_model: state
+                .per_model_usage
+                .values()
+                .map(|mu| traits::orchestrator::ModelUsageRow {
+                    model: mu.model_ref.model.clone(),
+                    total_nano_usd: mu.cost_nano_usd,
+                    input_tokens: mu.usage.tokens.input,
+                    output_tokens: mu.usage.tokens.output,
+                    cache_read_input_tokens: mu.cache_read_input_tokens,
+                    cache_creation_input_tokens: mu.cache_creation_input_tokens,
+                })
+                .collect(),
+            unknown_models: !state.unpriced_models.is_empty(),
         }
     }
 

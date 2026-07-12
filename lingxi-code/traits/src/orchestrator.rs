@@ -71,6 +71,51 @@ pub struct CostSnapshot {
     /// Elapsed time since the session started.
     #[serde(default)]
     pub session_duration: std::time::Duration,
+    /// Cumulative API wall time summed across calls (claude-code `UL` /
+    /// `Total duration (API)`). Projected from `CostState.total_api_duration_ms`.
+    #[serde(default)]
+    pub api_duration: std::time::Duration,
+    /// Cumulative lines added across all edits this session (claude-code `RFe`).
+    #[serde(default)]
+    pub code_lines_added: u64,
+    /// Cumulative lines removed across all edits this session (claude-code `xFe`).
+    #[serde(default)]
+    pub code_lines_removed: u64,
+    /// Per-model usage rows for the "Usage by model" block (claude-code `cbg`).
+    #[serde(default)]
+    pub by_model: Vec<ModelUsageRow>,
+    /// True if any used model had no pricing entry — drives the
+    /// "(costs may be inaccurate due to usage of unknown models)" note (`Cqo`).
+    #[serde(default)]
+    pub unknown_models: bool,
+}
+
+/// One model's cumulative usage for the `/usage` "Usage by model" block
+/// (claude-code `cbg`). Mirrors `cost::summary::ModelCostSummary`'s numeric
+/// fields; defined here (not reused from `cost`) because `traits` cannot
+/// depend on `cost` — that would be a dependency cycle (`cost` depends on
+/// `traits`). `cost::render::usage_by_model_block` consumes `&[ModelUsageRow]`
+/// directly.
+///
+/// The row carries only the model NAME (`model`), not a full `cost::ModelRef`:
+/// `ModelRef`/`ProviderId` live in `cost::pricing`, not `protocol`, so a typed
+/// field would require the very `cost` dependency this type exists to avoid —
+/// and the renderer's label is `${model}:` (just the name String), so the name
+/// is all the transport needs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelUsageRow {
+    /// Model name for the row label (claude-code uses `${model}:`).
+    pub model: String,
+    /// Cumulative cost for this model in nano-USD.
+    pub total_nano_usd: u64,
+    /// Cumulative input tokens for this model.
+    pub input_tokens: u64,
+    /// Cumulative output tokens for this model.
+    pub output_tokens: u64,
+    /// Cumulative tokens read from the prompt cache.
+    pub cache_read_input_tokens: u64,
+    /// Cumulative tokens written into the prompt cache.
+    pub cache_creation_input_tokens: u64,
 }
 
 /// Result of a `force_compact` operation. M5-10 wires `/compact` against

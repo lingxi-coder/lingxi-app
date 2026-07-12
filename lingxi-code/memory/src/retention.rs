@@ -48,21 +48,23 @@ const SWEPT_SUBDIR_TREES: &[&str] = &[
 /// `(dir, extension)` file sweeps — claude's `aj(<dir>, <ext>)` cleanups. Every
 /// direct child file whose name ends with `ext` and whose mtime is older than
 /// the cutoff is removed, then the dir is pruned if it emptied.
-const SWEPT_FILE_EXTS: &[(&str, &str)] = &[
-    ("plans", ".md"),                       // hVg
-    ("telemetry", ".json"),                 // AVg
-    ("traces", ".json"),                    // OVg
-    ("startup-perf", ".txt"),               // OVg
-    ("startup-perf", ".json"),              // OVg
-    ("shell-snapshots", ".sh"),             // xVg
-    ("feedback-bundles", ".zip"),           // PVg
-    ("dump-prompts", ".jsonl"),             // RVg (claude caps this shorter; we use the base period — keeps longer, safe)
-    ("shares", ".zip"),                     // wVg (also VRt-swept below)
-    ("backups", ""),                        // HVg (every file)
-    ("jobs/settled", ".json"),              // IVg
-    ("daemon/dispatch/rejected", ".json"),  // IVg
-    ("daemon/dispatch", ".json"),           // IVg
-    ("daemon/auth", ".json"),               // IVg
+/// `(dir, ext, cap_days)` — a `Some(cap)` retains for `min(period, cap)` days
+/// (claude's `UY(cap)`), so a capped dir is cleaned more aggressively.
+const SWEPT_FILE_EXTS: &[(&str, &str, Option<u64>)] = &[
+    ("plans", ".md", None),                       // hVg
+    ("telemetry", ".json", None),                 // AVg
+    ("traces", ".json", None),                    // OVg
+    ("startup-perf", ".txt", None),               // OVg
+    ("startup-perf", ".json", None),              // OVg
+    ("shell-snapshots", ".sh", None),             // xVg
+    ("feedback-bundles", ".zip", None),           // PVg
+    ("dump-prompts", ".jsonl", Some(3)),          // RVg (Qju = 3-day cap)
+    ("shares", ".zip", None),                     // wVg (also VRt-swept below)
+    ("backups", "", None),                        // HVg (every file)
+    ("jobs/settled", ".json", None),              // IVg
+    ("daemon/dispatch/rejected", ".json", None),  // IVg
+    ("daemon/dispatch", ".json", None),           // IVg
+    ("daemon/auth", ".json", None),               // IVg
 ];
 
 /// Single cache files removed when stale (claude `fVg` / `mVg`).
@@ -122,8 +124,9 @@ pub fn retention_period_days() -> (u64, bool) {
 #[must_use]
 pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> RetentionReport {
     let mut report = RetentionReport::default();
+    let now = SystemTime::now();
     // A period so large the cutoff underflows ⇒ nothing is old enough ⇒ no-op.
-    let Some(cutoff) = SystemTime::now().checked_sub(period) else {
+    let Some(cutoff) = now.checked_sub(period) else {
         return report;
     };
     // Entry-level sweep (todos/statsig/logs): remove every stale file/dir.
@@ -135,11 +138,18 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
     for sub in SWEPT_SUBDIR_TREES {
         report = merge(report, sweep_stale_entries(&config_home.join(sub), cutoff, false));
     }
-    // File-extension sweeps (aj): stale `<dir>/*<ext>` files.
-    for (dir, ext) in SWEPT_FILE_EXTS {
+    // File-extension sweeps (aj): stale `<dir>/*<ext>` files. A capped dir uses
+    // the more-recent `now - min(period, cap)` cutoff (claude `UY(cap)`).
+    for (dir, ext, cap_days) in SWEPT_FILE_EXTS {
+        let dir_cutoff = match cap_days {
+            Some(days) => now
+                .checked_sub(period.min(day_period(*days)))
+                .unwrap_or(cutoff),
+            None => cutoff,
+        };
         report = merge(
             report,
-            sweep_stale_files_by_ext(&config_home.join(dir), ext, cutoff, None),
+            sweep_stale_files_by_ext(&config_home.join(dir), ext, dir_cutoff, None),
         );
     }
     // Debug dir (DVg): every stale file except `latest`.
@@ -154,6 +164,46 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
     // MCP log dirs by filename-timestamp (dVg) and session transcripts (pVg).
     report = merge(report, sweep_mcp_logs(config_home, cutoff));
     report = merge(report, sweep_transcripts(config_home, cutoff));
+    // Orphaned host-managed daemon records (IVg tail).
+    report = merge(report, sweep_orphan_host_managed(config_home, cutoff));
+    report
+}
+
+/// Remove stale `daemon/host-managed/<name>` records whose backing
+/// `jobs/<name>` no longer exists (claude `IVg` tail): a record is deleted only
+/// when its job is gone AND the record is older than the cutoff.
+fn sweep_orphan_host_managed(config_home: &Path, cutoff: SystemTime) -> RetentionReport {
+    let mut report = RetentionReport::default();
+    let host_managed = config_home.join("daemon").join("host-managed");
+    let jobs = config_home.join("jobs");
+    let Ok(entries) = std::fs::read_dir(&host_managed) else {
+        return report;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        match jobs.join(&name).try_exists() {
+            Ok(true) => continue,     // job still exists → keep the record
+            Ok(false) => {}           // job gone → candidate for deletion
+            Err(_) => {
+                report.errors += 1;   // couldn't tell (non-ENOENT) → skip
+                continue;
+            }
+        }
+        let Ok(meta) = entry.metadata() else {
+            report.errors += 1;
+            continue;
+        };
+        let Ok(mtime) = meta.modified() else {
+            report.errors += 1;
+            continue;
+        };
+        if mtime < cutoff {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => report.session_files_deleted += 1,
+                Err(_) => report.errors += 1,
+            }
+        }
+    }
     report
 }
 
@@ -681,6 +731,51 @@ mod tests {
         assert!(!pre.exists(), "precompact sidecar cascaded");
         assert!(!subagents.exists(), "session subagents dir cascaded");
         assert!(fresh.exists(), "fresh transcript kept");
+    }
+
+    #[test]
+    fn dump_prompts_uses_the_shorter_3day_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let dp = root.path().join("dump-prompts");
+        fs::create_dir_all(&dp).unwrap();
+        // 10 days old: kept under a 30-day base period, but swept under the
+        // 3-day dump-prompts cap.
+        let f = dp.join("run.jsonl");
+        fs::write(&f, b"{}").unwrap();
+        set_old(&f, Duration::from_secs(10 * 86400));
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        assert_eq!(report.session_files_deleted, 1);
+        assert!(!f.exists(), "dump-prompts is capped at 3 days");
+    }
+
+    #[test]
+    fn host_managed_orphans_swept_only_when_job_gone_and_old() {
+        let root = tempfile::tempdir().unwrap();
+        let hm = root.path().join("daemon").join("host-managed");
+        let jobs = root.path().join("jobs");
+        fs::create_dir_all(&hm).unwrap();
+        fs::create_dir_all(&jobs).unwrap();
+        // Orphan + old → swept.
+        let orphan = hm.join("gone.json");
+        fs::write(&orphan, b"{}").unwrap();
+        set_old(&orphan, Duration::from_secs(60 * 86400));
+        // Old but its job still exists → kept.
+        let live = hm.join("alive.json");
+        fs::write(&live, b"{}").unwrap();
+        set_old(&live, Duration::from_secs(60 * 86400));
+        fs::write(jobs.join("alive.json"), b"{}").unwrap();
+        // Orphan but fresh → kept.
+        let fresh_orphan = hm.join("recent.json");
+        fs::write(&fresh_orphan, b"{}").unwrap();
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        // gone.json swept (1); jobs/settled sweep also runs but jobs/*.json here
+        // are fresh, so only the orphan is removed.
+        assert!(!orphan.exists(), "old orphan record swept");
+        assert!(live.exists(), "record with a live job kept");
+        assert!(fresh_orphan.exists(), "fresh orphan kept");
+        assert_eq!(report.session_files_deleted, 1);
     }
 
     #[test]

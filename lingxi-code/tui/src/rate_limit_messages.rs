@@ -276,60 +276,227 @@ pub fn using_overage_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> S
     }
 }
 
-/// Port of `getLimitReachedText` (rateLimitMessages.ts:143-197).
+/// `Hqi` (2.1.206 binary, string table @87692608:
+/// `Hqi=new Set(["org_level_disabled_until","org_spend_cap_reached"])`) — the
+/// org-level overage-disabled reasons that route to the "monthly spend
+/// limit" copy ahead of the seat/member/group taxonomy. Byte-verified
+/// against the real 2.1.206 binary.
+const HQI_REASONS: [&str; 2] = ["org_level_disabled_until", "org_spend_cap_reached"];
+
+/// Port of `getLimitReachedText` (2.1.206 binary `Ucg` @217902843), the
+/// usage-credits + org/seat/member/group taxonomy rewrite. Decoded body
+/// (straight ASCII apostrophes; `\xB7` middot escapes in the minified JS
+/// source, a literal U+00B7 byte in the binary's separate Latin-1 string
+/// table @87692608 — both regions cross-checked) byte-verified against the
+/// real 2.1.206 binary:
+///
+/// ```text
+/// function Ucg(e,t){
+///   let r=A5(),n=tC(),
+///       o=n?"":" · contact your admin to increase it",
+///       i=e.resetsAt, s=i?Jie(i,!0):void 0,
+///       a=e.overageResetsAt?Jie(e.overageResetsAt,!0):void 0,
+///       l=s?` · resets ${s}`:"",
+///       c=qcg(e,l,t);
+///   if(!r&&e.overageDisabledReason&&c&&!Hqi.has(e.overageDisabledReason)
+///        &&(e.rateLimitType==="seven_day_overage_included"||!(ZA(t)&&WBe()&&!B5())))
+///     return c;
+///   if(!r&&e.overageDisabledReason&&Hqi.has(e.overageDisabledReason)){
+///     let u=Fs();
+///     if(u==="team"||u==="enterprise")
+///       return lhe("org's monthly spend limit",
+///         n?" · run /usage-credits to raise it, or visit claude.ai/admin-settings/usage"
+///          :" · run /usage-credits to ask your admin for a higher limit",t);
+///     return lhe(n?"monthly spend limit":"org's monthly spend limit",
+///       n?" · raise it at claude.ai/settings/usage"
+///        :" · ask your admin to raise it at claude.ai/settings/usage",t)
+///   }
+///   if(e.overageStatus==="rejected"){
+///     let u="";
+///     if(i&&e.overageResetsAt) if(i<e.overageResetsAt)u=` · resets ${s}`;else u=` · resets ${a}`;
+///     else if(s)u=` · resets ${s}`; else if(a)u=` · resets ${a}`;
+///     if(e.overageDisabledReason==="out_of_credits"){
+///       if(r)return n?"Your org is out of usage · add funds to continue"
+///                    :"Your org is out of usage · contact your admin";
+///       return `You're out of usage credits${u}`
+///     }
+///     if(e.overageDisabledReason&&Hqi.has(e.overageDisabledReason)){
+///       let d=a?` · resets ${a}`:"";
+///       return lhe("org's monthly usage limit",d,t)
+///     }
+///     if(e.overageDisabledReason==="seat_tier_level_disabled"
+///        ||e.overageDisabledReason==="seat_tier_zero_credit_limit")
+///       return `Your seat type doesn't include ${r?"usage":"usage credits"}`;
+///     if(e.overageDisabledReason==="org_service_level_disabled")
+///       return"This service is disabled for your org";
+///     if(e.overageDisabledReason==="member_level_disabled"
+///        ||e.overageDisabledReason==="member_zero_credit_limit")
+///       return"Your usage allocation has been disabled by your admin · run /usage-credits to ask your admin for a higher limit";
+///     if(e.overageDisabledReason==="group_zero_credit_limit")
+///       return"Your group's usage limit is set to $0 · run /usage-credits to ask your admin for a higher limit";
+///     if(r)return lhe("usage limit",o,t);
+///     return lhe("limit",u,t)
+///   }
+///   if(c)return c;
+///   if(r)return lhe("usage limit",o,t);
+///   return lhe("usage limit",l,t)
+/// }
+/// ```
+///
+/// Byte-note: the "org's monthly spend limit" team/enterprise-with-billing
+/// variant is `" · run /usage-credits to raise it, or visit
+/// claude.ai/admin-settings/usage"` in the real binary — longer than an
+/// earlier draft's abbreviated `" · visit claude.ai/admin-settings/usage"`;
+/// this port uses the byte-verified binary text (confirmed both in the
+/// minified-source region @217902843 and the separate Latin-1 string table
+/// @87692608, which agree byte-for-byte).
+///
+/// `r`=[`SubscriptionSnapshot::is_usage_based_billing`] (`A5`),
+/// `n`=[`SubscriptionSnapshot::has_claude_ai_billing_access`] (`tC`),
+/// `Fs()`=`sub.subscription_type`, `qcg`=[`qcg_limit_name`] composed with
+/// [`format_limit_reached_text`] (`lhe`), `Jie(x,!0)`=[`fmt_reset`].
+///
+/// FIRST-GUARD COLLAPSE: the guard's final disjunct
+/// `(rateLimitType==="seven_day_overage_included"||!(ZA(t)&&WBe()&&!B5()))`
+/// is omitted below. Per Task 2's pinning, [`overage_consent_required`]
+/// (`WBe`) is a documented `false` in this port, so `ZA(t)&&WBe()&&!B5()` is
+/// always `false`, making `!(…)` always `true` — the whole disjunct
+/// collapses to a hard `true` regardless of `rateLimitType`, `ZA`, or `B5`.
+/// `ZA(t)` is the only consumer of the model parameter `t` in this function,
+/// so the model is not threaded here; see [`is_fable_model`] /
+/// [`overage_consent_required`] for the pinned leaves.
 fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnapshot) -> String {
+    let r = sub.is_usage_based_billing();
+    let n = sub.has_claude_ai_billing_access();
+    let o: &str = if n {
+        ""
+    } else {
+        " \u{b7} contact your admin to increase it"
+    };
+
     let reset_time = fmt_reset(info.resets_at);
     let overage_reset_time = fmt_reset(info.overage_resets_at);
     let reset_message = reset_time
         .as_deref()
         .map_or_else(String::new, |t| format!(" \u{b7} resets {t}"));
 
+    let c = qcg_limit_name(info.rate_limit_type.as_deref(), sub)
+        .map(|name| format_limit_reached_text(name, &reset_message, is_ant));
+
+    let reason = info.overage_disabled_reason.as_deref();
+    let is_hqi_reason = reason.is_some_and(|x| HQI_REASONS.contains(&x));
+
+    // 206 Ucg first guard (collapsed — see doc comment above).
+    if !r && reason.is_some() && c.is_some() && !is_hqi_reason {
+        return c.unwrap();
+    }
+
+    // Hqi (org-level spend-cap) reasons OUTSIDE the overage-rejected branch —
+    // this fires regardless of `overageStatus` and is checked BEFORE the
+    // `overageStatus === "rejected"` block below, so it takes priority over
+    // the Hqi arm nested inside that block (which is reachable only when `r`
+    // is true, since this outer arm always intercepts `!r` cases first).
+    if !r && is_hqi_reason {
+        let u = sub.subscription_type.as_deref();
+        if matches!(u, Some("team" | "enterprise")) {
+            return format_limit_reached_text(
+                "org's monthly spend limit",
+                if n {
+                    " \u{b7} run /usage-credits to raise it, or visit claude.ai/admin-settings/usage"
+                } else {
+                    " \u{b7} run /usage-credits to ask your admin for a higher limit"
+                },
+                is_ant,
+            );
+        }
+        return format_limit_reached_text(
+            if n {
+                "monthly spend limit"
+            } else {
+                "org's monthly spend limit"
+            },
+            if n {
+                " \u{b7} raise it at claude.ai/settings/usage"
+            } else {
+                " \u{b7} ask your admin to raise it at claude.ai/settings/usage"
+            },
+            is_ant,
+        );
+    }
+
     // "if BOTH subscription (checked before this method) and overage are
-    // exhausted" — TS :152-173.
+    // exhausted".
     if info.overage_status.as_deref() == Some("rejected") {
-        // "Show the earliest reset time" — TS :154-166. The first branch
-        // gates on the RAW timestamps (`resetsAt && limits.overageResetsAt`,
-        // 0 falsy), the fallbacks on the formatted strings.
+        // "Show the earliest reset time". The first branch gates on the RAW
+        // timestamps (`resetsAt && overageResetsAt`, 0 falsy), the fallbacks
+        // on the formatted strings.
         let earliest = match (
             info.resets_at.filter(|t| *t != 0),
             info.overage_resets_at.filter(|t| *t != 0),
         ) {
-            (Some(r), Some(o)) => {
-                if r < o {
-                    reset_time
+            (Some(rt), Some(ot)) => {
+                if rt < ot {
+                    reset_time.clone()
                 } else {
-                    overage_reset_time
+                    overage_reset_time.clone()
                 }
             }
-            _ => reset_time.or(overage_reset_time),
+            _ => reset_time.clone().or_else(|| overage_reset_time.clone()),
         };
-        let overage_reset_message = earliest
+        let u = earliest
             .as_deref()
             .map_or_else(String::new, |t| format!(" \u{b7} resets {t}"));
 
-        if info.overage_disabled_reason.as_deref() == Some("out_of_credits") {
-            return format!("You're out of extra usage{overage_reset_message}");
+        if reason == Some("out_of_credits") {
+            if r {
+                return if n {
+                    "Your org is out of usage \u{b7} add funds to continue".to_owned()
+                } else {
+                    "Your org is out of usage \u{b7} contact your admin".to_owned()
+                };
+            }
+            return format!("You're out of usage credits{u}");
         }
-
-        return format_limit_reached_text("limit", &overage_reset_message, is_ant);
+        if is_hqi_reason {
+            let d = overage_reset_time
+                .as_deref()
+                .map_or_else(String::new, |t| format!(" \u{b7} resets {t}"));
+            return format_limit_reached_text("org's monthly usage limit", &d, is_ant);
+        }
+        if matches!(
+            reason,
+            Some("seat_tier_level_disabled" | "seat_tier_zero_credit_limit")
+        ) {
+            return format!(
+                "Your seat type doesn't include {}",
+                if r { "usage" } else { "usage credits" }
+            );
+        }
+        if reason == Some("org_service_level_disabled") {
+            return "This service is disabled for your org".to_owned();
+        }
+        if matches!(
+            reason,
+            Some("member_level_disabled" | "member_zero_credit_limit")
+        ) {
+            return "Your usage allocation has been disabled by your admin \u{b7} run /usage-credits to ask your admin for a higher limit".to_owned();
+        }
+        if reason == Some("group_zero_credit_limit") {
+            return "Your group's usage limit is set to $0 \u{b7} run /usage-credits to ask your admin for a higher limit".to_owned();
+        }
+        if r {
+            return format_limit_reached_text("usage limit", o, is_ant);
+        }
+        return format_limit_reached_text("limit", &u, is_ant);
     }
 
-    let limit = match info.rate_limit_type.as_deref() {
-        // "For pro and enterprise, Sonnet limit is the same as weekly" —
-        // TS :175-182.
-        Some("seven_day_sonnet") => {
-            if sub.is_pro_or_enterprise() {
-                "weekly limit"
-            } else {
-                "Sonnet limit"
-            }
-        }
-        Some("seven_day_opus") => "Opus limit",
-        Some("seven_day") => "weekly limit",
-        Some("five_hour") => "session limit",
-        _ => "usage limit",
-    };
-    format_limit_reached_text(limit, &reset_message, is_ant)
+    if let Some(c) = c {
+        return c;
+    }
+    if r {
+        return format_limit_reached_text("usage limit", o, is_ant);
+    }
+    format_limit_reached_text("usage limit", &reset_message, is_ant)
 }
 
 /// Port of `qcg` (2.1.206 binary @217905040) limit-name mapping:
@@ -348,15 +515,12 @@ fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnap
 ///
 /// `qcg` itself calls straight through to `lhe`
 /// ([`format_limit_reached_text`]) with the resolved name; this helper
-/// isolates just the name resolution so callers can reuse it (the Ucg
-/// rewrite, a later task, is the first non-test caller — `pub(crate)` +
-/// `#[allow(dead_code)]` until then, matching this file's staged-helper
-/// convention, e.g. [`is_fable_model`] / [`overage_included_models`]).
+/// isolates just the name resolution so callers can reuse it —
+/// [`limit_reached_text`] (`Ucg`) is the first non-test caller.
 ///
 /// `seven_day_overage_included` → `"Fable 5 limit"` is NEW in 2.1.206
 /// ("Fable 5" is a model name — not rebranded). Byte-verified against the
 /// real 2.1.206 binary (string table @87697088).
-#[allow(dead_code)]
 #[must_use]
 pub(crate) fn qcg_limit_name(
     rate_limit_type: Option<&str>,
@@ -939,19 +1103,31 @@ mod tests {
     // ── rejected + overage rejected (TS :152-173) ─────────────────────────
 
     #[test]
-    fn both_rejected_out_of_credits_says_out_of_extra_usage() {
+    fn both_rejected_out_of_credits_personal_says_out_of_usage_credits() {
+        // 2.1.206 `Ucg`: `overageDisabledReason==="out_of_credits"` with
+        // `!A5()` (non-usage-based billing, the default snapshot) →
+        // `` `You're out of usage credits${u}` `` — straight apostrophe,
+        // replacing the pre-206 "You're out of extra usage" wording.
+        //
+        // rate_limit_type is left unmapped (None) here: the first guard
+        // (`!r && overageDisabledReason && c && !Hqi.has(...)`) would
+        // otherwise short-circuit on `c` (e.g. "session limit" for
+        // "five_hour") BEFORE this `overageStatus === "rejected"` taxonomy is
+        // ever reached — that guard only lets `r === false` cases through to
+        // this block when `c` is null (an unmapped rate-limit type).
         let ts = ts_in(1800);
         let info = RateLimitInfo {
             overage_status: Some("rejected".into()),
             overage_disabled_reason: Some("out_of_credits".into()),
             overage_resets_at: Some(ts),
-            ..rejected(Some("five_hour"), None)
+            ..rejected(None, None)
         };
         let got = compose(&info, false).unwrap();
         assert_eq!(
             got.text,
-            format!("You're out of extra usage \u{b7} resets {}", reset(ts))
+            format!("You're out of usage credits \u{b7} resets {}", reset(ts))
         );
+        assert!(!got.text.contains('\u{2019}'));
     }
 
     #[test]
@@ -992,6 +1168,292 @@ mod tests {
             got.text,
             format!("You've hit your limit \u{b7} resets {}", reset(early))
         );
+    }
+
+    // ── 2.1.206 `Ucg` usage-credits + org/seat/member/group taxonomy ──────
+    //
+    // Byte-verified against the real 2.1.206 binary: both the minified JS
+    // source (`function Ucg(e,t){...}` @217902843) and the separate Latin-1
+    // string table (@87692608) were decoded and cross-checked to agree
+    // byte-for-byte, including the straight ASCII apostrophes and the
+    // U+00B7 middot separators.
+
+    fn usage_based(sub: SubscriptionSnapshot) -> SubscriptionSnapshot {
+        SubscriptionSnapshot {
+            billing_type: Some("usage_based".into()),
+            ..sub
+        }
+    }
+
+    #[test]
+    fn out_of_credits_org_usage_based_with_billing_access_says_add_funds() {
+        // `Ucg`: overageStatus rejected, reason out_of_credits, A5()==true
+        // (usage-based billing) and tC()==true (billing access, e.g. an
+        // admin) → "Your org is out of usage · add funds to continue".
+        let sub = usage_based(SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("team".into()),
+            organization_role: Some("admin".into()),
+            ..SubscriptionSnapshot::default()
+        });
+        let info = RateLimitInfo {
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("out_of_credits".into()),
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_with(&info, false, &sub, false).unwrap();
+        assert_eq!(
+            got.text,
+            "Your org is out of usage \u{b7} add funds to continue"
+        );
+        assert!(!got.text.contains('\u{2019}'));
+    }
+
+    #[test]
+    fn out_of_credits_org_usage_based_without_billing_access_says_contact_admin() {
+        // Same branch, no billing access (e.g. a member role) →
+        // "Your org is out of usage · contact your admin".
+        let sub = usage_based(SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("team".into()),
+            organization_role: Some("member".into()),
+            ..SubscriptionSnapshot::default()
+        });
+        let info = RateLimitInfo {
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("out_of_credits".into()),
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_with(&info, false, &sub, false).unwrap();
+        assert_eq!(
+            got.text,
+            "Your org is out of usage \u{b7} contact your admin"
+        );
+    }
+
+    #[test]
+    fn seat_tier_disabled_personal_says_doesnt_include_usage_credits() {
+        // `overageDisabledReason ∈ {seat_tier_level_disabled,
+        // seat_tier_zero_credit_limit}` → `` `Your seat type doesn't include
+        // ${r?"usage":"usage credits"}` ``. Default (non-usage-based)
+        // subscription → "usage credits". rate_limit_type left unmapped
+        // (None) so the first-guard `c` short-circuit doesn't intercept
+        // before this taxonomy runs (see the out_of_credits test above).
+        for reason in ["seat_tier_level_disabled", "seat_tier_zero_credit_limit"] {
+            let info = RateLimitInfo {
+                overage_status: Some("rejected".into()),
+                overage_disabled_reason: Some(reason.into()),
+                ..rejected(None, None)
+            };
+            let got = compose(&info, false).unwrap();
+            assert_eq!(got.text, "Your seat type doesn't include usage credits");
+        }
+    }
+
+    #[test]
+    fn seat_tier_disabled_usage_based_says_doesnt_include_usage() {
+        // Same reasons, A5()==true (usage-based billing) → "usage" (no
+        // "credits" suffix).
+        let sub = usage_based(SubscriptionSnapshot::default());
+        let info = RateLimitInfo {
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("seat_tier_zero_credit_limit".into()),
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_with(&info, false, &sub, false).unwrap();
+        assert_eq!(got.text, "Your seat type doesn't include usage");
+    }
+
+    #[test]
+    fn org_service_level_disabled_says_service_disabled() {
+        // rate_limit_type unmapped (None) so the first guard doesn't
+        // intercept (see the out_of_credits test above).
+        let info = RateLimitInfo {
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("org_service_level_disabled".into()),
+            ..rejected(None, None)
+        };
+        let got = compose(&info, false).unwrap();
+        assert_eq!(got.text, "This service is disabled for your org");
+    }
+
+    #[test]
+    fn member_disabled_reasons_say_allocation_disabled_by_admin() {
+        // rate_limit_type unmapped (None) so the first guard doesn't
+        // intercept (see the out_of_credits test above).
+        for reason in ["member_level_disabled", "member_zero_credit_limit"] {
+            let info = RateLimitInfo {
+                overage_status: Some("rejected".into()),
+                overage_disabled_reason: Some(reason.into()),
+                ..rejected(None, None)
+            };
+            let got = compose(&info, false).unwrap();
+            assert_eq!(
+                got.text,
+                "Your usage allocation has been disabled by your admin \u{b7} run /usage-credits to ask your admin for a higher limit"
+            );
+        }
+    }
+
+    #[test]
+    fn group_zero_credit_limit_says_group_limit_set_to_zero() {
+        // rate_limit_type unmapped (None) so the first guard doesn't
+        // intercept (see the out_of_credits test above).
+        let info = RateLimitInfo {
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("group_zero_credit_limit".into()),
+            ..rejected(None, None)
+        };
+        let got = compose(&info, false).unwrap();
+        assert_eq!(
+            got.text,
+            "Your group's usage limit is set to $0 \u{b7} run /usage-credits to ask your admin for a higher limit"
+        );
+    }
+
+    #[test]
+    fn hqi_team_enterprise_spend_limit_by_billing_access() {
+        // Hqi reasons (org_level_disabled_until / org_spend_cap_reached),
+        // NOT inside the overage-rejected branch (overageStatus absent) —
+        // `Fs()` team/enterprise → "org's monthly spend limit", suffix gated
+        // on `tC()` (billing access): admin → the "raise it, or visit
+        // admin-settings" copy; member → the "ask your admin" copy.
+        for reason in ["org_level_disabled_until", "org_spend_cap_reached"] {
+            let admin = SubscriptionSnapshot {
+                is_subscriber: true,
+                subscription_type: Some("team".into()),
+                organization_role: Some("admin".into()),
+                ..SubscriptionSnapshot::default()
+            };
+            let info = RateLimitInfo {
+                overage_disabled_reason: Some(reason.into()),
+                ..rejected(Some("five_hour"), None)
+            };
+            let got = compose_with(&info, false, &admin, false).unwrap();
+            assert_eq!(
+                got.text,
+                "You've hit your org's monthly spend limit \u{b7} run /usage-credits to raise it, or visit claude.ai/admin-settings/usage"
+            );
+
+            let member = SubscriptionSnapshot {
+                organization_role: Some("member".into()),
+                ..admin
+            };
+            let got = compose_with(&info, false, &member, false).unwrap();
+            assert_eq!(
+                got.text,
+                "You've hit your org's monthly spend limit \u{b7} run /usage-credits to ask your admin for a higher limit"
+            );
+        }
+    }
+
+    #[test]
+    fn hqi_personal_spend_limit_by_billing_access() {
+        // Same Hqi reasons, non-team/enterprise `Fs()` (e.g. pro, or unknown)
+        // → `tC()` (billing access) selects "monthly spend limit" (raise it
+        // yourself) vs "org's monthly spend limit" (ask your admin).
+        let billed = SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("pro".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        let info = RateLimitInfo {
+            overage_disabled_reason: Some("org_level_disabled_until".into()),
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_with(&info, false, &billed, false).unwrap();
+        assert_eq!(
+            got.text,
+            "You've hit your monthly spend limit \u{b7} raise it at claude.ai/settings/usage"
+        );
+
+        // Unknown/no billing access (default snapshot) → the org-facing copy.
+        let got = compose(&info, false).unwrap();
+        assert_eq!(
+            got.text,
+            "You've hit your org's monthly spend limit \u{b7} ask your admin to raise it at claude.ai/settings/usage"
+        );
+    }
+
+    #[test]
+    fn hqi_inside_overage_rejected_reads_org_monthly_usage_limit() {
+        // The Hqi arm NESTED inside `overageStatus==="rejected"` is reachable
+        // only when `A5()` (`r`) is true — the outer `!r && Hqi.has(...)`
+        // check above always intercepts non-usage-based cases first.
+        let sub = usage_based(SubscriptionSnapshot::default());
+        let ts = ts_in(3600);
+        let info = RateLimitInfo {
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("org_spend_cap_reached".into()),
+            overage_resets_at: Some(ts),
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_with(&info, false, &sub, false).unwrap();
+        assert_eq!(
+            got.text,
+            format!("You've hit your org's monthly usage limit \u{b7} resets {}", reset(ts))
+        );
+
+        // No overageResetsAt → no reset suffix.
+        let info_no_reset = RateLimitInfo {
+            overage_resets_at: None,
+            ..info
+        };
+        let got = compose_with(&info_no_reset, false, &sub, false).unwrap();
+        assert_eq!(got.text, "You've hit your org's monthly usage limit");
+    }
+
+    #[test]
+    fn final_fallback_usage_limit_by_billing_and_reset() {
+        // Bottom of `Ucg`: no `c` (unmapped rate-limit type), no overage
+        // rejection, no Hqi reason → `r ? lhe("usage limit", o) :
+        // lhe("usage limit", l)`.
+        let usage_billed_admin = usage_based(SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("team".into()),
+            organization_role: Some("admin".into()),
+            ..SubscriptionSnapshot::default()
+        });
+        let info = rejected(Some("overage"), None); // "overage" is unmapped by qcg.
+        let got = compose_with(&info, false, &usage_billed_admin, false).unwrap();
+        assert_eq!(got.text, "You've hit your usage limit");
+
+        let usage_billed_member = SubscriptionSnapshot {
+            organization_role: Some("member".into()),
+            ..usage_billed_admin
+        };
+        let got = compose_with(&info, false, &usage_billed_member, false).unwrap();
+        assert_eq!(
+            got.text,
+            "You've hit your usage limit \u{b7} contact your admin to increase it"
+        );
+
+        // Non-usage-based, with a reset time → the `l` (reset_message) arm.
+        let ts = ts_in(1800);
+        let info_with_reset = rejected(Some("overage"), Some(ts));
+        let got = compose(&info_with_reset, false).unwrap();
+        assert_eq!(
+            got.text,
+            format!("You've hit your usage limit \u{b7} resets {}", reset(ts))
+        );
+    }
+
+    #[test]
+    fn first_guard_c_passthrough_bypasses_overage_rejected_branch() {
+        // The first guard (`!r && overageDisabledReason && c &&
+        // !Hqi.has(...)`) must intercept BEFORE the
+        // `overageStatus === "rejected"` block — proven by giving both an
+        // opus rate-limit type (so `c` = "You've hit your Opus limit") AND
+        // overageStatus "rejected" with a non-taxonomy disabled reason (so,
+        // absent the guard, control would instead fall into the rejected
+        // block and produce the very different "You've hit your limit").
+        let info = RateLimitInfo {
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("some_unrecognized_reason".into()),
+            ..rejected(Some("seven_day_opus"), None)
+        };
+        let got = compose(&info, false).unwrap();
+        assert_eq!(got.text, "You've hit your Opus limit");
     }
 
     // ── error upsell (RateLimitMessage.tsx getUpsellMessage :18-47) ───────

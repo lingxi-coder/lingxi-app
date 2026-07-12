@@ -239,23 +239,55 @@ fn fmt_reset(ts: Option<u64>) -> Option<String> {
     format_reset_time(ts.and_then(|t| i64::try_from(t).ok()), true, true)
 }
 
-/// Port of `getUsingOverageText` (rateLimitMessages.ts:303-331) — the
+/// Port of `getUsingOverageText` (2.1.206 binary `a7n` @217907540) — the
 /// transient notice shown once when the session rolls into extra usage
 /// (`useRateLimitWarningNotification.tsx` fires it on the overage
-/// transition).
+/// transition). Decoded body (byte-verified against the real 2.1.206 binary;
+/// straight ASCII apostrophe in "You're", U+00B7 middot separator):
+///
+/// ```text
+/// function a7n(e, t) {   // t = model
+///   r = e.resetsAt ? Jie(e.resetsAt, !0) : ""
+///   n = ""
+///   if (e.rateLimitType === "five_hour") n = "session limit"
+///   else if (e.rateLimitType === "seven_day") n = "weekly limit"
+///   else if (e.rateLimitType === "seven_day_opus") n = "Opus limit"
+///   else if (e.rateLimitType === "seven_day_sonnet") {
+///     a = Fs(); n = a === "pro" || a === "enterprise" ? "weekly limit" : "Sonnet limit"
+///   }
+///   o = A5()
+///   // model-specific arm — see COLLAPSE note below, omitted here
+///   i = o ? "your usage allocation" : "usage credits"
+///   if (!n) return `Now using ${i}`
+///   s = r && !o ? ` · Your ${n} resets ${r}` : ""
+///   return `You're now using ${i}${s}`
+/// }
+/// ```
+///
+/// Key 206 changes vs the prior (205) port: "extra usage" →
+/// `o?"your usage allocation":"usage credits"`; the no-limit-name case is now
+/// `"Now using {i}"` (was "Now using extra usage"); the reset suffix is
+/// suppressed entirely when `o` (usage-based billing) is true.
+///
+/// 206 `a7n` has a model-specific arm `if(!n && !o && model &&
+/// O9e().includes(VQ(ei(model)))) return "Now using usage credits for
+/// ${model}…"`. Per Task 2's pinning `overage_included_models()` is empty (no
+/// `tengu_usage_overage_included_models` source), so `O9e().includes(...)` is
+/// always false and the arm never fires; it is omitted and the model param is
+/// not threaded.
 #[must_use]
 pub fn using_overage_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> String {
-    // TS :304-306: `resetTime = limits.resetsAt ? formatResetTime(resetsAt,
-    // true) : ''` — the falsy-0 guard lives inside `format_reset_time`.
-    let reset_time = fmt_reset(info.resets_at);
-    // TS :308-321 limitName chain.
-    let limit_name = match info.rate_limit_type.as_deref() {
+    // JS `r = e.resetsAt ? formatResetTime(resetsAt, true) : ""` — an empty
+    // STRING (not an absent Option) when resetsAt is unset; the `s` guard
+    // below checks `r` truthiness (`r != ""`), matching the JS exactly.
+    let r: String = fmt_reset(info.resets_at).unwrap_or_default();
+    // limitName chain.
+    let n: &str = match info.rate_limit_type.as_deref() {
         Some("five_hour") => "session limit",
         Some("seven_day") => "weekly limit",
         Some("seven_day_opus") => "Opus limit",
         Some("seven_day_sonnet") => {
-            // "For pro and enterprise, Sonnet limit is the same as weekly"
-            // — TS :316-320.
+            // "For pro and enterprise, Sonnet limit is the same as weekly".
             if sub.is_pro_or_enterprise() {
                 "weekly limit"
             } else {
@@ -264,16 +296,21 @@ pub fn using_overage_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> S
         }
         _ => "",
     };
-    // TS :323-325: no limitName → the bare copy, BEFORE any reset suffix.
-    if limit_name.is_empty() {
-        return "Now using extra usage".to_owned();
+    let o = sub.is_usage_based_billing();
+    let i = if o { "your usage allocation" } else { "usage credits" };
+    // `!n` → the bare copy, BEFORE any reset suffix.
+    if n.is_empty() {
+        return format!("Now using {i}");
     }
-    // TS :327-330: `resetMessage = resetTime ? ` · Your ${limitName} resets
-    // ${resetTime}` : ''` — straight ASCII apostrophe, U+00B7 separator.
-    match reset_time {
-        Some(t) => format!("You're now using extra usage \u{b7} Your {limit_name} resets {t}"),
-        None => "You're now using extra usage".to_owned(),
-    }
+    // `s = r && !o ? ` · Your ${n} resets ${r}` : ""` — the reset suffix is
+    // suppressed outright when usage-based billing (`o`) is true, regardless
+    // of whether a reset time is present.
+    let s = if !r.is_empty() && !o {
+        format!(" \u{b7} Your {n} resets {r}")
+    } else {
+        String::new()
+    };
+    format!("You're now using {i}{s}")
 }
 
 /// `Hqi` (2.1.206 binary, string table @87692608:
@@ -1883,46 +1920,49 @@ mod tests {
         );
     }
 
-    // ── getUsingOverageText (rateLimitMessages.ts:303-331) ────────────────
+    // ── getUsingOverageText / `a7n` (2.1.206 binary @217907540) ───────────
     //
     // `using_overage_text` reads only `rate_limit_type`/`resets_at` plus the
     // subscription, so the `rejected(...)` constructor doubles as its input.
+    // 206 rewrote the copy from "extra usage" to `A5()`-gated "usage
+    // credits"/"your usage allocation" and suppresses the reset suffix
+    // outright when usage-based billing (`A5()`) is true.
 
     #[test]
     fn using_overage_text_per_limit_type() {
         let unknown = SubscriptionSnapshot::default();
         let ts = ts_in(3600);
-        // five_hour → 'session limit' (TS :309-310); separator placement is
-        // ` · Your {limitName} resets {resetTime}` (TS :328), U+00B7.
+        // five_hour → 'session limit'; separator placement is
+        // ` · Your {limitName} resets {resetTime}`, U+00B7.
         assert_eq!(
             using_overage_text(&rejected(Some("five_hour"), Some(ts)), &unknown),
             format!(
-                "You're now using extra usage \u{b7} Your session limit resets {}",
+                "You're now using usage credits \u{b7} Your session limit resets {}",
                 reset(ts)
             )
         );
-        // seven_day → 'weekly limit' (TS :311-312).
+        // seven_day → 'weekly limit'.
         assert_eq!(
             using_overage_text(&rejected(Some("seven_day"), Some(ts)), &unknown),
             format!(
-                "You're now using extra usage \u{b7} Your weekly limit resets {}",
+                "You're now using usage credits \u{b7} Your weekly limit resets {}",
                 reset(ts)
             )
         );
-        // seven_day_opus → 'Opus limit' (TS :313-314).
+        // seven_day_opus → 'Opus limit'.
         assert_eq!(
             using_overage_text(&rejected(Some("seven_day_opus"), Some(ts)), &unknown),
             format!(
-                "You're now using extra usage \u{b7} Your Opus limit resets {}",
+                "You're now using usage credits \u{b7} Your Opus limit resets {}",
                 reset(ts)
             )
         );
         // seven_day_sonnet: "For pro and enterprise, Sonnet limit is the same
-        // as weekly" (TS :315-320); everyone else keeps 'Sonnet limit'.
+        // as weekly"; everyone else keeps 'Sonnet limit'.
         assert_eq!(
             using_overage_text(&rejected(Some("seven_day_sonnet"), Some(ts)), &pro()),
             format!(
-                "You're now using extra usage \u{b7} Your weekly limit resets {}",
+                "You're now using usage credits \u{b7} Your weekly limit resets {}",
                 reset(ts)
             )
         );
@@ -1933,36 +1973,53 @@ mod tests {
         assert_eq!(
             using_overage_text(&rejected(Some("seven_day_sonnet"), Some(ts)), &enterprise),
             format!(
-                "You're now using extra usage \u{b7} Your weekly limit resets {}",
+                "You're now using usage credits \u{b7} Your weekly limit resets {}",
                 reset(ts)
             )
         );
         assert_eq!(
             using_overage_text(&rejected(Some("seven_day_sonnet"), Some(ts)), &unknown),
             format!(
-                "You're now using extra usage \u{b7} Your Sonnet limit resets {}",
+                "You're now using usage credits \u{b7} Your Sonnet limit resets {}",
                 reset(ts)
             )
         );
-        // No limit type → the bare copy, EVEN with resetsAt set: TS :323
-        // checks `!limitName` before the reset message is ever built.
+        // No limit type → the bare "Now using {i}" copy, EVEN with resetsAt
+        // set: the JS checks `!n` before the reset message is ever built.
         assert_eq!(
             using_overage_text(&rejected(None, Some(ts)), &unknown),
-            "Now using extra usage"
+            "Now using usage credits"
         );
-        // five_hour without a reset → no ` · Your …` suffix (TS :327-329:
-        // empty resetTime ⇒ empty resetMessage).
+        // Usage-based billing, no limit type → "your usage allocation".
+        assert_eq!(
+            using_overage_text(&rejected(None, Some(ts)), &usage_based(unknown.clone())),
+            "Now using your usage allocation"
+        );
+        // five_hour without a reset → no ` · Your …` suffix (empty resetTime
+        // ⇒ empty resetMessage).
         assert_eq!(
             using_overage_text(&rejected(Some("five_hour"), None), &unknown),
-            "You're now using extra usage"
+            "You're now using usage credits"
+        );
+    }
+
+    #[test]
+    fn using_overage_text_usage_based_billing_suppresses_reset() {
+        // 206: `s = r && !o ? " · Your {n} resets {r}" : ""` — when `o`
+        // (usage-based billing / A5()) is true, the reset suffix is
+        // suppressed even though a reset time IS present.
+        let ts = ts_in(3600);
+        let sub = usage_based(SubscriptionSnapshot::default());
+        assert_eq!(
+            using_overage_text(&rejected(Some("seven_day"), Some(ts)), &sub),
+            "You're now using your usage allocation"
         );
     }
 
     #[test]
     fn using_overage_text_is_straight_ascii() {
-        // TS :324/:330 use straight ASCII apostrophes (U+0027), never the
-        // curly U+2019; the only non-ASCII byte allowed is the U+00B7
-        // separator.
+        // TS uses straight ASCII apostrophes (U+0027), never the curly
+        // U+2019; the only non-ASCII byte allowed is the U+00B7 separator.
         let unknown = SubscriptionSnapshot::default();
         for info in [
             rejected(Some("five_hour"), Some(ts_in(3600))),

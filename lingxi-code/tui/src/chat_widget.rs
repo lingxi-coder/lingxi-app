@@ -5899,7 +5899,7 @@ mod tests {
         assert_eq!(cells(&widget).len(), 1);
         assert_eq!(
             cell::<RateLimitCell>(&widget, 0).text(),
-            "You're now using extra usage"
+            "You're now using usage credits"
         );
         assert!(widget.has_shown_overage_notification);
         // Staying in overage: the flag suppresses a repeat.
@@ -5932,7 +5932,7 @@ mod tests {
         assert_eq!(cells(&widget).len(), 1);
         assert_eq!(
             cell::<RateLimitCell>(&widget, 0).text(),
-            "You're now using extra usage"
+            "You're now using usage credits"
         );
     }
 

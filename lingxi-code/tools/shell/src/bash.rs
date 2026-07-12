@@ -543,13 +543,69 @@ fn bash_result_data(
 /// `<error>Command was aborted before completion</error>` marker appended to
 /// stderr (`BashTool.tsx:602-604`). `is_error` follows `interrupted` (TS
 /// `is_error: interrupted`) and is therefore `true`.
+/// Human-readable duration — claude-code's `qs()` in its default (no-options)
+/// form: a sub-minute value is `"<floor(seconds)>s"`; otherwise the largest
+/// units down, `"Xd Yh Zm"` / `"Yh Zm Ws"` / `"Zm Ws"` / `"Ws"`, with the
+/// seconds field rounded and 60→carry normalization (`60s→+1m`, `60m→+1h`,
+/// `24h→+1d`). Used for the timed-out-command annotation (94 call sites in the
+/// binary; ported for the one the Bash tool needs).
+#[must_use]
+pub fn format_duration_ms(ms: u64) -> String {
+    if ms < 60_000 {
+        return format!("{}s", ms / 1000);
+    }
+    let mut days = ms / 86_400_000;
+    let mut hours = (ms % 86_400_000) / 3_600_000;
+    let mut mins = (ms % 3_600_000) / 60_000;
+    let mut secs = ((ms % 60_000) as f64 / 1000.0).round() as u64;
+    if secs == 60 {
+        secs = 0;
+        mins += 1;
+    }
+    if mins == 60 {
+        mins = 0;
+        hours += 1;
+    }
+    if hours == 24 {
+        hours = 0;
+        days += 1;
+    }
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m {secs}s")
+    } else if mins > 0 {
+        format!("{mins}m {secs}s")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Build the model-facing result for a killed command. `timeout_ms = Some(ms)`
+/// marks a *timed-out* command (exit `143`/`R9c`): claude's shell prepends
+/// `Command timed out after <qs(ms)>` to stderr (`uqh`, space-joined) before the
+/// tool layer appends the abort marker; `None` is a plain interrupt.
 fn build_interrupted_result(
     stdout_partial: &str,
     stderr_partial: &str,
     cmd_str: &str,
+    timeout_ms: Option<u64>,
 ) -> ToolCallResult {
     let (stdout_clean, _ansi_out) = strip_ansi_count(stdout_partial);
     let (stderr_clean, _ansi_err) = strip_ansi_count(stderr_partial);
+    // Timeout annotation (claude `n(\`Command timed out after ${qs(#d)}\`)` →
+    // `r.stderr = uqh(msg, prev)` = `${msg} ${prev}` when prev is non-empty).
+    let stderr_clean = match timeout_ms {
+        Some(ms) => {
+            let annotation = format!("Command timed out after {}", format_duration_ms(ms));
+            if stderr_clean.is_empty() {
+                annotation
+            } else {
+                format!("{annotation} {stderr_clean}")
+            }
+        }
+        None => stderr_clean,
+    };
     let normalized =
         crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(&stdout_clean));
     // `truncated` is telemetry-only, not part of the result data — discard it.
@@ -1367,7 +1423,12 @@ impl Tool for BashTool {
                 // The streaming/stub runner may carry partial stdout/stderr
                 // captured before the kill — surface it (claude-code attaches
                 // whatever the accumulator held).
-                Ok(build_interrupted_result(&out.stdout, &out.stderr, &cmd_str))
+                Ok(build_interrupted_result(
+                    &out.stdout,
+                    &out.stderr,
+                    &cmd_str,
+                    Some(timeout_ms),
+                ))
             }
             Ok(out) => {
                 // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
@@ -1668,7 +1729,7 @@ impl Tool for BashTool {
                 // kill, so no partial output is available on this arm — emit the
                 // correct interrupted shape with empty partial. (The
                 // `Ok(timed_out)` arm above DOES carry partial bytes.)
-                Ok(build_interrupted_result("", "", &cmd_str))
+                Ok(build_interrupted_result("", "", &cmd_str, Some(timeout_ms)))
             }
             Err(e) => {
                 emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
@@ -1686,6 +1747,40 @@ mod tests {
 
     fn use_ctx() -> ToolUseContext {
         tool_api::test_support::fresh_ctx()
+    }
+
+    #[test]
+    fn format_duration_ms_matches_qs() {
+        // Sub-minute → floored seconds.
+        assert_eq!(format_duration_ms(0), "0s");
+        assert_eq!(format_duration_ms(200), "0s");
+        assert_eq!(format_duration_ms(5_000), "5s");
+        assert_eq!(format_duration_ms(59_999), "59s");
+        // Minute+ → largest units down, seconds rounded, 60→carry.
+        assert_eq!(format_duration_ms(60_000), "1m 0s");
+        assert_eq!(format_duration_ms(120_000), "2m 0s");
+        assert_eq!(format_duration_ms(119_600), "2m 0s"); // 1m 59.6s → round → 2m 0s
+        assert_eq!(format_duration_ms(3_600_000), "1h 0m 0s");
+        assert_eq!(format_duration_ms(3_661_000), "1h 1m 1s");
+        assert_eq!(format_duration_ms(90_061_000), "1d 1h 1m"); // days form drops seconds
+    }
+
+    #[test]
+    fn timeout_result_prepends_duration_annotation_to_stderr() {
+        let r = build_interrupted_result("out", "boom", "sleep 200", Some(120_000));
+        let mc = r.model_content.unwrap();
+        // claude `uqh`: annotation, space, partial stderr — then the abort marker.
+        assert!(
+            mc.contains("Command timed out after 2m 0s boom"),
+            "annotation missing/misplaced: {mc}"
+        );
+        assert!(
+            mc.contains("<error>Command was aborted before completion</error>"),
+            "abort marker missing: {mc}"
+        );
+        // A plain interrupt (no timeout) carries NO duration annotation.
+        let plain = build_interrupted_result("out", "boom", "cmd", None);
+        assert!(!plain.model_content.unwrap().contains("Command timed out after"));
     }
 
     #[test]

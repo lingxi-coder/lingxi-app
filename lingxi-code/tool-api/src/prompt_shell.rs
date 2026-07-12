@@ -335,6 +335,9 @@ fn build_effective_policy(
     if let Some(sandbox_runtime) = base.sandbox_runtime.clone() {
         policy = policy.with_sandbox_runtime(sandbox_runtime);
     }
+    if let Some(pwsh_parser) = base.pwsh_parser.clone() {
+        policy = policy.with_pwsh_parser(pwsh_parser);
+    }
     policy = policy.with_working_dirs(base.additional_working_dirs.clone());
     policy = policy.with_bypass_available(base.bypass_permissions_available);
     policy.bypass_killswitch_active = base.bypass_killswitch_active;

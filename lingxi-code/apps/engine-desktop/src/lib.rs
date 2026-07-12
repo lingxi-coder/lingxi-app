@@ -4038,7 +4038,14 @@ pub async fn build(
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
-            .with_sandbox_runtime(sandbox_auto_allow);
+            .with_sandbox_runtime(sandbox_auto_allow)
+            // Enable PowerShell path-containment via a real `pwsh` parse
+            // (claude-code `validatePowerShellCommandPaths`). Inert on hosts
+            // without PowerShell — `SystemPwshParser` returns passthrough when
+            // `pwsh`/`powershell` is not on PATH, exactly like claude-code.
+            .with_pwsh_parser(std::sync::Arc::new(
+                permission::powershell_parse::SystemPwshParser,
+            ));
         policy.bypass_killswitch_active = bypass_disabled;
         // Resolve the active Read(deny) rules to search-exclude globs while
         // the policy is still in scope (before it moves into the gate).
@@ -4908,13 +4915,15 @@ pub async fn build(
         // regardless of any local enforcement toggle.
         permission_policy: boot_permission_policy.clone().unwrap_or_else(|| {
             Arc::new(
-                permission::PermissionPolicy::new(cfg.permission_mode).with_roots(
-                    permission::FsRoots {
+                permission::PermissionPolicy::new(cfg.permission_mode)
+                    .with_roots(permission::FsRoots {
                         cwd: cwd.clone(),
                         home: dirs::home_dir(),
                         lingxi_home: cfg.lingxi_home.clone(),
-                    },
-                ),
+                    })
+                    .with_pwsh_parser(std::sync::Arc::new(
+                        permission::powershell_parse::SystemPwshParser,
+                    )),
             )
         }),
         sandbox_available,

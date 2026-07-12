@@ -376,34 +376,60 @@ pub(crate) fn qcg_limit_name(
     }
 }
 
-/// Port of `getEarlyWarningText` (rateLimitMessages.ts:199-254).
+/// Port of `getEarlyWarningText` (2.1.206 binary `jcg`, decoded body
+/// byte-verified against the real 2.1.206 binary @217905476). Key 206
+/// changes vs the prior (205) port: (1) a NEW
+/// `seven_day_overage_included` → `"Fable 5 limit"` case; (2) the `overage`
+/// limit name is now `A5()`-gated (`"usage"`/`"usage credits"` pre-Approaching,
+/// `"usage limit"`/`"usage credit limit"` in the Approaching branch),
+/// replacing the old `"extra usage"`/`"extra usage limit"` wording; (3) the
+/// reset time is suppressed when `rateLimitType==="overage" && A5()` (JS `n`);
+/// (4) the upsell suffix now comes from the 206 `Wcg` ([`warning_upsell`]).
 fn early_warning_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> Option<String> {
+    let is_overage = info.rate_limit_type.as_deref() == Some("overage");
+    let usage_based = sub.is_usage_based_billing();
+
     let limit_name = match info.rate_limit_type.as_deref() {
         Some("seven_day") => "weekly limit",
         Some("five_hour") => "session limit",
         Some("seven_day_opus") => "Opus limit",
         Some("seven_day_sonnet") => "Sonnet limit",
-        Some("overage") => "extra usage",
-        // TS `case undefined: return null` (:217-218); unknown strings can't
-        // occur in the typed union — treated alike.
+        Some("seven_day_overage_included") => "Fable 5 limit",
+        Some("overage") => {
+            if usage_based {
+                "usage"
+            } else {
+                "usage credits"
+            }
+        }
+        // TS `case void 0: return null`; unknown strings can't occur in the
+        // typed union — treated alike.
         _ => return None,
     };
 
-    // TS :222-224: `used = limits.utilization ? Math.floor(u * 100) :
-    // undefined`, then truthiness-gated (`if (used && ...)`) — so both a
-    // falsy utilization (0) and a floored 0% behave as absent. Kept as an
-    // already-floored `f64` rendered with `{:.0}` (no int cast): identical
-    // digits for every in-range fraction, and non-finite values (JS-falsy
-    // `NaN`) are filtered like the TS truthiness gate.
+    // TS `r = e.utilization?Math.floor(e.utilization*100):void 0`, then
+    // truthiness-gated (`if(r&&...)`) — so both a falsy utilization (0) and a
+    // floored 0% behave as absent. Kept as an already-floored `f64` rendered
+    // with `{:.0}` (no int cast): identical digits for every in-range
+    // fraction, and non-finite values (JS-falsy `NaN`) are filtered like the
+    // TS truthiness gate.
     let used = info
         .utilization
         .filter(|u| *u != 0.0)
         .map(|u| (u * 100.0).floor())
         .filter(|n| *n != 0.0 && n.is_finite());
-    let reset_time = fmt_reset(info.resets_at);
+
+    // 206 `n = e.rateLimitType==="overage" && A5()`: suppress the reset time
+    // for usage-based-billing overage notices even when `resetsAt` is set.
+    let reset_suppressed = is_overage && usage_based;
+    let reset_time = if reset_suppressed {
+        None
+    } else {
+        fmt_reset(info.resets_at)
+    };
 
     // "Get upsell command based on subscription type and limit type" —
-    // TS :229-230.
+    // now the 206 `Wcg` ([`warning_upsell`]).
     let upsell = warning_upsell(info.rate_limit_type.as_deref(), sub);
     let with_upsell = |base: String| match upsell {
         Some(u) => format!("{base} \u{b7} {u}"),
@@ -419,12 +445,16 @@ fn early_warning_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> Optio
         return Some(with_upsell(base));
     }
 
-    // "For the 'Approaching <x>' verbiage, 'extra usage limit' makes more
-    // sense than 'extra usage'" — TS :242-245.
-    let limit_name = if info.rate_limit_type.as_deref() == Some("overage") {
-        format!("{limit_name} limit")
+    // 206 `if(e.rateLimitType==="overage")t=A5()?"usage limit":"usage credit
+    // limit"` — the Approaching-only reassignment of the overage limit name.
+    let limit_name = if is_overage {
+        if usage_based {
+            "usage limit"
+        } else {
+            "usage credit limit"
+        }
     } else {
-        limit_name.to_owned()
+        limit_name
     };
 
     let base = if let Some(reset_time) = reset_time {
@@ -443,48 +473,69 @@ fn format_limit_reached_text(limit: &str, reset_message: &str, _is_ant: bool) ->
     format!("You've hit your {limit}{reset_message}")
 }
 
-/// Warning-upsell copy (rateLimitMessages.ts:274, :282 — straight ASCII).
-const EXTRA_USAGE_REQUEST: &str = "/extra-usage to request more";
+/// Warning-upsell copy (2.1.206 binary `Wcg` @213249305 area — straight
+/// ASCII, byte-verified against the real binary). `USAGE_CREDITS_ASK_ADMIN`
+/// is shared by both team/enterprise branches below (the `!hasBillingAccess`
+/// arm of each).
+const USAGE_CREDITS_TURN_ON: &str = "Run /usage-credits to turn on extra usage for your org";
+const USAGE_CREDITS_ASK_ADMIN: &str = "Run /usage-credits to ask your admin for more";
+const USAGE_CREDITS_RAISE_CAP: &str = "Run /usage-credits to raise the cap";
+/// 2.1.206 says `"/upgrade to keep using Claude Code"`; kept as the LingXi
+/// product name per this port's rebrand convention (byte-locked pre-206).
 const UPGRADE_KEEP_USING: &str = "/upgrade to keep using LingXi";
 
-/// Port of `getWarningUpsellText` (rateLimitMessages.ts:261-297).
+/// Port of `getWarningUpsellText` (2.1.206 binary `Wcg`):
+///
+/// ```text
+/// function Wcg(e){
+///   let t=Fs(), r=Uc()?.hasExtraUsageEnabled===!0, n=tC();
+///   if(t==="team"||t==="enterprise"){
+///     if(!r&&QJe())return n?"Run /usage-credits to turn on extra usage for your org"
+///                          :"Run /usage-credits to ask your admin for more";
+///     if(r&&e==="overage")return n?"Run /usage-credits to raise the cap"
+///                                 :"Run /usage-credits to ask your admin for more";
+///     return null
+///   }
+///   if(e==="five_hour"&&(t==="pro"||t==="max")&&!Pee())
+///     return"/upgrade to keep using Claude Code";
+///   return null
+/// }
+/// ```
+///
+/// `t`=`sub.subscription_type`, `r`=`sub.has_extra_usage_enabled`,
+/// `n`=`sub.has_claude_ai_billing_access()` (`tC`), `QJe`=
+/// `sub.is_overage_provisioning_allowed()`, `Pee`=[`flags::idle_amber_finch`]
+/// (documented `false` in this port ⇒ the five_hour pro/max branch always
+/// fires).
 fn warning_upsell(
     rate_limit_type: Option<&str>,
     sub: &SubscriptionSnapshot,
 ) -> Option<&'static str> {
-    match rate_limit_type {
-        // "5-hour session limit warning" — TS :268-284.
-        Some("five_hour") => {
-            if sub.is_team_or_enterprise() {
-                // "Teams/Enterprise with overages disabled: prompt to request
-                // extra usage. Only show if overage provisioning is allowed
-                // for this org type (e.g., not AWS marketplace)" — TS :270-275.
-                if !sub.has_extra_usage_enabled && sub.is_overage_provisioning_allowed() {
-                    return Some(EXTRA_USAGE_REQUEST);
-                }
-                // "Teams/Enterprise with overages enabled or unsupported
-                // billing type don't need upsell" — TS :276-277.
-                return None;
-            }
-            // "Pro/Max users: prompt to upgrade" — TS :280-283.
-            if matches!(sub.subscription_type.as_deref(), Some("pro" | "max")) {
-                return Some(UPGRADE_KEEP_USING);
-            }
-            None
+    let has_billing_access = sub.has_claude_ai_billing_access();
+    if sub.is_team_or_enterprise() {
+        if !sub.has_extra_usage_enabled && sub.is_overage_provisioning_allowed() {
+            return Some(if has_billing_access {
+                USAGE_CREDITS_TURN_ON
+            } else {
+                USAGE_CREDITS_ASK_ADMIN
+            });
         }
-        // "Overage warning (approaching spending limit)" — TS :286-293.
-        Some("overage") => {
-            if sub.is_team_or_enterprise()
-                && !sub.has_extra_usage_enabled
-                && sub.is_overage_provisioning_allowed()
-            {
-                return Some(EXTRA_USAGE_REQUEST);
-            }
-            None
+        if sub.has_extra_usage_enabled && rate_limit_type == Some("overage") {
+            return Some(if has_billing_access {
+                USAGE_CREDITS_RAISE_CAP
+            } else {
+                USAGE_CREDITS_ASK_ADMIN
+            });
         }
-        // "Weekly limit warnings don't show upsell per spec" — TS :295-296.
-        _ => None,
+        return None;
     }
+    if rate_limit_type == Some("five_hour")
+        && matches!(sub.subscription_type.as_deref(), Some("pro" | "max"))
+        && !flags::idle_amber_finch()
+    {
+        return Some(UPGRADE_KEEP_USING);
+    }
+    None
 }
 
 /// Port of `getUpsellMessage` (RateLimitMessage.tsx:18-47).
@@ -1135,16 +1186,61 @@ mod tests {
 
     #[test]
     fn warning_overage_type_appends_limit_to_approaching() {
-        // TS :242-245 — 'extra usage' becomes 'extra usage limit' on the
-        // Approaching path.
+        // 206 `jcg`: `t=A5()?"usage limit":"usage credit limit"` on the
+        // Approaching path. Default (unknown) subscription → A5()==false →
+        // "usage credit limit" (was "extra usage limit" pre-206).
         let got = compose(&warning(Some("overage"), None, None), false).unwrap();
-        assert_eq!(got.text, "Approaching extra usage limit");
+        assert_eq!(got.text, "Approaching usage credit limit");
     }
 
     #[test]
     fn warning_overage_type_with_utilization_keeps_extra_usage() {
+        // 206 `jcg`: `t=A5()?"usage":"usage credits"` pre-Approaching.
+        // Default (unknown) subscription → A5()==false → "usage credits"
+        // (was "extra usage" pre-206).
         let got = compose(&warning(Some("overage"), Some(0.9), None), false).unwrap();
-        assert_eq!(got.text, "You've used 90% of your extra usage");
+        assert_eq!(got.text, "You've used 90% of your usage credits");
+    }
+
+    #[test]
+    fn jcg_overage_usage_based_billing_says_usage_and_suppresses_reset() {
+        // 206: A5()==true (usage-based billing) → "usage" naming, and the
+        // reset time is suppressed (`n=rateLimitType==="overage"&&A5()`)
+        // even though resetsAt is present.
+        let sub = SubscriptionSnapshot {
+            billing_type: Some("usage_based".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        let ts = ts_in(3600);
+        let got = compose_with(
+            &warning(Some("overage"), Some(0.9), Some(ts)),
+            false,
+            &sub,
+            false,
+        )
+        .unwrap();
+        assert_eq!(got.text, "You've used 90% of your usage");
+    }
+
+    #[test]
+    fn jcg_overage_approaching_usage_based_says_usage_limit() {
+        let sub = SubscriptionSnapshot {
+            billing_type: Some("usage_based".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        let got = compose_with(&warning(Some("overage"), None, None), false, &sub, false).unwrap();
+        assert_eq!(got.text, "Approaching usage limit");
+    }
+
+    #[test]
+    fn jcg_seven_day_overage_included_reads_fable_5_limit() {
+        // NEW in 206: `case"seven_day_overage_included":t="Fable 5 limit"`.
+        let got = compose(
+            &warning(Some("seven_day_overage_included"), Some(0.75), None),
+            false,
+        )
+        .unwrap();
+        assert_eq!(got.text, "You've used 75% of your Fable 5 limit");
     }
 
     #[test]
@@ -1217,8 +1313,11 @@ mod tests {
 
     #[test]
     fn five_hour_warning_team_without_extra_usage_appends_request_upsell() {
-        // TS :272-275: team/enterprise without extra usage, overage
-        // provisioning allowed (Stripe) → '/extra-usage to request more'.
+        // 206 `Wcg`: team/enterprise, !hasExtraUsageEnabled &&
+        // isOverageProvisioningAllowed() (Stripe) → billing-access-gated
+        // "Run /usage-credits to …" copy. Admin role → hasBillingAccess ==
+        // true → the "turn on … for your org" wording (was
+        // '/extra-usage to request more' pre-206).
         let got = compose_with(
             &warning(Some("five_hour"), Some(0.8), None),
             false,
@@ -1228,7 +1327,24 @@ mod tests {
         .unwrap();
         assert_eq!(
             got.text,
-            "You've used 80% of your session limit \u{b7} /extra-usage to request more"
+            "You've used 80% of your session limit \u{b7} Run /usage-credits to turn on extra usage for your org"
+        );
+    }
+
+    #[test]
+    fn five_hour_warning_team_member_without_billing_access_asks_admin() {
+        // Same branch, member role → hasBillingAccess == false → the shared
+        // "ask your admin for more" wording.
+        let got = compose_with(
+            &warning(Some("five_hour"), Some(0.8), None),
+            false,
+            &team(false, Some("member")),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            got.text,
+            "You've used 80% of your session limit \u{b7} Run /usage-credits to ask your admin for more"
         );
     }
 
@@ -1261,9 +1377,12 @@ mod tests {
 
     #[test]
     fn overage_warning_team_without_extra_usage_appends_request_upsell() {
-        // TS :287-293 (overage arm) + the `limitName += ' limit'`
-        // Approaching adjustment (:242-245) happening BEFORE the upsell
-        // append (:247-249).
+        // 206: the overage-name Approaching reassignment (`t=A5()?"usage
+        // limit":"usage credit limit"`) happens BEFORE the `Wcg` upsell is
+        // appended. team() billing_type is stripe (not usage-based) → A5()
+        // == false → "usage credit limit"; admin role → billing-access-gated
+        // "turn on … for your org" (was '/extra-usage to request more'
+        // pre-206, on the old 'extra usage limit' wording).
         let got = compose_with(
             &warning(Some("overage"), None, None),
             false,
@@ -1273,7 +1392,32 @@ mod tests {
         .unwrap();
         assert_eq!(
             got.text,
-            "Approaching extra usage limit \u{b7} /extra-usage to request more"
+            "Approaching usage credit limit \u{b7} Run /usage-credits to turn on extra usage for your org"
+        );
+    }
+
+    #[test]
+    fn overage_warning_team_with_extra_usage_raises_cap_upsell() {
+        // 206 `Wcg` second team/enterprise branch: hasExtraUsageEnabled &&
+        // rateLimitType=="overage" → billing-access-gated "raise the cap".
+        // Only the admin (billing-access) variant is reachable through the
+        // full composer here: the TS :80-94 suppression
+        // (`isTeamOrEnterprise && hasExtraUsageEnabled &&
+        // !hasClaudeAiBillingAccess`) fires FIRST for any non-billing team
+        // member with extra usage enabled and returns null before `jcg`/`Wcg`
+        // ever run (see `team_with_extra_usage_and_no_billing_access_suppresses_warning`);
+        // the member/"ask your admin for more" arm of `Wcg` itself is pinned
+        // directly in `wcg_team_raise_cap_vs_ask_admin_by_billing_access`.
+        let got = compose_with(
+            &warning(Some("overage"), None, None),
+            false,
+            &team(true, Some("admin")),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            got.text,
+            "Approaching usage credit limit \u{b7} Run /usage-credits to raise the cap"
         );
     }
 
@@ -1373,14 +1517,98 @@ mod tests {
 
     #[test]
     fn warning_upsell_copy_is_straight_ascii() {
-        // rateLimitMessages.ts:274 + :282 use plain ASCII (no curly
-        // apostrophes, unlike the TSX getUpsellMessage strings).
-        assert_eq!(EXTRA_USAGE_REQUEST, "/extra-usage to request more");
+        // 2.1.206 `Wcg` copy uses plain ASCII (no curly apostrophes, unlike
+        // the TSX getUpsellMessage strings), byte-verified against the real
+        // binary @217906477-217906649.
+        assert_eq!(
+            USAGE_CREDITS_TURN_ON,
+            "Run /usage-credits to turn on extra usage for your org"
+        );
+        assert_eq!(
+            USAGE_CREDITS_ASK_ADMIN,
+            "Run /usage-credits to ask your admin for more"
+        );
+        assert_eq!(USAGE_CREDITS_RAISE_CAP, "Run /usage-credits to raise the cap");
         assert_eq!(UPGRADE_KEEP_USING, "/upgrade to keep using LingXi");
-        for s in [EXTRA_USAGE_REQUEST, UPGRADE_KEEP_USING] {
+        for s in [
+            USAGE_CREDITS_TURN_ON,
+            USAGE_CREDITS_ASK_ADMIN,
+            USAGE_CREDITS_RAISE_CAP,
+            UPGRADE_KEEP_USING,
+        ] {
             assert!(s.is_ascii(), "warning upsell copy must be straight ASCII");
             assert!(!s.contains('\u{2019}'));
         }
+    }
+
+    // ── warning_upsell (Wcg) direct unit tests ────────────────────────────
+
+    #[test]
+    fn wcg_team_turn_on_vs_ask_admin_by_billing_access() {
+        // Team/enterprise, !hasExtraUsageEnabled && isOverageProvisioningAllowed():
+        // hasBillingAccess (admin) → "turn on … for your org"; without it
+        // (member) → the shared "ask your admin for more".
+        assert_eq!(
+            warning_upsell(Some("five_hour"), &team(false, Some("admin"))),
+            Some(USAGE_CREDITS_TURN_ON)
+        );
+        assert_eq!(
+            warning_upsell(Some("five_hour"), &team(false, Some("member"))),
+            Some(USAGE_CREDITS_ASK_ADMIN)
+        );
+    }
+
+    #[test]
+    fn wcg_team_raise_cap_vs_ask_admin_by_billing_access() {
+        // Team/enterprise, hasExtraUsageEnabled && rateLimitType=="overage":
+        // hasBillingAccess (admin) → "raise the cap"; without it (member) →
+        // the shared "ask your admin for more".
+        assert_eq!(
+            warning_upsell(Some("overage"), &team(true, Some("admin"))),
+            Some(USAGE_CREDITS_RAISE_CAP)
+        );
+        assert_eq!(
+            warning_upsell(Some("overage"), &team(true, Some("member"))),
+            Some(USAGE_CREDITS_ASK_ADMIN)
+        );
+    }
+
+    #[test]
+    fn wcg_team_extra_usage_enabled_non_overage_falls_through_to_none() {
+        // hasExtraUsageEnabled but rateLimitType != "overage" → neither team
+        // branch matches → null.
+        assert_eq!(
+            warning_upsell(Some("five_hour"), &team(true, Some("admin"))),
+            None
+        );
+    }
+
+    #[test]
+    fn wcg_pro_max_five_hour_upgrade_fires_since_idle_amber_finch_is_false() {
+        // `!Pee()`: idle_amber_finch() is documented `false` in this port ⇒
+        // the pro/max five_hour upgrade upsell always fires.
+        assert!(!flags::idle_amber_finch());
+        assert_eq!(
+            warning_upsell(Some("five_hour"), &pro()),
+            Some(UPGRADE_KEEP_USING)
+        );
+        let max = SubscriptionSnapshot {
+            subscription_type: Some("max".into()),
+            ..pro()
+        };
+        assert_eq!(
+            warning_upsell(Some("five_hour"), &max),
+            Some(UPGRADE_KEEP_USING)
+        );
+    }
+
+    #[test]
+    fn wcg_weekly_limit_type_never_has_upsell() {
+        // "Weekly limit warnings don't show upsell per spec" — unaffected by
+        // the 206 rewrite: neither the team/enterprise nor the five_hour
+        // pro/max arm matches a non-five_hour, non-overage rate limit type.
+        assert_eq!(warning_upsell(Some("seven_day"), &pro()), None);
+        assert_eq!(warning_upsell(None, &pro()), None);
     }
 
     // ── locked upsell literals (RateLimitMessage.tsx getUpsellMessage) ────

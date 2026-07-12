@@ -3332,10 +3332,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // `data` happens to be an array (e.g. the Agent tool's transcript blocks)
         // are unaffected. A hook-mutated result (output replaced or
         // additionalContext appended) drops to the text-only `final_content`.
-        let content_blocks = if mutated || !tool_handle.is_mcp() {
+        //
+        // Non-MCP `{type:"image"}` results (Read on an image file, rendered PDF
+        // pages) get the binary result-mapper's `case "image"` form: the image
+        // block INSIDE the tool_result content (`image_tool_result_blocks`).
+        let content_blocks = if mutated {
             None
-        } else {
+        } else if tool_handle.is_mcp() {
             emit_payload.as_array().cloned()
+        } else {
+            image_tool_result_blocks(&emit_payload)
         };
         results.push(ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
@@ -3487,4 +3493,63 @@ fn tool_result_to_model_text(data: &serde_json::Value) -> String {
             || serde_json::to_string(data).unwrap_or_else(|_| "<unserializable>".into()),
             std::string::ToString::to_string,
         )
+}
+
+/// The binary result-mapper's `case "image"` (`mapToolResultToToolResultBlockParam`):
+/// a `{type:"image", file:{base64, type, …}}` result — Read on an image file, or a
+/// rendered PDF page (`tbo`) — becomes a tool_result whose content is the image
+/// block array `[{type:"image", source:{type:"base64", data, media_type}}]`,
+/// emitted VERBATIM on egress via `ContentBlock::ToolResult.content_blocks`.
+/// `None` for every other result shape (strict no-op: the wire form falls back to
+/// the text `content` exactly as before).
+fn image_tool_result_blocks(data: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    if data.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+        return None;
+    }
+    let file = data.get("file")?;
+    let base64 = file.get("base64").and_then(serde_json::Value::as_str)?;
+    let media_type = file.get("type").and_then(serde_json::Value::as_str)?;
+    Some(vec![serde_json::json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "data": base64,
+            "media_type": media_type,
+        },
+    })])
+}
+
+#[cfg(test)]
+mod image_tool_result_tests {
+    use super::image_tool_result_blocks;
+    use serde_json::json;
+
+    #[test]
+    fn image_result_becomes_the_binary_mapper_block_array() {
+        let data = json!({
+            "type": "image",
+            "file": { "base64": "QUJD", "type": "image/png", "originalSize": 3 }
+        });
+        let blocks = image_tool_result_blocks(&data).expect("image data maps");
+        // Byte shape of the binary mapper's `case "image"` — one image block,
+        // source keys in written order (type, data, media_type).
+        assert_eq!(
+            serde_json::to_string(&blocks).unwrap(),
+            r#"[{"type":"image","source":{"type":"base64","data":"QUJD","media_type":"image/png"}}]"#
+        );
+    }
+
+    #[test]
+    fn non_image_and_malformed_results_map_to_none() {
+        // Strict no-op for every other tool result shape.
+        assert!(image_tool_result_blocks(&json!({"type":"text","file":{}})).is_none());
+        assert!(image_tool_result_blocks(&json!({"filePath":"/a","content":"x"})).is_none());
+        assert!(image_tool_result_blocks(&json!("just a string")).is_none());
+        // `type:"image"` but missing/malformed file fields → None (text fallback).
+        assert!(image_tool_result_blocks(&json!({"type":"image"})).is_none());
+        assert!(image_tool_result_blocks(&json!({"type":"image","file":{}})).is_none());
+        assert!(
+            image_tool_result_blocks(&json!({"type":"image","file":{"base64":"QQ=="}})).is_none()
+        );
+    }
 }

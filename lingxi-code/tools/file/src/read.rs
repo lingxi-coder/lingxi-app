@@ -1096,11 +1096,12 @@ impl FileReadTool {
         Err(ToolError::Io(message))
     }
 
-    /// Process an image file and return it as multimodal content. The pixels ride
-    /// on `new_messages` as a `ContentBlock::Image` (the frozen tool-result content
-    /// is text-only); the tool-result text is a short placeholder. Mirrors
-    /// claude-code FileRead's image path (the model-facing image block + an
-    /// optional `[Image: original …]` metadata message when the image was resized).
+    /// Process an image file and return it as multimodal content. The pixels
+    /// reach the model INSIDE the tool_result content array (the dispatch loop
+    /// derives `content_blocks` from the `{type:"image"}` result data — the port
+    /// of claude-code's FileRead result-mapper `case "image"`); an optional
+    /// `[Image: original …]` resize note rides as a following isMeta message
+    /// (claude `newMessages: [Lr({content: y8t(dimensions), isMeta: true})]`).
     #[cfg(feature = "image-read")]
     async fn read_image_result(
         &self,
@@ -1118,26 +1119,24 @@ impl FileReadTool {
             }
         };
 
-        let source = protocol::ImageSource::Base64 {
-            media_type: processed.media_type.clone(),
-            // clone so the base64 also rides in the result `data.file.base64`
-            // (binary parity — the FileRead result carries the image bytes).
-            data: processed.base64.clone(),
-        };
-        let text = match processed.resized {
+        // claude-code FileReadTool image return (`{data: q, ...U && {newMessages:
+        // [Lr({content: U, isMeta: true})]}}`): the IMAGE itself rides inside the
+        // tool_result content array (the result mapper's `case "image"`, wired via
+        // `content_blocks` in the dispatch loop), and ONLY the resize note `U =
+        // y8t(q.file.dimensions)` is injected as a following isMeta user message —
+        // and only when the image was resized (dimensions present).
+        let new_messages = match processed.resized {
             Some((ow, oh, dw, dh)) => {
                 let scale = f64::from(ow) / f64::from(dw.max(1));
-                format!(
-                    "[Image: original {ow}x{oh}, displayed at {dw}x{dh}. Multiply coordinates by {scale:.2} to map to original image.]"
-                )
+                vec![protocol::ConversationMessage::user_meta(
+                    protocol::MessageId::new(),
+                    format!(
+                        "[Image: original {ow}x{oh}, displayed at {dw}x{dh}. Multiply coordinates by {scale:.2} to map to original image.]"
+                    ),
+                )]
             }
-            None => String::new(),
+            None => vec![],
         };
-        let msg = protocol::ConversationMessage::user_with_images(
-            protocol::MessageId::new(),
-            text,
-            vec![source],
-        );
 
         // MIRROR the text-read success path's completion telemetry
         // (`emit_completed(invocation_id, bytes_read, duration_ms)` at the
@@ -1150,29 +1149,31 @@ impl FileReadTool {
         self.emit_completed(invocation_id, original_size, duration_ms)
             .await;
 
+        // binary `{type:"image", file:{base64, type:<mediaType>, originalSize
+        // [, dimensions]}}` (no filePath) — `dimensions` present only when the
+        // image was resized (claude `tbo`'s optional `dimensions`), and it is
+        // what gates the resize-note `newMessages` above (`q.file.dimensions`).
+        let mut file = serde_json::json!({
+            "base64": processed.base64,
+            "type": processed.media_type,
+            "originalSize": original_size,
+        });
+        if let Some((ow, oh, dw, dh)) = processed.resized {
+            file["dimensions"] = serde_json::json!({
+                "originalWidth": ow,
+                "originalHeight": oh,
+                "displayWidth": dw,
+                "displayHeight": dh,
+            });
+        }
         Ok(ToolCallResult {
-            // binary `{type:"image", file:{base64, type:<mediaType>, originalSize}}`
-            // (no filePath); the model receives the image via `new_messages`.
-            data: serde_json::json!({
-                "type": "image",
-                "file": {
-                    "base64": processed.base64,
-                    "type": processed.media_type,
-                    "originalSize": original_size,
-                },
-            }),
-            // [KNOWN WIRE DIVERGENCE — image tool_result routing] claude-code
-            // 2.1.206's FileReadTool result mapper embeds the image DIRECTLY in
-            // the tool_result content array (`content: [{type:"image", source:
-            // {type:"base64", data, media_type}}]`) with NO text placeholder and
-            // NO separate message. The port instead sends this placeholder text
-            // as the tool_result content and injects the image as a following
-            // message (`new_messages`). Closing this requires routing the image
-            // block through `ContentBlock::ToolResult.content_blocks` in BOTH
-            // driver twins (turn_loop + streaming) and dropping the injected
-            // message — a dedicated unit (JSONL shape + TUI display follow).
-            model_content: Some("[Image content provided in the following message.]".to_string()),
-            new_messages: vec![msg],
+            data: serde_json::json!({ "type": "image", "file": file }),
+            // The image reaches the model INSIDE the tool_result content array
+            // (the dispatch loop derives `content_blocks` from `data` — the port
+            // of claude's result-mapper `case "image"`), so this text is
+            // display-only (TUI/transcript); claude's wire form has no text.
+            model_content: Some("[Image content provided in tool result.]".to_string()),
+            new_messages,
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
@@ -3500,9 +3501,7 @@ mod tests {
 
     #[cfg(feature = "image-read")]
     #[tokio::test]
-    async fn reads_image_as_multimodal_new_message() {
-        use protocol::{ContentBlock, ConversationMessage, ImageSource};
-
+    async fn reads_image_into_result_data_with_no_injected_image_message() {
         // Build a tiny PNG via the `image` crate (available under
         // `--features image-read`) and write it under the trusted dir, mirroring
         // the sibling text-read `call()` tests' tool/ctx/temp-file construction.
@@ -3525,26 +3524,74 @@ mod tests {
             .await
             .expect("image read must succeed");
 
-        // The tool-result data is text-only and tagged as an image.
+        // Binary result shape: `{type:"image", file:{base64, type, originalSize}}`.
+        // The dispatch loop derives the tool_result `content_blocks` from THIS
+        // data (result-mapper `case "image"`), so the base64 + media type must be
+        // present here — and the image must NOT also ride an injected message.
         assert_eq!(res.data["type"], "image");
+        assert_eq!(res.data["file"]["type"], "image/png");
+        assert!(res.data["file"]["base64"].as_str().is_some_and(|b| !b.is_empty()));
+        // An 8x8 PNG is not resized → no dimensions, no resize-note message.
+        assert!(res.data["file"].get("dimensions").is_none());
+        assert!(
+            res.new_messages.is_empty(),
+            "unresized image must inject NO messages (the image rides the tool_result)"
+        );
+    }
 
-        // The pixels ride on a single `new_messages` user message carrying a
-        // base64 `ContentBlock::Image` with the PNG media type.
+    #[cfg(feature = "image-read")]
+    #[tokio::test]
+    async fn resized_image_injects_only_the_meta_resize_note() {
+        use protocol::{ContentBlock, ConversationMessage};
+
+        // 4000px wide → exceeds IMAGE_MAX_DIM (2000) → resized.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("wide.png");
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(4000, 100))
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&target, &buf).unwrap();
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("image read must succeed");
+
+        // Resized → data.file.dimensions present (claude tbo's dimensions).
+        assert_eq!(res.data["file"]["dimensions"]["originalWidth"], 4000);
+        // The ONLY injected message is the isMeta resize note — text, NO image
+        // block (claude `newMessages: [Lr({content: y8t(dims), isMeta: true})]`).
         assert_eq!(res.new_messages.len(), 1);
-        let content = match &res.new_messages[0] {
-            ConversationMessage::User { content, .. } => content,
+        match &res.new_messages[0] {
+            ConversationMessage::User {
+                content, is_meta, ..
+            } => {
+                assert!(*is_meta, "resize note must be isMeta");
+                assert!(
+                    !content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Image { .. })),
+                    "note message must carry NO image block"
+                );
+                let text = content
+                    .iter()
+                    .find_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .expect("note text");
+                assert!(text.starts_with("[Image: original 4000x100, displayed at "));
+                assert!(text.ends_with(" to map to original image.]"));
+            }
             other => panic!("expected a User message, got {other:?}"),
-        };
-        let media_type = content
-            .iter()
-            .find_map(|b| match b {
-                ContentBlock::Image {
-                    source: ImageSource::Base64 { media_type, .. },
-                } => Some(media_type.as_str()),
-                _ => None,
-            })
-            .expect("a base64 image block");
-        assert_eq!(media_type, "image/png");
+        }
     }
 
     /// A valid minimal 1-page PDF with a proper xref table + startxref. lopdf

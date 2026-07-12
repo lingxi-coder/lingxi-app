@@ -658,11 +658,13 @@ pub(crate) fn help_lines() -> Vec<Line<'static>> {
     for command in crate::command::advertised() {
         out.push(row(command.name, command.description));
     }
-    out.push(Line::from(""));
-    out.push(Line::from(Span::styled(
-        "For more help: https://code.claude.com/docs/en/overview",
-        Style::default().add_modifier(Modifier::DIM),
-    )));
+    // [PARITY] 2.1.206's help dialog (`rCo` header + `LBs` command tabs) ends
+    // at the command list — it renders NO "For more help" docs footer, so the
+    // port's previously-invented footer line is dropped. The
+    // "New here? Run /powerup …" hint 2.1.206 shows here is intentionally NOT
+    // added: `/powerup` (a Claude-Code interactive-tutorial `local-jsx`
+    // command, `requires:{ink}`) is not ported, and advertising a command the
+    // port does not have would be worse than omitting the hint.
     out
 }
 
@@ -866,5 +868,9 @@ mod tests {
         // a dead chord here but is now a real registry-backed command, so it is
         // asserted present by the advertised-command sweep above.)
         assert!(!text.contains("for bash mode"));
+        // Parity: 2.1.206's help dialog renders no "For more help" docs footer,
+        // and does not advertise the unported `/powerup` command.
+        assert!(!text.contains("For more help"));
+        assert!(!text.contains("/powerup"));
     }
 }

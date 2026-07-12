@@ -117,7 +117,14 @@ The workspaceSymbol operation also takes:\n\
 \n\
 Note: LSP servers must be configured for the file type. If no server is available, an error will be returned.";
 
-/// Position-validation error literal (LingXi lock; ASCII `>=` form).
+/// Position-validation error literal.
+///
+/// [RESIDUAL — message not in 2.1.206] 2.1.206's LSP tool rejects an
+/// out-of-range position at the SCHEMA layer (`line`/`character` carry
+/// `minimum: 1`, mirrored below), so it has no such runtime string — the
+/// wording would be the validator's own output. This in-tool check is a
+/// port-only belt-and-suspenders reached only if a caller bypasses schema
+/// validation.
 pub const LSP_POSITION_ERROR: &str = "LSP position must be 1-based (line >= 1, character >= 1)";
 
 // -- Helpers -----------------------------------------------------------------

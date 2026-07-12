@@ -12,9 +12,10 @@ use crate::{
     usage::Usage,
     ModelRef,
 };
+use indexmap::IndexMap;
 use protocol::SessionId;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use telemetry::AnalyticsBus;
@@ -28,7 +29,7 @@ pub struct CostState {
     /// Cumulative cost across all models, in nano-USD.
     pub total_nano_usd: u64,
     /// Per-model usage and cost breakdown.
-    pub per_model_usage: HashMap<ModelRef, ModelUsage>,
+    pub per_model_usage: IndexMap<ModelRef, ModelUsage>,
     /// Total wall-clock spent in API calls (including retries), in ms.
     pub total_api_duration_ms: u64,
     /// Total wall-clock spent in API calls excluding retried attempts, in ms.
@@ -517,6 +518,73 @@ mod tests {
         let entry = snap.per_model_usage.get(&mr).unwrap();
         assert_eq!(entry.cache_read_input_tokens, 0);
         assert_eq!(entry.cache_creation_input_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn per_model_usage_preserves_insertion_order() {
+        // Byte-parity: claude-code's `cbg` renders "Usage by model:" rows in
+        // JS-object insertion (first-seen) order. Our per_model_usage must
+        // match — a HashMap would iterate in a per-process-randomized order.
+        // Record "zzz-first" before "aaa-second" so neither alphabetical sort
+        // nor hash order could coincide with insertion order by accident.
+        let (tx, mut rx) = mpsc::channel(8);
+        let tracker = CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        let first = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "zzz-first".into(),
+        };
+        let second = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "aaa-second".into(),
+        };
+        tracker
+            .record_api_response(
+                first,
+                Usage {
+                    tokens: TokenUsage {
+                        input: 100,
+                        output: 50,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Duration::from_millis(10),
+                0,
+            )
+            .await;
+        let _ = rx.recv().await.unwrap();
+        tracker
+            .record_api_response(
+                second,
+                Usage {
+                    tokens: TokenUsage {
+                        input: 200,
+                        output: 75,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Duration::from_millis(10),
+                0,
+            )
+            .await;
+        let _ = rx.recv().await.unwrap();
+
+        let snap = tracker.snapshot().await;
+        let order: Vec<String> = snap
+            .per_model_usage
+            .keys()
+            .map(|m| m.model.clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["zzz-first".to_string(), "aaa-second".to_string()],
+            "per_model_usage must iterate in insertion order, not hash order"
+        );
     }
 
     #[tokio::test]

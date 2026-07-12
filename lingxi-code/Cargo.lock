@@ -1007,6 +1007,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "indexmap",
  "protocol",
  "serde",
  "serde_json",

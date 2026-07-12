@@ -978,3 +978,32 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - **Spec coverage:** i6e/qs/cbg/FTu/Bu → Tasks 1–5; API-duration → Tasks 6,8; code-changes (cumulative per-edit) → Tasks 6,7,8; unknown-model → Tasks 6,9; CostSnapshot → Task 10; surface routing (`/usage` + TUI, print-mode unchanged) → Tasks 11,12; testing/verification → Task 13. `webSearchRequests` intentionally omitted (documented). Session-end auto-print intentionally out of scope.
 - **Interface consistency:** `CostSummaryInput`, `cost_summary`, `format_duration_ms`, `format_cost`, `format_token_count`, `usage_by_model_block`, `record_api_duration`, `record_code_change`, `mark_unknown_model_cost`, `count_structured_patch_lines` — names are used identically across the tasks that produce and consume them.
 - **Unknowns to confirm at implementation start (each task says so inline):** the `cost` crate's `CostState` constructor + per-model recording method signatures; `ModelCostSummary` exact field names; the `cost_tracker` handle type/lock on the orchestrator; the `command-core` crate name; whether `CostSnapshot` derives `Default`. These are lookups, not design gaps — resolve with the `grep` commands noted in each task.
+
+---
+
+## REVISION (2026-07-13, recon during execution)
+
+Recon of `cost/src/tracker.rs` after Task 5 revealed the cost crate ALREADY tracks
+most of what Tasks 6/8/9 planned to add. Revised remaining scope:
+
+- **`CostState` already has** `total_api_duration_ms` (accumulated by
+  `record_api_response_v2:41`, already called at `conversation.rs:5980` +
+  `turn_loop.rs:695`) and `unpriced_models: HashSet<ModelRef>` (populated on a
+  pricing miss). `summary.rs` already projects `by_model: HashMap<ModelRef,
+  ModelCostSummary>`.
+- **Task 6 (revised):** add ONLY `total_lines_added: u64` + `total_lines_removed:
+  u64` to `CostState` + a `record_code_change(&self, added, removed)` async method
+  on `CostTracker` (matching the existing async record pattern). Do NOT add an
+  api-duration field or method (exists), nor an unknown-model method (use
+  `unpriced_models`).
+- **Task 7:** unchanged (`count_structured_patch_lines`).
+- **Task 8 (revised):** wire ONLY code-change accumulation (`structuredPatch` →
+  `record_code_change`) in the orchestrator tool-result path. API-duration needs
+  NO new wiring (already accumulated) — just note this in verification.
+- **Task 9:** DROPPED — unknown-model already tracked via `unpriced_models`;
+  folded into Task 10's projection.
+- **Task 10 (revised):** extend `CostSnapshot` + project: `api_duration =
+  Duration::from_millis(state.total_api_duration_ms)`; `code_lines_added/removed`
+  from the new fields; `by_model` = the values of `summary().by_model`;
+  `unknown_models = !state.unpriced_models.is_empty()`.
+- **Tasks 11, 12, 13:** unchanged.

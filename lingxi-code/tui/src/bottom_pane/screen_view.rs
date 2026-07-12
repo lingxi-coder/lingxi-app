@@ -195,29 +195,12 @@ impl ScreenView {
     ///   Claude.ai subscription backend LingXi (multi-provider) does not have,
     ///   so that section is honestly absent rather than shown with placeholder
     ///   numbers.
-    /// - **Stats** tab: the reference's `/cost` block — `Total cost:` and
-    ///   `Total duration (wall):` with the same fixed-width labels — from real
-    ///   accumulated figures.
+    /// - **Stats** tab: the reference's byte-exact `i6e()` `/cost` block —
+    ///   `Total cost:`, `Total duration (API):`, `Total duration (wall):`,
+    ///   `Total code changes:`, and the `Usage by model:` breakdown — from
+    ///   real accumulated figures, dimmed.
     #[must_use]
     pub fn usage(cost: &CostSnapshot, default_tab: UsageTab) -> Self {
-        // Fixed-width labels aligned to the reference's widest ("Total
-        // duration (wall): " = 23 cols before the value).
-        let stat = |label: &str, value: &str| -> Line<'static> {
-            let pad = 23usize.saturating_sub(label.chars().count());
-            Line::from(Span::styled(
-                format!("{label}{}{value}", " ".repeat(pad)),
-                Style::default().add_modifier(Modifier::DIM),
-            ))
-        };
-        let secs = cost.session_duration.as_secs();
-        let wall = if secs >= 3600 {
-            format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
-        } else if secs >= 60 {
-            format!("{}m {:02}s", secs / 60, secs % 60)
-        } else {
-            format!("{secs}s")
-        };
-
         let usage_lines = vec![
             header("Session token usage"),
             row("└ Input", &cost.input_tokens.to_string()),
@@ -231,15 +214,15 @@ impl ScreenView {
                 Style::default().add_modifier(Modifier::DIM),
             )),
         ];
-        let stats_lines = vec![
-            stat("Total cost:", &format!("${:.4}", cost.total_usd)),
-            stat("Total duration (wall):", &wall),
-            Line::from(""),
-            stat("Input tokens:", &cost.input_tokens.to_string()),
-            stat("Output tokens:", &cost.output_tokens.to_string()),
-            stat("Cache read tokens:", &cost.cache_read_tokens.to_string()),
-            stat("Cache write tokens:", &cost.cache_creation_tokens.to_string()),
-        ];
+        let stats_lines: Vec<Line<'static>> = cost::render::cost_summary_from_snapshot(cost)
+            .lines()
+            .map(|l| {
+                Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ))
+            })
+            .collect();
         let tabs = vec![
             ("Usage".to_string(), usage_lines),
             ("Stats".to_string(), stats_lines),
@@ -845,6 +828,46 @@ mod tests {
         assert!(text.contains("My screen"), "{text}");
         assert!(text.contains("body line one"), "{text}");
         assert!(text.contains("esc to close"), "{text}");
+    }
+
+    #[test]
+    fn usage_stats_tab_renders_byte_exact_cost_block() {
+        use traits::orchestrator::ModelUsageRow;
+        let snap = CostSnapshot {
+            total_usd: 0.1234,
+            api_duration: std::time::Duration::from_millis(5_000),
+            session_duration: std::time::Duration::from_secs(125),
+            code_lines_added: 10,
+            code_lines_removed: 1,
+            by_model: vec![ModelUsageRow {
+                model: "claude-opus-4-8".into(),
+                total_nano_usd: 123_400_000,
+                input_tokens: 5_000,
+                output_tokens: 2_000,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            }],
+            ..CostSnapshot::default()
+        };
+        let s = ScreenView::usage(&snap, UsageTab::Stats);
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        s.render(area, &mut buf);
+        let text: String = (area.top()..area.bottom())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| {
+                        buf.cell(ratatui::layout::Position::new(x, y))
+                            .map_or(" ", ratatui::buffer::Cell::symbol)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Total duration (API):"), "{text}");
+        assert!(text.contains("Total code changes:"), "{text}");
+        assert!(text.contains("Usage by model:"), "{text}");
+        assert!(text.contains("claude-opus-4-8:"), "{text}");
     }
 
     #[test]

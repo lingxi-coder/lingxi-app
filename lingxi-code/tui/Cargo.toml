@@ -67,6 +67,11 @@ command-core = { path = "../commands/core" }
 # trait + `CommandResult`/`ParsedSlashCommand` types to invoke `command-core`
 # handlers directly. Same path-style as the `command-core` entry above.
 command-api = { path = "../command-api" }
+# Shared `CostSnapshot -> i6e()` cost-summary renderer (byte-exact `/cost`
+# block) — the `/usage` Stats tab renders the same block as the headless
+# `/usage` command via `cost::render::cost_summary_from_snapshot`. `cost`
+# does not depend on `tui`, so this introduces no dependency cycle.
+cost = { path = "../cost" }
 url = "2"
 dirs = "5"
 

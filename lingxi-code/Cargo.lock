@@ -5918,6 +5918,7 @@ dependencies = [
  "async-trait",
  "command-api",
  "command-core",
+ "cost",
  "crossterm",
  "dirs",
  "image 0.25.5",

@@ -45,15 +45,7 @@ impl BuiltinCommandHandler for UsageHandler {
 }
 
 fn render_usage_snapshot(cost: &CostSnapshot) -> String {
-    cost::render::cost_summary(&cost::render::CostSummaryInput {
-        total_usd: cost.total_usd,
-        unknown_models: cost.unknown_models,
-        api_duration_ms: u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
-        wall_duration_ms: u64::try_from(cost.session_duration.as_millis()).unwrap_or(u64::MAX),
-        code_lines_added: cost.code_lines_added,
-        code_lines_removed: cost.code_lines_removed,
-        by_model: &cost.by_model,
-    })
+    cost::render::cost_summary_from_snapshot(cost)
 }
 
 #[cfg(test)]

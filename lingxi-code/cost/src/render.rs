@@ -128,6 +128,22 @@ pub struct CostSummaryInput<'a> {
     pub by_model: &'a [traits::ModelUsageRow],
 }
 
+/// Map a session [`traits::CostSnapshot`] onto [`CostSummaryInput`] and render the
+/// byte-exact `i6e()` block. Shared by the `/usage` command handler and the TUI
+/// Usage/Stats screen so the field mapping lives in exactly one place.
+#[must_use]
+pub fn cost_summary_from_snapshot(snap: &traits::CostSnapshot) -> String {
+    cost_summary(&CostSummaryInput {
+        total_usd: snap.total_usd,
+        unknown_models: snap.unknown_models,
+        api_duration_ms: u64::try_from(snap.api_duration.as_millis()).unwrap_or(u64::MAX),
+        wall_duration_ms: u64::try_from(snap.session_duration.as_millis()).unwrap_or(u64::MAX),
+        code_lines_added: snap.code_lines_added,
+        code_lines_removed: snap.code_lines_removed,
+        by_model: &snap.by_model,
+    })
+}
+
 /// Byte-exact port of claude-code `i6e()`. Returns the plain block; the consumer
 /// applies dimming. Labels pad to column 23.
 #[must_use]
@@ -265,6 +281,38 @@ mod tests {
              Total code changes:    1 line added, 5 lines removed\n\
              Usage:                 0 input, 0 output, 0 cache read, 0 cache write"
         );
+    }
+
+    #[test]
+    fn cost_summary_from_snapshot_maps_fields() {
+        let rows = vec![ModelUsageRow {
+            model: "claude-opus-4-8".into(),
+            total_nano_usd: 123_400_000,
+            input_tokens: 5_000,
+            output_tokens: 2_000,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }];
+        let snap = traits::CostSnapshot {
+            total_usd: 0.1234,
+            unknown_models: true,
+            api_duration: std::time::Duration::from_millis(5_000),
+            session_duration: std::time::Duration::from_secs(125),
+            code_lines_added: 10,
+            code_lines_removed: 1,
+            by_model: rows.clone(),
+            ..traits::CostSnapshot::default()
+        };
+        let expected = cost_summary(&CostSummaryInput {
+            total_usd: 0.1234,
+            unknown_models: true,
+            api_duration_ms: 5_000,
+            wall_duration_ms: 125_000,
+            code_lines_added: 10,
+            code_lines_removed: 1,
+            by_model: &rows,
+        });
+        assert_eq!(cost_summary_from_snapshot(&snap), expected);
     }
 
     #[test]

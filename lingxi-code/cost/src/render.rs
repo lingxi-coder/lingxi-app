@@ -145,14 +145,44 @@ mod tests {
             cache_creation_input_tokens: 0,
         }];
         let out = usage_by_model_block(&rows);
-        assert!(out.starts_with("Usage by model:\n"));
-        // label right-aligned to 21, then the token/cost line.
-        assert!(
-            out.contains(
-                "    claude-opus-4-8:  5k input, 2k output, 1.5k cache read, 0 cache write ($1.23)"
-            ),
-            "{out}"
+        // label right-aligned to 21 ("claude-opus-4-8:" is 16 chars, so 5 leading spaces),
+        // then the token/cost line (5k, 2k, 1.5k, 0; cost $1.23).
+        assert_eq!(
+            out,
+            "Usage by model:\n     claude-opus-4-8:  5k input, 2k output, 1.5k cache read, 0 cache write ($1.23)"
         );
+    }
+
+    #[test]
+    fn cbg_multiple_models_joined() {
+        let rows = vec![
+            ModelCostSummary {
+                model_ref: ModelRef {
+                    provider: ProviderId::Anthropic,
+                    model: "claude-opus-4-8".into(),
+                },
+                total_nano_usd: 600_000_000, // $0.60
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            ModelCostSummary {
+                model_ref: ModelRef {
+                    provider: ProviderId::Anthropic,
+                    model: "claude-sonnet-4-20250514".into(),
+                },
+                total_nano_usd: 400_000_000, // $0.40
+                input_tokens: 2_000,
+                output_tokens: 100,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ];
+        let out = usage_by_model_block(&rows);
+        // header + two model lines, each starting on its own line.
+        assert!(out.starts_with("Usage by model:\n"), "{out}");
+        assert_eq!(out.matches('\n').count(), 2, "{out}"); // header\n line1\n line2 => 2 newlines
     }
 
     #[test]

@@ -77,9 +77,83 @@ pub fn format_token_count(n: u64) -> String {
     n.to_string()
 }
 
+use crate::pricing::ModelRef;
+use crate::summary::ModelCostSummary;
+
+/// `nano-USD → USD` (matches `cost/src/pricing.rs`'s `nano / 1e9`).
+#[allow(clippy::cast_precision_loss)]
+fn nano_to_usd(nano: u64) -> f64 {
+    nano as f64 / 1_000_000_000.0
+}
+
+/// Model display name for the "Usage by model" label. Uses the provider-scoped
+/// model name as-is (the port's per-model key is already a display-usable
+/// ref); a catalog lookup can refine this later without changing the format.
+fn model_label(model_ref: &ModelRef) -> String {
+    model_ref.model.clone()
+}
+
+/// Usage-by-model block — port of claude-code `cbg()`. Empty usage renders the
+/// aligned zero line; otherwise a header plus one right-aligned line per model.
+/// The per-model web-search clause is omitted (no per-model web-search tracking).
+#[must_use]
+pub fn usage_by_model_block(by_model: &[ModelCostSummary]) -> String {
+    if by_model.is_empty() {
+        return "Usage:                 0 input, 0 output, 0 cache read, 0 cache write".to_string();
+    }
+    let mut r = "Usage by model:".to_string();
+    for m in by_model {
+        let label = format!("{}:", model_label(&m.model_ref));
+        // right-align label to width 21 (claude-code `padStart(21)`).
+        let padded = format!("{label:>21}");
+        let line = format!(
+            "  {} input, {} output, {} cache read, {} cache write ({})",
+            format_token_count(m.input_tokens),
+            format_token_count(m.output_tokens),
+            format_token_count(m.cache_read_input_tokens),
+            format_token_count(m.cache_creation_input_tokens),
+            format_cost(nano_to_usd(m.total_nano_usd)),
+        );
+        r.push('\n');
+        r.push_str(&padded);
+        r.push_str(&line);
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pricing::ProviderId;
+
+    #[test]
+    fn cbg_empty_and_per_model() {
+        // Empty → the aligned zero line.
+        assert_eq!(
+            usage_by_model_block(&[]),
+            "Usage:                 0 input, 0 output, 0 cache read, 0 cache write"
+        );
+        let rows = vec![ModelCostSummary {
+            model_ref: ModelRef {
+                provider: ProviderId::Anthropic,
+                model: "claude-opus-4-8".into(),
+            },
+            total_nano_usd: 1_230_000_000, // $1.23
+            input_tokens: 5_000,
+            output_tokens: 2_000,
+            cache_read_input_tokens: 1_500,
+            cache_creation_input_tokens: 0,
+        }];
+        let out = usage_by_model_block(&rows);
+        assert!(out.starts_with("Usage by model:\n"));
+        // label right-aligned to 21, then the token/cost line.
+        assert!(
+            out.contains(
+                "    claude-opus-4-8:  5k input, 2k output, 1.5k cache read, 0 cache write ($1.23)"
+            ),
+            "{out}"
+        );
+    }
 
     #[test]
     fn qs_matches_cc() {

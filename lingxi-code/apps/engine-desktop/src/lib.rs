@@ -1846,6 +1846,9 @@ pub struct DesktopRuntime {
     /// (`/sandbox` description) `SandboxRuntimeConfig` unsandboxed-commands-allowed
     /// — renders ", fallback allowed" in the dynamic `/sandbox` description.
     pub sandbox_desc_fallback: bool,
+    /// (`/sandbox` description) `checkDependencies().errors.length === 0` — when
+    /// `false`, the dynamic `/sandbox` description shows the warning glyph.
+    pub sandbox_desc_deps_ok: bool,
     /// (`/rewind`) The shared file-history checkpoint store. The SAME
     /// `Arc<session::FileHistory>` the orchestrator captures into; the CLI uses
     /// it to build the `/rewind` picker rows and to restore code on rewind.
@@ -4872,12 +4875,14 @@ pub async fn build(
     let sandbox_toggle =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(sandbox_runtime_cfg.enabled));
     // (`/sandbox` description fidelity) Capture the static config flags the TUI's
-    // dynamic `/sandbox` description renders (claude-code `t`/`r`) BEFORE the
-    // config is moved into `tool_ctx` below. `managed` (policy-lock) and the
-    // dependency-check warning glyph are not modeled here yet (default off /
-    // deps-ok), a documented residual.
+    // dynamic `/sandbox` description renders (claude-code `t`/`r`/`o`) BEFORE the
+    // config is moved into `tool_ctx` below. `deps_ok` = claude-code
+    // `checkDependencies().errors.length === 0` (the same `sandbox_deps` computed
+    // above drives `sandbox_available`); `false` → the warning glyph. `managed`
+    // (policy-lock) is still not modeled (default off), a documented residual.
     let sandbox_desc_auto_allow = sandbox_runtime_cfg.auto_allow_bash_if_sandboxed;
     let sandbox_desc_fallback = sandbox_runtime_cfg.are_unsandboxed_commands_allowed();
+    let sandbox_desc_deps_ok = sandbox_deps.errors.is_empty();
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -5941,6 +5946,7 @@ pub async fn build(
         sandbox_toggle,
         sandbox_desc_auto_allow,
         sandbox_desc_fallback,
+        sandbox_desc_deps_ok,
         file_history,
         plugin_runtime,
         provider_availability,

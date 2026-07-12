@@ -378,6 +378,7 @@ pub(crate) async fn run_ratatui(
     tui::command::register_sandbox_desc_flags(tui::command::SandboxDescFlags {
         auto_allow: tui_build.runtime.sandbox_desc_auto_allow,
         fallback_allowed: tui_build.runtime.sandbox_desc_fallback,
+        deps_ok: tui_build.runtime.sandbox_desc_deps_ok,
         ..Default::default()
     });
     // (/tasks) The live background-task registry (already `TaskRegistryHandle`),

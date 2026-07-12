@@ -74,6 +74,9 @@ pub struct Runtime {
     pub sandbox_desc_auto_allow: bool,
     /// See [`Self::sandbox_desc_auto_allow`].
     pub sandbox_desc_fallback: bool,
+    /// (`/sandbox` description) dependency-check status projected from
+    /// [`engine_desktop::DesktopRuntime`]; `false` → the warning glyph.
+    pub sandbox_desc_deps_ok: bool,
     /// (`/rewind`) Shared file-history checkpoint store, projected from
     /// [`engine_desktop::DesktopRuntime::file_history`]. The TUI mount builds the
     /// `/rewind` picker rows from it, and the restore path calls its
@@ -743,6 +746,7 @@ pub async fn build_runtime_from_config(
         sandbox_toggle: rt.sandbox_toggle,
         sandbox_desc_auto_allow: rt.sandbox_desc_auto_allow,
         sandbox_desc_fallback: rt.sandbox_desc_fallback,
+        sandbox_desc_deps_ok: rt.sandbox_desc_deps_ok,
         file_history: rt.file_history,
         plugin_runtime: rt.plugin_runtime,
         provider_availability: rt.provider_availability,

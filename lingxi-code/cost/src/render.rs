@@ -42,6 +42,18 @@ pub fn format_duration_ms(ms: u64) -> String {
     "0s".to_string()
 }
 
+/// Cost formatter — port of claude-code `FTu(usd, 4)`: `> $0.50` renders 2
+/// decimals (rounded to cents via `dbg(e,100)=round(e*100)/100`); otherwise 4.
+#[must_use]
+pub fn format_cost(usd: f64) -> String {
+    if usd > 0.5 {
+        let cents = (usd * 100.0).round() / 100.0;
+        format!("${cents:.2}")
+    } else {
+        format!("${usd:.4}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +70,15 @@ mod tests {
         assert_eq!(format_duration_ms(90_061_000), "1d 1h 1m"); // days form drops seconds
         assert_eq!(format_duration_ms(59_500), "59s");  // floor(59.5)=59
         assert_eq!(format_duration_ms(119_500), "2m 0s"); // round(59.5s)=60 -> carry: 1m -> 2m 0s
+    }
+
+    #[test]
+    fn ftu_matches_cc() {
+        assert_eq!(format_cost(0.0), "$0.0000");
+        assert_eq!(format_cost(0.05), "$0.0500");
+        assert_eq!(format_cost(0.5), "$0.5000");        // not > 0.5
+        assert_eq!(format_cost(0.5001), "$0.50");       // > 0.5 -> 2dp rounded
+        assert_eq!(format_cost(1.2345), "$1.23");
+        assert_eq!(format_cost(12.999), "$13.00");
     }
 }

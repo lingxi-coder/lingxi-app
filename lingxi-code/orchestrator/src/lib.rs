@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub(crate) mod cost_lines;
 pub mod conversation;
 pub mod cost_wiring;
 pub mod cwd_changed_firer;

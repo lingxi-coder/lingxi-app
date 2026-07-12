@@ -514,6 +514,49 @@ mod rate_limit_message {
     }
 
     #[test]
+    fn parses_206_overage_headers() {
+        // 2.1.206 `ClaudeAILimits` overage fields — no `status` header, so the
+        // early-warning replacement in `from_headers_at` never fires and the
+        // raw parse passes through untouched (same guard as
+        // `from_headers_reads_unified_headers` above).
+        let headers = vec![
+            (
+                "anthropic-ratelimit-unified-overage-in-use".into(),
+                "true".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-upgrade-paths".into(),
+                "upgrade_plan, overage".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-period-monthly-utilization".into(),
+                "0.42".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-period-channel-utilization".into(),
+                "0.10".into(),
+            ),
+        ];
+        let info = RateLimitInfo::from_headers(&headers);
+        assert!(info.overage_in_use);
+        assert_eq!(
+            info.upgrade_paths.as_deref(),
+            Some(&["upgrade_plan".to_string(), "overage".to_string()][..])
+        );
+        assert_eq!(info.overage_period_monthly_utilization, Some(0.42));
+        assert_eq!(info.overage_period_channel_utilization, Some(0.10));
+    }
+
+    #[test]
+    fn overage_206_fields_absent_headers_yield_defaults() {
+        let info = RateLimitInfo::from_headers(&[]);
+        assert!(!info.overage_in_use);
+        assert_eq!(info.upgrade_paths, None);
+        assert_eq!(info.overage_period_monthly_utilization, None);
+        assert_eq!(info.overage_period_channel_utilization, None);
+    }
+
+    #[test]
     fn five_hour_session_limit_message_is_byte_locked() {
         // claude-code rateLimitMessages.ts:192-193 + :343.
         let msg = rate_limit_error_message(

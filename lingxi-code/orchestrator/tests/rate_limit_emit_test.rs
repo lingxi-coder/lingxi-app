@@ -30,9 +30,10 @@ fn end_turn_response(text: &str) -> llm_client::LlmResponse {
     )
 }
 
-/// A fully-populated internal snapshot (all nine post-T7 fields, plus the
-/// B4-T2 `surpassed_threshold` — internal-only: the nine-argument
-/// `emit_rate_limit` event surface is unchanged).
+/// A fully-populated internal snapshot (all nine post-T7 fields, the
+/// B4-T2 `surpassed_threshold`, plus the four 2.1.206 overage fields —
+/// internal-only: the nine-argument `emit_rate_limit` event surface is
+/// unchanged).
 fn sample_info() -> RateLimitInfo {
     RateLimitInfo {
         rate_limit_type: Some("five_hour".into()),
@@ -45,6 +46,10 @@ fn sample_info() -> RateLimitInfo {
         overage_resets_at: Some(1_760_000_200),
         fallback_available: Some(true),
         surpassed_threshold: Some(0.9),
+        overage_in_use: true,
+        upgrade_paths: Some(vec!["upgrade_plan".to_string(), "overage".to_string()]),
+        overage_period_monthly_utilization: Some(0.42),
+        overage_period_channel_utilization: Some(0.10),
     }
 }
 

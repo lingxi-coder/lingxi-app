@@ -420,6 +420,22 @@ pub struct RateLimitInfo {
     /// (`claudeAiLimits.ts:288`); the base header parse and the time-relative
     /// fallback leave it `None` (the TS fresh object at `:332-339` omits it).
     pub surpassed_threshold: Option<f64>,
+    /// `anthropic-ratelimit-unified-overage-in-use` strict-equals `"true"`
+    /// (2.1.206 `ClaudeAILimits`: `overageInUse = header(…) === 'true'`). No
+    /// header → `false` (the TS boolean has no `undefined` state).
+    pub overage_in_use: bool,
+    /// `anthropic-ratelimit-unified-upgrade-paths` — a comma-separated list of
+    /// upgrade-plan identifiers, split and trimmed (2.1.206:
+    /// `header(…)?.split(',').map(trim)`). `None` when the header is absent.
+    pub upgrade_paths: Option<Vec<String>>,
+    /// `anthropic-ratelimit-unified-overage-period-monthly-utilization` (0-1
+    /// fraction; 2.1.206: `Number(header(…))` when finite). `None` when the
+    /// header is absent or non-finite.
+    pub overage_period_monthly_utilization: Option<f64>,
+    /// `anthropic-ratelimit-unified-overage-period-channel-utilization` (0-1
+    /// fraction; 2.1.206: `Number(header(…))` when finite). `None` when the
+    /// header is absent or non-finite.
+    pub overage_period_channel_utilization: Option<f64>,
 }
 
 /// Map a representative-claim value to the abbreviation used in the per-claim
@@ -772,6 +788,24 @@ impl RateLimitInfo {
             // Only ever set by the header-based early-warning replacement
             // below (claudeAiLimits.ts:288) — never by the raw parse.
             surpassed_threshold: None,
+            // 2.1.206 overage fields — `=== 'true'` strict equality (no
+            // header → `false`, matching the TS boolean's no-`undefined`
+            // stance).
+            overage_in_use: header_value(headers, "anthropic-ratelimit-unified-overage-in-use")
+                == Some("true"),
+            // `header(…)?.split(',').map(trim)` — absent header → `None`;
+            // present header always yields at least one (possibly empty)
+            // element, same as the TS `.split(',')`.
+            upgrade_paths: header_value(headers, "anthropic-ratelimit-unified-upgrade-paths")
+                .map(|v| v.split(',').map(|s| s.trim().to_string()).collect()),
+            overage_period_monthly_utilization: parse_fraction(
+                headers,
+                "anthropic-ratelimit-unified-overage-period-monthly-utilization",
+            ),
+            overage_period_channel_utilization: parse_fraction(
+                headers,
+                "anthropic-ratelimit-unified-overage-period-channel-utilization",
+            ),
         };
 
         // Final-status semantics (claudeAiLimits.ts:411-424) — the early

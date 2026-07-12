@@ -75,7 +75,7 @@ Total code changes:    <A> line[s] added, <B> line[s] removed
 | Total cost (`QS`) | `total_nano_usd` | none |
 | Total duration (wall) (`Dxe`) | `session_duration` | `qs()` formatting |
 | Total duration (API) (`UL`) | per-call `elapsed` computed at `turn_loop.rs:692` / `conversation.rs:5977` (telemetry only) | NEW accumulator |
-| Total code changes (`RFe`/`xFe`) | `FileHistory` stores per-file content snapshots (`FileHistorySnapshot`) | NEW diff / line count |
+| Total code changes (`RFe`/`xFe`) | `Edit`/`Write`/`MultiEdit` emit `structuredPatch` hunks (`edit.rs:823`, `write.rs:413`) | NEW cumulative counter (sum +/- lines per edit) |
 | Usage by model (`cbg`/`jP`) | `cost/src/summary.rs::ModelCostSummary` already projects per-model `total_nano_usd` + all token types | render/projection |
 | unknown-model note (`Cqo`) | not tracked | NEW flag |
 | token/cost formatters (`Bu`/`FTu`) | `format_tokens` (TS-compact), `${:.2}` cost | reuse, pin vs binary |
@@ -98,19 +98,22 @@ Add a cumulative API-duration counter to `CostState`/`CostTracker`. At the exist
 per-call `elapsed` sites (`turn_loop.rs:692`, `conversation.rs:5977`), add the elapsed to
 the counter. `snapshot_cost_real` projects it into `CostSnapshot.api_duration`.
 
-### Component 3 — code-change line counting (session/file-history)
+### Component 3 — code-change line counting (CUMULATIVE per-edit)
 
-A new helper (beside `session/src/file_history.rs`) that, **on demand at render time**,
-for each file tracked in the session's `FileHistory`, diffs snapshot content vs current
-content and sums line additions / removals. On-demand (not incremental) mirrors CC's
-`RFe()`/`xFe()` and avoids hot-path cost. Projected into
-`CostSnapshot.code_lines_added` / `code_lines_removed`.
+**Pinned against the binary:** CC keeps running counters — `RFe()=Pt.totalLinesAdded`,
+`xFe()=Pt.totalLinesRemoved` — incremented after each edit via
+`Bhn(added,removed){Pt.totalLinesAdded+=added; Pt.totalLinesRemoved+=removed}` (reset to
+0 at session start). So it is CUMULATIVE per-edit line counts from each edit's diff, NOT a
+net FileHistory snapshot diff.
 
-**Pin against CC (`RFe`/`xFe`) during implementation:** (a) the counting SEMANTICS —
-NET session change (earliest snapshot vs current) vs CUMULATIVE per-edit additions; and
-(b) the diff granularity (whole-file line diff vs per-edit hunk sums). Extract `RFe`/`xFe`
-from the binary to decide before coding, so the counts match CC rather than merely being
-"a reasonable line count".
+The port's `Edit`/`Write`/`MultiEdit` tools already emit a `structuredPatch` hunk array
+(`edit.rs:823`, `write.rs:413`; `tools/file/src/structured_patch.rs::build_structured_patch`,
+a 1:1 jsdiff port). Implementation: when the **orchestrator** processes a file-edit tool
+result carrying `structuredPatch`, count the `+`/`-` lines across its hunks and add them
+to session counters (added, removed). This needs no edit-tool changes — the orchestrator
+already sees tool results, mirroring where CC calls `Bhn`. Counters live in the session
+cost/stats state (Component 2's home) and project into `CostSnapshot.code_lines_added` /
+`code_lines_removed`.
 
 ### Component 4 — unknown-model flag (`cost` crate)
 

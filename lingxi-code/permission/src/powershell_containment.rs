@@ -29,8 +29,11 @@ use std::sync::LazyLock;
 /// is reserved for the `NKn`/`xgg` write-vs-create path branches).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PsOperation {
+    /// A read/inspect cmdlet (e.g. `Get-Content`, `Test-Path`).
     Read,
+    /// A write/modify/delete cmdlet (e.g. `Set-Content`, `Remove-Item`).
     Write,
+    /// A create cmdlet — reserved for the `NKn`/`xgg` write-vs-create branches.
     Create,
 }
 
@@ -44,9 +47,13 @@ pub enum PsOperation {
 /// `optional_write` marks a write whose target path may legitimately be absent.
 #[derive(Debug, Clone)]
 pub struct FkEntry {
+    /// Whether this cmdlet reads, writes, or creates.
     pub operation_type: PsOperation,
+    /// Parameters whose value is a file path (e.g. `-Path`, `-LiteralPath`).
     pub path_params: &'static [&'static str],
+    /// Boolean flags that take no value (e.g. `-Recurse`, `-Force`).
     pub known_switches: &'static [&'static str],
+    /// Parameters that take a non-path value which must be skipped (e.g. `-Value`).
     pub known_value_params: &'static [&'static str],
     /// `leafOnlyPathParams` — parameters (e.g. `New-Item -Name`) whose value is a
     /// bare leaf name; a value containing a separator / `.` / `..` is treated as
@@ -630,6 +637,266 @@ pub fn is_parameter(arg: &str, element_type: Option<&str>) -> bool {
 pub fn param_in_list(short: &str, list: &[&str]) -> bool {
     list.iter()
         .any(|&r| r == short || (short.len() > 1 && r.starts_with(short)))
+}
+
+/// A single parsed PowerShell command (claude-code's transformed `CommandAst`
+/// node). `element_types[0]` is the command NAME's simplified AST type;
+/// `element_types[i + 1]` is the type of `args[i]` (`_Br`-mapped, e.g.
+/// `"StringConstant"`, `"Parameter"`, `"SubExpression"`, `"Variable"`). A missing
+/// entry (short vector) reads as "unknown", exactly like JS `a[p+1] === undefined`.
+#[derive(Debug, Clone)]
+pub struct PsCommand {
+    /// The command name as written (alias or canonical cmdlet, any casing).
+    pub name: String,
+    /// The command's arguments, in order, as reconstructed token text.
+    pub args: Vec<String>,
+    /// Simplified AST element types: `[0]` is the name's type; `[i + 1]` is the
+    /// type of `args[i]`. A short vector reads as "unknown" for missing entries.
+    pub element_types: Vec<String>,
+}
+
+/// Result of [`extract_paths`] (claude-code `X_u`): the file-path arguments, the
+/// cmdlet's operation, whether any path argument could not be statically
+/// validated (→ the caller asks), and whether the write target is optional.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathExtraction {
+    /// The file-path arguments discovered for the command.
+    pub paths: Vec<String>,
+    /// The cmdlet's read/write/create classification.
+    pub operation_type: PsOperation,
+    /// True when some path argument could not be statically validated (→ ask).
+    pub has_unvalidatable_path_arg: bool,
+    /// True when the write target may legitimately be absent (e.g. `Invoke-WebRequest`).
+    pub optional_write: bool,
+}
+
+/// A quote character stripped by `L1`/tested by `eGi` (claude-code
+/// `/['"‘-‟]/`): ASCII `'`/`"` plus the Unicode quote block
+/// U+2018..U+201F (curly single/double quotes).
+fn is_quote_char(c: char) -> bool {
+    c == '\'' || c == '"' || ('\u{2018}'..='\u{201F}').contains(&c)
+}
+
+/// Leading whitespace stripped by `qWi` (`/^[\s᠎]+/`): JS `\s`
+/// verbatim (incl. `﻿`, excl. Rust's ``) plus the explicit U+0085 and
+/// U+180E.
+fn is_ps_leading_ws(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0009}' | '\u{000A}' | '\u{000B}' | '\u{000C}' | '\u{000D}' | '\u{0020}'
+            | '\u{0085}' | '\u{00A0}' | '\u{1680}' | '\u{180E}'
+            | '\u{2000}'..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}'
+            | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+    )
+}
+
+/// Strip surrounding quote characters (claude-code `L1`: remove leading and
+/// trailing runs of [`is_quote_char`]).
+fn strip_surrounding_quotes(s: &str) -> &str {
+    let start = s.find(|c| !is_quote_char(c)).unwrap_or(s.len());
+    let t = &s[start..];
+    let end = t.rfind(|c| !is_quote_char(c)).map_or(0, |i| i + t[i..].chars().next().unwrap().len_utf8());
+    &t[..end]
+}
+
+/// Strip a leading whitespace run + any PowerShell comments (claude-code `Gee`):
+/// leading `\s᠎`, then repeatedly a `<# … #>` block comment or a
+/// `# … <newline>` line comment (each followed by another leading-ws strip).
+fn strip_comments_and_leading_ws(s: &str) -> &str {
+    let mut t = s.trim_start_matches(is_ps_leading_ws);
+    loop {
+        if let Some(rest) = t.strip_prefix("<#") {
+            match rest.find("#>") {
+                Some(i) => t = rest[i + 2..].trim_start_matches(is_ps_leading_ws),
+                None => break,
+            }
+        } else if t.starts_with('#') {
+            match t.find(['\r', '\n']) {
+                // slice FROM the newline (claude-code `t.slice(r)`), then strip ws.
+                Some(i) => t = t[i..].trim_start_matches(is_ps_leading_ws),
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
+    t
+}
+
+/// `$Kn` — strip comments/leading-ws then surrounding quotes.
+fn clean_value(s: &str) -> &str {
+    strip_surrounding_quotes(strip_comments_and_leading_ws(s))
+}
+
+/// `eGi` — a parameter/positional VALUE that cannot be statically validated as a
+/// single literal path: it contains a quote char, or (after [`clean_value`])
+/// looks like an array / subexpression / variable / backtick-escape.
+fn is_unvalidatable_value(s: &str) -> bool {
+    if s.chars().any(is_quote_char) {
+        return true;
+    }
+    let t = clean_value(s);
+    t.contains(',')
+        || t.starts_with('(')
+        || t.starts_with('[')
+        || t.contains('`')
+        || t.contains("@(")
+        || t.starts_with('@')
+        || t.contains('$')
+}
+
+/// Extract the file-path arguments of a PowerShell command (claude-code `X_u`).
+///
+/// Cmdlets not in [`FKN`] take no path args (`{paths: [], read}`). For a
+/// path-taking cmdlet, walk the args: parameters are matched against the
+/// cmdlet's path / leaf-only / switch / value-param lists (with `WWi`/`GWi`
+/// appended); a `-Param:value` value is quote-stripped, a `-Param value` value
+/// consumes the next arg raw; positional args past `positional_skip` are paths.
+/// Any arg whose following AST element type is not in [`AGG`], any array /
+/// subexpression value, or any unknown parameter marks `has_unvalidatable_path_arg`.
+#[must_use]
+pub fn extract_paths(cmd: &PsCommand) -> PathExtraction {
+    let canon = normalize_cmdlet(&cmd.name);
+    let Some(entry) = FKN.get(canon.as_str()) else {
+        return PathExtraction {
+            paths: Vec::new(),
+            operation_type: PsOperation::Read,
+            has_unvalidatable_path_arg: false,
+            optional_write: false,
+        };
+    };
+    let switches: Vec<&str> = entry.known_switches.iter().chain(WWI).copied().collect();
+    let value_params: Vec<&str> = entry.known_value_params.iter().chain(GWI).copied().collect();
+
+    let s = &cmd.args;
+    // element type of args[p] lives at element_types[p + 1] (index 0 = cmd name).
+    let elem_type = |p: usize| -> Option<&str> { cmd.element_types.get(p + 1).map(String::as_str) };
+
+    let mut paths: Vec<String> = Vec::new();
+    let mut unvalidatable = false;
+    let mut positional = 0usize;
+
+    let mut p = 0usize;
+    while p < s.len() {
+        let f = &s[p];
+        if f.is_empty() {
+            p += 1;
+            continue;
+        }
+        // `d(p)`: mark unvalidatable when the arg-at-p's element type is known and
+        // not one of the statically-validatable types (StringConstant/Parameter).
+        let peek_unvalidatable = |idx: usize| -> bool {
+            matches!(elem_type(idx), Some(t) if !AGG.contains(t))
+        };
+
+        if is_parameter(f, elem_type(p)) {
+            // Normalize the leading (possibly Unicode) dash to a single "-" and
+            // split off an inline `-Param:value` value. Work on the tail after the
+            // dash so a multi-byte dash never desyncs the colon offset.
+            let first_len = f.chars().next().map_or(0, char::len_utf8);
+            let rest = &f[first_len..];
+            let (sname, colon_value): (String, Option<&str>) = match rest.find(':') {
+                Some(ci) => (format!("-{}", &rest[..ci]).to_lowercase(), Some(&rest[ci + 1..])),
+                None => (format!("-{rest}").to_lowercase(), None),
+            };
+
+            if param_in_list(&sname, entry.path_params) {
+                let mut b: Option<String> = None;
+                if let Some(v) = colon_value {
+                    if is_unvalidatable_value(v) {
+                        unvalidatable = true;
+                    }
+                    b = Some(clean_value(v).to_string());
+                } else if let Some(v) = s.get(p + 1) {
+                    // JS `if(v && !Rtt(v,w))` — an empty next-arg is falsy, not consumed.
+                    if !v.is_empty() && !is_parameter(v, elem_type(p + 1)) {
+                        b = Some(v.clone());
+                        if peek_unvalidatable(p + 1) {
+                            unvalidatable = true;
+                        }
+                        p += 1;
+                    }
+                }
+                if let Some(b) = b {
+                    if !b.is_empty() {
+                        paths.push(b);
+                    }
+                }
+            } else if !entry.leaf_only_path_params.is_empty()
+                && param_in_list(&sname, entry.leaf_only_path_params)
+            {
+                let mut b: Option<String> = None;
+                if let Some(v) = colon_value {
+                    if is_unvalidatable_value(v) {
+                        unvalidatable = true;
+                    }
+                    b = Some(clean_value(v).to_string());
+                } else if let Some(v) = s.get(p + 1) {
+                    // JS `if(v && !Rtt(v,w))` — an empty next-arg is falsy, not consumed.
+                    if !v.is_empty() && !is_parameter(v, elem_type(p + 1)) {
+                        b = Some(v.clone());
+                        if peek_unvalidatable(p + 1) {
+                            unvalidatable = true;
+                        }
+                        p += 1;
+                    }
+                }
+                if let Some(b) = b {
+                    if b.contains('/') || b.contains('\\') || b == "." || b == ".." {
+                        unvalidatable = true;
+                    } else {
+                        paths.push(b);
+                    }
+                }
+            } else if param_in_list(&sname, &switches) {
+                // known switch → no value, ignore
+            } else if param_in_list(&sname, &value_params) {
+                // known value param → skip its (non-path) value
+                if let Some(v) = colon_value {
+                    if is_unvalidatable_value(v) {
+                        unvalidatable = true;
+                    }
+                } else if let Some(v) = s.get(p + 1) {
+                    // JS `if(v && !Rtt(v,w))` — an empty next-arg is falsy, not consumed.
+                    if !v.is_empty() && !is_parameter(v, elem_type(p + 1)) {
+                        if peek_unvalidatable(p + 1) {
+                            unvalidatable = true;
+                        }
+                        p += 1;
+                    }
+                }
+            } else {
+                // unknown parameter → cannot validate; a `-X:value` form still
+                // contributes its value as a path candidate.
+                unvalidatable = true;
+                if let Some(v) = colon_value {
+                    paths.push(clean_value(v).to_string());
+                }
+            }
+            p += 1;
+            continue;
+        }
+
+        // positional argument
+        if positional < entry.positional_skip {
+            positional += 1;
+            p += 1;
+            continue;
+        }
+        positional += 1;
+        if peek_unvalidatable(p) {
+            unvalidatable = true;
+        }
+        paths.push(f.clone());
+        p += 1;
+    }
+
+    PathExtraction {
+        paths,
+        operation_type: entry.operation_type,
+        has_unvalidatable_path_arg: unvalidatable,
+        optional_write: entry.optional_write,
+    }
 }
 
 #[cfg(test)]

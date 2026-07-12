@@ -111,6 +111,118 @@ fn is_parameter_matches_rtt() {
     assert!(!is_parameter("", None));
 }
 
+/// Build a command whose arg element types are all unknown (empty vector ⇒
+/// `is_parameter` falls back to the leading-dash heuristic, like a real
+/// text-only reconstruction).
+fn cmd(name: &str, args: &[&str]) -> PsCommand {
+    PsCommand {
+        name: name.to_string(),
+        args: args.iter().map(|s| (*s).to_string()).collect(),
+        element_types: Vec::new(),
+    }
+}
+
+/// Build a command with explicit per-arg element types (index 0 = name type).
+fn cmd_typed(name: &str, args: &[&str], types: &[&str]) -> PsCommand {
+    PsCommand {
+        name: name.to_string(),
+        args: args.iter().map(|s| (*s).to_string()).collect(),
+        element_types: types.iter().map(|s| (*s).to_string()).collect(),
+    }
+}
+
+#[test]
+fn extract_positional_and_named_paths() {
+    // Positional read path.
+    let e = extract_paths(&cmd("Get-Content", &["foo.txt"]));
+    assert_eq!(e.paths, vec!["foo.txt"]);
+    assert_eq!(e.operation_type, PsOperation::Read);
+    assert!(!e.has_unvalidatable_path_arg);
+
+    // Named -Path with a skipped -Value.
+    let e = extract_paths(&cmd("Set-Content", &["-Path", "out.txt", "-Value", "hello"]));
+    assert_eq!(e.paths, vec!["out.txt"]);
+    assert_eq!(e.operation_type, PsOperation::Write);
+
+    // Alias resolves + positional path.
+    assert_eq!(extract_paths(&cmd("gc", &["a.log"])).paths, vec!["a.log"]);
+}
+
+#[test]
+fn extract_colon_form_and_quote_strip() {
+    assert_eq!(extract_paths(&cmd("Set-Content", &["-Path:out.txt"])).paths, vec!["out.txt"]);
+    // Surrounding quotes stripped from a -Param:value value.
+    assert_eq!(extract_paths(&cmd("Set-Content", &["-Path:\"my file.txt\""])).paths, vec!["my file.txt"]);
+    // Unambiguous abbreviation binds to -Path.
+    assert_eq!(extract_paths(&cmd("Get-Content", &["-pa", "z.txt"])).paths, vec!["z.txt"]);
+}
+
+#[test]
+fn extract_switch_ignored_value_param_skipped() {
+    // -Recurse is a switch (no value); the positional after it is the path.
+    let e = extract_paths(&cmd("Get-ChildItem", &["-Recurse", "src"]));
+    assert_eq!(e.paths, vec!["src"]);
+    // -Filter is a value param → its value is skipped, not treated as a path.
+    let e = extract_paths(&cmd("Get-Content", &["-Filter", "*.rs", "real.txt"]));
+    assert_eq!(e.paths, vec!["real.txt"]);
+}
+
+#[test]
+fn extract_positional_skip_and_optional_write() {
+    // Invoke-WebRequest skips the positional URI (positional_skip=1); only -OutFile is a path.
+    let e = extract_paths(&cmd("Invoke-WebRequest", &["https://example.com/x", "-OutFile", "dl.bin"]));
+    assert_eq!(e.paths, vec!["dl.bin"]);
+    assert_eq!(e.operation_type, PsOperation::Write);
+    assert!(e.optional_write);
+    // With no path at all, extraction yields none (caller decides via optional_write).
+    let e = extract_paths(&cmd("Invoke-WebRequest", &["https://example.com/x"]));
+    assert!(e.paths.is_empty());
+    assert!(e.optional_write);
+}
+
+#[test]
+fn extract_leaf_only_param() {
+    // New-Item -Name takes a bare leaf → valid path.
+    assert_eq!(extract_paths(&cmd("New-Item", &["-Name", "notes.md"])).paths, vec!["notes.md"]);
+    // A leaf value containing a separator is un-validatable, NOT a path.
+    let e = extract_paths(&cmd("New-Item", &["-Name", "sub/notes.md"]));
+    assert!(e.paths.is_empty());
+    assert!(e.has_unvalidatable_path_arg);
+}
+
+#[test]
+fn extract_unknown_param_and_array_value_flag_unvalidatable() {
+    // Unknown parameter → unvalidatable; a -X:value still contributes its value.
+    let e = extract_paths(&cmd("Set-Content", &["-Bogus:val"]));
+    assert!(e.has_unvalidatable_path_arg);
+    assert_eq!(e.paths, vec!["val"]);
+    // An array-literal value on a path param is flagged unvalidatable (eGi).
+    let e = extract_paths(&cmd("Set-Content", &["-Path:@(a,b)"]));
+    assert!(e.has_unvalidatable_path_arg);
+}
+
+#[test]
+fn extract_element_type_marks_unvalidatable() {
+    // A path value whose AST element type is a Variable (not StringConstant/Parameter)
+    // is pushed but flags unvalidatable (the `d()` peek).
+    // types: [0]=cmd name, [1]=-Path (Parameter), [2]=$var (Variable)
+    let e = extract_paths(&cmd_typed(
+        "Set-Content",
+        &["-Path", "$var"],
+        &["StringConstant", "Parameter", "Variable"],
+    ));
+    assert_eq!(e.paths, vec!["$var"]);
+    assert!(e.has_unvalidatable_path_arg);
+}
+
+#[test]
+fn extract_non_path_cmdlet_is_empty_read() {
+    let e = extract_paths(&cmd("Write-Output", &["hello", "world"]));
+    assert!(e.paths.is_empty());
+    assert_eq!(e.operation_type, PsOperation::Read);
+    assert!(!e.has_unvalidatable_path_arg);
+}
+
 #[test]
 fn param_in_list_matches_lkn() {
     let list = &["-path", "-literalpath", "-pspath", "-lp"];

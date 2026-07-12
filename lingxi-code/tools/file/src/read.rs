@@ -1161,6 +1161,16 @@ impl FileReadTool {
                     "originalSize": original_size,
                 },
             }),
+            // [KNOWN WIRE DIVERGENCE — image tool_result routing] claude-code
+            // 2.1.206's FileReadTool result mapper embeds the image DIRECTLY in
+            // the tool_result content array (`content: [{type:"image", source:
+            // {type:"base64", data, media_type}}]`) with NO text placeholder and
+            // NO separate message. The port instead sends this placeholder text
+            // as the tool_result content and injects the image as a following
+            // message (`new_messages`). Closing this requires routing the image
+            // block through `ContentBlock::ToolResult.content_blocks` in BOTH
+            // driver twins (turn_loop + streaming) and dropping the injected
+            // message — a dedicated unit (JSONL shape + TUI display follow).
             model_content: Some("[Image content provided in the following message.]".to_string()),
             new_messages: vec![msg],
             context_modifier: None,
@@ -1315,6 +1325,10 @@ impl FileReadTool {
             {
                 self.emit_failed(invocation_id, "pdf_extraction_unavailable")
                     .await;
+                // [RESIDUAL — message not in 2.1.206] port-only fallback for a
+                // build WITHOUT the `pdf-render` feature; claude always ships
+                // page extraction, so it has no analogous string. Desktop builds
+                // enable `pdf-render` and never reach this.
                 return Err(ToolError::Io(
                     "Reading specific PDF pages requires page extraction, which is not yet available. Read the whole PDF (omit pages) if it is small.".to_string(),
                 ));

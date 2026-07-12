@@ -384,15 +384,9 @@ fn early_warning_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> Optio
 
 /// Port of `formatLimitReachedText` (rateLimitMessages.ts:333-344). The TS
 /// `model` parameter is unused there (`_model`) and omitted here.
-fn format_limit_reached_text(limit: &str, reset_message: &str, is_ant: bool) -> String {
-    if is_ant {
-        // FEEDBACK_CHANNEL_ANT = '#briarpatch-cc' (rateLimitMessages.ts:15).
-        return format!(
-            "You've hit your {limit}{reset_message}. If you have feedback about \
-             this limit, post in #briarpatch-cc. You can reset your limits with \
-             /reset-limits"
-        );
-    }
+fn format_limit_reached_text(limit: &str, reset_message: &str, _is_ant: bool) -> String {
+    // 2.1.206 `lhe(e,t,r)` = `You've hit your ${e}${t}` — the USER_TYPE==='ant'
+    // #briarpatch-cc/reset-limits branch was removed in 206.
     format!("You've hit your {limit}{reset_message}")
 }
 
@@ -816,13 +810,22 @@ mod tests {
     }
 
     #[test]
-    fn rejected_ant_user_appends_feedback_and_reset_hint() {
-        // TS formatLimitReachedText USER_TYPE === 'ant' branch (:339-341).
+    fn rejected_ant_user_gets_plain_text_206() {
+        // 2.1.206 `lhe` dropped the USER_TYPE === 'ant' #briarpatch-cc
+        // branch entirely; `is_ant` no longer changes the output.
         let got = compose(&rejected(Some("five_hour"), None), true).unwrap();
+        assert_eq!(got.text, "You've hit your session limit");
+    }
+
+    #[test]
+    fn lhe_206_has_no_ant_branch() {
         assert_eq!(
-            got.text,
-            "You've hit your session limit. If you have feedback about this limit, \
-             post in #briarpatch-cc. You can reset your limits with /reset-limits"
+            format_limit_reached_text("session limit", " · resets 3pm", true),
+            "You've hit your session limit · resets 3pm"
+        );
+        assert_eq!(
+            format_limit_reached_text("weekly limit", "", false),
+            "You've hit your weekly limit"
         );
     }
 

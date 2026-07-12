@@ -21,12 +21,17 @@ use std::sync::{Arc, Mutex};
 
 use tui_core::status_line_command::{
     build_status_line_input, parse_cost_usd, RawUtilizationSnapshot, StatusLineConfig,
+    StatusLineInputs,
 };
 
 /// The live inputs the pump folds into the JSON stdin payload. Updated by the
 /// widget as `TurnEvent`s arrive; read by the pump when it re-runs the command.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct StatusLineData {
+    /// `session_id` (2.1.206 `Rf()` base field) — seeded once at boot.
+    pub session_id: String,
+    /// `transcript_path` (`Rf()` base field) — seeded once at boot.
+    pub transcript_path: String,
     /// Current model WIRE id (`model.id`, e.g. the provider-local request model),
     /// distinct from the human display name (claude-code `model.id` vs
     /// `display_name`).
@@ -35,13 +40,59 @@ pub struct StatusLineData {
     pub model: String,
     /// Working directory (`workspace.current_dir` + `project_dir`).
     pub cwd: PathBuf,
+    /// Active output style name (`output_style.name`; claude default
+    /// `"default"`).
+    pub output_style: String,
     /// Pre-formatted session cost string (`$0.0000`); parsed to `total_cost_usd`.
     pub cost: String,
-    /// Context-window used fraction (0-1). Not yet tracked by the ratatui path
-    /// → `0.0` (documented divergence, same as the old `StatusSnapshot` subset).
+    /// Context-window used fraction (0-1), from `TurnEvent::ContextPressure`.
     pub context_pct: f32,
+    /// Raw context token estimate behind the fraction
+    /// (`context_window.total_input_tokens` + the `exceeds_200k_tokens` input).
+    pub used_tokens: u64,
+    /// The model's effective context window in tokens
+    /// (`context_window.context_window_size`).
+    pub context_window_tokens: u64,
+    /// `fast_mode` — Claude-syntax concept: `true` only when the active model's
+    /// provider supports a fast tier AND it is toggled on; always `false` for
+    /// non-Anthropic providers (the key is still emitted, per the binary shape).
+    pub fast_mode: bool,
+    /// `effort.level` — `None` OMITS the key (binary `Bx(model)` gate). Must
+    /// stay `None` for models/providers without an effort / reasoning-effort
+    /// equivalent.
+    pub effort_level: Option<String>,
+    /// `thinking.enabled` — whether the active model's thinking/reasoning
+    /// equivalent is enabled (Claude extended thinking, OpenAI
+    /// `reasoning_effort`, …); `false` for models without one. Defaults `true`
+    /// (the Claude-model default).
+    pub thinking_enabled: bool,
+    /// `vim.mode` — `Some("INSERT"|"NORMAL")` while vim bindings are on;
+    /// `None` omits the key (binary `...D$()&&{vim:{…}}`).
+    pub vim_mode: Option<String>,
     /// Latest `TurnEvent::RawUtilization` snapshot → the optional `rate_limits`.
     pub raw_utilization: Option<RawUtilizationSnapshot>,
+}
+
+impl Default for StatusLineData {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            transcript_path: String::new(),
+            model_id: String::new(),
+            model: String::new(),
+            cwd: PathBuf::new(),
+            output_style: "default".to_string(),
+            cost: String::new(),
+            context_pct: 0.0,
+            used_tokens: 0,
+            context_window_tokens: 0,
+            fast_mode: false,
+            effort_level: None,
+            thinking_enabled: true,
+            vim_mode: None,
+            raw_utilization: None,
+        }
+    }
 }
 
 /// The shared statusline state behind the [`SharedStatusLine`] slot.
@@ -56,6 +107,9 @@ pub struct StatusLineShared {
     pub dirty: bool,
     /// The command's rendered output — the row the bottom pane displays.
     pub text: Option<String>,
+    /// Slot creation time — `cost.total_duration_ms` (wall time since session
+    /// start, the binary's `Dxe()`).
+    pub started_at: Option<std::time::Instant>,
 }
 
 /// Composition-root-shared statusline slot: the widget writes inputs + dirty,
@@ -67,6 +121,7 @@ pub type SharedStatusLine = Arc<Mutex<StatusLineShared>>;
 pub fn new_slot(config: Option<StatusLineConfig>) -> SharedStatusLine {
     Arc::new(Mutex::new(StatusLineShared {
         config,
+        started_at: Some(std::time::Instant::now()),
         ..StatusLineShared::default()
     }))
 }
@@ -83,17 +138,35 @@ pub fn build_payload(shared: &StatusLineShared) -> Option<(String, String)> {
         return None;
     }
     let d = &shared.data;
-    let json = build_status_line_input(
-        &d.model_id,
-        &d.model,
-        &d.cwd,
-        &d.cwd,
-        &[],
-        env!("CARGO_PKG_VERSION"),
-        parse_cost_usd(&d.cost),
-        d.context_pct,
-        d.raw_utilization.as_ref(),
-    );
+    let cwd = d.cwd.to_string_lossy();
+    #[allow(clippy::cast_possible_truncation)]
+    let total_duration_ms = shared
+        .started_at
+        .map(|t| t.elapsed().as_millis() as u64)
+        .unwrap_or(0);
+    let json = build_status_line_input(&StatusLineInputs {
+        session_id: &d.session_id,
+        transcript_path: &d.transcript_path,
+        model_id: &d.model_id,
+        model_display_name: &d.model,
+        current_dir: &cwd,
+        project_dir: &cwd,
+        added_dirs: &[],
+        version: env!("CARGO_PKG_VERSION"),
+        output_style: &d.output_style,
+        cost_usd: parse_cost_usd(&d.cost),
+        total_duration_ms,
+        total_api_duration_ms: 0, // residual — no per-call duration counter
+        total_lines_added: 0,     // residual — no edit-line counters
+        total_lines_removed: 0,
+        used_tokens: d.used_tokens,
+        context_window_tokens: d.context_window_tokens,
+        fast_mode: d.fast_mode,
+        effort_level: d.effort_level.as_deref(),
+        thinking_enabled: d.thinking_enabled,
+        vim_mode: d.vim_mode.as_deref(),
+        raw_utilization: d.raw_utilization.as_ref(),
+    });
     Some((cfg.command.clone(), json.to_string()))
 }
 

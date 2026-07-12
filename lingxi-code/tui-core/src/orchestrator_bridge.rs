@@ -83,6 +83,14 @@ pub enum TurnEvent {
         /// Context usage as a 0-1 fraction of the model's effective context
         /// window (fed to the custom statusline's `context_window.used_percentage`).
         used_fraction: f32,
+        /// Raw token estimate behind the fraction (the auto-compact gate's
+        /// input estimate) — the statusline payload's
+        /// `context_window.total_input_tokens` and the `exceeds_200k_tokens`
+        /// derivation input.
+        used_tokens: u64,
+        /// The model's effective context window in tokens
+        /// (`context_window.context_window_size`).
+        context_window_tokens: u64,
     },
     /// An allowlisted terminal escape sequence a hook returned (#6 main-loop
     /// parity). `apply_event` stages it on `state.pending_terminal_sequence`;
@@ -309,10 +317,14 @@ impl OutputStream for BridgeOutputStream {
         &self,
         banner: Option<ContextPressureBanner>,
         used_fraction: f32,
+        used_tokens: u64,
+        context_window_tokens: u64,
     ) {
         let _ = self.tx.send(TurnEvent::ContextPressure {
             banner,
             used_fraction,
+            used_tokens,
+            context_window_tokens,
         });
     }
 
@@ -544,12 +556,16 @@ mod tests {
                     level: traits::ContextPressureLevel::Error,
                 }),
                 0.92,
+                184_000,
+                200_000,
             )
             .await;
         match rx.try_recv().expect("bridge must forward a TurnEvent") {
             TurnEvent::ContextPressure {
                 banner: Some(b),
                 used_fraction,
+                used_tokens,
+                context_window_tokens,
             } => {
                 assert_eq!(
                     b.text,
@@ -557,6 +573,8 @@ mod tests {
                 );
                 assert_eq!(b.level, traits::ContextPressureLevel::Error);
                 assert!((used_fraction - 0.92).abs() < 1e-6);
+                assert_eq!(used_tokens, 184_000);
+                assert_eq!(context_window_tokens, 200_000);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -566,7 +584,7 @@ mod tests {
     async fn emit_context_pressure_none_clears() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        bridge.emit_context_pressure(None, 0.0).await;
+        bridge.emit_context_pressure(None, 0.0, 0, 0).await;
         assert!(matches!(
             rx.try_recv().expect("bridge must forward a TurnEvent"),
             TurnEvent::ContextPressure {

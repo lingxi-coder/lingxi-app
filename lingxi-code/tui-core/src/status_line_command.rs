@@ -10,31 +10,24 @@
 //!
 //! ## Fidelity / divergences vs. claude-code
 //!
-//! **Input payload is a documented SUBSET.** claude-code's
-//! `buildStatusLineCommandInput` (`StatusLine.tsx:36-127`) emits a large object;
-//! Rust only includes the fields the orchestrator currently surfaces onto the
-//! TUI `StatusSnapshot` (model, workspace dirs, version, a cost snapshot, and a
-//! context-window percentage). Keys present:
-//!   - `hook_event_name`  (constant `"Status"`, from `createBaseHookInput`)
-//!   - `model.id`, `model.display_name`
-//!   - `workspace.current_dir`, `workspace.project_dir`, `workspace.added_dirs`
-//!   - `version`
-//!   - `cost.total_cost_usd` (parsed from the pre-formatted cost string when it
-//!     looks like `"$N.NNNN"`; the other `cost.*` timing/line counters are
-//!     omitted — the orchestrator does not expose them to the TUI yet)
-//!   - `context_window.used_percentage`, `context_window.remaining_percentage`
-//!   - `rate_limits` (OPTIONAL — only when at least one window resolved,
-//!     `StatusLine.tsx:99-101`; per-window `five_hour`/`seven_day` keys
-//!     conditionally spread from the [`RawUtilizationSnapshot`],
-//!     `StatusLine.tsx:50-65`)
-//!
-//! Keys claude-code emits that are OMITTED here (not available to the TUI):
-//!   `session_name`, `output_style`, `cost.total_duration_ms`,
-//!   `cost.total_api_duration_ms`, `cost.total_lines_added`,
-//!   `cost.total_lines_removed`, `context_window.total_input_tokens`,
-//!   `context_window.total_output_tokens`, `context_window.context_window_size`,
-//!   `context_window.current_usage`, `exceeds_200k_tokens`,
-//!   `vim`, `agent`, `remote`, `worktree`.
+//! **Input payload mirrors the 2.1.206 `Wj_` builder** — key set AND order:
+//! `session_id`, `transcript_path`, `cwd`, `model{id,display_name}`,
+//! `workspace{current_dir,project_dir,added_dirs}`, `version`,
+//! `output_style{name}`, `cost{total_cost_usd,total_duration_ms,
+//! total_api_duration_ms,total_lines_added,total_lines_removed}`,
+//! `context_window{total_input_tokens,total_output_tokens,
+//! context_window_size,current_usage,used_percentage,remaining_percentage}`,
+//! `exceeds_200k_tokens`, `fast_mode`, [`effort{level}`], `thinking{enabled}`,
+//! [`rate_limits`], [`vim{mode}`] (bracketed = conditional, omitted exactly
+//! when the binary's conditional spread omits them). Groups the port does not
+//! track are omitted — matching a claude-code session where that state is
+//! absent: `session_name`, `workspace.git_worktree`/`repo`, `prompt_id`,
+//! `agent`, `remote`, `pr`, `worktree`. RESIDUAL (key present, value
+//! degraded): `cost.total_api_duration_ms`/`total_lines_added`/
+//! `total_lines_removed` = 0, `context_window.total_output_tokens` = 0,
+//! `current_usage` = null — the port has no per-call duration / edit-line /
+//! usage-decomposition counters. See [`StatusLineInputs`] for the
+//! multi-provider semantics of `fast_mode`/`effort`/`thinking`.
 //!
 //! **Trust gating is simplified.** claude-code gates execution on workspace
 //! trust + managed-settings policy (`shouldDisableAllHooksIncludingManaged`,
@@ -72,8 +65,8 @@ fn format_custom_status_line(stdout: &str) -> String {
         .join("\n")
 }
 
-/// The `"Status"` hook-event name claude-code stamps via `createBaseHookInput()`.
-pub const STATUS_HOOK_EVENT_NAME: &str = "Status";
+// (2.1.206 removed the payload's `hook_event_name` — `Rf()` emits none — so
+// the old `STATUS_HOOK_EVENT_NAME` const is retired.)
 
 /// Default (and claude-code's) status-line command timeout: 5 seconds.
 pub const STATUS_LINE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -143,42 +136,149 @@ impl StatusLineConfig {
     }
 }
 
-/// Build the JSON stdin payload for the status-line command, mirroring the
-/// (subset of) `buildStatusLineCommandInput`. See the module docs for the
-/// included/omitted key list.
+/// Inputs for [`build_status_line_input`] — one field per 2.1.206 payload
+/// group the port can populate (the `Wj_` builder's data, minus the groups the
+/// port does not track: `session_name`, `workspace.git_worktree`/`repo`,
+/// `prompt_id`, `agent`, `remote`, `pr`, `worktree` — all CONDITIONAL spreads
+/// in the binary, so omitting them matches a claude-code session where that
+/// state is absent).
 ///
-/// `cost_usd` is the numeric total cost (dollars). `context_pct` is the
-/// context-window *used* fraction in `[0.0, 1.0]` (the same value the built-in
-/// row renders as `{:.0}%`); `remaining_percentage` is derived as
-/// `100 - used_percentage`, matching claude-code's `calculateContextPercentages`.
-/// `raw_utilization` is the latest per-window rate-limit snapshot (`None`
-/// before any API response carried the headers) feeding `rate_limits`.
+/// Multi-provider note (`fast_mode` / `effort` / `thinking` are CLAUDE-syntax
+/// concepts): the values must reflect the PROVIDER-MAPPED reality of the
+/// active model, not the Claude default —
+/// - `effort_level`: `None` OMITS the key, matching the binary's `Bx(model)`
+///   support gate; a provider without an effort/reasoning-effort equivalent
+///   must pass `None`.
+/// - `fast_mode`: always emitted (binary shape); a provider without a fast
+///   tier is simply `false` (it can never be enabled there).
+/// - `thinking_enabled`: always emitted; the value is whether the active
+///   model's thinking/reasoning equivalent (Claude extended thinking, OpenAI
+///   `reasoning_effort`, …) is enabled — `false` for models without one.
+#[derive(Debug, Clone, Default)]
+pub struct StatusLineInputs<'a> {
+    /// `session_id` (binary `Rf()` base field).
+    pub session_id: &'a str,
+    /// `transcript_path` (binary `Rf()` base field).
+    pub transcript_path: &'a str,
+    /// Wire model id (`model.id`).
+    pub model_id: &'a str,
+    /// Human model label (`model.display_name`).
+    pub model_display_name: &'a str,
+    /// `cwd` + `workspace.current_dir`.
+    pub current_dir: &'a str,
+    /// `workspace.project_dir`.
+    pub project_dir: &'a str,
+    /// `workspace.added_dirs`.
+    pub added_dirs: &'a [String],
+    /// `version` string.
+    pub version: &'a str,
+    /// `output_style.name` (binary default `"default"`).
+    pub output_style: &'a str,
+    /// `cost.total_cost_usd`.
+    pub cost_usd: f64,
+    /// `cost.total_duration_ms` (wall time since session start).
+    pub total_duration_ms: u64,
+    /// `cost.total_api_duration_ms`. RESIDUAL: the port does not track
+    /// cumulative API-call duration — always `0` (key present for script
+    /// compatibility).
+    pub total_api_duration_ms: u64,
+    /// `cost.total_lines_added` / `total_lines_removed`. RESIDUAL: the port
+    /// has no edit-line counters — always `0`.
+    pub total_lines_added: u64,
+    /// See [`Self::total_lines_added`].
+    pub total_lines_removed: u64,
+    /// Raw context token estimate (the auto-compact gate's input estimate) —
+    /// `context_window.total_input_tokens` + the `exceeds_200k_tokens`
+    /// derivation. `0` = no usage yet (percentages go `null`, binary `o2n`).
+    pub used_tokens: u64,
+    /// Effective context window size in tokens (`context_window_size`).
+    pub context_window_tokens: u64,
+    /// `fast_mode` (see the multi-provider note above).
+    pub fast_mode: bool,
+    /// `effort.level` — `None` omits the key (unsupported model/provider or
+    /// untracked), matching the binary's `...Bx(y)&&{effort:{…}}` gate.
+    pub effort_level: Option<&'a str>,
+    /// `thinking.enabled` (see the multi-provider note above).
+    pub thinking_enabled: bool,
+    /// `vim.mode` — `Some("INSERT"|"NORMAL")` only when vim bindings are on
+    /// (binary `...D$()&&{vim:{mode:u??"INSERT"}}`); `None` omits the key.
+    pub vim_mode: Option<&'a str>,
+    /// Latest per-window rate-limit snapshot → the optional `rate_limits`.
+    pub raw_utilization: Option<&'a RawUtilizationSnapshot>,
+}
+
+/// Build the JSON stdin payload for the status-line command — the 2.1.206
+/// `Wj_` payload in its exact key ORDER: `session_id`, `transcript_path`,
+/// `cwd`, `model`, `workspace`, `version`, `output_style`, `cost`,
+/// `context_window`, `exceeds_200k_tokens`, `fast_mode`, [`effort`],
+/// `thinking`, [`rate_limits`], [`vim`]. (2.1.206 dropped the older
+/// `hook_event_name` field — `Rf()` does not emit one — so neither do we.)
 #[must_use]
-// One parameter per JSON field the payload carries (mirroring the flat
-// `buildStatusLineCommandInput` arg list). Bundling them into a struct would
-// add a parallel type with no behavioral benefit, so the 9-arg form is kept.
-#[allow(clippy::too_many_arguments)]
-pub fn build_status_line_input(
-    model_id: &str,
-    model_display_name: &str,
-    current_dir: &Path,
-    project_dir: &Path,
-    added_dirs: &[String],
-    version: &str,
-    cost_usd: f64,
-    context_pct: f32,
-    raw_utilization: Option<&RawUtilizationSnapshot>,
-) -> Value {
-    let used = f64::from(context_pct) * 100.0;
-    let remaining = 100.0 - used;
+pub fn build_status_line_input(inputs: &StatusLineInputs<'_>) -> Value {
+    let i = inputs;
+    // `context_window` (binary `jj_`/`o2n`): with usage, used% =
+    // round(tokens/window*100) clamped 0-100 as an INTEGER; without usage both
+    // percentages are null. RESIDUALS: the port's estimate has no output-token
+    // / cache decomposition, so `total_output_tokens` is `0` and
+    // `current_usage` is `null` (binary sends the raw usage object).
+    let has_usage = i.used_tokens > 0 && i.context_window_tokens > 0;
+    let (used, remaining) = if has_usage {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let pct = ((i.used_tokens as f64 / i.context_window_tokens as f64) * 100.0).round()
+            as u64;
+        let pct = pct.min(100);
+        (json!(pct), json!(100 - pct))
+    } else {
+        (Value::Null, Value::Null)
+    };
+    // `exceeds_200k_tokens` (binary `AJn`: last usage total > 200000; the
+    // port's estimate omits output tokens — a documented approximation).
+    let exceeds_200k = i.used_tokens > 200_000;
+
+    let mut payload = json!({
+        "session_id": i.session_id,
+        "transcript_path": i.transcript_path,
+        "cwd": i.current_dir,
+        "model": {
+            "id": i.model_id,
+            "display_name": i.model_display_name,
+        },
+        "workspace": {
+            "current_dir": i.current_dir,
+            "project_dir": i.project_dir,
+            "added_dirs": i.added_dirs,
+        },
+        "version": i.version,
+        "output_style": { "name": i.output_style },
+        "cost": {
+            "total_cost_usd": i.cost_usd,
+            "total_duration_ms": i.total_duration_ms,
+            "total_api_duration_ms": i.total_api_duration_ms,
+            "total_lines_added": i.total_lines_added,
+            "total_lines_removed": i.total_lines_removed,
+        },
+        "context_window": {
+            "total_input_tokens": i.used_tokens,
+            "total_output_tokens": 0,
+            "context_window_size": i.context_window_tokens,
+            "current_usage": Value::Null,
+            "used_percentage": used,
+            "remaining_percentage": remaining,
+        },
+        "exceeds_200k_tokens": exceeds_200k,
+        "fast_mode": i.fast_mode,
+    });
+    // Conditional groups, in Wj_ spread order: effort → thinking →
+    // rate_limits → vim.
+    if let Some(level) = i.effort_level {
+        payload["effort"] = json!({ "level": level });
+    }
+    payload["thinking"] = json!({ "enabled": i.thinking_enabled });
     // `rate_limits` is OPTIONAL: TS only spreads it into the payload when at
-    // least one window resolved (StatusLine.tsx:99-101
-    // `...((rateLimits.five_hour || rateLimits.seven_day) && {rate_limits})`;
-    // statuslineSetup.ts:67 documents it as "Only present for subscribers
-    // after first API response"). A window with either header missing omits
-    // its key entirely (TS conditional spread, not `null`).
+    // least one window resolved (`...((I.five_hour||I.seven_day)&&{rate_limits:I})`).
+    // A window with either header missing omits its key entirely.
     let mut rate_limits = serde_json::Map::new();
-    if let Some(raw) = raw_utilization {
+    if let Some(raw) = i.raw_utilization {
         if let (Some(u), Some(r)) = (raw.five_hour_utilization, raw.five_hour_resets_at) {
             rate_limits.insert(
                 "five_hour".into(),
@@ -192,28 +292,11 @@ pub fn build_status_line_input(
             );
         }
     }
-    let mut payload = json!({
-        "hook_event_name": STATUS_HOOK_EVENT_NAME,
-        "model": {
-            "id": model_id,
-            "display_name": model_display_name,
-        },
-        "workspace": {
-            "current_dir": current_dir.to_string_lossy(),
-            "project_dir": project_dir.to_string_lossy(),
-            "added_dirs": added_dirs,
-        },
-        "version": version,
-        "cost": {
-            "total_cost_usd": cost_usd,
-        },
-        "context_window": {
-            "used_percentage": used,
-            "remaining_percentage": remaining,
-        },
-    });
     if !rate_limits.is_empty() {
         payload["rate_limits"] = Value::Object(rate_limits);
+    }
+    if let Some(mode) = i.vim_mode {
+        payload["vim"] = json!({ "mode": mode });
     }
     payload
 }
@@ -316,19 +399,29 @@ mod tests {
 
     #[test]
     fn build_status_line_input_shape() {
-        let v = build_status_line_input(
-            "claude-sonnet-4.5",
-            "Claude Sonnet 4.5",
-            &PathBuf::from("/work/cur"),
-            &PathBuf::from("/work/proj"),
-            &["/extra".to_string()],
-            "0.8.0",
-            0.0123,
-            0.42,
-            None,
-        );
-        // Top-level keys.
-        assert_eq!(v["hook_event_name"], "Status");
+        let v = build_status_line_input(&StatusLineInputs {
+            session_id: "sess-1",
+            transcript_path: "/t/sess-1.jsonl",
+            model_id: "claude-sonnet-4.5",
+            model_display_name: "Claude Sonnet 4.5",
+            current_dir: "/work/cur",
+            project_dir: "/work/proj",
+            added_dirs: &["/extra".to_string()],
+            version: "0.8.0",
+            output_style: "default",
+            cost_usd: 0.0123,
+            total_duration_ms: 5000,
+            used_tokens: 84_000,
+            context_window_tokens: 200_000,
+            thinking_enabled: true,
+            ..Default::default()
+        });
+        // 206 base fields (Rf): session_id / transcript_path / cwd — and NO
+        // hook_event_name (removed in 2.1.206).
+        assert_eq!(v["session_id"], "sess-1");
+        assert_eq!(v["transcript_path"], "/t/sess-1.jsonl");
+        assert_eq!(v["cwd"], "/work/cur");
+        assert!(v.get("hook_event_name").is_none());
         assert_eq!(v["version"], "0.8.0");
         // model
         assert_eq!(v["model"]["id"], "claude-sonnet-4.5");
@@ -337,19 +430,64 @@ mod tests {
         assert_eq!(v["workspace"]["current_dir"], "/work/cur");
         assert_eq!(v["workspace"]["project_dir"], "/work/proj");
         assert_eq!(v["workspace"]["added_dirs"][0], "/extra");
-        // cost
+        // output_style
+        assert_eq!(v["output_style"]["name"], "default");
+        // cost — full 206 block (durations/lines are residual zeros).
         assert!((v["cost"]["total_cost_usd"].as_f64().unwrap() - 0.0123).abs() < 1e-9);
-        // context_window percentages (42% used → 58% remaining). Tolerance is
-        // loose enough to absorb the `0.42_f32 → f64` rounding.
-        assert!((v["context_window"]["used_percentage"].as_f64().unwrap() - 42.0).abs() < 1e-3);
-        assert!(
-            (v["context_window"]["remaining_percentage"]
-                .as_f64()
-                .unwrap()
-                - 58.0)
-                .abs()
-                < 1e-3
-        );
+        assert_eq!(v["cost"]["total_duration_ms"], 5000);
+        assert_eq!(v["cost"]["total_api_duration_ms"], 0);
+        assert_eq!(v["cost"]["total_lines_added"], 0);
+        assert_eq!(v["cost"]["total_lines_removed"], 0);
+        // context_window — full jj_ shape: integer o2n percentages
+        // (84000/200000 → 42), token totals, null current_usage.
+        assert_eq!(v["context_window"]["total_input_tokens"], 84_000);
+        assert_eq!(v["context_window"]["total_output_tokens"], 0);
+        assert_eq!(v["context_window"]["context_window_size"], 200_000);
+        assert!(v["context_window"]["current_usage"].is_null());
+        assert_eq!(v["context_window"]["used_percentage"], 42);
+        assert_eq!(v["context_window"]["remaining_percentage"], 58);
+        // flags
+        assert_eq!(v["exceeds_200k_tokens"], false);
+        assert_eq!(v["fast_mode"], false);
+        assert_eq!(v["thinking"]["enabled"], true);
+        // Conditional groups absent when untracked/off.
+        assert!(v.get("effort").is_none());
+        assert!(v.get("vim").is_none());
+        assert!(v.get("rate_limits").is_none());
+    }
+
+    #[test]
+    fn no_usage_yields_null_percentages_and_exceeds_derives_from_tokens() {
+        // No usage yet → o2n's null percentages.
+        let v = build_status_line_input(&StatusLineInputs {
+            context_window_tokens: 200_000,
+            ..Default::default()
+        });
+        assert!(v["context_window"]["used_percentage"].is_null());
+        assert!(v["context_window"]["remaining_percentage"].is_null());
+        assert_eq!(v["exceeds_200k_tokens"], false);
+        // 250k tokens → exceeds_200k true, used% clamped to 100.
+        let v = build_status_line_input(&StatusLineInputs {
+            used_tokens: 250_000,
+            context_window_tokens: 200_000,
+            ..Default::default()
+        });
+        assert_eq!(v["exceeds_200k_tokens"], true);
+        assert_eq!(v["context_window"]["used_percentage"], 100);
+        assert_eq!(v["context_window"]["remaining_percentage"], 0);
+    }
+
+    #[test]
+    fn conditional_effort_and_vim_render_when_present() {
+        let v = build_status_line_input(&StatusLineInputs {
+            effort_level: Some("high"),
+            vim_mode: Some("NORMAL"),
+            fast_mode: true,
+            ..Default::default()
+        });
+        assert_eq!(v["effort"]["level"], "high");
+        assert_eq!(v["vim"]["mode"], "NORMAL");
+        assert_eq!(v["fast_mode"], true);
     }
 
     // ── rate_limits (llm-client future-work batch 5, Task 4) ────────────
@@ -366,17 +504,15 @@ mod tests {
             seven_day_utilization: None,
             seven_day_resets_at: None,
         };
-        let v = build_status_line_input(
-            "claude-sonnet-4.5",
-            "Claude Sonnet 4.5",
-            &PathBuf::from("/work/cur"),
-            &PathBuf::from("/work/proj"),
-            &[],
-            "0.8.0",
-            0.0,
-            0.0,
-            Some(&raw),
-        );
+        let v = build_status_line_input(&StatusLineInputs {
+            model_id: "claude-sonnet-4.5",
+            model_display_name: "Claude Sonnet 4.5",
+            current_dir: "/work/cur",
+            project_dir: "/work/proj",
+            version: "0.8.0",
+            raw_utilization: Some(&raw),
+            ..Default::default()
+        });
         let rl = v["rate_limits"]
             .as_object()
             .expect("rate_limits must be an object");
@@ -397,17 +533,14 @@ mod tests {
     /// response").
     #[test]
     fn rate_limits_key_absent_when_no_window_resolved() {
-        let v = build_status_line_input(
-            "m",
-            "M",
-            &PathBuf::from("/c"),
-            &PathBuf::from("/p"),
-            &[],
-            "0.8.0",
-            0.0,
-            0.0,
-            None,
-        );
+        let v = build_status_line_input(&StatusLineInputs {
+            model_id: "m",
+            model_display_name: "M",
+            current_dir: "/c",
+            project_dir: "/p",
+            version: "0.8.0",
+            ..Default::default()
+        });
         assert!(
             v.get("rate_limits").is_none(),
             "rate_limits must be omitted when no window resolved: {v:?}"

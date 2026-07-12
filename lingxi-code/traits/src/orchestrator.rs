@@ -1479,10 +1479,17 @@ pub trait OutputStream: Send + Sync {
     /// carried alongside the (optional) banner so a consumer that wants the raw
     /// percentage — the custom statusline's `context_window.used_percentage` —
     /// gets it on every turn, not only when the warning banner is showing.
+    /// `used_tokens` / `context_window_tokens` are the raw inputs behind the
+    /// fraction (the same token estimate + effective window the auto-compact
+    /// gate uses), so the statusline can also populate the 2.1.206 payload's
+    /// `context_window.total_input_tokens` / `context_window_size` and derive
+    /// `exceeds_200k_tokens`.
     async fn emit_context_pressure(
         &self,
         _banner: Option<ContextPressureBanner>,
         _used_fraction: f32,
+        _used_tokens: u64,
+        _context_window_tokens: u64,
     ) {
     }
 

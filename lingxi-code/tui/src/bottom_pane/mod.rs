@@ -682,6 +682,20 @@ impl BottomPane {
         self.vim.is_some()
     }
 
+    /// The current vim mode label for the statusline payload's `vim.mode`
+    /// (`"NORMAL"` / `"INSERT"`, claude-code's mode strings; the binary emits
+    /// `u ?? "INSERT"`). `None` when vim bindings are off — the payload then
+    /// omits the `vim` key entirely. Visual mode reports `"NORMAL"`
+    /// (claude-code's vim layer has no visual mode, so its payload never
+    /// carries another value).
+    #[must_use]
+    pub fn vim_mode_label(&self) -> Option<&'static str> {
+        self.vim.as_ref().map(|v| match v.mode {
+            crate::vim::VimMode::Insert => "INSERT",
+            crate::vim::VimMode::Normal | crate::vim::VimMode::Visual => "NORMAL",
+        })
+    }
+
     /// Read-only access to the composer (rendering/tests; owners must not
     /// mutate composer internals directly).
     #[must_use]

@@ -803,6 +803,23 @@ pub(crate) async fn run_ratatui(
     // only when the widget re-armed `dirty` on a turn boundary, set-only-on-
     // change). The slot is shared with the render thread via `run_app`.
     let status_line = tui::status_line::new_slot(read_status_line_config());
+    // Seed the boot-known 2.1.206 payload base fields (`Rf()`): session_id +
+    // transcript_path (`<lingxi_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`).
+    {
+        let sid = tui_build.runtime.orchestrator.current_session_id().await;
+        let uuid = sid.as_uuid().to_string();
+        let home = memory::session_memory::config_home_dir();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let transcript = orchestrator::transcript_paths::main_transcript_path(
+            &home,
+            &cwd.to_string_lossy(),
+            &uuid,
+        );
+        if let Ok(mut s) = status_line.lock() {
+            s.data.session_id = uuid;
+            s.data.transcript_path = transcript.display().to_string();
+        }
+    }
     let pump_slot = status_line.clone();
     let status_pump = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(300));

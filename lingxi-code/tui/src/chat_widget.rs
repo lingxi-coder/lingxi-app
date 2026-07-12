@@ -911,8 +911,14 @@ impl ChatWidget {
                 // turn boundaries.
                 self.tool_inputs.clear();
                 // Re-arm the statusline pump (claude-code executes the command
-                // on turn boundaries; the pump is debounced single-flight).
-                self.with_status_line(|s| s.dirty = true);
+                // on turn boundaries; the pump is debounced single-flight) and
+                // snapshot the render-thread-owned UI states the payload needs
+                // (`vim.mode` — omitted entirely when vim is off).
+                let vim_mode = self.bottom_pane.vim_mode_label().map(str::to_string);
+                self.with_status_line(|s| {
+                    s.data.vim_mode = vim_mode.clone();
+                    s.dirty = true;
+                });
             }
             TurnEvent::CostUpdated(cost_str) => {
                 // Update the status-row cost so the next render pass shows the
@@ -940,6 +946,8 @@ impl ChatWidget {
             TurnEvent::ContextPressure {
                 banner,
                 used_fraction,
+                used_tokens,
+                context_window_tokens,
             } => {
                 // (TokenWarning) The orchestrator-computed context-pressure
                 // banner renders as its own pane row next pass; `None` clears a
@@ -947,9 +955,15 @@ impl ChatWidget {
                 // warning threshold (claude-code's `<TokenWarning>` returning
                 // null).
                 self.bottom_pane.set_context_pressure(banner);
-                // Feed the live context usage into the statusline payload's
-                // `context_window.used_percentage` (0-1 fraction).
-                self.with_status_line(|s| s.data.context_pct = used_fraction);
+                // Feed the live context usage into the statusline payload:
+                // the 0-1 fraction plus the raw token estimate + window size
+                // (2.1.206 `context_window.total_input_tokens` /
+                // `context_window_size` / `exceeds_200k_tokens`).
+                self.with_status_line(|s| {
+                    s.data.context_pct = used_fraction;
+                    s.data.used_tokens = used_tokens;
+                    s.data.context_window_tokens = context_window_tokens;
+                });
             }
             TurnEvent::TerminalSequence { seq } => {
                 // #6: stage the validated terminal escape sequence; the app
@@ -5663,6 +5677,8 @@ mod tests {
                 level: traits::ContextPressureLevel::Warning,
             }),
             used_fraction: 0.88,
+            used_tokens: 0,
+            context_window_tokens: 0,
         });
         assert_eq!(
             widget.bottom_pane().context_pressure().map(|b| b.level),
@@ -5686,15 +5702,19 @@ mod tests {
         widget.apply_turn_event(TurnEvent::ContextPressure {
             banner: None,
             used_fraction: 0.0,
+            used_tokens: 0,
+            context_window_tokens: 0,
         });
         assert!(widget.bottom_pane().context_pressure().is_none());
         assert_eq!(widget.desired_height(width), idle_height);
     }
 
     #[test]
-    fn context_pressure_feeds_statusline_used_percentage() {
-        // The numeric `used_fraction` on a ContextPressure event reaches the
-        // statusline payload's `context_window.used_percentage` (× 100).
+    fn context_pressure_feeds_statusline_context_window() {
+        // The ContextPressure event's raw tokens reach the statusline payload's
+        // full 2.1.206 `context_window` block: integer o2n percentages
+        // (75000/200000 → round(37.5) = 38), token totals, window size, and
+        // the derived `exceeds_200k_tokens`.
         let mut widget = widget();
         let slot = crate::status_line::new_slot(
             tui_core::status_line_command::StatusLineConfig::from_settings_value(
@@ -5705,15 +5725,16 @@ mod tests {
         widget.apply_turn_event(TurnEvent::ContextPressure {
             banner: None,
             used_fraction: 0.375,
+            used_tokens: 75_000,
+            context_window_tokens: 200_000,
         });
         let (_, json) = crate::status_line::build_payload(&slot.lock().unwrap()).expect("payload");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        // 0.375 fraction → 37.5% used.
-        assert!(
-            (v["context_window"]["used_percentage"].as_f64().unwrap() - 37.5).abs() < 1e-3,
-            "used_percentage: {}",
-            v["context_window"]["used_percentage"]
-        );
+        assert_eq!(v["context_window"]["used_percentage"], 38);
+        assert_eq!(v["context_window"]["remaining_percentage"], 62);
+        assert_eq!(v["context_window"]["total_input_tokens"], 75_000);
+        assert_eq!(v["context_window"]["context_window_size"], 200_000);
+        assert_eq!(v["exceeds_200k_tokens"], false);
     }
 
     #[test]

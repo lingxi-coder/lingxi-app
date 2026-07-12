@@ -1149,7 +1149,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         (estimate as f64 / context_window as f64) as f32
     };
     orch.output
-        .emit_context_pressure(banner, used_fraction)
+        .emit_context_pressure(banner, used_fraction, estimate, context_window)
         .await;
 
     if warning.is_at_blocking_limit {

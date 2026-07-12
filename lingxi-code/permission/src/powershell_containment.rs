@@ -899,6 +899,209 @@ pub fn extract_paths(cmd: &PsCommand) -> PathExtraction {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Message builders + `NKn` string-guard reasons + leaf path helpers.
+//
+// The model-facing brand is "LingXi" (the product rebrand — claude-code says
+// "Claude Code"), matching the port's existing containment messages in
+// `command_path_containment` / `path_constraints`.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// `MKn` dir-list truncation threshold (claude-code `ZWi = 5`).
+const DIR_LIST_MAX: usize = 5;
+
+/// Format the allowed-working-directory list (claude-code `MKn`): up to
+/// [`DIR_LIST_MAX`] quoted dirs joined by `", "`, else the first five plus
+/// `", and N more"`.
+#[must_use]
+pub fn format_dir_list(dirs: &[String]) -> String {
+    let quoted = |d: &str| format!("'{d}'");
+    if dirs.len() <= DIR_LIST_MAX {
+        dirs.iter().map(|d| quoted(d)).collect::<Vec<_>>().join(", ")
+    } else {
+        let head = dirs[..DIR_LIST_MAX]
+            .iter()
+            .map(|d| quoted(d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{head}, and {} more", dirs.len() - DIR_LIST_MAX)
+    }
+}
+
+/// The cmdlet path-containment deny/ask message (claude-code template B). Note
+/// the verb is the fixed `"access files in"` for ALL cmdlets (read AND write) —
+/// only output-redirection targets use `"write to files in"`.
+#[must_use]
+pub fn cmdlet_containment_message(cmdlet: &str, path: &str, dirs: &[String]) -> String {
+    format!(
+        "{cmdlet} targeting '{path}' was blocked. For security, LingXi may only access files in the allowed working directories for this session: {}.",
+        format_dir_list(dirs)
+    )
+}
+
+/// The output-redirection containment message (claude-code, `"write to files in"`
+/// variant). Identical wording to [`crate::path_constraints`]'s redirection block.
+#[must_use]
+pub fn redirection_containment_message(path: &str, dirs: &[String]) -> String {
+    format!(
+        "Output redirection to '{path}' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: {}.",
+        format_dir_list(dirs)
+    )
+}
+
+/// `Remove-Item` protected-system-path deny message (claude-code `Hwt`).
+#[must_use]
+pub fn remove_item_protected_message(path: &str) -> String {
+    format!("Remove-Item on system path '{path}' is blocked. This path is protected from removal.")
+}
+
+/// The `NKn` string-guard "other"-type reasons — the manual-approval messages a
+/// PowerShell path triggers when it cannot be statically validated. Ported
+/// verbatim from claude-code `NKn` (binary 2.1.206).
+pub mod ps_path_reasons {
+    /// A `~user` (tilde not followed by `/`) home reference.
+    pub const TILDE_USER: &str =
+        "Paths beginning with ~user cannot be statically validated and require manual approval";
+    /// A backtick escape in the path.
+    pub const BACKTICK: &str =
+        "Backtick escape characters in paths cannot be statically validated and require manual approval";
+    /// A `::` module-qualified provider path.
+    pub const PROVIDER_QUALIFIED: &str =
+        "Module-qualified provider paths (::) cannot be statically validated and require manual approval";
+    /// A UNC / WebDAV / SSL path.
+    pub const UNC: &str =
+        "UNC paths are blocked because they can trigger network requests and credential leakage";
+    /// A `$`/`%` variable-expansion path.
+    pub const VARIABLE_EXPANSION: &str =
+        "Variable expansion syntax in paths requires manual approval";
+    /// A `..` traversal after a real directory segment.
+    pub const TRAVERSAL: &str =
+        "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory";
+    /// A glob in a write/create operation.
+    pub const GLOB_WRITE: &str =
+        "Glob patterns are not allowed in write operations. Please specify an exact file path.";
+    /// A glob in a read operation.
+    pub const GLOB_READ: &str =
+        "Glob patterns in paths cannot be statically validated \u{2014} symlinks inside the glob expansion are not examined. Requires manual approval.";
+}
+
+/// Reason for a Windows drive-relative path (claude-code interpolates the path).
+#[must_use]
+pub fn drive_relative_reason(path: &str) -> String {
+    format!("Path '{path}' is drive-relative (resolves against the per-drive current directory, which cannot be statically validated) and requires manual approval")
+}
+
+/// Reason for a non-filesystem provider path (claude-code interpolates the path).
+#[must_use]
+pub fn non_fs_provider_reason(path: &str) -> String {
+    format!("Path '{path}' uses a non-filesystem provider and requires manual approval")
+}
+
+/// Expand a leading `~`/`~/`/`~\` to the home directory (claude-code `UKn`).
+/// With no home available the path is returned unchanged.
+#[must_use]
+pub fn expand_tilde(path: &str, home: Option<&str>) -> String {
+    let is_tilde = path == "~" || path.starts_with("~/") || path.starts_with("~\\");
+    match (is_tilde, home) {
+        (true, Some(h)) => format!("{h}{}", &path[1..]),
+        _ => path.to_string(),
+    }
+}
+
+/// True when a `..` segment appears AFTER a real directory segment (claude-code
+/// `eUr`) — i.e. a traversal that could escape via a symlinked component. Empty
+/// and `.` segments are ignored; a leading run of `..` (before any real segment)
+/// does not count.
+#[must_use]
+pub fn has_traversal_after_segment(path: &str, is_windows: bool) -> bool {
+    let segs: Vec<&str> = if is_windows {
+        path.split(['\\', '/']).collect()
+    } else {
+        path.split('/').collect()
+    };
+    let mut real_seen = false;
+    for seg in segs {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if real_seen {
+                return true;
+            }
+        } else {
+            real_seen = true;
+        }
+    }
+    false
+}
+
+/// First glob-metacharacter index (claude-code `Uxe`): the position of `*`, `?`,
+/// or a `[` that has a later matching `]`; `None` when the path has no glob.
+#[must_use]
+pub fn glob_index(path: &str) -> Option<usize> {
+    let bytes: Vec<char> = path.chars().collect();
+    for (t, &r) in bytes.iter().enumerate() {
+        if r == '*' || r == '?' {
+            return Some(t);
+        }
+        if r == '[' && bytes[t + 1..].contains(&']') {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// True when `..` appears as a full path segment (claude-code `OTe`:
+/// `/(?:^|[\\/])\.\.(?:[\\/]|$)/`).
+#[must_use]
+pub fn has_dotdot_segment(path: &str) -> bool {
+    let is_sep = |c: char| c == '/' || c == '\\';
+    let chars: Vec<char> = path.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if chars[i] == '.' && chars[i + 1] == '.' {
+            let before_ok = i == 0 || is_sep(chars[i - 1]);
+            let after_ok = i + 2 >= n || is_sep(chars[i + 2]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The base directory of a glob path (claude-code `wgg`): the portion up to the
+/// last separator before the first glob char; `"."` when the glob has no
+/// leading directory; the glob path unchanged when it has no glob.
+#[must_use]
+pub fn glob_base_dir(path: &str) -> String {
+    let Some(t) = glob_index(path) else {
+        return path.to_string();
+    };
+    let prefix = &path[..path.char_indices().nth(t).map_or(path.len(), |(b, _)| b)];
+    let last_sep = prefix.rfind(['/', '\\']);
+    match last_sep {
+        None => ".".to_string(),
+        Some(n) => {
+            let dir = &prefix[..n + 1];
+            if dir.is_empty() {
+                "/".to_string()
+            } else {
+                dir.to_string()
+            }
+        }
+    }
+}
+
+/// Case-fold a path for comparison (claude-code `Hg`): lowercase, then map the
+/// dotless-i (U+0131) → `i` and long-s (U+017F) → `s`.
+#[must_use]
+pub fn casefold_path(path: &str) -> String {
+    path.to_lowercase().replace('\u{0131}', "i").replace('\u{017F}', "s")
+}
+
 #[cfg(test)]
 #[path = "powershell_containment_test.rs"]
 mod powershell_containment_test;

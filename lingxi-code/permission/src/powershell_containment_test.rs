@@ -223,6 +223,114 @@ fn extract_non_path_cmdlet_is_empty_read() {
     assert!(!e.has_unvalidatable_path_arg);
 }
 
+fn dirs(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| (*s).to_string()).collect()
+}
+
+#[test]
+fn format_dir_list_matches_mkn() {
+    assert_eq!(format_dir_list(&dirs(&["/a", "/b"])), "'/a', '/b'");
+    assert_eq!(format_dir_list(&dirs(&["/a"])), "'/a'");
+    // Exactly 5 → all listed.
+    assert_eq!(
+        format_dir_list(&dirs(&["/1", "/2", "/3", "/4", "/5"])),
+        "'/1', '/2', '/3', '/4', '/5'"
+    );
+    // 6 → first 5 + "and 1 more".
+    assert_eq!(
+        format_dir_list(&dirs(&["/1", "/2", "/3", "/4", "/5", "/6"])),
+        "'/1', '/2', '/3', '/4', '/5', and 1 more"
+    );
+    assert_eq!(
+        format_dir_list(&dirs(&["/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8"])),
+        "'/1', '/2', '/3', '/4', '/5', and 3 more"
+    );
+}
+
+#[test]
+fn containment_messages_use_lingxi_brand_and_correct_verb() {
+    let m = cmdlet_containment_message("get-content", "/etc/passwd", &dirs(&["/work"]));
+    assert_eq!(
+        m,
+        "get-content targeting '/etc/passwd' was blocked. For security, LingXi may only access files in the allowed working directories for this session: '/work'."
+    );
+    let r = redirection_containment_message("/etc/x", &dirs(&["/work"]));
+    assert_eq!(
+        r,
+        "Output redirection to '/etc/x' was blocked. For security, LingXi may only write to files in the allowed working directories for this session: '/work'."
+    );
+    assert_eq!(
+        remove_item_protected_message("/etc"),
+        "Remove-Item on system path '/etc' is blocked. This path is protected from removal."
+    );
+}
+
+#[test]
+fn expand_tilde_matches_ukn() {
+    assert_eq!(expand_tilde("~", Some("/home/u")), "/home/u");
+    assert_eq!(expand_tilde("~/proj", Some("/home/u")), "/home/u/proj");
+    assert_eq!(expand_tilde("~\\proj", Some("/home/u")), "/home/u\\proj");
+    // A `~user` form is NOT expanded (not `~`/`~/`/`~\`).
+    assert_eq!(expand_tilde("~bob/x", Some("/home/u")), "~bob/x");
+    // No home available → unchanged.
+    assert_eq!(expand_tilde("~/proj", None), "~/proj");
+    // Non-tilde unchanged.
+    assert_eq!(expand_tilde("/abs/path", Some("/home/u")), "/abs/path");
+}
+
+#[test]
+fn traversal_after_segment_matches_eur() {
+    assert!(has_traversal_after_segment("a/../b", false));
+    assert!(has_traversal_after_segment("./a/../b", false));
+    assert!(has_traversal_after_segment("dir/..", false));
+    // A leading `..` (before any real segment) does NOT count.
+    assert!(!has_traversal_after_segment("../a", false));
+    assert!(!has_traversal_after_segment("../../x", false));
+    assert!(!has_traversal_after_segment("a/b/c", false));
+    // Windows separators.
+    assert!(has_traversal_after_segment("a\\..\\b", true));
+    assert!(!has_traversal_after_segment("a\\..\\b", false)); // backslash not a sep off Windows
+}
+
+#[test]
+fn glob_index_matches_uxe() {
+    assert_eq!(glob_index("a*b"), Some(1));
+    assert_eq!(glob_index("a?b"), Some(1));
+    assert_eq!(glob_index("a[bc]d"), Some(1));
+    assert_eq!(glob_index("plain.txt"), None);
+    // `[` with no closing `]` is not a glob.
+    assert_eq!(glob_index("a[bc"), None);
+}
+
+#[test]
+fn dotdot_segment_matches_ote() {
+    assert!(has_dotdot_segment("a/../b"));
+    assert!(has_dotdot_segment("a/.."));
+    assert!(has_dotdot_segment(".."));
+    assert!(has_dotdot_segment("../a"));
+    assert!(has_dotdot_segment("a\\..\\b"));
+    // `..` embedded in a name is NOT a segment.
+    assert!(!has_dotdot_segment("a..b"));
+    assert!(!has_dotdot_segment("...."));
+    assert!(!has_dotdot_segment("a/b"));
+}
+
+#[test]
+fn glob_base_dir_matches_wgg() {
+    assert_eq!(glob_base_dir("src/*.rs"), "src/");
+    assert_eq!(glob_base_dir("*.rs"), ".");
+    assert_eq!(glob_base_dir("/a/b/*.txt"), "/a/b/");
+    // No glob → unchanged.
+    assert_eq!(glob_base_dir("plain/path.txt"), "plain/path.txt");
+}
+
+#[test]
+fn casefold_matches_hg() {
+    assert_eq!(casefold_path("/Etc/PASSWD"), "/etc/passwd");
+    assert_eq!(casefold_path("\u{0131}"), "i"); // dotless i → i
+    assert_eq!(casefold_path("\u{017F}"), "s"); // long s → s
+}
+
 #[test]
 fn param_in_list_matches_lkn() {
     let list = &["-path", "-literalpath", "-pspath", "-lp"];

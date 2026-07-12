@@ -410,6 +410,67 @@ fn classify_guard_ordering_var_before_provider() {
     assert_eq!(reason_of(&classify("env:$x", PsOperation::Read)), R::VARIABLE_EXPANSION);
 }
 
+fn ps_roots() -> crate::filesystem::FsRoots {
+    crate::filesystem::FsRoots {
+        cwd: std::path::PathBuf::from("/proj/work"),
+        home: Some(std::path::PathBuf::from("/home/u")),
+        lingxi_home: std::path::PathBuf::from("/home/u/.lingxi"),
+    }
+}
+
+#[test]
+fn check_ps_path_allows_inside_working_dir() {
+    let roots = ps_roots();
+    // A relative path resolves under cwd → allowed.
+    assert_eq!(
+        check_ps_path("notes.txt", PsOperation::Read, &roots, &[], false),
+        PsPathOutcome::Allowed
+    );
+    // An absolute path inside cwd → allowed.
+    assert_eq!(
+        check_ps_path("/proj/work/sub/a.txt", PsOperation::Read, &roots, &[], false),
+        PsPathOutcome::Allowed
+    );
+}
+
+#[test]
+fn check_ps_path_blocks_outside_working_dir_with_containment() {
+    let roots = ps_roots();
+    match check_ps_path("/etc/passwd", PsOperation::Read, &roots, &[], false) {
+        PsPathOutcome::AskContainment { resolved } => assert_eq!(resolved, "/etc/passwd"),
+        other => panic!("expected AskContainment, got {other:?}"),
+    }
+}
+
+#[test]
+fn check_ps_path_honors_additional_working_dirs() {
+    let roots = ps_roots();
+    let extra = [std::path::PathBuf::from("/tmp/allowed")];
+    assert_eq!(
+        check_ps_path("/tmp/allowed/f.txt", PsOperation::Write, &roots, &extra, false),
+        PsPathOutcome::Allowed
+    );
+    // Still blocked outside both cwd and the extra dir.
+    assert!(matches!(
+        check_ps_path("/tmp/other/f.txt", PsOperation::Write, &roots, &extra, false),
+        PsPathOutcome::AskContainment { .. }
+    ));
+}
+
+#[test]
+fn check_ps_path_string_guard_wins_over_containment() {
+    let roots = ps_roots();
+    // A guard fires before any working-dir resolution.
+    match check_ps_path("~bob/secret", PsOperation::Read, &roots, &[], false) {
+        PsPathOutcome::AskReason { reason, .. } => assert_eq!(reason, ps_path_reasons::TILDE_USER),
+        other => panic!("expected AskReason, got {other:?}"),
+    }
+    match check_ps_path("out*.log", PsOperation::Write, &roots, &[], false) {
+        PsPathOutcome::AskReason { reason, .. } => assert_eq!(reason, ps_path_reasons::GLOB_WRITE),
+        other => panic!("expected AskReason, got {other:?}"),
+    }
+}
+
 #[test]
 fn param_in_list_matches_lkn() {
     let list = &["-path", "-literalpath", "-pspath", "-lp"];

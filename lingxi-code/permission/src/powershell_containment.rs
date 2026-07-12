@@ -1226,6 +1226,64 @@ pub fn classify_ps_path(
     PsPathClass::Proceed { normalized: i }
 }
 
+/// The outcome of the complete per-path check (claude-code `NKn`): the string
+/// guards ([`classify_ps_path`]) followed by working-directory containment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PsPathOutcome {
+    /// The path resolves inside an allowed working directory — no constraint.
+    Allowed,
+    /// Blocked by a string guard — ASK with `reason` used verbatim.
+    AskReason {
+        /// The reported blocked path.
+        resolved: String,
+        /// The manual-approval reason (the ask message).
+        reason: String,
+    },
+    /// Blocked by working-directory containment — the caller builds the template-B
+    /// `"<cmdlet> targeting '<resolved>' … access files in …"` message (or the
+    /// redirection variant) from `resolved`.
+    AskContainment {
+        /// The resolved path outside the allowed working directories.
+        resolved: String,
+    },
+}
+
+/// The complete `NKn` per-path check: run the [`classify_ps_path`] string guards,
+/// then (for a clean path) resolve it and test membership in the allowed working
+/// directories, reusing the port's [`crate::filesystem::path_in_allowed_working_path`]
+/// (the same containment `check_command_path_containment` uses for bash).
+///
+/// `additional` are the extra allowed working dirs (TS `additionalWorkingDirectories`);
+/// `is_windows` selects the Windows-specific guard variants (drive-relative,
+/// provider min length). Deny-RULE resolution is handled upstream in the policy
+/// gate (see [`classify_ps_path`]).
+#[must_use]
+pub fn check_ps_path(
+    raw: &str,
+    op: PsOperation,
+    roots: &crate::filesystem::FsRoots,
+    additional: &[std::path::PathBuf],
+    is_windows: bool,
+) -> PsPathOutcome {
+    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+    match classify_ps_path(raw, op, is_windows, home.as_deref()) {
+        PsPathClass::Blocked { resolved, reason } => PsPathOutcome::AskReason { resolved, reason },
+        PsPathClass::Proceed { normalized } => {
+            let resolved = crate::filesystem::expand_path(&normalized, roots);
+            let mut work_dirs = Vec::with_capacity(1 + additional.len());
+            work_dirs.push(roots.cwd.clone());
+            work_dirs.extend(additional.iter().cloned());
+            if crate::filesystem::path_in_allowed_working_path(&resolved, &work_dirs, roots) {
+                PsPathOutcome::Allowed
+            } else {
+                PsPathOutcome::AskContainment {
+                    resolved: resolved.to_string_lossy().into_owned(),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "powershell_containment_test.rs"]
 mod powershell_containment_test;

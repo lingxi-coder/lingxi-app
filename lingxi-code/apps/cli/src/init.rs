@@ -68,6 +68,12 @@ pub struct Runtime {
     /// `Arc<AtomicBool>` the bash tool reads). The TUI mount threads a clone
     /// into the widget so `/sandbox` flips sandboxing for the live session.
     pub sandbox_toggle: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// (`/sandbox` description) auto-allow / fallback flags projected from
+    /// [`engine_desktop::DesktopRuntime`], rendered in the dynamic `/sandbox`
+    /// popup description.
+    pub sandbox_desc_auto_allow: bool,
+    /// See [`Self::sandbox_desc_auto_allow`].
+    pub sandbox_desc_fallback: bool,
     /// (`/rewind`) Shared file-history checkpoint store, projected from
     /// [`engine_desktop::DesktopRuntime::file_history`]. The TUI mount builds the
     /// `/rewind` picker rows from it, and the restore path calls its
@@ -735,6 +741,8 @@ pub async fn build_runtime_from_config(
         file_changed_watcher: rt.file_changed_watcher,
         subscription: rt.subscription,
         sandbox_toggle: rt.sandbox_toggle,
+        sandbox_desc_auto_allow: rt.sandbox_desc_auto_allow,
+        sandbox_desc_fallback: rt.sandbox_desc_fallback,
         file_history: rt.file_history,
         plugin_runtime: rt.plugin_runtime,
         provider_availability: rt.provider_availability,

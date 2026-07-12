@@ -373,6 +373,13 @@ pub(crate) async fn run_ratatui(
     // (/sandbox) The shared toggle cell threaded into the widget + clones for
     // the off-loop settings-persistence effect (mirrors the sibling triplets).
     let sandbox_toggle = tui_build.runtime.sandbox_toggle.clone();
+    // (/sandbox description fidelity) Register the static config flags the dynamic
+    // `/sandbox` popup description renders (claude-code auto-allow / fallback).
+    tui::command::register_sandbox_desc_flags(tui::command::SandboxDescFlags {
+        auto_allow: tui_build.runtime.sandbox_desc_auto_allow,
+        fallback_allowed: tui_build.runtime.sandbox_desc_fallback,
+        ..Default::default()
+    });
     // (/tasks) The live background-task registry (already `TaskRegistryHandle`),
     // cloned as a trait object for the widget's snapshot read; plus a handle +
     // tx clone for the off-loop stop effect (mirrors the sandbox triplet).

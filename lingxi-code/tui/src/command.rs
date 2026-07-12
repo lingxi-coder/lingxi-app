@@ -765,18 +765,98 @@ pub fn register_sandbox_toggle(toggle: std::sync::Arc<std::sync::atomic::AtomicB
     }
 }
 
-/// `/sandbox` dynamic description — claude-code 2.1.205:
-/// `${glyph} sandbox enabled|disabled[…flags] (⏎ to configure)` with the
-/// figures `tick`/`circle` glyph by state (`warning` on dependency errors —
-/// LingXi doesn't model dependency checks or the auto-allow/fallback/managed
-/// flags yet, so those segments are omitted until the R2 behavior pass).
+/// The static (session-config-derived) inputs to the `/sandbox` description
+/// beyond the live on/off toggle: claude-code's `isAutoAllowBashIfSandboxedEnabled`
+/// (`t`), `areUnsandboxedCommandsAllowed` (`r`), the policy-lock (`n` =
+/// `areSandboxSettingsLockedByPolicy || areUnsandboxedCommandsForbiddenByPolicy`),
+/// and `checkDependencies().errors.length === 0` (`o`). Registered once per
+/// session by the CLI mount; the [`Default`] leaves every flag off (and
+/// `deps_ok`) so an unregistered build renders exactly the old
+/// `${glyph} sandbox enabled|disabled (⏎ to configure)` string.
+#[derive(Debug, Clone, Copy)]
+pub struct SandboxDescFlags {
+    /// `isAutoAllowBashIfSandboxedEnabled` → "sandbox enabled (auto-allow)".
+    pub auto_allow: bool,
+    /// `areUnsandboxedCommandsAllowed` → ", fallback allowed".
+    pub fallback_allowed: bool,
+    /// policy-locked → " (managed)".
+    pub managed: bool,
+    /// `checkDependencies().errors.length === 0`; `false` → the warning glyph.
+    pub deps_ok: bool,
+}
+
+impl Default for SandboxDescFlags {
+    fn default() -> Self {
+        Self { auto_allow: false, fallback_allowed: false, managed: false, deps_ok: true }
+    }
+}
+
+static SANDBOX_DESC_FLAGS: std::sync::Mutex<SandboxDescFlags> =
+    std::sync::Mutex::new(SandboxDescFlags {
+        auto_allow: false,
+        fallback_allowed: false,
+        managed: false,
+        deps_ok: true,
+    });
+
+/// Register (REPLACING any prior) the static `/sandbox` description flags for the
+/// current session — the CLI mount derives these from the resolved
+/// `SandboxRuntimeConfig`. Mirrors [`register_sandbox_toggle`]'s replace-on-mount
+/// discipline so the popup row tracks the CURRENT session's config.
+pub fn register_sandbox_desc_flags(flags: SandboxDescFlags) {
+    if let Ok(mut slot) = SANDBOX_DESC_FLAGS.lock() {
+        *slot = flags;
+    }
+}
+
+fn sandbox_desc_flags() -> SandboxDescFlags {
+    SANDBOX_DESC_FLAGS.lock().map(|f| *f).unwrap_or_default()
+}
+
+/// `/sandbox` dynamic description — byte-exact port of claude-code 2.1.206's
+/// `get description()`:
+/// ```text
+/// i = !o ? warning : (e ? tick : circle)
+/// s = e ? (t ? "sandbox enabled (auto-allow)" : "sandbox enabled") + (r ? ", fallback allowed" : "")
+///       : "sandbox disabled"
+/// s += n ? " (managed)" : ""
+/// `${i} ${s} (⏎ to configure)`
+/// ```
+/// where `e` = live toggle ([`sandbox_enabled`]) and `t`/`r`/`n`/`o` come from
+/// the registered [`SandboxDescFlags`]. Figures: `warning` U+26A0, `tick` U+2714,
+/// `circle` U+25EF (unicode forms, matching the port's existing glyphs).
 fn desc_sandbox() -> String {
-    let (glyph, state) = if sandbox_enabled() {
-        ("\u{2714}", "sandbox enabled")
+    render_sandbox_desc(sandbox_enabled(), sandbox_desc_flags())
+}
+
+/// Pure render of the `/sandbox` description from the live toggle + static flags
+/// (claude-code `get description()`). Separated from the process-globals so it is
+/// testable in isolation.
+fn render_sandbox_desc(enabled: bool, f: SandboxDescFlags) -> String {
+    let glyph = if !f.deps_ok {
+        "\u{26A0}"
+    } else if enabled {
+        "\u{2714}"
     } else {
-        ("\u{25EF}", "sandbox disabled")
+        "\u{25EF}"
     };
-    format!("{glyph} {state} (\u{23CE} to configure)")
+    let mut status = if enabled {
+        let mut s = if f.auto_allow {
+            "sandbox enabled (auto-allow)".to_string()
+        } else {
+            "sandbox enabled".to_string()
+        };
+        if f.fallback_allowed {
+            s.push_str(", fallback allowed");
+        }
+        s
+    } else {
+        "sandbox disabled".to_string()
+    };
+    if f.managed {
+        status.push_str(" (managed)");
+    }
+    format!("{glyph} {status} (\u{23CE} to configure)")
 }
 
 /// `/terminal-setup` dynamic description — claude-code 2.1.205
@@ -1018,5 +1098,59 @@ mod tests {
 
         let ts = BUILTIN.iter().find(|c| c.name == "/terminal-setup").unwrap();
         assert!(!ts.describe().is_empty());
+    }
+
+    #[test]
+    fn sandbox_description_renders_all_flag_states() {
+        use super::{render_sandbox_desc, SandboxDescFlags};
+        let f = |auto_allow, fallback_allowed, managed, deps_ok| SandboxDescFlags {
+            auto_allow,
+            fallback_allowed,
+            managed,
+            deps_ok,
+        };
+        // Baseline (default flags) — unchanged from the pre-fidelity strings.
+        assert_eq!(
+            render_sandbox_desc(false, SandboxDescFlags::default()),
+            "\u{25EF} sandbox disabled (\u{23CE} to configure)"
+        );
+        assert_eq!(
+            render_sandbox_desc(true, SandboxDescFlags::default()),
+            "\u{2714} sandbox enabled (\u{23CE} to configure)"
+        );
+        // auto-allow.
+        assert_eq!(
+            render_sandbox_desc(true, f(true, false, false, true)),
+            "\u{2714} sandbox enabled (auto-allow) (\u{23CE} to configure)"
+        );
+        // auto-allow + fallback.
+        assert_eq!(
+            render_sandbox_desc(true, f(true, true, false, true)),
+            "\u{2714} sandbox enabled (auto-allow), fallback allowed (\u{23CE} to configure)"
+        );
+        // fallback without auto-allow.
+        assert_eq!(
+            render_sandbox_desc(true, f(false, true, false, true)),
+            "\u{2714} sandbox enabled, fallback allowed (\u{23CE} to configure)"
+        );
+        // managed appends to any state (enabled + disabled).
+        assert_eq!(
+            render_sandbox_desc(true, f(true, true, true, true)),
+            "\u{2714} sandbox enabled (auto-allow), fallback allowed (managed) (\u{23CE} to configure)"
+        );
+        assert_eq!(
+            render_sandbox_desc(false, f(false, false, true, true)),
+            "\u{25EF} sandbox disabled (managed) (\u{23CE} to configure)"
+        );
+        // Dependency errors → the warning glyph, overriding tick/circle in BOTH
+        // enabled and disabled states.
+        assert_eq!(
+            render_sandbox_desc(true, f(false, false, false, false)),
+            "\u{26A0} sandbox enabled (\u{23CE} to configure)"
+        );
+        assert_eq!(
+            render_sandbox_desc(false, f(false, false, false, false)),
+            "\u{26A0} sandbox disabled (\u{23CE} to configure)"
+        );
     }
 }

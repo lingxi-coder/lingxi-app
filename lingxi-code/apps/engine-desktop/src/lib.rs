@@ -1840,6 +1840,12 @@ pub struct DesktopRuntime {
     /// `BuiltinToolContext::sandbox_enabled_override`; the TUI mount threads a
     /// clone into the widget so `/sandbox` flips it for the live session.
     pub sandbox_toggle: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// (`/sandbox` description) `SandboxRuntimeConfig.autoAllowBashIfSandboxed`
+    /// — renders " (auto-allow)" in the dynamic `/sandbox` popup description.
+    pub sandbox_desc_auto_allow: bool,
+    /// (`/sandbox` description) `SandboxRuntimeConfig` unsandboxed-commands-allowed
+    /// — renders ", fallback allowed" in the dynamic `/sandbox` description.
+    pub sandbox_desc_fallback: bool,
     /// (`/rewind`) The shared file-history checkpoint store. The SAME
     /// `Arc<session::FileHistory>` the orchestrator captures into; the CLI uses
     /// it to build the `/rewind` picker rows and to restore code on rewind.
@@ -4865,6 +4871,13 @@ pub async fn build(
     // exactly as the config `enabled` flag does today.
     let sandbox_toggle =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(sandbox_runtime_cfg.enabled));
+    // (`/sandbox` description fidelity) Capture the static config flags the TUI's
+    // dynamic `/sandbox` description renders (claude-code `t`/`r`) BEFORE the
+    // config is moved into `tool_ctx` below. `managed` (policy-lock) and the
+    // dependency-check warning glyph are not modeled here yet (default off /
+    // deps-ok), a documented residual.
+    let sandbox_desc_auto_allow = sandbox_runtime_cfg.auto_allow_bash_if_sandboxed;
+    let sandbox_desc_fallback = sandbox_runtime_cfg.are_unsandboxed_commands_allowed();
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -5926,6 +5939,8 @@ pub async fn build(
         file_changed_watcher,
         subscription,
         sandbox_toggle,
+        sandbox_desc_auto_allow,
+        sandbox_desc_fallback,
         file_history,
         plugin_runtime,
         provider_availability,

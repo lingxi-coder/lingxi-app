@@ -57,11 +57,12 @@ mod tests {
         assert_eq!(format_duration_ms(65_000), "1m 5s");
         assert_eq!(format_duration_ms(3_661_000), "1h 1m 1s");
         assert_eq!(format_duration_ms(90_061_000), "1d 1h 1m"); // days form drops seconds
-        assert_eq!(format_duration_ms(59_500), "59s");  // round(59.5)=60 -> carry to 1m 0s? see note
+        assert_eq!(format_duration_ms(59_500), "59s");   // <60000 FLOORS: floor(59.5)=59
+        assert_eq!(format_duration_ms(119_500), "2m 0s"); // >=60000 branch: round(59.5)=60 -> carry -> 2m 0s
     }
 }
 ```
-Note: `59_500ms` → seconds `round(59.5)=60` → `i=0,o=1` → `"1m 0s"`. Fix that assertion to `"1m 0s"` before running (kept here to force thinking about carry).
+CRITICAL (verified vs the 2.1.206 binary): the `<60000ms` branch is an unconditional `Math.floor` — NO rounding, NO carry. `59_500ms → floor(59.5)=59 → "59s"`. Rounding + the carry chain (`i===60→o++`, …) exist ONLY in the `>=60000ms` branch; `119_500ms` exercises that carry (`round(59.5s)=60 → 2m 0s`).
 
 - [ ] **Step 2: Run test to verify it fails**
 

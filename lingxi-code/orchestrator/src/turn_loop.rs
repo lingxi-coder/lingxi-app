@@ -2038,6 +2038,27 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
         .collect()
 }
 
+/// Fold a tool result's `structuredPatch` (if any) into the session's
+/// cumulative code-change counters (claude-code `Bhn(added, removed)`,
+/// surfaced by `/usage`). Only file-edit tools (Edit/Write/MultiEdit) put a
+/// `structuredPatch` array in their result data; every other tool's payload
+/// lacks the key, so this is a no-op for them. Also a no-op when no
+/// `cost_tracker` is wired (M6-06 default `None`).
+pub(crate) async fn accumulate_code_change(
+    emit_payload: &serde_json::Value,
+    tracker: Option<&std::sync::Arc<cost::CostTracker>>,
+) {
+    let Some(sp) = emit_payload.get("structuredPatch") else {
+        return;
+    };
+    let (added, removed) = crate::cost_lines::count_structured_patch_lines(sp);
+    if added > 0 || removed > 0 {
+        if let Some(tracker) = tracker {
+            tracker.record_code_change(added, removed).await;
+        }
+    }
+}
+
 /// Dispatch each `tool_use` block through hooks -> permission -> registry ->
 /// hooks. Returns a list of `ContentBlock::ToolResult` blocks for the
 /// next user message.
@@ -2990,6 +3011,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .emit_tool_result(tool_use_id, name, &content, &emit_payload)
             .await;
 
+        // (code-change stats for /usage — claude-code `Bhn(added, removed)`)
+        // Only file-edit tools (Edit/Write/MultiEdit) put a `structuredPatch`
+        // in their result data; sum its +/- lines into the session counters.
+        accumulate_code_change(&emit_payload, orch.cost_tracker.as_ref()).await;
+
         // Record the file into the read-file-state cache backing `/files`
         // (TS `readFileState.set(expandPath(file_path), …)` in FileReadTool /
         // FileEditTool / FileWriteTool / MultiEditTool / NotebookEditTool).
@@ -3644,5 +3670,57 @@ mod image_tool_result_tests {
         assert!(
             image_tool_result_blocks(&json!({"type":"image","file":{"base64":"QQ=="}})).is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod code_change_accumulation_tests {
+    use super::accumulate_code_change;
+    use cost::{CostTracker, PricingCatalog};
+    use protocol::SessionId;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn make_tracker() -> Arc<CostTracker> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        Arc::new(CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ))
+    }
+
+    #[tokio::test]
+    async fn structured_patch_lines_accumulate_into_the_tracker() {
+        let tracker = make_tracker();
+        let payload = json!({
+            "structuredPatch": [
+                { "lines": ["+a", "+b", "-c"] }
+            ]
+        });
+        accumulate_code_change(&payload, Some(&tracker)).await;
+        let snap = tracker.snapshot().await;
+        assert_eq!(snap.total_lines_added, 2);
+        assert_eq!(snap.total_lines_removed, 1);
+    }
+
+    #[tokio::test]
+    async fn no_tracker_is_a_no_op() {
+        // Absent tracker (M6-06 default `None`) must not panic — this is the
+        // common case whenever no host has opted into cost tracking.
+        let payload = json!({
+            "structuredPatch": [ { "lines": ["+a"] } ]
+        });
+        accumulate_code_change(&payload, None).await;
+    }
+
+    #[tokio::test]
+    async fn missing_structured_patch_is_a_no_op() {
+        let tracker = make_tracker();
+        // Every non-edit tool's result data lacks `structuredPatch` entirely.
+        accumulate_code_change(&json!({"stdout": "ok"}), Some(&tracker)).await;
+        let snap = tracker.snapshot().await;
+        assert_eq!(snap.total_lines_added, 0);
+        assert_eq!(snap.total_lines_removed, 0);
     }
 }

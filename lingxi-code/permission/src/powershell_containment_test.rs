@@ -331,6 +331,85 @@ fn casefold_matches_hg() {
     assert_eq!(casefold_path("\u{017F}"), "s"); // long s → s
 }
 
+fn classify(raw: &str, op: PsOperation) -> PsPathClass {
+    classify_ps_path(raw, op, false, Some("/home/u"))
+}
+
+fn reason_of(c: &PsPathClass) -> &str {
+    match c {
+        PsPathClass::Blocked { reason, .. } => reason,
+        PsPathClass::Proceed { .. } => panic!("expected Blocked, got Proceed"),
+    }
+}
+
+#[test]
+fn classify_string_guards_block_with_exact_reasons() {
+    use ps_path_reasons as R;
+    assert_eq!(reason_of(&classify("~bob/x", PsOperation::Read)), R::TILDE_USER);
+    assert_eq!(reason_of(&classify("a`b", PsOperation::Read)), R::BACKTICK);
+    assert_eq!(reason_of(&classify("Registry::HKLM", PsOperation::Read)), R::PROVIDER_QUALIFIED);
+    assert_eq!(reason_of(&classify("//server/share", PsOperation::Read)), R::UNC);
+    assert_eq!(reason_of(&classify("$env:TEMP/x", PsOperation::Read)), R::VARIABLE_EXPANSION);
+    assert_eq!(reason_of(&classify("dir/../escape", PsOperation::Read)), R::TRAVERSAL);
+}
+
+#[test]
+fn classify_glob_reason_depends_on_operation() {
+    use ps_path_reasons as R;
+    assert_eq!(reason_of(&classify("out*.txt", PsOperation::Write)), R::GLOB_WRITE);
+    assert_eq!(reason_of(&classify("out*.txt", PsOperation::Create)), R::GLOB_WRITE);
+    assert_eq!(reason_of(&classify("in*.txt", PsOperation::Read)), R::GLOB_READ);
+}
+
+#[test]
+fn classify_provider_and_drive_relative() {
+    // Off Windows, a `C:foo` drive-relative is caught by the provider guard.
+    let r = reason_of(&classify("C:foo", PsOperation::Read)).to_string();
+    assert!(r.contains("uses a non-filesystem provider"));
+    assert!(r.contains("C:foo"));
+    // A URL-like provider prefix.
+    assert!(reason_of(&classify("http:notafile", PsOperation::Read)).contains("non-filesystem provider"));
+
+    // On Windows, `C:foo` is drive-relative (distinct reason).
+    let w = classify_ps_path("C:foo", PsOperation::Read, true, Some("C:\\Users\\u"));
+    assert!(reason_of(&w).contains("is drive-relative"));
+}
+
+#[test]
+fn classify_clean_paths_proceed_normalized() {
+    // Backslashes normalized, surrounding quotes stripped.
+    assert_eq!(
+        classify("src\\file.txt", PsOperation::Read),
+        PsPathClass::Proceed { normalized: "src/file.txt".to_string() }
+    );
+    assert_eq!(
+        classify("'quoted name.txt'", PsOperation::Read),
+        PsPathClass::Proceed { normalized: "quoted name.txt".to_string() }
+    );
+    // `~/x` (tilde followed by '/') is expanded, NOT a ~user block.
+    assert_eq!(
+        classify("~/proj/a.txt", PsOperation::Read),
+        PsPathClass::Proceed { normalized: "/home/u/proj/a.txt".to_string() }
+    );
+    // A leading `../` is not traversal-after-segment → proceeds.
+    assert_eq!(
+        classify("../sibling.txt", PsOperation::Read),
+        PsPathClass::Proceed { normalized: "../sibling.txt".to_string() }
+    );
+    // A plain relative path proceeds.
+    assert_eq!(
+        classify("logs/today.txt", PsOperation::Read),
+        PsPathClass::Proceed { normalized: "logs/today.txt".to_string() }
+    );
+}
+
+#[test]
+fn classify_guard_ordering_var_before_provider() {
+    // `$` variable-expansion fires before the provider-prefix guard.
+    use ps_path_reasons as R;
+    assert_eq!(reason_of(&classify("env:$x", PsOperation::Read)), R::VARIABLE_EXPANSION);
+}
+
 #[test]
 fn param_in_list_matches_lkn() {
     let list = &["-path", "-literalpath", "-pspath", "-lp"];

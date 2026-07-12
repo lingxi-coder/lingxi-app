@@ -1102,6 +1102,130 @@ pub fn casefold_path(path: &str) -> String {
     path.to_lowercase().replace('\u{0131}', "i").replace('\u{017F}', "s")
 }
 
+/// Classification of a single PowerShell path argument by the `NKn` string-guard
+/// sequence — the pure, roots-independent half of containment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PsPathClass {
+    /// A guard (or glob) fired: block with this fixed `"other"`-type reason,
+    /// which the caller surfaces as an ASK. `resolved` is the reported blocked
+    /// path (metadata; the ask message is `reason`, not a template).
+    Blocked {
+        /// The reported blocked path.
+        resolved: String,
+        /// The manual-approval reason (used verbatim as the ask message).
+        reason: String,
+    },
+    /// No guard fired; `normalized` (quotes stripped, tilde-expanded, backslashes
+    /// normalized) proceeds to working-directory containment.
+    Proceed {
+        /// The normalized path to check against the allowed working directories.
+        normalized: String,
+    },
+}
+
+/// A Windows drive-relative path (claude-code `/^[a-z]:(?![/\\])/i`): a single
+/// letter, a colon, and NOT immediately a separator.
+fn is_drive_relative(i: &str) -> bool {
+    let b = i.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && !matches!(b.get(2), Some(b'/' | b'\\'))
+}
+
+/// A non-filesystem provider prefix (claude-code `/^[a-z0-9]{2,}:/i` on Windows,
+/// `/^[a-z0-9]+:/i` elsewhere): an alphanumeric run then a colon.
+fn is_provider_prefix(i: &str, is_windows: bool) -> bool {
+    let run: usize = i.bytes().take_while(u8::is_ascii_alphanumeric).count();
+    let min = if is_windows { 2 } else { 1 };
+    run >= min && i.as_bytes().get(run) == Some(&b':')
+}
+
+/// Windows 8.3 short-name expansion (claude-code `tGi`) — a no-op off Windows,
+/// which is the only platform the port validates PowerShell on.
+fn short_name_expand(i: &str, _is_windows: bool) -> String {
+    // `tGi` returns the input unchanged on every non-Windows platform; the
+    // per-segment `PKn` 8.3 expansion is Windows-registry-backed and not modeled.
+    i.to_string()
+}
+
+/// Classify a PowerShell path argument through the `NKn` string-guard sequence
+/// (claude-code `NKn`, binary 2.1.206). Returns an early [`PsPathClass::Blocked`]
+/// for a path that cannot be statically validated (`~user`, backtick, `::`,
+/// drive-relative, UNC, `$`/`%`, non-fs provider, `..`-traversal, glob), else
+/// [`PsPathClass::Proceed`] with the normalized path for working-dir containment.
+///
+/// NOTE: claude-code additionally pre-checks a deny RULE inside the backtick /
+/// `::` / traversal / glob branches (returning a `deny` instead of an ask when a
+/// rule matches). Those rule pre-checks are intentionally omitted here: the port
+/// runs its deny-rule walk UPSTREAM of containment (in `PermissionPolicy`), so a
+/// rule-matched command is already denied before this runs; the residual case
+/// (a rule targeting a transformed sub-path) degrades to ASK, which still blocks
+/// auto-execution.
+#[must_use]
+pub fn classify_ps_path(
+    raw: &str,
+    op: PsOperation,
+    is_windows: bool,
+    home: Option<&str>,
+) -> PsPathClass {
+    use ps_path_reasons as R;
+    // i = UKn(L1(e)).replaceAll("\\","/")
+    let mut i = expand_tilde(strip_surrounding_quotes(raw), home).replace('\\', "/");
+
+    let blocked = |resolved: &str, reason: String| PsPathClass::Blocked {
+        resolved: resolved.to_string(),
+        reason,
+    };
+
+    // ~user (tilde NOT followed by '/'): `/^~[^/]/`
+    if i.starts_with('~') && i.as_bytes().get(1).is_some_and(|&c| c != b'/') {
+        return blocked(&i, R::TILDE_USER.to_string());
+    }
+    // backtick escape
+    if i.contains('`') {
+        return blocked(&i, R::BACKTICK.to_string());
+    }
+    // `::` module-qualified provider
+    if i.contains("::") {
+        return blocked(&i, R::PROVIDER_QUALIFIED.to_string());
+    }
+    // Windows drive-relative
+    if is_windows && is_drive_relative(&i) {
+        return blocked(&i, drive_relative_reason(&i));
+    }
+    // tGi short-name expansion, then UNC / WebDAV / SSL
+    i = short_name_expand(&i, is_windows);
+    if i.starts_with("//")
+        || i.to_ascii_lowercase().contains("davwwwroot")
+        || i.to_ascii_uppercase().contains("@SSL@")
+    {
+        return blocked(&i, R::UNC.to_string());
+    }
+    // `$`/`%` variable expansion
+    if i.contains('$') || i.contains('%') {
+        return blocked(&i, R::VARIABLE_EXPANSION.to_string());
+    }
+    // non-filesystem provider prefix
+    if is_provider_prefix(&i, is_windows) {
+        return blocked(&i, non_fs_provider_reason(&i));
+    }
+    // `..` traversal after a real segment
+    if has_traversal_after_segment(&i, is_windows) {
+        return blocked(&i, R::TRAVERSAL.to_string());
+    }
+    // glob
+    if glob_index(&i).is_some() {
+        let reason = if matches!(op, PsOperation::Write | PsOperation::Create) {
+            R::GLOB_WRITE
+        } else {
+            R::GLOB_READ
+        };
+        return blocked(&i, reason.to_string());
+    }
+    PsPathClass::Proceed { normalized: i }
+}
+
 #[cfg(test)]
 #[path = "powershell_containment_test.rs"]
 mod powershell_containment_test;

@@ -35,9 +35,13 @@ use serde_json::{Map, Value};
 
 /// One line of the session JSONL file.
 ///
-/// Outer field NAMES match claude; field ORDER does not yet (see module
-/// docs — claude spreads a per-kind envelope mid-line). The `message` field is
-/// an opaque `Value` because its inner schema depends on `type` (Anthropic
+/// Outer field NAMES **and ORDER** match claude: the hand-written
+/// [`impl Serialize for JsonlMessage`] emits claude's per-kind envelope order
+/// (see the module docs) rather than this struct's declaration order — so the
+/// on-disk byte layout is 1:1, not just the field set. (This corrects an
+/// earlier note that claimed the order "does not yet" match; the hand-written
+/// `Serialize` closed that gap.) The `message` field is an opaque `Value`
+/// because its inner schema depends on `type` (Anthropic
 /// Messages API for `user`/`assistant`, claude-code internal shapes for
 /// `system`/`attachment`). All un-named outer fields land in `extra` via
 /// `#[serde(flatten)]` so read→write round-trips preserve every byte we read.

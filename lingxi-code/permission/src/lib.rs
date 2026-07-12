@@ -32,6 +32,7 @@ pub mod persist;
 pub mod policy;
 pub mod policy_gate;
 pub mod powershell_containment;
+pub mod powershell_parse;
 pub mod prompting_gate;
 pub mod read_deny_globs;
 pub mod read_only_command;

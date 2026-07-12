@@ -644,7 +644,7 @@ pub fn param_in_list(short: &str, list: &[&str]) -> bool {
 /// `element_types[i + 1]` is the type of `args[i]` (`_Br`-mapped, e.g.
 /// `"StringConstant"`, `"Parameter"`, `"SubExpression"`, `"Variable"`). A missing
 /// entry (short vector) reads as "unknown", exactly like JS `a[p+1] === undefined`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PsCommand {
     /// The command name as written (alias or canonical cmdlet, any casing).
     pub name: String,
@@ -667,7 +667,7 @@ pub struct PsRedirection {
 }
 
 /// One element of a pipeline statement (claude-code `e.commands` entry).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PsElement {
     /// A `CommandAst` — a cmdlet/command invocation to validate.
     Command(PsCommand),
@@ -680,7 +680,7 @@ pub enum PsElement {
 }
 
 /// A parsed PowerShell statement / pipeline (claude-code `xgg`'s input `e`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PsStatement {
     /// The pipeline's elements, in order.
     pub commands: Vec<PsElement>,

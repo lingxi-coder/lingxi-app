@@ -290,7 +290,8 @@ async fn pre_hook_blocks_bash_tool() {
     }
 
     // The 2nd API call must carry a ContentBlock::ToolResult with is_error=true
-    // and content starting with "Hook blocked:" — that's the byte-lock proving
+    // and content "PreToolUse:Bash hook error: <reason>" — claude-code's `aAs`
+    // rendering of a PreToolUse `decision:"block"` → deny — the byte-lock proving
     // the Pre hook intercepted the dispatch.
     let captured = api.captured_msgs().await;
     assert_eq!(captured.len(), 2, "expected 2 API turns");
@@ -300,7 +301,7 @@ async fn pre_hook_blocks_bash_tool() {
         .expect("at least one message in turn 2 history");
     let payload = serde_json::to_string(user_msg_with_result).unwrap();
     assert!(
-        payload.contains("Hook blocked: Bash is gated"),
+        payload.contains("PreToolUse:Bash hook error: Bash is gated"),
         "turn-2 history must include the hook-blocked tool result; got: {payload}"
     );
 }

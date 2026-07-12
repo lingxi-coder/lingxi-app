@@ -108,7 +108,7 @@ async fn apply_terminal_sequence(
         }
         None => {
             tracing::warn!(
-                "Hook {hook_name} returned a terminalSequence that was rejected by the allowlist (only OSC 0/1/2/9/99/777 and BEL are permitted)"
+                "Hook {hook_name} returned a terminalSequence that was rejected by the allowlist (only OSC 0/1/2/9/99/777 and BEL are permitted, and OSC 9 bodies may not begin with a digit unless in the 9;4 progress form)"
             );
         }
     }
@@ -2538,17 +2538,25 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         }
 
         if matches!(pre_agg.decision, Some(HookDecision::Block)) {
+            // claude-code maps a PreToolUse `decision:"block"` to
+            // `permissionBehavior:"deny"` with `blockingError = reason ||
+            // "Blocked by hook"`, then renders the model-facing deny message via
+            // `aAs(hookName, blockingError)` = `` `${hookName} hook error:
+            // ${blockingError}` ``. For PreToolUse the hook name is
+            // `PreToolUse:${toolName}`, so the tool_result the model sees is
+            // `"PreToolUse:<name> hook error: <reason>"` (fallback reason
+            // "Blocked by hook", capital B).
             let reason = pre_agg
                 .reason
                 .clone()
-                .unwrap_or_else(|| "blocked by hook".into());
+                .unwrap_or_else(|| "Blocked by hook".into());
             tracing::info!(
                 event = orch_events::HOOK_PRE_COMPLETED,
                 tool_name = %name,
                 decision = "block",
                 duration_ms = pre_dur_ms,
             );
-            let model_text = format!("Hook blocked: {reason}");
+            let model_text = format!("PreToolUse:{name} hook error: {reason}");
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
                 content: model_text.clone(),

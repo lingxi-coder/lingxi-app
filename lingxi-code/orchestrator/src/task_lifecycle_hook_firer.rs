@@ -108,7 +108,10 @@ impl OrchestratorTaskLifecycleHookFirer {
     async fn run(&self, event: HookEvent) -> Result<(), String> {
         let agg = self.hooks.execute(event, self.ctx()).await;
         if agg.decision == Some(HookDecision::Block) {
-            Err(agg.reason.unwrap_or_else(|| "blocked by hook".to_string()))
+            // claude-code's block case sets `blockingError = reason || "Blocked
+            // by hook"` (capital B) uniformly across hook events; the task tool
+            // then wraps it as "Task{Created,Completed} hook feedback:\n<reason>".
+            Err(agg.reason.unwrap_or_else(|| "Blocked by hook".to_string()))
         } else {
             Ok(())
         }

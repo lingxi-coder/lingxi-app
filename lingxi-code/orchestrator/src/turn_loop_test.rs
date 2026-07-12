@@ -3784,7 +3784,7 @@ mod pre_tool_hook_tests {
             .unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
-        assert!(content.contains("Hook blocked: nope"));
+        assert!(content.contains("PreToolUse:Echo hook error: nope"));
         assert!(!content.contains("ECHOED-OUTPUT"), "tool never ran");
     }
 

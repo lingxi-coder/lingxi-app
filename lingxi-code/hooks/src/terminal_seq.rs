@@ -14,14 +14,17 @@
 //!   let n=NEo(e.terminalSequence);
 //!   if(n!==null)BEo(n);
 //!   else C(`Hook ${t} returned a terminalSequence that was rejected by the
-//!     allowlist (only OSC 0/1/2/9/99/777 and BEL are permitted)`)
+//!     allowlist (only OSC 0/1/2/9/99/777 and BEL are permitted, and OSC 9
+//!     bodies may not begin with a digit unless in the 9;4 progress form)`)
 //! }
 //! ```
 //!
 //! The allowlist accepts ONLY:
 //! - BEL (`\x07`), and
 //! - OSC sequences (`ESC ]` … terminator) whose `Ps` numeric code is one of
-//!   `{0, 1, 2, 9, 99, 777}`.
+//!   `{0, 1, 2, 9, 99, 777}` — with the added constraint (claude-code `z7h`)
+//!   that an OSC **9** body may not begin with a bare digit unless it is the
+//!   `9;4` progress form (see [`osc9_body_allowed`]).
 //!
 //! Anything else — a bare `ESC` not starting an OSC, a non-numeric / out-of-set
 //! `Ps`, an unterminated OSC, a control char in the input, or a total length
@@ -32,6 +35,9 @@
 //! `process.stdout.write` to the controlling TTY, terminal-multiplexer-aware
 //! re-escaping in `aS`/`Sk`) lives in the TUI terminal writer; this crate has no
 //! TTY handle, so it surfaces the validated string for that consumer to emit.
+
+use regex::Regex;
+use std::sync::LazyLock;
 
 /// BEL control char (`\x07`, claude-code `KO`).
 const BEL: char = '\u{0007}';
@@ -68,6 +74,39 @@ fn sanitize_payload(s: &str) -> String {
             r >= 32 && r != 127 && !(128..=159).contains(&r)
         })
         .collect()
+}
+
+/// Validate the sanitized body of an OSC **9** sequence (claude-code `z7h`, BIN
+/// off 216069691). An OSC-9 body is accepted ONLY when it is the `9;4` progress
+/// form (`/^4;[0-4](;(100|\d{1,2})?)?$/`) or does NOT begin with a decimal digit
+/// — after optional leading whitespace and an optional `+`/`-` sign
+/// (`/^[\s᠎​]*[+-]?\p{Nd}/u`). This blocks a hook from spoofing numeric
+/// OSC-9 control payloads (e.g. a fake progress/notification code) while still
+/// allowing free-text desktop notifications and the real progress protocol.
+///
+/// `\d` in the progress pattern is ASCII-only per JS `RegExp` semantics (hence
+/// `[0-9]`, not `\p{Nd}`); the leading-digit test uses Unicode `\p{Nd}` per the
+/// `u` flag. The leading-whitespace class replicates JS `\s` verbatim (which
+/// includes `﻿` but NOT ``, unlike Rust's `\p{White_Space}`) plus the
+/// two explicit code points `᠎` and `​`.
+fn osc9_body_allowed(body: &str) -> bool {
+    // JS `\s` = HT LF VT FF CR SP NBSP U+1680 U+2000..U+200A LS PS U+202F U+205F
+    // U+3000 U+FEFF; plus the source's explicit U+180E and U+200B. U+2000..U+200A
+    // and U+200B are contiguous, collapsed to U+2000..U+200B.
+    static LEADING_DIGIT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            "^[\t\n\u{0B}\u{0C}\r \u{A0}\u{1680}\u{180E}\u{2000}-\u{200B}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}]*[+-]?\\p{Nd}",
+        )
+        .expect("static OSC-9 leading-digit regex is valid")
+    });
+    static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^4;[0-4](;(100|[0-9]{1,2})?)?$")
+            .expect("static OSC-9 progress-form regex is valid")
+    });
+    if PROGRESS.is_match(body) {
+        return true;
+    }
+    !LEADING_DIGIT.is_match(body)
 }
 
 /// Tokenize a `terminalSequence` (claude-code `wem`). Returns `None` (reject the
@@ -142,10 +181,14 @@ fn tokenize(input: &str) -> Option<Vec<TerminalToken>> {
         if !ALLOWED_OSC_PS.contains(&ps) {
             return None;
         }
-        tokens.push(TerminalToken::Osc {
-            ps,
-            payload: sanitize_payload(&payload),
-        });
+        let payload = sanitize_payload(&payload);
+        // `if(d===9&&!z7h(p))return null` — an OSC 9 body that begins with a bare
+        // digit (and is not the `9;4` progress form) is rejected so a hook can't
+        // spoof numeric OSC-9 control payloads.
+        if ps == 9 && !osc9_body_allowed(&payload) {
+            return None;
+        }
+        tokens.push(TerminalToken::Osc { ps, payload });
         n = s + term_len;
     }
     Some(tokens)
@@ -207,6 +250,50 @@ mod tests {
         let seq = "\u{001B}]9;hello\u{0007}";
         let out = validate_terminal_sequence(seq).unwrap();
         assert_eq!(out, "\u{001B}]9;hello\u{0007}");
+    }
+
+    #[test]
+    fn osc_9_body_beginning_with_a_bare_digit_is_rejected() {
+        // ESC ] 9 ; 5 items done BEL — body "5 items done" begins with a digit
+        // and is not the 9;4 progress form → rejected (claude-code `z7h`).
+        assert_eq!(validate_terminal_sequence("\u{001B}]9;5 items done\u{0007}"), None);
+        // A leading sign / leading whitespace before the digit is also rejected.
+        assert_eq!(validate_terminal_sequence("\u{001B}]9;-3 left\u{0007}"), None);
+        assert_eq!(validate_terminal_sequence("\u{001B}]9; 42%\u{0007}"), None);
+    }
+
+    #[test]
+    fn osc_9_4_progress_form_is_accepted() {
+        // The `9;4;state;progress` desktop-progress protocol is explicitly allowed
+        // even though its body begins with a digit.
+        for body in ["4;0", "4;1;50", "4;3;100", "4;2;", "4;4;7"] {
+            let seq = format!("\u{001B}]9;{body}\u{0007}");
+            assert_eq!(
+                validate_terminal_sequence(&seq),
+                Some(seq.clone()),
+                "9;{body} progress form must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn osc_9_text_body_not_starting_with_a_digit_is_accepted() {
+        // Free-text notifications whose body does not begin with a digit stay
+        // valid — the common desktop-notification use case.
+        assert_eq!(
+            validate_terminal_sequence("\u{001B}]9;Build finished\u{0007}"),
+            Some("\u{001B}]9;Build finished\u{0007}".to_string())
+        );
+    }
+
+    #[test]
+    fn osc_9_rule_does_not_affect_other_ps_codes() {
+        // The digit-body constraint is OSC-9-only; OSC 0/1/2/99/777 bodies may
+        // freely begin with a digit.
+        assert_eq!(
+            validate_terminal_sequence("\u{001B}]0;3 tabs\u{0007}"),
+            Some("\u{001B}]0;3 tabs\u{0007}".to_string())
+        );
     }
 
     #[test]

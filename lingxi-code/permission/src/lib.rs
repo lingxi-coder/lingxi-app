@@ -31,6 +31,7 @@ pub mod path_constraints;
 pub mod persist;
 pub mod policy;
 pub mod policy_gate;
+pub mod powershell_containment;
 pub mod prompting_gate;
 pub mod read_deny_globs;
 pub mod read_only_command;

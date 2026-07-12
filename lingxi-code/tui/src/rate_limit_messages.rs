@@ -50,24 +50,39 @@ use llm_client::model::rate_limit::format_reset_time;
 use traits::env::is_env_truthy;
 use traits::subscription::SubscriptionSnapshot;
 
-/// Locked upsell strings. Mirrors claude-code `getUpsellMessage`
-/// (`RateLimitMessage.tsx`). Note the curly apostrophe U+2019 in "you’re" and
-/// the ellipsis U+2026 in "Opening your options…". Carried byte-identical from
-/// the iocraft backend's `components/messages/rate_limit.rs`.
+/// Locked upsell strings. Mirrors claude-code 2.1.206 `getUpsellMessage`
+/// (binary `Gid` @221157422: `function
+/// Gid({shouldShowUpsell:e,isMax20x:t,isExtraUsageCommandEnabled:r,shouldAutoOpenRateLimitOptionsMenu:n,isTeamOrEnterprise:o,hasBillingAccess:i,serverHidesUpgrade:s,serverHidesOverage:a,spendLimitNudgePath:l}){...}`).
+/// Note the curly apostrophe U+2019 in "you’re" and the ellipsis U+2026 in
+/// "Opening your options…" — both byte-verified against the real 2.1.206
+/// binary's minified-source region (the `/extra-usage` slash-command was
+/// renamed to `/usage-credits` in 206; see `Ytr`/`Xte`/`Mhs` nearby in the
+/// same binary region).
 pub mod upsell {
-    /// Max-20x + extra-usage enabled.
-    pub const EXTRA_USAGE_FINISH: &str = "/extra-usage to finish what you\u{2019}re working on.";
+    /// Max-20x + extra-usage enabled; team/enterprise + billing access;
+    /// serverHidesUpgrade + extra-usage enabled. Reused verbatim across
+    /// THREE `Gid` branches (byte-verified: the same literal appears 3x in
+    /// the binary's `Gid` body).
+    pub const USAGE_CREDITS_FINISH: &str =
+        "/usage-credits to finish what you\u{2019}re working on.";
     /// Max-20x, extra-usage disabled.
     pub const LOGIN_SWITCH: &str = "/login to switch to an API usage-billed account.";
-    /// Auto-open menu.
+    /// Auto-open menu (`shouldAutoOpenRateLimitOptionsMenu`); structurally
+    /// unreachable in the TUI (no interactive rate-limit options menu).
     pub const OPENING_OPTIONS: &str = "Opening your options\u{2026}";
-    /// Default (non-team, no extra-usage).
+    /// `spendLimitNudgePath` arm.
+    pub const SPEND_LIMIT_NUDGE: &str = "/usage-credits to adjust your monthly spend limit.";
+    /// Default (non-team, no extra-usage / serverHidesUpgrade false).
     pub const UPGRADE: &str = "/upgrade to increase your usage limit.";
     /// Team/enterprise, no billing access.
-    pub const EXTRA_USAGE_ADMIN: &str = "/extra-usage to request more usage from your admin.";
-    /// Fallback (team/enterprise generic).
-    pub const UPGRADE_OR_EXTRA: &str =
-        "/upgrade or /extra-usage to finish what you\u{2019}re working on.";
+    pub const USAGE_CREDITS_REQUEST_ADMIN: &str =
+        "/usage-credits to request more usage from your admin.";
+    /// Team/enterprise, extra-usage disabled (`!c`).
+    pub const USAGE_CREDITS_ADMIN_ENABLE: &str =
+        "Your admin can enable extra usage at claude.ai/admin-settings/usage.";
+    /// Fallback (non-team, serverHidesUpgrade false, extra-usage enabled).
+    pub const UPGRADE_OR_USAGE_CREDITS: &str =
+        "/upgrade or /usage-credits to finish what you\u{2019}re working on.";
 }
 
 /// The nine header-derived fields of `TurnEvent::RateLimit`
@@ -180,9 +195,37 @@ fn compose_with(
 
     // "ERROR STATES - when limits are rejected" — rateLimitMessages.ts:62-65.
     if status == Some("rejected") {
+        // 2.1.206 `Tdo` (binary @221157422 area): `jid =
+        // fit.rateLimitType==="seven_day_overage_included" ||
+        // fit.errorCode==="credits_required"` — when `jid`, the upsell
+        // region is hard-nulled (`if(jid){Uhs=null;break bb0}`) BEFORE `Gid`
+        // is ever invoked, regardless of what `Gid`'s own inputs would
+        // otherwise produce.
+        let jid = info.rate_limit_type.as_deref() == Some("seven_day_overage_included")
+            || info.credits_required;
+        let upsell = if jid {
+            None
+        } else {
+            error_upsell(&UpsellInputs {
+                should_show_upsell: should_show_upsell(sub),
+                is_max20x: sub.is_max20x(),
+                is_extra_usage_command_enabled: extra_usage_cmd_enabled,
+                // `Tdo` derives this from pending-menu-open UI state
+                // (`_do=j$C&&yly==="pending"&&_ly&&!jid&&ydo`) that has no
+                // TUI counterpart — there is no interactive rate-limit
+                // options menu here, so the arm is structurally always
+                // false (see [`upsell::OPENING_OPTIONS`]'s doc comment).
+                should_auto_open_rate_limit_options_menu: false,
+                is_team_or_enterprise: sub.is_team_or_enterprise(),
+                has_billing_access: sub.has_claude_ai_billing_access(),
+                server_hides_upgrade: server_hides_upgrade(info),
+                server_hides_overage: server_hides_overage(info),
+                spend_limit_nudge_path: spend_limit_nudge_path(info, sub, extra_usage_cmd_enabled),
+            })
+        };
         return Some(ComposedRateLimit {
             text: limit_reached_text(info, is_ant, sub),
-            upsell: error_upsell(sub, extra_usage_cmd_enabled),
+            upsell,
         });
     }
 
@@ -739,50 +782,169 @@ fn warning_upsell(
     None
 }
 
-/// Port of `getUpsellMessage` (RateLimitMessage.tsx:18-47).
+/// The nine `Gid` inputs (2.1.206 `getUpsellMessage`, binary `Gid`
+/// @221157422). Field names are the camelCase JS destructure keys
+/// snake_cased 1:1 so the mapping to the decoded body stays obvious. See
+/// [`error_upsell`] for the derivation of each from `compose_with`'s
+/// `RateLimitInfo` / `SubscriptionSnapshot` / `extra_usage_cmd_enabled`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpsellInputs {
+    /// `e` — `Eyt()||Bo()`, reduces to `sub.is_subscriber` via
+    /// [`should_show_upsell`]. Gates every other arm.
+    pub should_show_upsell: bool,
+    /// `t` — `sub.is_max20x()`.
+    pub is_max20x: bool,
+    /// `r` — the `extra_usage_cmd_enabled` param threaded through
+    /// `compose_with`.
+    pub is_extra_usage_command_enabled: bool,
+    /// `n` — structurally `false` in the TUI (no interactive rate-limit
+    /// options menu).
+    pub should_auto_open_rate_limit_options_menu: bool,
+    /// `o` — `sub.is_team_or_enterprise()`.
+    pub is_team_or_enterprise: bool,
+    /// `i` — `sub.has_claude_ai_billing_access()`.
+    pub has_billing_access: bool,
+    /// `s` — see [`server_hides_upgrade`].
+    pub server_hides_upgrade: bool,
+    /// `a` — see [`server_hides_overage`].
+    pub server_hides_overage: bool,
+    /// `l` — see [`spend_limit_nudge_path`].
+    pub spend_limit_nudge_path: bool,
+}
+
+/// Port of `getUpsellMessage` (2.1.206 binary `Gid` @221157422), byte-verified
+/// against the real binary:
 ///
-/// `shouldAutoOpenRateLimitOptionsMenu` is structurally false: the TUI has no
-/// interactive rate-limit options menu, so the `OPENING_OPTIONS` arm (TSX
-/// :33-35) is unreachable (the constant stays byte-locked for when the menu
-/// lands). `shouldShowUpsell` is `sub.is_subscriber` — the TS
-/// `shouldProcessMockLimits()` arm (TSX :78) is the unported `/mock-limits`
-/// test command.
-fn error_upsell(sub: &SubscriptionSnapshot, extra_usage_cmd_enabled: bool) -> Option<String> {
-    // TSX :26.
-    if !sub.is_subscriber {
+/// ```text
+/// function Gid({shouldShowUpsell:e,isMax20x:t,isExtraUsageCommandEnabled:r,
+///               shouldAutoOpenRateLimitOptionsMenu:n,isTeamOrEnterprise:o,
+///               hasBillingAccess:i,serverHidesUpgrade:s,serverHidesOverage:a,
+///               spendLimitNudgePath:l}){
+///   if(!e)return null;
+///   if(n)return"Opening your options…";
+///   if(l)return"/usage-credits to adjust your monthly spend limit.";
+///   let c=r&&!a;
+///   if(t){
+///     if(c)return"/usage-credits to finish what you’re working on.";
+///     return"/login to switch to an API usage-billed account."
+///   }
+///   if(o){
+///     if(!c)return"Your admin can enable extra usage at claude.ai/admin-settings/usage.";
+///     if(i)return"/usage-credits to finish what you’re working on.";
+///     return"/usage-credits to request more usage from your admin."
+///   }
+///   if(s){
+///     if(c)return"/usage-credits to finish what you’re working on.";
+///     return null
+///   }
+///   if(!c)return"/upgrade to increase your usage limit.";
+///   return"/upgrade or /usage-credits to finish what you’re working on."
+/// }
+/// ```
+///
+/// `shouldAutoOpenRateLimitOptionsMenu` (`n`) is structurally false in this
+/// port: the TUI has no interactive rate-limit options menu, so the
+/// `OPENING_OPTIONS` arm is unreachable (the constant stays byte-locked for
+/// when the menu lands). `shouldShowUpsell` (`e`) is derived by callers via
+/// [`should_show_upsell`] (`Eyt()||Bo()`, reducing to `sub.is_subscriber`).
+#[must_use]
+fn error_upsell(inputs: &UpsellInputs) -> Option<String> {
+    let &UpsellInputs {
+        should_show_upsell,
+        is_max20x,
+        is_extra_usage_command_enabled,
+        should_auto_open_rate_limit_options_menu,
+        is_team_or_enterprise,
+        has_billing_access,
+        server_hides_upgrade,
+        server_hides_overage,
+        spend_limit_nudge_path,
+    } = inputs;
+    if !should_show_upsell {
         return None;
     }
-    // TSX :27-32.
-    if sub.is_max20x() {
+    if should_auto_open_rate_limit_options_menu {
+        return Some(upsell::OPENING_OPTIONS.to_owned());
+    }
+    if spend_limit_nudge_path {
+        return Some(upsell::SPEND_LIMIT_NUDGE.to_owned());
+    }
+    let c = is_extra_usage_command_enabled && !server_hides_overage;
+    if is_max20x {
         return Some(
-            if extra_usage_cmd_enabled {
-                upsell::EXTRA_USAGE_FINISH
+            if c {
+                upsell::USAGE_CREDITS_FINISH
             } else {
                 upsell::LOGIN_SWITCH
             }
             .to_owned(),
         );
     }
-    // TSX :36-38.
-    if !sub.is_team_or_enterprise() && !extra_usage_cmd_enabled {
-        return Some(upsell::UPGRADE.to_owned());
-    }
-    // TSX :39-45.
-    if sub.is_team_or_enterprise() {
-        if !extra_usage_cmd_enabled {
-            return None;
+    if is_team_or_enterprise {
+        if !c {
+            return Some(upsell::USAGE_CREDITS_ADMIN_ENABLE.to_owned());
         }
         return Some(
-            if sub.has_claude_ai_billing_access() {
-                upsell::EXTRA_USAGE_FINISH
+            if has_billing_access {
+                upsell::USAGE_CREDITS_FINISH
             } else {
-                upsell::EXTRA_USAGE_ADMIN
+                upsell::USAGE_CREDITS_REQUEST_ADMIN
             }
             .to_owned(),
         );
     }
-    // TSX :46.
-    Some(upsell::UPGRADE_OR_EXTRA.to_owned())
+    if server_hides_upgrade {
+        return if c {
+            Some(upsell::USAGE_CREDITS_FINISH.to_owned())
+        } else {
+            None
+        };
+    }
+    if !c {
+        return Some(upsell::UPGRADE.to_owned());
+    }
+    Some(upsell::UPGRADE_OR_USAGE_CREDITS.to_owned())
+}
+
+/// `serverHidesUpgrade` (`Tdo`'s `hkt = B$C||Uid`, 2.1.206 binary): the
+/// server's `upgrade_paths` list is present and excludes `"upgrade_plan"`, OR
+/// the `tengu_idle_amber_finch` flag (`Pee()`/[`flags::idle_amber_finch`]) is
+/// set. `mle!==void 0&&!mle.includes("upgrade_plan")` — an ABSENT
+/// `upgrade_paths` (`None`) is `false`, matching JS `mle!==void 0`.
+#[must_use]
+fn server_hides_upgrade(info: &RateLimitInfo) -> bool {
+    info.upgrade_paths
+        .as_ref()
+        .is_some_and(|paths| !paths.iter().any(|p| p == "upgrade_plan"))
+        || flags::idle_amber_finch()
+}
+
+/// `serverHidesOverage` (`Tdo`'s `Bid = lly`, 2.1.206 binary):
+/// `mle!==void 0&&!mle.includes("overage")` — an absent `upgrade_paths` is
+/// `false`.
+#[must_use]
+fn server_hides_overage(info: &RateLimitInfo) -> bool {
+    info.upgrade_paths
+        .as_ref()
+        .is_some_and(|paths| !paths.iter().any(|p| p == "overage"))
+}
+
+/// `spendLimitNudgePath` (`Tdo`'s `Bhs = gly`, 2.1.206 binary):
+/// `Ze("tengu_pewter_summit",!1)&&!$id&&fit.overageDisabledReason==="org_level_disabled_until"&&mly&&qid`
+/// — the spend-nudge flag AND non-team/enterprise AND the org-level
+/// spend-cap disabled reason AND billing access AND the extra-usage command
+/// enabled.
+#[must_use]
+fn spend_limit_nudge_path(
+    info: &RateLimitInfo,
+    sub: &SubscriptionSnapshot,
+    extra_usage_cmd_enabled: bool,
+) -> bool {
+    flags::spend_limit_nudge_enabled()
+        && !sub.is_team_or_enterprise()
+        && info.overage_disabled_reason.as_deref() == Some("org_level_disabled_until")
+        && sub.has_claude_ai_billing_access()
+        && extra_usage_cmd_enabled
 }
 
 // ── 2.1.206 deep-internal predicates (Task 2) ────────────────────────────────
@@ -1513,9 +1675,10 @@ mod tests {
 
     #[test]
     fn rejected_unknown_subscription_with_overage_header_has_no_upsell() {
-        // Pre-batch-4 the overage-status header proxied
-        // `upsell::UPGRADE_OR_EXTRA`; the real gate is the subscriber check
-        // (TSX :26 + :78); the header no longer drives the upsell.
+        // Pre-batch-4 the overage-status header proxied a generic
+        // team/enterprise fallthrough upsell; the real gate is the
+        // subscriber check (TSX :26 + :78); the header no longer drives the
+        // upsell.
         let info = RateLimitInfo {
             overage_status: Some("rejected".into()),
             ..rejected(Some("five_hour"), None)
@@ -1564,67 +1727,261 @@ mod tests {
         assert_eq!(got.text, "You've hit your weekly limit");
     }
 
+    /// Builds the 9 `Gid` inputs the same way `compose_with` derives them
+    /// from a subscription + the extra-usage-command flag, with both
+    /// `RateLimitInfo`-sourced server-hide fields defaulted `false` (no
+    /// `upgrade_paths`) and `spend_limit_nudge_path` defaulted `false` — the
+    /// tests below override individual fields with struct-update syntax to
+    /// pin the branches those fields gate.
+    fn inputs(sub: &SubscriptionSnapshot, extra_usage_cmd_enabled: bool) -> UpsellInputs {
+        UpsellInputs {
+            should_show_upsell: should_show_upsell(sub),
+            is_max20x: sub.is_max20x(),
+            is_extra_usage_command_enabled: extra_usage_cmd_enabled,
+            should_auto_open_rate_limit_options_menu: false,
+            is_team_or_enterprise: sub.is_team_or_enterprise(),
+            has_billing_access: sub.has_claude_ai_billing_access(),
+            server_hides_upgrade: false,
+            server_hides_overage: false,
+            spend_limit_nudge_path: false,
+        }
+    }
+
+    #[test]
+    fn gid_not_a_subscriber_returns_none() {
+        // `Gid` :`if(!e)return null` — shouldShowUpsell gates everything
+        // else, including the auto-open-menu and spend-nudge arms that
+        // otherwise run BEFORE it in source order.
+        assert_eq!(
+            error_upsell(&UpsellInputs {
+                should_show_upsell: false,
+                should_auto_open_rate_limit_options_menu: true,
+                spend_limit_nudge_path: true,
+                ..UpsellInputs::default()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn gid_auto_open_menu_returns_opening_options() {
+        // `Gid`: `if(n)return"Opening your options…"` — checked before the
+        // spend-nudge arm. Structurally unreachable from `compose_with`
+        // (always passes `false`), but `Gid` itself must still honor it.
+        assert_eq!(
+            error_upsell(&UpsellInputs {
+                should_show_upsell: true,
+                should_auto_open_rate_limit_options_menu: true,
+                spend_limit_nudge_path: true,
+                ..UpsellInputs::default()
+            })
+            .as_deref(),
+            Some(upsell::OPENING_OPTIONS)
+        );
+    }
+
+    #[test]
+    fn gid_spend_limit_nudge_path_returns_adjust_spend_limit() {
+        // `Gid`: `if(l)return"/usage-credits to adjust your monthly spend
+        // limit."` — tested by passing `spendLimitNudgePath` directly as an
+        // input, since the real `tengu_pewter_summit` flag
+        // ([`flags::spend_limit_nudge_enabled`]) is documented `false` in
+        // this port and can never drive this branch through `compose_with`.
+        assert_eq!(
+            error_upsell(&UpsellInputs {
+                should_show_upsell: true,
+                spend_limit_nudge_path: true,
+                ..UpsellInputs::default()
+            })
+            .as_deref(),
+            Some(upsell::SPEND_LIMIT_NUDGE)
+        );
+    }
+
     #[test]
     fn max20x_error_upsell_login_switch_without_extra_usage_cmd() {
-        // TSX :27-31: Max-20x without the extra-usage command → /login arm.
+        // `Gid`: `if(t){if(c)return FINISH; return"/login to switch..."}`,
+        // `c = false` (extra-usage command disabled).
         assert_eq!(
-            error_upsell(&max20x(), false).as_deref(),
+            error_upsell(&inputs(&max20x(), false)).as_deref(),
             Some(upsell::LOGIN_SWITCH)
         );
     }
 
     #[test]
-    fn max20x_error_upsell_extra_usage_finish_with_cmd() {
-        // TSX :28-30: Max-20x with the extra-usage command enabled.
+    fn max20x_error_upsell_usage_credits_finish_with_cmd() {
+        // Max-20x with the extra-usage command enabled → `c = true`.
         assert_eq!(
-            error_upsell(&max20x(), true).as_deref(),
-            Some(upsell::EXTRA_USAGE_FINISH)
+            error_upsell(&inputs(&max20x(), true)).as_deref(),
+            Some(upsell::USAGE_CREDITS_FINISH)
         );
     }
 
     #[test]
     fn pro_error_upsell_upgrade_without_cmd() {
-        // TSX :36-38: !isTeamOrEnterprise && !isExtraUsageCommandEnabled.
+        // `Gid`: non-team, `serverHidesUpgrade` false, `!c` → UPGRADE.
         assert_eq!(
-            error_upsell(&pro(), false).as_deref(),
+            error_upsell(&inputs(&pro(), false)).as_deref(),
             Some(upsell::UPGRADE)
         );
     }
 
     #[test]
-    fn pro_with_cmd_enabled_falls_through_to_upgrade_or_extra() {
-        // TSX :36 requires BOTH !team && !cmd — a pro user WITH the command
-        // enabled skips the UPGRADE arm and the team block (:39) and lands
-        // on the final fallthrough (:46). This pins the subtle TS ordering.
+    fn pro_with_cmd_enabled_falls_through_to_upgrade_or_usage_credits() {
+        // A pro user WITH the command enabled skips the team block and
+        // lands on the final fallthrough — `c = true` → UPGRADE_OR_USAGE_CREDITS.
         assert_eq!(
-            error_upsell(&pro(), true).as_deref(),
-            Some(upsell::UPGRADE_OR_EXTRA)
+            error_upsell(&inputs(&pro(), true)).as_deref(),
+            Some(upsell::UPGRADE_OR_USAGE_CREDITS)
         );
     }
 
     #[test]
-    fn team_error_upsell_admin_vs_member() {
-        // TSX :39-45: team/enterprise — null without the command; with it,
-        // billing access picks FINISH, member picks ADMIN.
-        assert_eq!(error_upsell(&team(false, Some("admin")), false), None);
+    fn team_error_upsell_admin_enable_without_cmd_regardless_of_role() {
+        // `Gid`: `if(o){if(!c)return"Your admin can enable extra usage
+        // ..."; ...}` — the `!c` check runs BEFORE the `hasBillingAccess`
+        // (`i`) check, so admin and member alike get the admin-enable copy
+        // when the extra-usage command is disabled. This is a REAL 206
+        // behavior change: pre-206 this arm returned `null`.
         assert_eq!(
-            error_upsell(&team(false, Some("admin")), true).as_deref(),
-            Some(upsell::EXTRA_USAGE_FINISH)
+            error_upsell(&inputs(&team(false, Some("admin")), false)).as_deref(),
+            Some(upsell::USAGE_CREDITS_ADMIN_ENABLE)
         );
         assert_eq!(
-            error_upsell(&team(false, Some("member")), true).as_deref(),
-            Some(upsell::EXTRA_USAGE_ADMIN)
+            error_upsell(&inputs(&team(false, Some("member")), false)).as_deref(),
+            Some(upsell::USAGE_CREDITS_ADMIN_ENABLE)
         );
-        // Enterprise rides the same is_team_or_enterprise() predicate
-        // (TSX :74); pin one variant so the arm isn't team-only-tested.
+    }
+
+    #[test]
+    fn team_error_upsell_finish_vs_request_admin_with_cmd_by_billing_access() {
+        // `Gid`: `if(i)return FINISH; return REQUEST_ADMIN` — `c = true`
+        // (extra-usage command enabled), billing access picks FINISH,
+        // member picks REQUEST_ADMIN.
+        assert_eq!(
+            error_upsell(&inputs(&team(false, Some("admin")), true)).as_deref(),
+            Some(upsell::USAGE_CREDITS_FINISH)
+        );
+        assert_eq!(
+            error_upsell(&inputs(&team(false, Some("member")), true)).as_deref(),
+            Some(upsell::USAGE_CREDITS_REQUEST_ADMIN)
+        );
+        // Enterprise rides the same is_team_or_enterprise() predicate; pin
+        // one variant so the arm isn't team-only-tested.
         let enterprise = SubscriptionSnapshot {
             subscription_type: Some("enterprise".into()),
             ..team(false, Some("member"))
         };
         assert_eq!(
-            error_upsell(&enterprise, true).as_deref(),
-            Some(upsell::EXTRA_USAGE_ADMIN)
+            error_upsell(&inputs(&enterprise, true)).as_deref(),
+            Some(upsell::USAGE_CREDITS_REQUEST_ADMIN)
         );
+    }
+
+    #[test]
+    fn gid_server_hides_upgrade_finish_when_c_else_none() {
+        // `Gid`: `if(s){if(c)return FINISH; return null}` — non-team,
+        // `serverHidesUpgrade` true.
+        let with_cmd = UpsellInputs {
+            server_hides_upgrade: true,
+            ..inputs(&pro(), true)
+        };
+        assert_eq!(
+            error_upsell(&with_cmd).as_deref(),
+            Some(upsell::USAGE_CREDITS_FINISH)
+        );
+        let without_cmd = UpsellInputs {
+            server_hides_upgrade: true,
+            ..inputs(&pro(), false)
+        };
+        assert_eq!(error_upsell(&without_cmd), None);
+    }
+
+    // ── server-hides-* / spend-nudge derivations (`Tdo`, 2.1.206 binary) ──
+
+    #[test]
+    fn server_hides_overage_derives_from_upgrade_paths_membership() {
+        // `mle!==void 0&&!mle.includes("overage")`.
+        assert!(!server_hides_overage(&RateLimitInfo::default()), "absent upgrade_paths");
+        assert!(!server_hides_overage(&RateLimitInfo {
+            upgrade_paths: Some(vec!["overage".into()]),
+            ..RateLimitInfo::default()
+        }));
+        assert!(server_hides_overage(&RateLimitInfo {
+            upgrade_paths: Some(vec!["upgrade_plan".into()]),
+            ..RateLimitInfo::default()
+        }));
+        assert!(server_hides_overage(&RateLimitInfo {
+            upgrade_paths: Some(vec![]),
+            ..RateLimitInfo::default()
+        }));
+    }
+
+    #[test]
+    fn server_hides_upgrade_derives_from_upgrade_paths_membership() {
+        // `mle!==void 0&&!mle.includes("upgrade_plan")` OR `Pee()`
+        // (idle_amber_finch — documented false, so this reduces to the
+        // upgrade_paths membership test alone in this port).
+        assert!(!server_hides_upgrade(&RateLimitInfo::default()), "absent upgrade_paths");
+        assert!(!server_hides_upgrade(&RateLimitInfo {
+            upgrade_paths: Some(vec!["upgrade_plan".into()]),
+            ..RateLimitInfo::default()
+        }));
+        assert!(server_hides_upgrade(&RateLimitInfo {
+            upgrade_paths: Some(vec!["overage".into()]),
+            ..RateLimitInfo::default()
+        }));
+    }
+
+    #[test]
+    fn spend_limit_nudge_path_predicate_requires_every_conjunct() {
+        // `Ze("tengu_pewter_summit",!1)&&!$id&&reason==="org_level_disabled_until"&&mly&&qid`.
+        // The real flag ([`flags::spend_limit_nudge_enabled`]) is documented
+        // `false` in this port, so the full predicate is always `false`
+        // through `compose_with` EVEN when every other conjunct holds.
+        assert!(!flags::spend_limit_nudge_enabled());
+        let billed_personal = SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("pro".into()),
+            organization_role: Some("admin".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        let info = RateLimitInfo {
+            overage_disabled_reason: Some("org_level_disabled_until".into()),
+            ..RateLimitInfo::default()
+        };
+        assert!(!spend_limit_nudge_path(&info, &billed_personal, true));
+        // Wrong reason, team/enterprise, or the cmd disabled each
+        // independently keep it false too (exercising the AND chain).
+        assert!(!spend_limit_nudge_path(
+            &RateLimitInfo::default(),
+            &billed_personal,
+            true
+        ));
+        assert!(!spend_limit_nudge_path(&info, &team(false, Some("admin")), true));
+        assert!(!spend_limit_nudge_path(&info, &billed_personal, false));
+    }
+
+    // ── `jid` upsell-suppression gate (2.1.206 `Tdo`) ──────────────────────
+
+    #[test]
+    fn jid_seven_day_overage_included_suppresses_upsell_end_to_end() {
+        // `jid = rateLimitType==="seven_day_overage_included" ||
+        // errorCode==="credits_required"` hard-nulls the upsell BEFORE `Gid`
+        // ever runs, regardless of subscription state.
+        let info = rejected(Some("seven_day_overage_included"), None);
+        let got = compose_with(&info, false, &pro(), true).unwrap();
+        assert_eq!(got.upsell, None);
+    }
+
+    #[test]
+    fn jid_credits_required_suppresses_upsell_end_to_end() {
+        let info = RateLimitInfo {
+            credits_required: true,
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_with(&info, false, &pro(), true).unwrap();
+        assert_eq!(got.upsell, None);
     }
 
     // ── allowed_warning branches (TS :68-100, 199-254) ───────────────────
@@ -2133,9 +2490,9 @@ mod tests {
     // ── locked upsell literals (RateLimitMessage.tsx getUpsellMessage) ────
 
     #[test]
-    fn extra_usage_uses_curly_apostrophe() {
-        assert!(upsell::EXTRA_USAGE_FINISH.contains('\u{2019}'));
-        assert!(upsell::UPGRADE_OR_EXTRA.contains('\u{2019}'));
+    fn usage_credits_upsell_uses_curly_apostrophe() {
+        assert!(upsell::USAGE_CREDITS_FINISH.contains('\u{2019}'));
+        assert!(upsell::UPGRADE_OR_USAGE_CREDITS.contains('\u{2019}'));
     }
 
     #[test]

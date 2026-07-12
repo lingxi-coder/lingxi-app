@@ -79,7 +79,7 @@ mod tests {
     fn edit_result_message_single_is_byte_locked() {
         // FileEditTool.ts:589-593 (non-interactive, modifiedNote empty).
         assert_eq!(
-            edit_result_message("/tmp/a.txt", false),
+            edit_result_message("/tmp/a.txt", false, false),
             "The file /tmp/a.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
         );
     }
@@ -89,7 +89,7 @@ mod tests {
         // FileEditTool.ts:581-586 (non-interactive, modifiedNote empty) + the
         // file-state-current suffix (binary const `Pyn`).
         assert_eq!(
-            edit_result_message("/tmp/a.txt", true),
+            edit_result_message("/tmp/a.txt", true, false),
             "The file /tmp/a.txt has been updated. All occurrences were successfully replaced. (file state is current in your context — no need to Read it back)"
         );
     }
@@ -98,9 +98,109 @@ mod tests {
     fn edit_result_message_echoes_original_path_verbatim() {
         // claude-code echoes the input path, not a canonicalized form.
         assert_eq!(
-            edit_result_message("./relative/../weird/path.txt", false),
+            edit_result_message("./relative/../weird/path.txt", false, false),
             "The file ./relative/../weird/path.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
         );
+    }
+
+    #[test]
+    fn edit_result_message_stale_recovered_appends_the_note() {
+        // The staleRecovered branch replaces the current-state suffix with the
+        // byte-exact modified-on-disk note (binary Edit mapper `a = i ? … : Pyn`).
+        assert_eq!(
+            edit_result_message("/tmp/a.txt", false, true),
+            "The file /tmp/a.txt has been updated successfully. (note: the file had been modified on disk since you last read it \u{2014} the edit applied cleanly, but the file contains other changes not in your context. Read it before edits that depend on surrounding content.)"
+        );
+        assert_eq!(
+            edit_result_message("/tmp/a.txt", true, true),
+            "The file /tmp/a.txt has been updated. All occurrences were successfully replaced. (note: the file had been modified on disk since you last read it \u{2014} the edit applied cleanly, but the file contains other changes not in your context. Read it before edits that depend on surrounding content.)"
+        );
+    }
+
+    /// End-to-end `tengu_cedar_sundial` stale recovery: the file is modified on
+    /// disk after the seeded Read (newer mtime + different content), but the
+    /// edit still applies cleanly to the CURRENT content — with the flag on the
+    /// call succeeds against the current content, appends the modified-on-disk
+    /// note, and marks `staleRecovered: true` (conditional spread). With the
+    /// flag off (default) the same setup yields the stale J2n error.
+    #[tokio::test]
+    async fn stale_recovery_end_to_end_flag_on_vs_off() {
+        const FLAG: &str = "tengu_cedar_sundial";
+        for flag_on in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join("a.txt");
+            std::fs::write(&target, "hello world").unwrap();
+            let (ctx, _sink) = make_ctx(&tmp);
+            seed_full_read(&ctx, &target);
+            // Modify on disk AFTER the read: different content, mtime bumped
+            // strictly forward so the guard sees staleness.
+            std::fs::write(&target, "hello world plus formatter churn").unwrap();
+            let future = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+            filetime::set_file_mtime(&target, filetime::FileTime::from_system_time(future))
+                .unwrap();
+
+            if flag_on {
+                telemetry::feature_flags::test_set_flag(FLAG, true);
+            } else {
+                telemetry::feature_flags::test_clear_flag(FLAG);
+            }
+            let tool = FileEditTool::new(ctx);
+            let outcome = tool
+                .call(
+                    json!({
+                        "file_path": target.to_str().unwrap(),
+                        "old_string": "world",
+                        "new_string": "Rust"
+                    }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await;
+            telemetry::feature_flags::test_clear_flag(FLAG);
+
+            if flag_on {
+                let result = outcome.expect("flag-on stale edit that applies must recover");
+                // Applied against the CURRENT content.
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    "hello Rust plus formatter churn"
+                );
+                assert_eq!(result.data["staleRecovered"], true);
+                let mc = result.model_content.unwrap();
+                assert!(
+                    mc.ends_with("Read it before edits that depend on surrounding content.)"),
+                    "stale note missing: {mc}"
+                );
+                assert!(!mc.contains("file state is current"));
+            } else {
+                let err = outcome.expect_err("default (flag off) must keep the stale error");
+                assert!(
+                    err.to_string().contains("File content has changed since it was last read"),
+                    "expected J2n stale error, got: {err}"
+                );
+                // File untouched on the error path.
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    "hello world plus formatter churn"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_edit_applies_is_flag_gated_and_mirrors_zvi() {
+        const FLAG: &str = "tengu_cedar_sundial";
+        // Default (flag off): never recovers, even for a clean unique match.
+        telemetry::feature_flags::test_clear_flag(FLAG);
+        assert!(!stale_edit_applies("alpha beta", "alpha", false));
+        // Flag on: ZVi semantics.
+        telemetry::feature_flags::test_set_flag(FLAG, true);
+        assert!(stale_edit_applies("alpha beta", "alpha", false)); // applies
+        assert!(!stale_edit_applies("alpha beta", "", false)); // "" → no_match
+        assert!(!stale_edit_applies("alpha beta", "gamma", false)); // no_match
+        assert!(!stale_edit_applies("dup x dup", "dup", false)); // ambiguous
+        assert!(stale_edit_applies("dup x dup", "dup", true)); // replace_all ⇒ applies
+        telemetry::feature_flags::test_clear_flag(FLAG);
     }
 
     #[test]
@@ -155,7 +255,7 @@ mod tests {
         let input_path = target.to_str().unwrap();
         assert_eq!(
             result.model_content.as_deref().unwrap(),
-            edit_result_message(input_path, false)
+            edit_result_message(input_path, false, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
         // Result data is the binary FileEditTool record (1:1 field set); the
@@ -768,7 +868,7 @@ that bypasses Perforce tracking."
         let input_path = target.to_str().unwrap();
         assert_eq!(
             result.model_content.as_deref().unwrap(),
-            edit_result_message(input_path, true)
+            edit_result_message(input_path, true, false)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "bar bar bar");
     }

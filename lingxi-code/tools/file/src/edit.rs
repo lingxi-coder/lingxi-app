@@ -139,28 +139,59 @@ pub fn patch_truncation_suffix(n: usize) -> String {
 ///
 /// claude-code's `xYa` suffix has THREE branches:
 /// `staleRecovered ? "<modified-on-disk note>" : (userModified ? "" : Pyn)`.
-/// Both non-`Pyn` branches are inert in LingXi's non-interactive orchestrator and
-/// are therefore documented-out rather than dead-coded (R-F5 / R-V1 disposition):
+/// - `staleRecovered` — the `tengu_cedar_sundial` stale-recovery path (see
+///   [`stale_edit_applies`]) — inserts [`STALE_RECOVERED_NOTE`].
 /// - `userModified` (interactive-only) — which inserts `".  The user modified your
 ///   proposed changes before accepting them. "` — requires a human-in-the-loop
-///   accept step that does not exist here.
-/// - `staleRecovered` — which inserts the `" (note: the file had been modified on
-///   disk since you last read it — the edit applied cleanly, but the file contains
-///   other changes not in your context. Read it before edits that depend on
-///   surrounding content.)"` note — requires on-disk staleness detection BETWEEN
-///   the Read and the Edit. LingXi's non-interactive tool path has no such
-///   detector (the file-state is always treated as current, hence the
-///   unconditional `Pyn`/`FILE_STATE_CURRENT_SUFFIX`), so this branch can never
-///   fire and would be dead code.
-/// So the suffix here is always `Pyn` (the current-state suffix).
+///   accept step that does not exist here; documented-out rather than dead-coded
+///   (R-F5 / R-V1 disposition).
+/// So the suffix is [`STALE_RECOVERED_NOTE`] on a recovered edit, else `Pyn`
+/// (the current-state suffix).
 #[must_use]
-pub fn edit_result_message(path: &str, replace_all: bool) -> String {
+pub fn edit_result_message(path: &str, replace_all: bool, stale_recovered: bool) -> String {
     let base = if replace_all {
         format!("The file {path} has been updated. All occurrences were successfully replaced.")
     } else {
         format!("The file {path} has been updated successfully.")
     };
-    format!("{base}{}", crate::FILE_STATE_CURRENT_SUFFIX)
+    let suffix = if stale_recovered {
+        STALE_RECOVERED_NOTE
+    } else {
+        crate::FILE_STATE_CURRENT_SUFFIX
+    };
+    format!("{base}{suffix}")
+}
+
+/// The suffix appended to a stale-recovered edit's success message (claude's
+/// `a = i ? <this note> : …` in the Edit result mapper; `—` = em-dash).
+pub const STALE_RECOVERED_NOTE: &str = " (note: the file had been modified on disk since you last read it \u{2014} the edit applied cleanly, but the file contains other changes not in your context. Read it before edits that depend on surrounding content.)";
+
+/// Stale-recovery gate — claude-code `TEu(ZVi(content, old, replaceAll))`:
+/// with `tengu_cedar_sundial` on (default **false**), an edit whose file changed
+/// on disk since the last Read may still proceed when it "applies" cleanly to
+/// the CURRENT content — `ZVi`: a non-empty `old_string` found via the
+/// quote-normalizing matcher (`Ytt` = [`crate::quotes::find_actual_string`]),
+/// unique unless `replace_all`. Anything else keeps the stale error.
+#[must_use]
+pub fn stale_edit_applies(content: &str, old_string: &str, replace_all: bool) -> bool {
+    if !telemetry::flag_bool("tengu_cedar_sundial", false) {
+        return false; // TEu's flag gate — default-OFF ⇒ byte-identical behavior
+    }
+    if old_string.is_empty() {
+        return false; // ZVi: "" → no_match
+    }
+    let Some(actual) = crate::quotes::find_actual_string(content, old_string) else {
+        return false; // ZVi: !Ytt → no_match
+    };
+    if !replace_all {
+        // ZVi: a second occurrence ⇒ ambiguous.
+        if let Some(first) = content.find(actual.as_str()) {
+            if content[first + actual.len()..].contains(actual.as_str()) {
+                return false;
+            }
+        }
+    }
+    true // "applies"
 }
 
 /// Normalize claude-code's accepted Edit input aliases to the canonical keys
@@ -566,6 +597,9 @@ impl Tool for FileEditTool {
             }
         };
 
+        // `staleRecovered` (claude `xTg` → `D`): set when the flag-gated
+        // stale-recovery lets a stale-but-cleanly-applying edit proceed.
+        let mut stale_recovered = false;
         let (before, after, replacements): (String, String, u32) = match existing {
             // File does not exist.
             None => {
@@ -595,8 +629,24 @@ impl Tool for FileEditTool {
                     guard_mtime_ms,
                     &guard_raw_content,
                 ) {
-                    self.emit_failed(&invocation_id, "stale_read").await;
-                    return Err(e);
+                    // Stale-recovery (claude `xTg`'s `TEu(ZVi(...))` branch,
+                    // flag-gated `tengu_cedar_sundial`, default-OFF): only the
+                    // CONTENT-CHANGED error is recoverable — a never-read /
+                    // partial-read failure always propagates (`xTg` throws Y2n
+                    // before the recovery check). When the edit still applies
+                    // cleanly to the CURRENT content, proceed and mark the
+                    // result `staleRecovered`.
+                    let is_stale_error = matches!(
+                        &e,
+                        tool_api::tool_trait::ToolError::InvalidInput(m)
+                            if m == crate::FILE_CONTENT_CHANGED_LINTER_MESSAGE
+                    );
+                    if is_stale_error && stale_edit_applies(&before, old_string, replace_all) {
+                        stale_recovered = true;
+                    } else {
+                        self.emit_failed(&invocation_id, "stale_read").await;
+                        return Err(e);
+                    }
                 }
 
                 if old_string.is_empty() {
@@ -753,7 +803,7 @@ impl Tool for FileEditTool {
         // not the canonicalized path. Batch A's serialization rule emits
         // `data["content"]` verbatim to the model; `replacements` /
         // `patch_preview` remain for the TUI diff render only.
-        let content = edit_result_message(file_path, replace_all);
+        let content = edit_result_message(file_path, replace_all, stale_recovered);
 
         // claude-code FileEditTool result data (2.1.191): {filePath, oldString,
         // newString, originalFile, structuredPatch, userModified, replaceAll}
@@ -762,18 +812,23 @@ impl Tool for FileEditTool {
         // structure, SAME as the already-merged Write tool; the binary's npm-`diff`
         // hunk array {oldStart,oldLines,newStart,newLines,lines} is a shared
         // residual (Write + Edit both emit the string preview). `userModified` is
-        // false (no interactive human-accept step); `gitDiff`/`staleRecovered` are
-        // OMITTED (LingXi has no git-diff capture / stale-recovery signal here).
+        // false (no interactive human-accept step); `gitDiff` is OMITTED (no
+        // git-diff capture); `staleRecovered` follows the binary's conditional
+        // spread `...x&&{staleRecovered:!0}` — present only when true.
+        let mut data = json!({
+            "filePath": file_path,
+            "oldString": old_string,
+            "newString": new_string,
+            "originalFile": before,
+            "structuredPatch": crate::structured_patch::build_structured_patch(&before, &after),
+            "userModified": false,
+            "replaceAll": replace_all,
+        });
+        if stale_recovered {
+            data["staleRecovered"] = json!(true);
+        }
         Ok(ToolCallResult {
-            data: json!({
-                "filePath": file_path,
-                "oldString": old_string,
-                "newString": new_string,
-                "originalFile": before,
-                "structuredPatch": crate::structured_patch::build_structured_patch(&before, &after),
-                "userModified": false,
-                "replaceAll": replace_all,
-            }),
+            data,
             model_content: Some(content),
             new_messages: vec![],
             context_modifier: None,

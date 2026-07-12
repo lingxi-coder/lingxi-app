@@ -303,6 +303,46 @@ pub fn parse_ps_ast_json(json: &str) -> ParseResult {
     ParseResult { valid: true, statements }
 }
 
+/// A capability that parses a PowerShell command into a [`ParseResult`]. Injected
+/// into the permission gate (like the sandbox runtime) so the gate stays pure by
+/// default: with no parser, PowerShell path-containment passes through — exactly
+/// claude-code's behavior on a host without `pwsh`.
+pub trait PwshParser: Send + Sync {
+    /// Parse `command`; `valid=false` (→ passthrough) on any failure.
+    fn parse(&self, command: &str) -> ParseResult;
+}
+
+/// The production [`PwshParser`]: resolve `pwsh` (then `powershell`), run the
+/// embedded parse script via `-EncodedCommand`, and transform the JSON AST. Any
+/// failure (executable absent, non-zero exit, unparsed) → `valid=false`
+/// (passthrough). Wire this at the engine boot site on hosts that have
+/// PowerShell; leaving the gate's parser `None` keeps containment inert.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemPwshParser;
+
+impl PwshParser for SystemPwshParser {
+    fn parse(&self, command: &str) -> ParseResult {
+        let script = build_pwsh_script(command);
+        let encoded = encode_for_pwsh(&script);
+        for exe in ["pwsh", "powershell"] {
+            match std::process::Command::new(exe)
+                .args(PWSH_ARGS)
+                .arg(&encoded)
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    return parse_ps_ast_json(&String::from_utf8_lossy(&out.stdout));
+                }
+                // Non-zero exit from a resolved pwsh → treat as unparsed.
+                Ok(_) => return ParseResult::default(),
+                // Executable not found on PATH → try the next name.
+                Err(_) => {}
+            }
+        }
+        ParseResult::default()
+    }
+}
+
 #[cfg(test)]
 #[path = "powershell_parse_test.rs"]
 mod powershell_parse_test;

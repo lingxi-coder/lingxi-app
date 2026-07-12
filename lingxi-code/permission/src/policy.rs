@@ -112,6 +112,13 @@ pub struct PermissionPolicy {
     /// engine wiring of this field is reported as a follow-up this batch (the
     /// boot site currently constructs a disabled-default `SandboxRuntimeConfig`).
     pub sandbox_runtime: Option<crate::sandbox_auto_allow::SandboxAutoAllowConfig>,
+    /// PowerShell command parser (via `pwsh`) enabling the PowerShell-specific
+    /// path-containment guard. `None` (the DEFAULT) makes PowerShell path
+    /// containment a passthrough no-op — exactly claude-code's behavior on a host
+    /// without PowerShell — so `authorize` is byte-identical when absent. Set via
+    /// [`Self::with_pwsh_parser`] at the engine boot site on hosts with `pwsh`
+    /// (e.g. [`crate::powershell_parse::SystemPwshParser`]).
+    pub pwsh_parser: Option<std::sync::Arc<dyn crate::powershell_parse::PwshParser>>,
 }
 
 impl PermissionPolicy {
@@ -131,6 +138,50 @@ impl PermissionPolicy {
             stripped_positions: Vec::new(),
             additional_working_dirs: Vec::new(),
             sandbox_runtime: None,
+            pwsh_parser: None,
+        }
+    }
+
+    /// Attach a [`crate::powershell_parse::PwshParser`], enabling PowerShell
+    /// path-containment. When absent (the default) PowerShell containment passes
+    /// through — matching claude-code on a host without `pwsh`.
+    #[must_use]
+    pub fn with_pwsh_parser(
+        mut self,
+        parser: std::sync::Arc<dyn crate::powershell_parse::PwshParser>,
+    ) -> Self {
+        self.pwsh_parser = Some(parser);
+        self
+    }
+
+    /// Run PowerShell path containment for a `PowerShell` command (claude-code
+    /// `validatePowerShellCommandPaths` → `Z_u`). Returns `Some(ask/deny)` on a
+    /// containment violation, or `None` (passthrough) when no parser is wired,
+    /// `pwsh` is unavailable, the command doesn't parse, or every path is allowed.
+    fn check_powershell_containment(
+        &self,
+        command: &str,
+        roots: &FsRoots,
+    ) -> Option<PermissionResult> {
+        let parser = self.pwsh_parser.as_ref()?;
+        let parse = parser.parse(command);
+        if !parse.valid {
+            return None;
+        }
+        let ctx = crate::powershell_containment::PsCtx {
+            roots,
+            additional: &self.additional_working_dirs,
+            is_windows: cfg!(target_os = "windows"),
+            is_macos: cfg!(target_os = "macos"),
+        };
+        match crate::powershell_containment::validate_ps_statements(&parse.statements, &ctx, false) {
+            crate::powershell_containment::PsContainmentResult::Passthrough => None,
+            crate::powershell_containment::PsContainmentResult::Ask { message, reason } => {
+                Some(ask_powershell_containment(message, reason))
+            }
+            crate::powershell_containment::PsContainmentResult::Deny { message, reason } => {
+                Some(deny_powershell_containment(message, reason))
+            }
         }
     }
 
@@ -440,7 +491,18 @@ impl PermissionPolicy {
         //    (preserves pre-guard behavior), consistent with shell content
         //    matching being roots-gated.
         if let Some(roots) = self.roots.as_ref() {
-            if shell_command::is_shell_tool(tool_name) {
+            // PowerShell path containment (claude-code `validatePowerShellCommandPaths`
+            // via a `pwsh` parse). Runs INSTEAD of the bash guards below — those
+            // parse bash syntax and don't apply to cmdlets. Passthrough (falls
+            // through to the normal flow) when no parser is wired / `pwsh` is
+            // absent / the command doesn't parse — matching claude-code.
+            if tool_name == "PowerShell" {
+                if let Some(command) = shell_command::command_from_input(input) {
+                    if let Some(result) = self.check_powershell_containment(command, roots) {
+                        return result;
+                    }
+                }
+            } else if shell_command::is_shell_tool(tool_name) {
                 if let Some(command) = shell_command::command_from_input(input) {
                     let home = roots
                         .home
@@ -1730,6 +1792,31 @@ fn ask_dangerous_removal(
 /// 'other'`), carrying the byte-locked message. Offers no rule-saving
 /// suggestion (the TS suggestions are a UI concern modeled elsewhere; the
 /// permission-layer decision is the ask itself).
+/// Map a PowerShell containment ASK to a permission prompt (mirrors
+/// [`ask_path_constraint`]; the message is byte-faithful to claude-code).
+fn ask_powershell_containment(message: String, reason: String) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::Other { reason },
+        prompt: PermissionPrompt {
+            title: "Allow PowerShell?".to_string(),
+            message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Map a PowerShell containment DENY (a `Remove-Item` protected-path hit, `Hwt`)
+/// to a permission deny.
+fn deny_powershell_containment(message: String, reason: String) -> PermissionResult {
+    PermissionResult::Deny {
+        reason: PermissionDecisionReason::Other { reason },
+        explanation: Some(message),
+        metadata: PermissionMetadata::default(),
+    }
+}
+
 fn ask_path_constraint(
     tool_name: &str,
     ask: crate::path_constraints::PathConstraintAsk,

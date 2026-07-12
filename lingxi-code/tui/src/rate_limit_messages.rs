@@ -611,6 +611,38 @@ pub fn model_in_overage_included_set(model_display_name: &str) -> bool {
         .any(|m| m == model_display_name)
 }
 
+/// 2.1.206 claude.ai statsig flag gates consulted by the rate-limit message
+/// composer (`tengu_pewter_summit`, `tengu_idle_amber_finch`,
+/// `tengu_coral_beacon`). The port has no statsig backend and no realizable
+/// claude.ai experiment state, so the statsig default (`false`) is
+/// byte-faithful for every port state — same documented-`false` convention as
+/// [`EYT`] / [`DEPLOYMENT_FIRST_PARTY`] / [`overage_consent_required`] above.
+/// Each is kept as a named helper (rather than inlined `false`) so the branch
+/// structure matches 2.1.206 and it's a single edit-point if a flag source is
+/// ever wired.
+pub mod flags {
+    /// `tengu_pewter_summit` — spend-limit nudge gate. Statsig default
+    /// `false`; no flag source in the port ⇒ always `false`.
+    #[must_use]
+    pub fn spend_limit_nudge_enabled() -> bool {
+        false
+    }
+
+    /// `tengu_idle_amber_finch` (`Pee()`). Statsig default `false`; no flag
+    /// source in the port ⇒ always `false`.
+    #[must_use]
+    pub fn idle_amber_finch() -> bool {
+        false
+    }
+
+    /// `tengu_coral_beacon`. Statsig default `false`; no flag source in the
+    /// port ⇒ always `false`.
+    #[must_use]
+    pub fn coral_beacon() -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1355,5 +1387,14 @@ mod tests {
         assert!(overage_included_models().is_empty());
         assert!(!model_in_overage_included_set("Claude Fable 5"));
         assert!(!model_in_overage_included_set(""));
+    }
+
+    #[test]
+    fn rate_limit_flags_default_off() {
+        // With no override env/config, all three 206 flags default to false so
+        // the default build is byte-identical to pre-change.
+        assert!(!flags::spend_limit_nudge_enabled());
+        assert!(!flags::idle_amber_finch());
+        assert!(!flags::coral_beacon());
     }
 }

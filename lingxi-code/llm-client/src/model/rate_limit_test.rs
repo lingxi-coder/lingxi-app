@@ -557,6 +557,19 @@ mod rate_limit_message {
     }
 
     #[test]
+    fn upgrade_paths_empty_header_value_yields_none() {
+        // JS `d ? d.split(',')… : undefined` — an empty header value is falsy,
+        // so a present-but-empty header collapses to `None` (NOT `Some([""])`),
+        // same as an absent header.
+        let headers = vec![(
+            "anthropic-ratelimit-unified-upgrade-paths".into(),
+            String::new(),
+        )];
+        let info = RateLimitInfo::from_headers(&headers);
+        assert_eq!(info.upgrade_paths, None);
+    }
+
+    #[test]
     fn five_hour_session_limit_message_is_byte_locked() {
         // claude-code rateLimitMessages.ts:192-193 + :343.
         let msg = rate_limit_error_message(

@@ -426,7 +426,9 @@ pub struct RateLimitInfo {
     pub overage_in_use: bool,
     /// `anthropic-ratelimit-unified-upgrade-paths` — a comma-separated list of
     /// upgrade-plan identifiers, split and trimmed (2.1.206:
-    /// `header(…)?.split(',').map(trim)`). `None` when the header is absent.
+    /// `d = header(…); d ? d.split(',').map(trim) : undefined`). `None` when
+    /// the header is absent OR empty — an empty string is falsy in TS, so a
+    /// present-but-empty header collapses to `None`, same as `status`.
     pub upgrade_paths: Option<Vec<String>>,
     /// `anthropic-ratelimit-unified-overage-period-monthly-utilization` (0-1
     /// fraction; 2.1.206: `Number(header(…))` when finite). `None` when the
@@ -793,10 +795,12 @@ impl RateLimitInfo {
             // stance).
             overage_in_use: header_value(headers, "anthropic-ratelimit-unified-overage-in-use")
                 == Some("true"),
-            // `header(…)?.split(',').map(trim)` — absent header → `None`;
-            // present header always yields at least one (possibly empty)
-            // element, same as the TS `.split(',')`.
+            // `d ? d.split(',').map(trim) : undefined` — an empty header
+            // value is falsy in TS, so a present-but-empty header collapses to
+            // `None` exactly like an absent one (same `.filter(!empty)`
+            // convention as `status` / the `from_429_error_headers` fields).
             upgrade_paths: header_value(headers, "anthropic-ratelimit-unified-upgrade-paths")
+                .filter(|s| !s.is_empty())
                 .map(|v| v.split(',').map(|s| s.trim().to_string()).collect()),
             overage_period_monthly_utilization: parse_fraction(
                 headers,

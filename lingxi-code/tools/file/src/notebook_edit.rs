@@ -238,6 +238,11 @@ Usage:\n\
             && edit_mode != EDIT_MODE_DELETE
         {
             self.emit_failed(&invocation_id, "bad_edit_mode").await;
+            // [RESIDUAL — message not in 2.1.206] claude rejects an invalid
+            // `edit_mode` at the SCHEMA layer (the Zod enum on the input), so
+            // its wording is the validator's own non-reproducible output; this
+            // in-tool fallback string is port-only, reachable only when the
+            // model bypasses the schema enum.
             return Err(ToolError::InvalidInput(
                 "Edit mode must be replace, insert, or delete.".into(),
             ));
@@ -285,18 +290,16 @@ Usage:\n\
         // `check_read_before_write` helper for uniformity with Edit/Write,
         // which also applies the isPartialView + content-equality fallback —
         // TS's NotebookEdit guard is the simpler `!lastRead` / `mtime >
-        // timestamp` form without those, but the extra checks only ever relax
-        // (content-equality) or tighten (partial-view) in cases a notebook does
-        // not reach in practice.
+        // timestamp` form without those.
         //
-        // KNOWN PARTIAL COVERAGE (flagged per spec): the Rust `Read` tool does
-        // NOT support `.ipynb` (no notebook media), so it never populates
-        // `read_file_state` for a notebook. The guard can therefore only trip
-        // on a prior NotebookEdit's OWN post-write `set` below — a plain
-        // Read→NotebookEdit cannot satisfy the guard. This gap closes only when
-        // Read gains notebook support, which is out of faithful reach (no Rust
-        // crate equivalent for the TS notebook media pipeline). `raw` is the
-        // current on-disk content for the (rarely-reached) content fallback.
+        // The Rust `Read` tool DOES read `.ipynb` (read.rs ipynb branch) and
+        // records the read into `read_file_state` — with the serialized CELLS
+        // JSON as the entry `content` (mirroring TS `FileReadTool.ts:842-847`).
+        // So a plain Read→NotebookEdit satisfies this guard via the mtime
+        // check. The content-equality fallback compares the RAW on-disk bytes
+        // (`raw`) against that recorded cells JSON and thus never matches for a
+        // notebook — which collapses the shared helper to exactly TS's
+        // no-fallback `mtime > timestamp` NotebookEdit guard.
         let current_mtime_ms = tokio::fs::metadata(&canon)
             .await
             .ok()
@@ -677,6 +680,51 @@ mod tests {
     #[test]
     fn tool_name_is_notebook_edit() {
         assert_eq!(TOOL_NAME, "NotebookEdit");
+    }
+
+    /// A REAL `Read` of the notebook satisfies the read-before-write guard —
+    /// no manual seeding. Read's ipynb branch records the read (cells JSON +
+    /// mtime) into the SHARED `read_file_state`, so the subsequent NotebookEdit
+    /// passes the guard via the mtime check exactly like TS's
+    /// Read→NotebookEdit flow. (Guards the staleness-guard wiring against a
+    /// regression where the ipynb Read stops recording state, which would make
+    /// every Read→NotebookEdit fail with "File has not been read yet".)
+    #[tokio::test]
+    async fn real_read_then_notebook_edit_passes_the_guard() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        // Run the actual Read tool (ipynb branch) on a CLONE of the ctx — the
+        // read_file_state map is an Arc, so the recording is shared.
+        let read_tool = crate::read::FileReadTool::new(ctx.clone());
+        read_tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read must handle .ipynb");
+        // No seed_full_read: the Read above must be sufficient.
+        let tool = NotebookEditTool::new(ctx);
+        let result = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "c1",
+                    "edit_mode": "replace",
+                    "new_source": "print('via-real-read')"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read→NotebookEdit must satisfy the staleness guard");
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("Updated cell c1 with print('via-real-read')")
+        );
     }
 
     #[tokio::test]

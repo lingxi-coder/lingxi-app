@@ -8,23 +8,7 @@
 #[must_use]
 pub fn format_duration_ms(ms: u64) -> String {
     if ms < 60_000 {
-        if ms == 0 {
-            return "0s".to_string();
-        }
-        // For < 1 minute: floor the seconds unless rounding would cause a carry to 60s
-        let seconds_remainder = ms % 60_000;
-        let seconds_int = seconds_remainder / 1000;
-        let frac = (seconds_remainder % 1000) as f64 / 1000.0;
-        let i = if frac >= 0.5 && seconds_int == 59 {
-            // 59.5+ rounds to 60, which carries to 1m 0s
-            return "1m 0s".to_string();
-        } else {
-            seconds_int as u64
-        };
-        if i > 0 {
-            return format!("{}s", i);
-        }
-        return "0s".to_string();
+        return format!("{}s", ms / 1000);
     }
     let mut r = ms / 86_400_000;
     let mut n = (ms % 86_400_000) / 3_600_000;
@@ -72,6 +56,7 @@ mod tests {
         assert_eq!(format_duration_ms(65_000), "1m 5s");
         assert_eq!(format_duration_ms(3_661_000), "1h 1m 1s");
         assert_eq!(format_duration_ms(90_061_000), "1d 1h 1m"); // days form drops seconds
-        assert_eq!(format_duration_ms(59_500), "1m 0s");  // round(59.5)=60 -> carry to 1m 0s
+        assert_eq!(format_duration_ms(59_500), "59s");  // floor(59.5)=59
+        assert_eq!(format_duration_ms(119_500), "2m 0s"); // round(59.5s)=60 -> carry: 1m -> 2m 0s
     }
 }

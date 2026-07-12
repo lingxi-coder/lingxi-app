@@ -161,8 +161,17 @@ fn compose_with(
     // overage is available)" — rateLimitMessages.ts:49-60.
     if is_using_overage(info) {
         if overage_status == Some("allowed_warning") {
+            // 2.1.206 `Fdu` (binary @217902246): `` `You're close to your
+            // ${A5()?"usage limit":"usage credit limit"}` `` — straight
+            // ASCII apostrophe, byte-verified against the real binary. This
+            // replaces the pre-206 "extra usage spending limit" wording.
+            let limit_name = if sub.is_usage_based_billing() {
+                "usage limit"
+            } else {
+                "usage credit limit"
+            };
             return Some(ComposedRateLimit {
-                text: "You're close to your extra usage spending limit".to_owned(),
+                text: format!("You're close to your {limit_name}"),
                 upsell: None,
             });
         }
@@ -321,6 +330,50 @@ fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnap
         _ => "usage limit",
     };
     format_limit_reached_text(limit, &reset_message, is_ant)
+}
+
+/// Port of `qcg` (2.1.206 binary @217905040) limit-name mapping:
+///
+/// ```text
+/// function qcg(e,t,r){
+///   if(e.rateLimitType==="seven_day_sonnet"){let n=Fs();
+///     return lhe(n==="pro"||n==="enterprise"?"weekly limit":"Sonnet limit",t,r)}
+///   if(e.rateLimitType==="seven_day_opus")return lhe("Opus limit",t,r);
+///   if(e.rateLimitType==="seven_day_overage_included")return lhe("Fable 5 limit",t,r);
+///   if(e.rateLimitType==="seven_day")return lhe("weekly limit",t,r);
+///   if(e.rateLimitType==="five_hour")return lhe("session limit",t,r);
+///   ...
+/// }
+/// ```
+///
+/// `qcg` itself calls straight through to `lhe`
+/// ([`format_limit_reached_text`]) with the resolved name; this helper
+/// isolates just the name resolution so callers can reuse it (the Ucg
+/// rewrite, a later task, is the first non-test caller — `pub(crate)` +
+/// `#[allow(dead_code)]` until then, matching this file's staged-helper
+/// convention, e.g. [`is_fable_model`] / [`overage_included_models`]).
+///
+/// `seven_day_overage_included` → `"Fable 5 limit"` is NEW in 2.1.206
+/// ("Fable 5" is a model name — not rebranded). Byte-verified against the
+/// real 2.1.206 binary (string table @87697088).
+#[allow(dead_code)]
+#[must_use]
+pub(crate) fn qcg_limit_name(
+    rate_limit_type: Option<&str>,
+    sub: &SubscriptionSnapshot,
+) -> Option<&'static str> {
+    match rate_limit_type {
+        Some("seven_day_sonnet") => Some(if sub.is_pro_or_enterprise() {
+            "weekly limit"
+        } else {
+            "Sonnet limit"
+        }),
+        Some("seven_day_opus") => Some("Opus limit"),
+        Some("seven_day_overage_included") => Some("Fable 5 limit"),
+        Some("seven_day") => Some("weekly limit"),
+        Some("five_hour") => Some("session limit"),
+        _ => None,
+    }
 }
 
 /// Port of `getEarlyWarningText` (rateLimitMessages.ts:199-254).
@@ -750,15 +803,18 @@ mod tests {
 
     #[test]
     fn rejected_with_overage_allowed_warning_warns_spending_limit() {
-        // isUsingOverage + overageStatus allowed_warning → spending-limit
-        // warning (TS :53-58). Straight apostrophe — byte parity.
+        // isUsingOverage + overageStatus allowed_warning → close-to-limit
+        // warning (TS :53-58). 2.1.206 `Fdu` swapped the wording to
+        // `You're close to your ${A5()?"usage limit":"usage credit
+        // limit"}` (binary @217902246) — straight apostrophe, byte parity.
+        // Default (non-usage-based) subscription → "usage credit limit".
         let info = RateLimitInfo {
             status: Some("rejected".into()),
             overage_status: Some("allowed_warning".into()),
             ..RateLimitInfo::default()
         };
         let got = compose(&info, false).unwrap();
-        assert_eq!(got.text, "You're close to your extra usage spending limit");
+        assert_eq!(got.text, "You're close to your usage credit limit");
         assert!(!got.text.contains('\u{2019}'));
         assert_eq!(got.upsell, None, "warnings carry no dim upsell line");
     }
@@ -1407,5 +1463,76 @@ mod tests {
         assert!(!flags::spend_limit_nudge_enabled());
         assert!(!flags::idle_amber_finch());
         assert!(!flags::coral_beacon());
+    }
+
+    // ── 2.1.206 `Fdu` overage close-to-your ${limitName} (Task 8) ─────────
+
+    #[test]
+    fn overage_close_to_your_uses_limit_name() {
+        // 2.1.206 binary @217902246: `` `You're close to your
+        // ${A5()?"usage limit":"usage credit limit"}` `` — straight ASCII
+        // apostrophe, byte-verified against the real 2.1.206 binary.
+        let info = RateLimitInfo {
+            status: Some("rejected".into()),
+            overage_status: Some("allowed_warning".into()),
+            ..RateLimitInfo::default()
+        };
+        // not usage_based → "usage credit limit" (A5() == false).
+        let sub = SubscriptionSnapshot::default();
+        assert_eq!(
+            compose_with(&info, false, &sub, true).unwrap().text,
+            "You're close to your usage credit limit"
+        );
+        // A5() == true → "usage limit".
+        let sub = SubscriptionSnapshot {
+            billing_type: Some("usage_based".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        assert_eq!(
+            compose_with(&info, false, &sub, true).unwrap().text,
+            "You're close to your usage limit"
+        );
+        assert!(
+            !compose_with(&info, false, &sub, true)
+                .unwrap()
+                .text
+                .contains('\u{2019}'),
+            "TS source uses a straight ASCII apostrophe"
+        );
+    }
+
+    #[test]
+    fn qcg_maps_206_limit_names() {
+        // Port of `qcg` (2.1.206 binary @217905040), byte-verified against
+        // the real binary. Pin every arm, including the NEW
+        // `seven_day_overage_included` → "Fable 5 limit" case (206-only;
+        // "Fable 5" is a model name, not rebranded).
+        let unknown = SubscriptionSnapshot::default();
+        assert_eq!(
+            qcg_limit_name(Some("seven_day_sonnet"), &unknown),
+            Some("Sonnet limit")
+        );
+        assert_eq!(
+            qcg_limit_name(Some("seven_day_sonnet"), &pro()),
+            Some("weekly limit")
+        );
+        assert_eq!(
+            qcg_limit_name(Some("seven_day_opus"), &unknown),
+            Some("Opus limit")
+        );
+        assert_eq!(
+            qcg_limit_name(Some("seven_day_overage_included"), &unknown),
+            Some("Fable 5 limit")
+        );
+        assert_eq!(
+            qcg_limit_name(Some("seven_day"), &unknown),
+            Some("weekly limit")
+        );
+        assert_eq!(
+            qcg_limit_name(Some("five_hour"), &unknown),
+            Some("session limit")
+        );
+        assert_eq!(qcg_limit_name(None, &unknown), None);
+        assert_eq!(qcg_limit_name(Some("overage"), &unknown), None);
     }
 }

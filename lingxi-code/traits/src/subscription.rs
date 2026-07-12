@@ -118,6 +118,55 @@ impl SubscriptionSnapshot {
     pub fn is_usage_based_billing(&self) -> bool {
         self.billing_type.as_deref() == Some("usage_based")
     }
+
+    /// Port of `DBe()` (2.1.206 binary @214254095):
+    /// `Fs()==="enterprise" && Mhc()==="enterprise_usage_based"`, where
+    /// `Fs()` = `getSubscriptionType()` and `Mhc()` = `Uc()?.seatTier`
+    /// (binary @214254332). One leaf of [`Self::is_saffron_credits_only`]
+    /// (`B5()`).
+    ///
+    // 206 DBe: the `seatTier==="enterprise_usage_based"` conjunct defaults to
+    // `false` because the port has no `oauthAccount.seatTier` source — it is a
+    // claude.ai-only field never surfaced to a third-party port and not carried
+    // on `SubscriptionSnapshot`. `DBe()` is therefore `false` for every
+    // populated snapshot; the `subscription_type` conjunct is retained for
+    // faithfulness but cannot flip the result true on its own.
+    #[must_use]
+    pub fn is_enterprise_usage_based_seat(&self) -> bool {
+        // `seat_tier` has no port data source (see note) ⇒ the conjunction is
+        // always false regardless of `subscription_type`.
+        const SEAT_TIER_IS_ENTERPRISE_USAGE_BASED: bool = false;
+        self.subscription_type.as_deref() == Some("enterprise")
+            && SEAT_TIER_IS_ENTERPRISE_USAGE_BASED
+    }
+
+    /// Port of `B5()` (2.1.206 binary @213282281):
+    /// `Rn()!=="firstParty" || !Bo() || DBe() || x5()==="default_claude_zero"`
+    /// — the saffron "credits-only tier" gate.
+    ///
+    /// Leaf mapping:
+    /// - `Rn()!=="firstParty"` → injected `deployment_first_party` (see the
+    ///   `DEPLOYMENT_FIRST_PARTY` note in `tui::rate_limit_messages`; the port
+    ///   has no first-party deployment discriminator, so the composer passes
+    ///   the documented default `false` ⇒ this disjunct is `true`);
+    /// - `!Bo()` → `!self.is_subscriber` (`Bo()` = `bS()&&GW(scopes)`, the
+    ///   claude.ai-subscriber check, binary @214252997);
+    /// - `DBe()` → [`Self::is_enterprise_usage_based_seat`];
+    /// - `x5()==="default_claude_zero"` → `rate_limit_tier` (`x5()` =
+    ///   `getRateLimitTier()`, binary @214254206).
+    ///
+    /// Consumed ONLY by `Ucg`'s first guard `!(ZA(t)&&WBe()&&!B5())`; the
+    /// port's `WBe()` is a documented `false` (see
+    /// `tui::rate_limit_messages::overage_consent_required`), so that guard
+    /// collapses and `B5()` is currently unreachable — pinned faithfully so the
+    /// branch stays correct if `WBe()` ever gains a data source.
+    #[must_use]
+    pub fn is_saffron_credits_only(&self, deployment_first_party: bool) -> bool {
+        !deployment_first_party
+            || !self.is_subscriber
+            || self.is_enterprise_usage_based_seat()
+            || self.rate_limit_tier.as_deref() == Some("default_claude_zero")
+    }
 }
 
 /// Shared slot the composition root fills asynchronously (a background
@@ -320,5 +369,63 @@ mod tests {
         assert!(s.is_usage_based_billing());
         s.billing_type = Some("stripe_subscription".into());
         assert!(!s.is_usage_based_billing());
+    }
+
+    #[test]
+    fn dbe_enterprise_usage_based_seat_has_no_port_source() {
+        // 206 DBe: `seatTier` has no port source ⇒ always false, even for an
+        // enterprise snapshot (the only `subscription_type` that could satisfy
+        // the first conjunct).
+        let enterprise = SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("enterprise".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        assert!(!enterprise.is_enterprise_usage_based_seat());
+
+        let team = SubscriptionSnapshot {
+            subscription_type: Some("team".into()),
+            ..enterprise.clone()
+        };
+        assert!(!team.is_enterprise_usage_based_seat());
+
+        assert!(!SubscriptionSnapshot::default().is_enterprise_usage_based_seat());
+    }
+
+    #[test]
+    fn b5_saffron_credits_only_truth_table() {
+        // Fully "not credits-only": first-party deployment, subscriber, no
+        // enterprise-usage-based seat, non-zero tier ⇒ every disjunct false.
+        let clean = SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("pro".into()),
+            rate_limit_tier: Some("default_claude_max_20x".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        assert!(!clean.is_saffron_credits_only(true));
+
+        // `Rn()!=="firstParty"` disjunct: non-first-party deployment ⇒ true.
+        assert!(clean.is_saffron_credits_only(false));
+
+        // `!Bo()` disjunct: not a subscriber ⇒ true (even first-party).
+        let anon = SubscriptionSnapshot {
+            is_subscriber: false,
+            ..clean.clone()
+        };
+        assert!(anon.is_saffron_credits_only(true));
+
+        // `x5()==="default_claude_zero"` disjunct ⇒ true (first-party sub).
+        let zero = SubscriptionSnapshot {
+            rate_limit_tier: Some("default_claude_zero".into()),
+            ..clean.clone()
+        };
+        assert!(zero.is_saffron_credits_only(true));
+
+        // A different tier does NOT trip the zero-tier disjunct.
+        let non_zero = SubscriptionSnapshot {
+            rate_limit_tier: Some("default_claude_max_5x".into()),
+            ..clean.clone()
+        };
+        assert!(!non_zero.is_saffron_credits_only(true));
     }
 }

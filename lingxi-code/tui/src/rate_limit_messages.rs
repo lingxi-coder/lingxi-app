@@ -478,6 +478,123 @@ fn error_upsell(sub: &SubscriptionSnapshot, extra_usage_cmd_enabled: bool) -> Op
     Some(upsell::UPGRADE_OR_EXTRA.to_owned())
 }
 
+// ── 2.1.206 deep-internal predicates (Task 2) ────────────────────────────────
+//
+// These pin the leaves that gate three 2.1.206 branches:
+//   (a) `Ucg`'s first guard  `!(ZA(t) && WBe() && !B5())`
+//   (b) `a7n`'s per-model arm `O9e().includes(VQ(ei(t)))`
+//   (c) `Gid`'s upsell gate   `shouldShowUpsell = Eyt() || Bo()`
+// The subscription-consuming leaves (`B5`/`DBe`/`Bo` via `is_subscriber`,
+// `x5` via `rate_limit_tier`) live on [`SubscriptionSnapshot`]. The
+// model-based / flag-based / module-global leaves are pinned here. Every
+// documented default follows the byte-locked-but-unreachable convention used
+// by [`upsell::OPENING_OPTIONS`].
+
+/// `Eyt()` (2.1.206 binary @212992273: `function Eyt(){return!1}`) — a hard
+/// `false` constant in 2.1.206. It is one input to `Gid`'s
+/// `shouldShowUpsell = Eyt() || Bo()`; with `Eyt()==false`, `shouldShowUpsell`
+/// reduces to `Bo()` = [`SubscriptionSnapshot::is_subscriber`].
+const EYT: bool = false;
+
+/// Composer default for `Rn()!=="firstParty"` inside `B5()`
+/// ([`SubscriptionSnapshot::is_saffron_credits_only`]).
+///
+// 206 Rn(): the port is not Anthropic's first-party Claude Code binary and has
+// no deployment discriminator wired into the subscription layer, so
+// `deployment_first_party` defaults to `false` (⇒ `Rn()!=="firstParty"` is
+// `true`). Byte-locked-but-unreachable exactly like the OPENING_OPTIONS note:
+// `B5()` is only consumed by a guard that `overage_consent_required()` already
+// collapses. `Rn()` itself (binary @212986032) is an env-derived deployment
+// tag (gateway/bedrock/foundry/anthropicAws/mantle/vertex/firstParty); the
+// composer intentionally does not thread that env state into this claude.ai
+// saffron gate.
+pub const DEPLOYMENT_FIRST_PARTY: bool = false;
+
+/// `Gid` `shouldShowUpsell = Eyt() || Bo()` (2.1.206). `Bo()` (binary
+/// @214252997: `bS() && GW(scopes)`) is the claude.ai-subscriber check =
+/// [`SubscriptionSnapshot::is_subscriber`].
+#[must_use]
+pub fn should_show_upsell(sub: &SubscriptionSnapshot) -> bool {
+    EYT || sub.is_subscriber
+}
+
+/// `WBe()` (2.1.206 binary @213282129: `function WBe(){return bIe()||Vqo()}`).
+///
+/// - `bIe()` (binary @213282164) reads the `tengu_saffron_lattice` flag config
+///   via `n7m()`: `if(cfg.enabled===false) return false; return
+///   cfg.overageConsentRequired===true || <planLimitsEndDate elapsed>`. The
+///   port has no such flag config source and the flag is absent by default
+///   (`enabled` unset) ⇒ `bIe()==false`.
+/// - `Vqo()` (binary @210856387: `return Pt.fableCreditsRequired`) returns a
+///   module-global set only by the (unported) fable-bridge consent dialog flow
+///   ⇒ `false`.
+///
+// 206 WBe: `false` because the port has neither a `tengu_saffron_lattice` flag
+// config nor fable-credits module state. This collapses `Ucg`'s first guard
+// `!(ZA(t) && WBe() && !B5())` to a constant `true`, so that guarded early
+// return never fires — and `ZA`/`B5` are consequently unreachable too.
+#[must_use]
+pub fn overage_consent_required() -> bool {
+    false
+}
+
+/// Minimal faithful port of `Ns(so(id))` model-id normalization used by `ZA`:
+/// lowercases, drops a trailing `[1m]` context suffix, and strips any
+/// provider-prefix path segment (`anthropic/claude-fable-5` → `claude-fable-5`).
+fn normalize_model_id(model_id: &str) -> String {
+    let lower = model_id.trim().to_lowercase();
+    let no_suffix = lower.strip_suffix("[1m]").unwrap_or(&lower);
+    no_suffix
+        .rsplit('/')
+        .next()
+        .unwrap_or(no_suffix)
+        .to_string()
+}
+
+/// `ZA(t)` (2.1.206 binary @213182958:
+/// `Ns(so(e))==="claude-fable-5" || KQ(e)`) — is the model the Fable model.
+/// `KQ` (binary @213182868) compares the normalized id to
+/// `ANTHROPIC_DEFAULT_FABLE_MODEL`. Consumed by `Ucg`'s first guard alongside
+/// [`overage_consent_required`] (`WBe`, documented `false`), so this predicate
+/// is currently unreachable; pinned faithfully.
+#[must_use]
+pub fn is_fable_model(model_id: &str) -> bool {
+    let norm = normalize_model_id(model_id);
+    if norm == "claude-fable-5" {
+        return true;
+    }
+    // KQ(e): `t = ANTHROPIC_DEFAULT_FABLE_MODEL; if(!t) return false;
+    //         return Ns(e)===Ns(t)`.
+    std::env::var("ANTHROPIC_DEFAULT_FABLE_MODEL")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .is_some_and(|t| normalize_model_id(&t) == norm)
+}
+
+/// `O9e()` (2.1.206 binary @217901083:
+/// `Ze("tengu_usage_overage_included_models", []).filter(isString)`) — the set
+/// of model DISPLAY NAMES for which `a7n` swaps to the
+/// "Now using usage credits for `${model}`" copy
+/// (`O9e().includes(VQ(ei(t)))`). `VQ(ei(t))` (binaries @213199290 / @213199704)
+/// is the resolved model's `display_name`.
+///
+// 206 O9e: empty because the port has no `tengu_usage_overage_included_models`
+// flag source (statsig default `[]`). With an empty set the membership test is
+// always false ⇒ the per-model usage-credits arm never fires.
+#[must_use]
+pub fn overage_included_models() -> Vec<String> {
+    Vec::new()
+}
+
+/// `O9e().includes(VQ(ei(t)))` — whether the resolved model's display name is in
+/// the overage-included set. Always `false` in the port (empty set).
+#[must_use]
+pub fn model_in_overage_included_set(model_display_name: &str) -> bool {
+    overage_included_models()
+        .iter()
+        .any(|m| m == model_display_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1162,5 +1279,64 @@ mod tests {
     #[test]
     fn opening_options_uses_ellipsis() {
         assert!(upsell::OPENING_OPTIONS.ends_with('\u{2026}'));
+    }
+
+    // ── 2.1.206 deep-internal predicates (Task 2) ─────────────────────────
+
+    #[test]
+    fn eyt_is_hard_false() {
+        // binary @212992273: `function Eyt(){return!1}`.
+        assert!(!EYT);
+    }
+
+    #[test]
+    fn deployment_first_party_defaults_not_first_party() {
+        // 206 Rn(): documented default — the port is not the first-party
+        // binary, so `Rn()!=="firstParty"` is true ⇒ the flag is false.
+        assert!(!DEPLOYMENT_FIRST_PARTY);
+        // Threaded through B5 it forces the credits-only gate on regardless of
+        // the subscription (the guard it feeds is unreachable via WBe anyway).
+        let sub = SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("pro".into()),
+            rate_limit_tier: Some("default_claude_max_20x".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        assert!(sub.is_saffron_credits_only(DEPLOYMENT_FIRST_PARTY));
+    }
+
+    #[test]
+    fn should_show_upsell_reduces_to_is_subscriber() {
+        // Gid: shouldShowUpsell = Eyt() || Bo(); Eyt()==false ⇒ == is_subscriber.
+        assert!(!should_show_upsell(&SubscriptionSnapshot::default()));
+        let sub = SubscriptionSnapshot {
+            is_subscriber: true,
+            ..SubscriptionSnapshot::default()
+        };
+        assert!(should_show_upsell(&sub));
+    }
+
+    #[test]
+    fn overage_consent_required_is_documented_false() {
+        // WBe() = bIe() || Vqo(); both leaves have no port source ⇒ false.
+        assert!(!overage_consent_required());
+    }
+
+    #[test]
+    fn is_fable_model_matches_normalized_fable_id() {
+        assert!(is_fable_model("claude-fable-5"));
+        assert!(is_fable_model("Claude-Fable-5"));
+        assert!(is_fable_model("anthropic/claude-fable-5"));
+        assert!(is_fable_model("claude-fable-5[1m]"));
+        assert!(!is_fable_model("claude-sonnet-4-5"));
+        assert!(!is_fable_model("claude-mythos-5"));
+    }
+
+    #[test]
+    fn overage_included_set_is_empty_arm_never_fires() {
+        // O9e() default [] ⇒ membership always false, for any display name.
+        assert!(overage_included_models().is_empty());
+        assert!(!model_in_overage_included_set("Claude Fable 5"));
+        assert!(!model_in_overage_included_set(""));
     }
 }

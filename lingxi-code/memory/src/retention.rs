@@ -74,6 +74,9 @@ const SWEPT_SINGLE_FILES: &[&str] = &["hfi-auth.json", "mcp-needs-auth-cache.jso
 pub struct RetentionReport {
     /// Session-file entries (files or directories) deleted.
     pub session_files_deleted: u64,
+    /// Transcript `.jsonl` files deleted (a subset of `session_files_deleted`,
+    /// reported separately for the `tengu_retention_sweep` `transcripts` field).
+    pub transcripts_deleted: u64,
     /// Entries that could not be stat'd or removed.
     pub errors: u64,
 }
@@ -148,6 +151,9 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
     for name in SWEPT_SINGLE_FILES {
         report = merge(report, sweep_stale_file(&config_home.join(name), cutoff));
     }
+    // MCP log dirs by filename-timestamp (dVg) and session transcripts (pVg).
+    report = merge(report, sweep_mcp_logs(config_home, cutoff));
+    report = merge(report, sweep_transcripts(config_home, cutoff));
     report
 }
 
@@ -155,6 +161,7 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
 fn merge(a: RetentionReport, b: RetentionReport) -> RetentionReport {
     RetentionReport {
         session_files_deleted: a.session_files_deleted + b.session_files_deleted,
+        transcripts_deleted: a.transcripts_deleted + b.transcripts_deleted,
         errors: a.errors + b.errors,
     }
 }
@@ -283,7 +290,7 @@ pub fn run_startup_retention_sweep() -> Option<RetentionReport> {
     telemetry::emit_retention_sweep(
         false,
         None,
-        0, // transcripts_deleted — not ported (session-file sweep only)
+        report.transcripts_deleted,
         report.session_files_deleted,
         report.errors,
         days,
@@ -295,6 +302,176 @@ pub fn run_startup_retention_sweep() -> Option<RetentionReport> {
 /// `days` as a [`Duration`] (saturating, so an absurd override can't overflow).
 fn day_period(days: u64) -> Duration {
     Duration::from_secs(days.saturating_mul(24 * 60 * 60))
+}
+
+// ── mcp-logs (dVg / cWu / uVg) ──────────────────────────────────────────────
+
+/// Parse a log filename's embedded timestamp (claude `uVg`): the name stem is
+/// an ISO instant with `-`-separated time fields, e.g.
+/// `2024-01-15T10-30-00-000Z.log`. Returns `None` for any name that does not
+/// parse (claude's `Invalid Date`, which never compares `< cutoff`, so those
+/// files are kept). Dependency-free (days-from-civil), UTC.
+fn parse_filename_timestamp(name: &str) -> Option<SystemTime> {
+    let stem = name.split('.').next()?;
+    let (date, time) = stem.split_once('T')?;
+    let time = time.strip_suffix('Z')?;
+    let d: Vec<&str> = date.split('-').collect();
+    let t: Vec<&str> = time.split('-').collect();
+    if d.len() != 3 || t.len() != 4 {
+        return None;
+    }
+    let year: i64 = d[0].parse().ok()?;
+    let month: i64 = d[1].parse().ok()?;
+    let day: i64 = d[2].parse().ok()?;
+    let hour: i64 = t[0].parse().ok()?;
+    let minute: i64 = t[1].parse().ok()?;
+    let second: i64 = t[2].parse().ok()?;
+    let millis: i64 = t[3].parse().ok()?;
+    if !(0..24).contains(&hour) || !(0..60).contains(&minute) || !(0..60).contains(&second) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    let secs = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    if secs < 0 {
+        return None;
+    }
+    Some(
+        SystemTime::UNIX_EPOCH
+            + Duration::from_secs(secs as u64)
+            + Duration::from_millis(millis.max(0) as u64),
+    )
+}
+
+/// Days since the Unix epoch for a civil (Y, M, D) date — Howard Hinnant's
+/// `days_from_civil`. `None` for an out-of-range month/day.
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// Remove log files under `dir` whose filename-embedded timestamp is older than
+/// `cutoff` (claude `cWu`). Files whose name does not parse are kept.
+fn sweep_logs_by_filename_timestamp(dir: &Path, cutoff: SystemTime) -> RetentionReport {
+    let mut report = RetentionReport::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return report;
+    };
+    for entry in entries.flatten() {
+        if !entry.metadata().map(|m| m.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let Some(ts) = parse_filename_timestamp(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        if ts < cutoff {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => report.session_files_deleted += 1,
+                Err(_) => report.errors += 1,
+            }
+        }
+    }
+    report
+}
+
+/// Sweep the MCP log directories (claude `dVg`): every `mcp-logs-*` subdir of
+/// the base logs dir has its stale (by filename-timestamp) files removed, then
+/// the emptied subdir is pruned. The port has no dedicated MCP-log base dir, so
+/// the base is `<config>/logs`; inert when no such subdirs exist.
+fn sweep_mcp_logs(config_home: &Path, cutoff: SystemTime) -> RetentionReport {
+    let mut report = RetentionReport::default();
+    let base_logs = config_home.join("logs");
+    let Ok(entries) = std::fs::read_dir(&base_logs) else {
+        return report;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+        if is_dir && name.starts_with("mcp-logs-") {
+            let dir = entry.path();
+            report = merge(report, sweep_logs_by_filename_timestamp(&dir, cutoff));
+            prune_if_empty(&dir);
+        }
+    }
+    report
+}
+
+// ── transcripts (pVg) ───────────────────────────────────────────────────────
+
+/// The transcript sidecar/related suffixes claude's `pVg` considers alongside
+/// the primary `.jsonl`.
+const TRANSCRIPT_SUFFIXES: &[&str] = &[".jsonl", ".cast", ".ccr-tip.json", ".precompact.json"];
+const TRANSCRIPT_TMP_MARKERS: &[&str] = &[".ccr-tip.json.tmp.", ".precompact.json.tmp."];
+
+/// Sweep stale session transcripts (claude `pVg`). Under
+/// `<config>/projects/<project>/`, a `.jsonl` (and `.cast` / sidecar / tmp)
+/// file older than the cutoff is removed; deleting a `<id>.jsonl` also force-
+/// removes its `<id>.ccr-tip.json` / `<id>.precompact.json` sidecars and the
+/// `<id>/` subagents directory.
+fn sweep_transcripts(config_home: &Path, cutoff: SystemTime) -> RetentionReport {
+    let mut report = RetentionReport::default();
+    let projects = config_home.join("projects");
+    let Ok(project_dirs) = std::fs::read_dir(&projects) else {
+        return report;
+    };
+    for pd in project_dirs.flatten() {
+        if !pd.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let project = pd.path();
+        let Ok(files) = std::fs::read_dir(&project) else {
+            report.errors += 1;
+            continue;
+        };
+        for f in files.flatten() {
+            let Ok(meta) = f.metadata() else {
+                report.errors += 1;
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let name = f.file_name().to_string_lossy().into_owned();
+            let considered = TRANSCRIPT_SUFFIXES.iter().any(|s| name.ends_with(s))
+                || TRANSCRIPT_TMP_MARKERS.iter().any(|m| name.contains(m));
+            if !considered {
+                continue;
+            }
+            let Ok(mtime) = meta.modified() else {
+                report.errors += 1;
+                continue;
+            };
+            if mtime >= cutoff {
+                continue;
+            }
+            match std::fs::remove_file(f.path()) {
+                Ok(()) => {
+                    report.session_files_deleted += 1;
+                    // Cascade: a deleted `<id>.jsonl` takes its sidecars + the
+                    // `<id>/` subagents dir with it.
+                    if let Some(base) = name.strip_suffix(".jsonl") {
+                        report.transcripts_deleted += 1;
+                        if !base.is_empty() && base != "." && base != ".." {
+                            let _ = std::fs::remove_file(project.join(format!("{base}.ccr-tip.json")));
+                            let _ =
+                                std::fs::remove_file(project.join(format!("{base}.precompact.json")));
+                            let _ = std::fs::remove_dir_all(project.join(base));
+                        }
+                    }
+                }
+                Err(_) => report.errors += 1,
+            }
+        }
+    }
+    report
 }
 
 #[cfg(test)]
@@ -444,6 +621,66 @@ mod tests {
         assert_eq!(report.session_files_deleted, 1);
         assert!(!old.exists());
         assert!(latest.exists(), "`latest` debug file must be preserved");
+    }
+
+    #[test]
+    fn filename_timestamp_parses_iso_dashed_form() {
+        // 2024-01-15T10:30:00.000Z = 1705314600 s since epoch.
+        let ts = parse_filename_timestamp("2024-01-15T10-30-00-000Z.log").unwrap();
+        let secs = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(secs, 1_705_314_600);
+        // Unparseable names yield None (kept, never swept).
+        assert!(parse_filename_timestamp("not-a-timestamp.log").is_none());
+        assert!(parse_filename_timestamp("latest").is_none());
+    }
+
+    #[test]
+    fn mcp_logs_sweep_deletes_by_filename_timestamp() {
+        let root = tempfile::tempdir().unwrap();
+        let d = root.path().join("logs").join("mcp-logs-sentry");
+        fs::create_dir_all(&d).unwrap();
+        // Old (2020) filename-timestamp → swept; recent → kept; unparseable → kept.
+        let old = d.join("2020-01-01T00-00-00-000Z.txt");
+        let unparseable = d.join("keepme.txt");
+        fs::write(&old, b"x").unwrap();
+        fs::write(&unparseable, b"x").unwrap();
+        // A "recent" filename-timestamp: build from ~now-ish (last year is enough).
+        let recent = d.join("2999-01-01T00-00-00-000Z.txt");
+        fs::write(&recent, b"x").unwrap();
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        assert_eq!(report.session_files_deleted, 1);
+        assert!(!old.exists(), "old-timestamp log swept");
+        assert!(recent.exists(), "future-timestamp log kept");
+        assert!(unparseable.exists(), "unparseable-name log kept");
+    }
+
+    #[test]
+    fn transcript_sweep_cascades_sidecars_and_subagents_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let proj = root.path().join("projects").join("-Users-me-proj");
+        fs::create_dir_all(&proj).unwrap();
+        let jsonl = proj.join("sess-1.jsonl");
+        let ccr = proj.join("sess-1.ccr-tip.json");
+        let pre = proj.join("sess-1.precompact.json");
+        let subagents = proj.join("sess-1");
+        fs::create_dir_all(subagents.join("subagents")).unwrap();
+        fs::write(subagents.join("subagents").join("agent-x.jsonl"), b"{}").unwrap();
+        for p in [&jsonl, &ccr, &pre] {
+            fs::write(p, b"{}").unwrap();
+        }
+        set_old(&jsonl, Duration::from_secs(60 * 86400));
+        // A fresh transcript in the same project must be untouched.
+        let fresh = proj.join("sess-2.jsonl");
+        fs::write(&fresh, b"{}").unwrap();
+
+        let report = run_retention_sweep_in(root.path(), day_period(30));
+        assert_eq!(report.transcripts_deleted, 1);
+        assert!(!jsonl.exists(), "stale transcript swept");
+        assert!(!ccr.exists(), "ccr-tip sidecar cascaded");
+        assert!(!pre.exists(), "precompact sidecar cascaded");
+        assert!(!subagents.exists(), "session subagents dir cascaded");
+        assert!(fresh.exists(), "fresh transcript kept");
     }
 
     #[test]

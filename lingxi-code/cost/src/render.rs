@@ -116,7 +116,8 @@ pub fn usage_by_model_block(by_model: &[traits::ModelUsageRow]) -> String {
 }
 
 /// Inputs to [`cost_summary`], mapped by the caller from the session's cost
-/// snapshot. Kept local so the `cost` crate needs no `traits` dependency.
+/// snapshot. The caller maps its `CostSnapshot` onto this input; `by_model`
+/// borrows the snapshot's `Vec<traits::ModelUsageRow>` directly.
 pub struct CostSummaryInput<'a> {
     pub total_usd: f64,
     pub unknown_models: bool,

@@ -801,7 +801,7 @@ mod batch_5_tests {
         let h = reg.get_handler("usage").expect("usage handler missing");
         match h.handle(&args("usage")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert!(s.starts_with("Usage\nTotal cost: $"));
+                assert!(s.starts_with("Total cost:            $"));
                 assert!(!s.contains("interactive TUI mode"));
                 assert_ne!(s, "usage: not implemented in v0.6.0 (M5)");
             }

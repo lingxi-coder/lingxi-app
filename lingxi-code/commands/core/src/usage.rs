@@ -11,7 +11,6 @@ use std::sync::Arc;
 use traits::{CostSnapshot, OrchestratorHandle};
 
 const DESCRIPTION: &str = "Show current session usage";
-const M8_GAP_LINE: &str = "Per-model cost breakdown is not available yet (M8).";
 
 /// `/usage` handler backed by the orchestrator's cumulative cost snapshot.
 #[derive(Clone)]
@@ -46,15 +45,15 @@ impl BuiltinCommandHandler for UsageHandler {
 }
 
 fn render_usage_snapshot(cost: &CostSnapshot) -> String {
-    format!(
-        "Usage\nTotal cost: ${:.4}\nInput tokens: {}\nOutput tokens: {}\nAPI calls: {}\nSession duration: {}s\n{}\nEsc to close",
-        cost.total_usd,
-        cost.input_tokens,
-        cost.output_tokens,
-        cost.api_calls,
-        cost.session_duration.as_secs(),
-        M8_GAP_LINE
-    )
+    cost::render::cost_summary(&cost::render::CostSummaryInput {
+        total_usd: cost.total_usd,
+        unknown_models: cost.unknown_models,
+        api_duration_ms: u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
+        wall_duration_ms: u64::try_from(cost.session_duration.as_millis()).unwrap_or(u64::MAX),
+        code_lines_added: cost.code_lines_added,
+        code_lines_removed: cost.code_lines_removed,
+        by_model: &cost.by_model,
+    })
 }
 
 #[cfg(test)]
@@ -72,24 +71,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renders_flat_usage_snapshot() {
-        let mock = Arc::new(MockOrchestratorHandle::new());
-        mock.set_cost_snapshot(CostSnapshot {
+    async fn renders_cost_summary_block() {
+        use traits::orchestrator::ModelUsageRow;
+        let rows = vec![ModelUsageRow {
+            model: "claude-opus-4-8".into(),
+            total_nano_usd: 123_400_000,
+            input_tokens: 5_000,
+            output_tokens: 2_000,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }];
+        let snap = CostSnapshot {
             total_usd: 0.1234,
-            input_tokens: 5000,
-            output_tokens: 2000,
-            api_calls: 7,
-            session_duration: Duration::from_secs(125),
+            unknown_models: true,
+            api_duration: Duration::from_millis(5_000),
+            session_duration: Duration::from_secs(125), // wall = 125_000 ms
+            code_lines_added: 10,
+            code_lines_removed: 1,
+            by_model: rows.clone(),
             ..CostSnapshot::default()
-        });
+        };
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_cost_snapshot(snap.clone());
         let h = UsageHandler::new(mock);
+
+        let expected = cost::render::cost_summary(&cost::render::CostSummaryInput {
+            total_usd: 0.1234,
+            unknown_models: true,
+            api_duration_ms: 5_000,
+            wall_duration_ms: 125_000,
+            code_lines_added: 10,
+            code_lines_removed: 1,
+            by_model: &rows,
+        });
         match h.handle(&args()).await {
-            CommandResult::Done { display: Some(s) } => {
-                assert_eq!(
-                    s,
-                    "Usage\nTotal cost: $0.1234\nInput tokens: 5000\nOutput tokens: 2000\nAPI calls: 7\nSession duration: 125s\nPer-model cost breakdown is not available yet (M8).\nEsc to close"
-                );
-            }
+            CommandResult::Done { display: Some(s) } => assert_eq!(s, expected),
             other => panic!("expected display, got {other:?}"),
         }
     }

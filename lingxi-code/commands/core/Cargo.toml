@@ -20,6 +20,11 @@ skill-api = { path = "../../skill-api" }
 cron = { path = "../../cron" }
 traits = { path = "../../traits" }
 telemetry = { path = "../../telemetry" }
+# `/usage` renders the byte-exact claude-code `i6e()` cost-summary block via
+# cost::render::cost_summary; this is non-test code, so `cost` must be a
+# regular dependency (it was previously only a dev-dependency below, which
+# is unusable from the crate's own lib code).
+cost = { path = "../../cost" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
@@ -42,7 +47,6 @@ tokio = { workspace = true, features = ["sync"] }
 # /init template test checks the OLD_INIT_PROMPT sha256 via sha2.
 orchestrator = { path = "../../orchestrator" }
 tool-api = { path = "../../tool-api" }
-cost = { path = "../../cost" }
 llm-client = { path = "../../llm-client" }
 compaction = { path = "../../compaction" }
 sha2 = "0.10"

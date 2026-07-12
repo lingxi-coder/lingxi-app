@@ -40,6 +40,12 @@ pub struct CostState {
     pub unpriced_models: HashSet<ModelRef>,
     /// Cumulative server-side web search request count.
     pub total_web_search_requests: u32,
+    /// Cumulative lines added across all edits this session (claude-code
+    /// `Pt.totalLinesAdded`).
+    pub total_lines_added: u64,
+    /// Cumulative lines removed across all edits this session (claude-code
+    /// `Pt.totalLinesRemoved`).
+    pub total_lines_removed: u64,
 }
 
 /// Per-model usage and cost slice of a [`CostState`].
@@ -247,6 +253,14 @@ impl CostTracker {
     /// charge, and the on-resume value is already the persisted truth.
     pub async fn restore_total_nano_usd(&self, nano_usd: u64) {
         self.state.write().await.total_nano_usd = nano_usd;
+    }
+
+    /// Accumulate one edit's line changes (claude-code `Bhn(added, removed)`:
+    /// `Pt.totalLinesAdded += added; Pt.totalLinesRemoved += removed`).
+    pub async fn record_code_change(&self, added: u64, removed: u64) {
+        let mut state = self.state.write().await;
+        state.total_lines_added = state.total_lines_added.saturating_add(added);
+        state.total_lines_removed = state.total_lines_removed.saturating_add(removed);
     }
 
     /// Snapshot the current state. Cloned, safe to inspect off-thread.
@@ -503,5 +517,20 @@ mod tests {
         let entry = snap.per_model_usage.get(&mr).unwrap();
         assert_eq!(entry.cache_read_input_tokens, 0);
         assert_eq!(entry.cache_creation_input_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn record_code_change_accumulates() {
+        let (tx, _rx) = mpsc::channel(8);
+        let tracker = CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        tracker.record_code_change(3, 1).await;
+        tracker.record_code_change(0, 2).await;
+        let snap = tracker.snapshot().await;
+        assert_eq!(snap.total_lines_added, 3);
+        assert_eq!(snap.total_lines_removed, 3);
     }
 }

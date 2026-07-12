@@ -13,6 +13,7 @@ pub mod calculator;
 pub mod events;
 pub mod handle;
 pub mod pricing;
+pub mod render;
 pub mod summary;
 pub mod token_usage_replay;
 pub mod tracker;

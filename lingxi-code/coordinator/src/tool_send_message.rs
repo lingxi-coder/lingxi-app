@@ -825,6 +825,7 @@ mod tests {
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,
+            file_history: None,
         }
     }
 

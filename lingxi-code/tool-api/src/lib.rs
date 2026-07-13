@@ -37,7 +37,7 @@ pub mod test_support;
 pub use anthropic_request::AnthropicRequestBuilder;
 pub use builtin_context::{
     AndroidGitSecret, AndroidGitToolCtx, AndroidShellToolCtx, BuiltinToolContext,
-    GitCredentialProvider, TaskLifecycleHookFirer,
+    GitCredentialProvider, LiveCwdCell, TaskLifecycleHookFirer,
 };
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};

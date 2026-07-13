@@ -490,6 +490,100 @@ async fn no_firer_registered_is_a_silent_noop() {
     );
 }
 
+// ===== P2-08 — Bash is the single writer of the shared live-cwd cell ==========
+//
+// claude-code keeps ONE session-global live cwd (`Pt.cwd`, read via `getCwd()`).
+// The desktop wiring adopts a shared `Arc<Mutex<PathBuf>>` as the `BashTool`'s
+// persistent shell cwd, so a foreground `cd` writes the SAME cell the
+// file/search/LSP tools and the orchestrator read. A subagent (`preventCwdChanges
+// = !isMainThread`) must never mutate it.
+
+/// `tool_with`, but adopting a shared live-cwd cell (the P2-08 desktop wiring).
+/// The caller keeps its own clone of `cell` to observe the writes — the mock
+/// "consumer" that stands in for Read/Glob/Grep/LSP + the orchestrator.
+fn tool_with_live_cwd(
+    workspace: &std::path::Path,
+    runner: Arc<RecordingRunner>,
+    cell: Arc<Mutex<PathBuf>>,
+) -> BashTool {
+    let mut ctx = shell_test_ctx(ProcessOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 0,
+        timed_out: false,
+    });
+    ctx.workspace = workspace.to_path_buf();
+    ctx.process = runner;
+    BashTool::new(ctx).with_live_cwd(cell)
+}
+
+#[tokio::test]
+async fn foreground_cd_advances_the_shared_live_cwd_cell() {
+    // Depends on TFo (the maintain-cwd env) being UNSET — take the shared lock.
+    let _g = maintain_lock();
+    // A foreground `cd` to an in-workspace subdir writes the post-`cd` directory
+    // into the injected shared cell, so a consumer holding a clone of the Arc
+    // observes it (single writer, 1:1 with CC's getCwd()/setCwdState).
+    let workspace = TempDir::new().unwrap();
+    let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
+    let sub_canon = workspace_canon.join("sub");
+    std::fs::create_dir(&sub_canon).unwrap();
+
+    let cell = Arc::new(Mutex::new(workspace_canon.clone()));
+    let runner = RecordingRunner::new(vec![Some(sub_canon.clone())], false);
+    let tool = tool_with_live_cwd(&workspace_canon, runner, cell.clone());
+
+    // Before the cd the consumer sees the workspace.
+    assert_eq!(*cell.lock().unwrap(), workspace_canon);
+
+    tool.call(
+        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        fresh_ctx(),
+        fresh_tx(),
+    )
+    .await
+    .expect("cd call ok");
+
+    // The shared cell now holds the canonical post-`cd` directory — the same live
+    // cwd the file/search/LSP tools read.
+    assert_eq!(
+        *cell.lock().unwrap(),
+        sub_canon,
+        "a foreground cd must advance the shared live-cwd cell",
+    );
+}
+
+#[tokio::test]
+async fn subagent_cd_does_not_advance_the_shared_live_cwd_cell() {
+    // A subagent (agent_id set) runs each command per-call and must NEVER move
+    // the shared session cwd (CC `preventCwdChanges = !isMainThread`), so the
+    // injected shared cell is left untouched.
+    let workspace = TempDir::new().unwrap();
+    let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
+    let sub_canon = workspace_canon.join("sub");
+    std::fs::create_dir(&sub_canon).unwrap();
+
+    let cell = Arc::new(Mutex::new(workspace_canon.clone()));
+    let runner = RecordingRunner::new(vec![Some(sub_canon.clone())], false);
+    let tool = tool_with_live_cwd(&workspace_canon, runner, cell.clone());
+
+    let mut sub_ctx = fresh_ctx();
+    sub_ctx.agent_id = Some(protocol::AgentId::new());
+    tool.call(
+        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        sub_ctx,
+        fresh_tx(),
+    )
+    .await
+    .expect("subagent call ok");
+
+    assert_eq!(
+        *cell.lock().unwrap(),
+        workspace_canon,
+        "a subagent cd must not mutate the shared live-cwd cell",
+    );
+}
+
 // ===== Finding #8 — `J2n` cwd-reset when the shell leaves the allowed dirs ====
 //
 // claude-code `J2n`: after a command, if the shell cwd moved away from the

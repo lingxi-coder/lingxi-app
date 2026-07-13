@@ -953,8 +953,9 @@ pub fn desktop_tool_registry(
     // Offline / snapshot path: no command registry to back the Skill tool, so it
     // gets the hermetic `EmptySkillLoader` (tool name unchanged → snapshot-safe).
     // No `CwdChanged` firer here either (offline factory has no hook executor) —
-    // the BashTool is the byte-identical no-firer variant.
-    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None, None);
+    // the BashTool is the byte-identical no-firer variant. No shared live-cwd
+    // cell either: every tool falls back to `ctx.workspace` / the process cwd.
+    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None, None, None);
     reg
 }
 
@@ -1210,9 +1211,15 @@ pub fn register_desktop_tools(
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
+    live_cwd: Option<tool_api::LiveCwdCell>,
 ) -> tool_cron::WakeupSchedulerCell {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
-    tool_file::register_all(reg, ctx.clone());
+    // (P2-08) The shared live-cwd cell (`getCwd()`/`Ct()`): the desktop `BashTool`
+    // writes it on a `cd`, and Read/Glob/Grep + the LSP tool read it as their live
+    // cwd (default search dir, "does not exist" cwd notes, relative path root),
+    // 1:1 with claude-code's single session-global cwd. `None` (offline factory)
+    // falls every tool back to `ctx.workspace` / the process cwd — byte-identical.
+    tool_file::register_all_with_live_cwd(reg, ctx.clone(), live_cwd.clone());
     // BASH.4 `onCwdChangedForHooks` (Shell.ts:409): when a firer is supplied (real
     // desktop sessions wire one over the shared `Arc<HookExecutorImpl>`), a `cd`
     // inside a Bash call fires the `CwdChanged` hook. `None` (the offline
@@ -1220,7 +1227,7 @@ pub fn register_desktop_tools(
     // registered tool NAMES are unchanged either way, so the locked tool-list
     // snapshot is unaffected. `engine-mobile` never reaches this call (it does
     // not register the shell tools).
-    tool_shell::register_all_with_cwd_firer(reg, ctx.clone(), cwd_changed_firer);
+    tool_shell::register_all_with_cwd_firer(reg, ctx.clone(), cwd_changed_firer, live_cwd.clone());
     tool_web::register_all(reg, ctx.clone(), web_side_query);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
@@ -1283,7 +1290,7 @@ pub fn register_desktop_tools(
     }
     tool_worktree::register_all(reg, ctx.clone());
     tool_mcp::register_all(reg, ctx.clone());
-    tool_lsp::register_all(reg, ctx);
+    tool_lsp::register_all_with_live_cwd(reg, ctx, live_cwd);
     wakeup_cell
 }
 
@@ -5364,6 +5371,10 @@ pub async fn build(
         Some(skill_loader),
         cwd_changed_firer,
         Some(side_query_client.clone()),
+        // (P2-08) The SAME shared live-cwd cell the `CwdChanged` firer and the
+        // orchestrator (`.with_current_cwd`) hold, so the desktop `BashTool` is
+        // the single writer of the live cwd Read/Glob/Grep + LSP read.
+        Some(current_cwd_cell.clone()),
     );
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`

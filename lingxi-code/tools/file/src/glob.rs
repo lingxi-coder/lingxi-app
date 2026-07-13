@@ -119,13 +119,39 @@ fn extract_glob_base_directory(pattern: &str) -> (String, String) {
 /// `GlobTool` — pattern walker.
 pub struct GlobTool {
     ctx: BuiltinToolContext,
+    /// Optional shared live-cwd cell (claude-code `getCwd()`/`Ct()`). When
+    /// injected (desktop), the no-`path` default dir, the "Directory does not
+    /// exist" cwd note, and result relativization follow the post-`cd`
+    /// directory; when absent (mobile/tests) they fall back to `ctx.workspace`.
+    live_cwd: Option<tool_api::LiveCwdCell>,
 }
 
 impl GlobTool {
     /// Construct a new tool.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            live_cwd: None,
+        }
+    }
+
+    /// Inject the shared live-cwd cell (builder; default is `None`). The desktop
+    /// composition root passes the SAME cell the `BashTool` writes on a `cd`, so
+    /// Glob's live cwd tracks the shell — 1:1 with claude-code's `Ct()`.
+    #[must_use]
+    pub fn with_live_cwd(mut self, cell: tool_api::LiveCwdCell) -> Self {
+        self.live_cwd = Some(cell);
+        self
+    }
+
+    /// The effective live cwd: the injected cell's value if present, else the
+    /// static `ctx.workspace` (claude-code `Ct()` fallback for the no-cell case).
+    fn cwd_now(&self) -> std::path::PathBuf {
+        self.live_cwd
+            .as_ref()
+            .map(|c| c.lock().unwrap().clone())
+            .unwrap_or_else(|| self.ctx.workspace.clone())
     }
 }
 
@@ -177,7 +203,7 @@ impl Tool for GlobTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_search_directory(path, &self.ctx.workspace)?;
+            crate::dir_validate::validate_search_directory(path, &self.cwd_now())?;
         }
         Ok(())
     }
@@ -220,14 +246,16 @@ impl Tool for GlobTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;
 
+        // claude-code Glob `getPath({path:e}){return e?$i(e):Ct()}`: a supplied
+        // `path` is used as-is, otherwise the LIVE cwd (`Ct()`). The no-cell
+        // fallback (`cwd_now()`==`ctx.workspace`) equals the former
+        // `trusted_dirs.first()` boot cwd, so behavior is byte-identical until a
+        // Bash `cd` moves the shared cell.
         let base = input
             .get("path")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .or_else(|| self.ctx.trusted_dirs.first().cloned())
-            .ok_or_else(|| {
-                ToolError::InvalidInput("no path supplied and no trusted_dirs configured".into())
-            })?;
+            .unwrap_or_else(|| self.cwd_now());
 
         let started = Instant::now();
 
@@ -353,12 +381,14 @@ impl Tool for GlobTool {
             hits.truncate(MAX_GLOB_MATCHES);
         }
 
-        // Relativize each hit against the canonicalized workspace (TS
-        // `files.map(toRelativePath)`, `GlobTool.ts:166`). The walk yields
-        // canonicalized paths, so the cwd must be canonicalized too for
-        // `strip_prefix` to match — same rule GrepTool uses.
-        let cwd_for_rel = std::fs::canonicalize(&self.ctx.workspace)
-            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        // Relativize each hit against the canonicalized LIVE cwd (TS
+        // `files.map(toRelativePath)`, `GlobTool.ts:166`, where `toRelativePath`
+        // is relative to `Ct()`). The walk yields canonicalized paths, so the cwd
+        // must be canonicalized too for `strip_prefix` to match — same rule
+        // GrepTool uses.
+        let live_cwd = self.cwd_now();
+        let cwd_for_rel =
+            std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
         let matches: Vec<String> = hits
             .iter()
             .map(|(p, _)| to_relative_path(p, &cwd_for_rel))
@@ -996,5 +1026,84 @@ mod tests {
             })
             .await;
         assert_eq!(p, d);
+    }
+
+    // ── P2-08: live-cwd cell drives the no-path default dir + relativization ───
+
+    #[tokio::test]
+    async fn live_cwd_cell_drives_default_dir_and_relativization() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("root_only.rs"), "x").unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("in_sub.rs"), "x").unwrap();
+
+        // No cell → default dir is the workspace (tmp); a bare `*.rs` matches at
+        // any depth, so BOTH files are found — byte-identical to the pre-cell
+        // behavior.
+        {
+            let (ctx, _sink) = make_ctx(&tmp);
+            let tool = GlobTool::new(ctx);
+            let names: Vec<String> = tool
+                .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap()
+                .data["filenames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert!(names.iter().any(|m| m.ends_with("root_only.rs")), "{names:?}");
+            assert!(names.iter().any(|m| m.ends_with("in_sub.rs")), "{names:?}");
+        }
+
+        // Cell = tmp/sub (a post-`cd`): the default dir follows the cell, so only
+        // the file under sub is found, relativized against sub.
+        {
+            let (ctx, _sink) = make_ctx(&tmp);
+            let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
+            let tool = GlobTool::new(ctx).with_live_cwd(cell);
+            let names: Vec<String> = tool
+                .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap()
+                .data["filenames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().replace('\\', "/"))
+                .collect();
+            assert_eq!(
+                names,
+                vec!["in_sub.rs".to_string()],
+                "cell must drive both the default dir and relativization: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_cwd_cell_drives_directory_not_found_note() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
+        let tool = GlobTool::new(ctx).with_live_cwd(cell);
+        let err = tool
+            .validate_input(&json!({ "path": "no_such_dir" }), &fresh_ctx())
+            .await
+            .unwrap_err();
+        // The "does not exist" note prints the LIVE cwd (canonicalized sub), NOT
+        // the workspace (tmp).
+        let canon_sub = std::fs::canonicalize(&sub).unwrap();
+        assert_eq!(
+            err.0,
+            format!(
+                "Directory does not exist: no_such_dir. Note: your current working directory is {}.",
+                canon_sub.display()
+            )
+        );
     }
 }

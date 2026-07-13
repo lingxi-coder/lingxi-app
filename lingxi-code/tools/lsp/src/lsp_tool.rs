@@ -186,9 +186,16 @@ fn file_too_large_message(size: u64) -> String {
 /// Core of `validateInput` (`LSPTool.ts:166-208`), split out for direct
 /// testing: confirm the (expanded) path exists and is a regular file, with
 /// byte-exact TS messages. Returns `Ok(())` for UNC paths (skipped for the
-/// NTLM-leak security reason in the TS source).
+/// NTLM-leak security reason in the TS source). Relative paths resolve against
+/// the process cwd; the tool uses [`validate_file_path_in`] with the live cwd.
 fn validate_file_path(file_path: &str) -> Result<(), ValidationError> {
-    let absolute_path = expand_path(file_path);
+    validate_file_path_in(file_path, &current_cwd())
+}
+
+/// [`validate_file_path`] resolving a relative `file_path` against an explicit
+/// `cwd` — the live `getCwd()` the LSP tool passes so a Bash `cd` is honored.
+fn validate_file_path_in(file_path: &str, cwd: &Path) -> Result<(), ValidationError> {
+    let absolute_path = expand_path_in(file_path, cwd);
     let display = absolute_path.to_string_lossy();
     if display.starts_with("\\\\") || display.starts_with("//") {
         return Ok(());
@@ -216,9 +223,16 @@ fn validate_file_path(file_path: &str) -> Result<(), ValidationError> {
 /// empty-path handling of the TS implementation; the Windows POSIX-path
 /// conversion branch is not relevant on the target platform.
 fn expand_path(path: &str) -> PathBuf {
+    expand_path_in(path, &current_cwd())
+}
+
+/// [`expand_path`] resolving relative/empty paths against an explicit `cwd`
+/// (the live `getCwd()` the LSP tool passes) instead of the process cwd, so a
+/// Bash `cd` is honored — 1:1 with claude-code's live `Ct()`.
+fn expand_path_in(path: &str, cwd: &Path) -> PathBuf {
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        return current_cwd();
+        return cwd.to_path_buf();
     }
     if trimmed == "~" {
         return home_dir();
@@ -230,7 +244,7 @@ fn expand_path(path: &str) -> PathBuf {
     if candidate.is_absolute() {
         return candidate.to_path_buf();
     }
-    current_cwd().join(candidate)
+    cwd.join(candidate)
 }
 
 // -- gitignore filtering (`LSPTool.ts:336-374`, `filterGitIgnoredLocations`) --
@@ -1061,14 +1075,41 @@ fn format_result(operation: &str, result: &Value, cwd: &Path) -> (String, u64, u
 /// Builtin tool — dispatches 4 LSP operations.
 pub struct LSPTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
+    /// Optional shared live-cwd cell (claude-code `getCwd()`/`Ct()`). When
+    /// injected (desktop), relative `filePath` expansion and the gitignore-filter
+    /// root follow the post-`cd` directory; when absent (mobile/tests) they fall
+    /// back to the process cwd ([`current_cwd`]) — the prior behavior.
+    live_cwd: Option<tool_api::LiveCwdCell>,
 }
 
 impl LSPTool {
     /// Construct a new [`LSPTool`] over the supplied context.
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            live_cwd: None,
+        }
     }
+
+    /// Inject the shared live-cwd cell (builder; default is `None`). The desktop
+    /// composition root passes the SAME cell the `BashTool` writes on a `cd`.
+    #[must_use]
+    pub fn with_live_cwd(mut self, cell: tool_api::LiveCwdCell) -> Self {
+        self.live_cwd = Some(cell);
+        self
+    }
+
+    /// The effective live cwd: the injected cell's value if present, else the
+    /// process cwd ([`current_cwd`], i.e. `env::current_dir()`) — the claude-code
+    /// `Ct()` fallback for the no-cell case.
+    fn cwd_now(&self) -> PathBuf {
+        self.live_cwd
+            .as_ref()
+            .map(|c| c.lock().unwrap().clone())
+            .unwrap_or_else(current_cwd)
+    }
+
     fn lsp_registry(&self) -> Option<&Arc<LspRegistry>> {
         self.ctx.lsp_registry.as_ref()
     }
@@ -1130,9 +1171,10 @@ impl Tool for LSPTool {
     }
 
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
-        // `LSPTool.ts:152-154` `getPath({ filePath }) => expandPath(filePath)`.
+        // `LSPTool.ts:152-154` `getPath({ filePath }) => expandPath(filePath)`,
+        // where `expandPath` resolves relatives against the live `getCwd()`.
         let file_path = input.get("file_path").and_then(Value::as_str)?;
-        Some(expand_path(file_path))
+        Some(expand_path_in(file_path, &self.cwd_now()))
     }
 
     /// Port of `LSPTool.ts:155-209` `validateInput`: confirm the (expanded)
@@ -1146,7 +1188,7 @@ impl Tool for LSPTool {
             .get("file_path")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        validate_file_path(file_path)
+        validate_file_path_in(file_path, &self.cwd_now())
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
@@ -1270,11 +1312,12 @@ impl Tool for LSPTool {
 
         let tracker = OpenFileTracker::new();
         // `LSPTool.ts:225` `expandPath(input.filePath)` — tilde / relative path
-        // resolution before the file is opened.
-        let expanded = expand_path(&file_path);
+        // resolution (against the live `getCwd()`) before the file is opened.
+        let live_cwd = self.cwd_now();
+        let expanded = expand_path_in(&file_path, &live_cwd);
         let path = expanded.as_path();
-        // `getCwd()` for the gitignore filter (`LSPTool.ts:226`).
-        let cwd = current_cwd();
+        // `getCwd()` for the gitignore filter (`LSPTool.ts:226`) — live cwd.
+        let cwd = live_cwd;
 
         // `LSPTool.ts:427-` `getMethodAndParams` — per-operation dispatch. Position-
         // based ops use `line`/`character`; `documentSymbol` is file-level;
@@ -1935,6 +1978,44 @@ mod tests {
         assert_eq!(
             s,
             "LSPTool: unknown operation \"completion\"; allowed: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls"
+        );
+    }
+
+    // ── P2-08: relative-path expansion follows the live cwd ──────────────────
+
+    #[test]
+    fn expand_path_in_resolves_relative_against_the_given_cwd() {
+        // A relative path resolves against the supplied cwd (the live getCwd()),
+        // not the process cwd.
+        assert_eq!(
+            expand_path_in("rel/f.rs", Path::new("/live/cwd")),
+            PathBuf::from("/live/cwd/rel/f.rs")
+        );
+        // The empty path yields the cwd itself.
+        assert_eq!(expand_path_in("", Path::new("/live/cwd")), PathBuf::from("/live/cwd"));
+        // Absolute + `~` forms ignore the cwd (unchanged by the parametrization).
+        assert_eq!(
+            expand_path_in("/abs/x.rs", Path::new("/live/cwd")),
+            PathBuf::from("/abs/x.rs")
+        );
+        assert_eq!(expand_path_in("~", Path::new("/live/cwd")), home_dir());
+    }
+
+    #[test]
+    fn injected_live_cwd_cell_drives_get_path() {
+        // A tool built `with_live_cwd(cell)` expands a relative `filePath` against
+        // the cell — so a Bash `cd` moves the LSP tool's relative-path root, 1:1
+        // with claude-code's live `Ct()`.
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            std::sync::Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/workspace")],
+        );
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(PathBuf::from("/live/cwd")));
+        let tool = LSPTool::new(ctx).with_live_cwd(cell);
+        assert_eq!(
+            tool.get_path(&serde_json::json!({ "file_path": "rel/x.rs" })),
+            Some(PathBuf::from("/live/cwd/rel/x.rs"))
         );
     }
 }

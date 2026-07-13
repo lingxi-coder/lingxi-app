@@ -401,13 +401,38 @@ impl Sink for GrepSink {
 /// `GrepTool` — content search.
 pub struct GrepTool {
     ctx: BuiltinToolContext,
+    /// Optional shared live-cwd cell (claude-code `getCwd()`/`Ct()`). When
+    /// injected (desktop), the no-`path` default dir, the "Path does not exist"
+    /// cwd note, and result relativization follow the post-`cd` directory; when
+    /// absent (mobile/tests) they fall back to `ctx.workspace`.
+    live_cwd: Option<tool_api::LiveCwdCell>,
 }
 
 impl GrepTool {
     /// Construct a new tool.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            live_cwd: None,
+        }
+    }
+
+    /// Inject the shared live-cwd cell (builder; default is `None`). The desktop
+    /// composition root passes the SAME cell the `BashTool` writes on a `cd`.
+    #[must_use]
+    pub fn with_live_cwd(mut self, cell: tool_api::LiveCwdCell) -> Self {
+        self.live_cwd = Some(cell);
+        self
+    }
+
+    /// The effective live cwd: the injected cell's value if present, else the
+    /// static `ctx.workspace` (claude-code `Ct()` fallback for the no-cell case).
+    fn cwd_now(&self) -> std::path::PathBuf {
+        self.live_cwd
+            .as_ref()
+            .map(|c| c.lock().unwrap().clone())
+            .unwrap_or_else(|| self.ctx.workspace.clone())
     }
 }
 
@@ -477,7 +502,7 @@ impl Tool for GrepTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_search_directory(path, &self.ctx.workspace)?;
+            crate::dir_validate::validate_search_directory(path, &self.cwd_now())?;
         }
         Ok(())
     }
@@ -521,14 +546,15 @@ impl Tool for GrepTool {
             .get("pattern")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("pattern is required".into()))?;
+        // claude-code Grep `getPath`: a supplied `path` is used as-is, otherwise
+        // the LIVE cwd (`Ct()`). The no-cell fallback (`cwd_now()`==
+        // `ctx.workspace`) equals the former `trusted_dirs.first()` boot cwd, so
+        // behavior is byte-identical until a Bash `cd` moves the shared cell.
         let base = input
             .get("path")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .or_else(|| self.ctx.trusted_dirs.first().cloned())
-            .ok_or_else(|| {
-                ToolError::InvalidInput("no path and no trusted_dirs configured".into())
-            })?;
+            .unwrap_or_else(|| self.cwd_now());
         let glob_filter = input.get("glob").and_then(Value::as_str);
         let type_filter = input.get("type").and_then(Value::as_str);
         let output_mode = input
@@ -567,11 +593,12 @@ impl Tool for GrepTool {
             }
         };
 
-        // Relativize against the (canonicalized) workspace — mirrors TS
+        // Relativize against the (canonicalized) LIVE cwd — mirrors TS
         // `toRelativePath(_, getCwd())`. The walk yields canonicalized paths, so
         // the cwd must be canonicalized too for `strip_prefix` to match.
-        let cwd_for_rel = std::fs::canonicalize(&self.ctx.workspace)
-            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        let live_cwd = self.cwd_now();
+        let cwd_for_rel =
+            std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
 
         // --- Build regex matcher (multiline → -U --multiline-dotall) ---
         let matcher = match RegexMatcherBuilder::new()
@@ -1610,6 +1637,61 @@ mod tests {
         assert_eq!(
             tool.search_hint(),
             Some("search file contents with regex (ripgrep)")
+        );
+    }
+
+    // ── P2-08: live-cwd cell drives the no-path default dir + "does not exist" ──
+
+    #[tokio::test]
+    async fn live_cwd_cell_drives_default_search_dir() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("root_only.rs"), "needle here").unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("in_sub.rs"), "needle here").unwrap();
+
+        // Cell = tmp/sub (a post-`cd`): a no-path search defaults to the cell, so
+        // only the match under sub is returned (relativized against sub).
+        let (ctx, _sink) = make_ctx(&tmp);
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
+        let tool = GrepTool::new(ctx).with_live_cwd(cell);
+        let names: Vec<String> = tool
+            .call(json!({ "pattern": "needle" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap()
+            .data["filenames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["in_sub.rs".to_string()],
+            "cell must drive the default search dir + relativization: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_cwd_cell_drives_path_not_found_note() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
+        let tool = GrepTool::new(ctx).with_live_cwd(cell);
+        let err = tool
+            .validate_input(&json!({ "path": "no_such_dir" }), &fresh_ctx())
+            .await
+            .unwrap_err();
+        // The note prints the LIVE cwd (canonicalized sub), NOT the workspace.
+        let canon_sub = std::fs::canonicalize(&sub).unwrap();
+        assert_eq!(
+            err.0,
+            format!(
+                "Directory does not exist: no_such_dir. Note: your current working directory is {}.",
+                canon_sub.display()
+            )
         );
     }
 }

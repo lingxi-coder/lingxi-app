@@ -755,6 +755,68 @@ impl Tool for EnterWorktreeTool {
     }
 }
 
+/// Audit reason stamped on the `tmux kill-session` command issued by
+/// [`kill_worktree_tmux_session`] when `ExitWorktree` removes a worktree that
+/// has an attached tmux session (`session.tmux_session_name`). Mirrors
+/// `platforms/posix/src/worktree_tmux.rs`'s `WORKTREE_TMUX_AUDIT_REASON` for
+/// the create side; kept LOCAL to this crate (rather than reusing that
+/// module) to avoid a `tool-worktree -> platform-posix -> lingxi-lsp ->
+/// tool-worktree` dependency cycle — see this file's top-of-module doc on
+/// why the slug helpers are reimplemented locally for the same reason.
+/// `ExitWorktreeTool` only needs the `ProcessRunner`/`Sandbox` seams already
+/// on `BuiltinToolContext` (`ctx.process`/`ctx.sandbox`), so a tiny local
+/// argv-builder + runner is the least-coupling option (worktree tmux launch
+/// plan, Task 5 — the alternative of adding a `kill_tmux_session` method to
+/// the `WorktreeManager` trait was rejected: that trait models GIT worktree
+/// lifecycle, not tmux, and every existing method maps 1:1 to a git
+/// operation).
+const WORKTREE_TMUX_KILL_AUDIT_REASON: &str = "worktree_tmux_kill_session";
+
+/// Build the argv (excluding the `tmux` program name) for killing a detached
+/// worktree tmux session: `kill-session -t <session_name>`. Byte-faithful to
+/// claude-code 2.1.206's `rPe(name) = { let{code}=await
+/// Ur("tmux",["kill-session","-t",name]); return code===0 }` (binary
+/// @216347635).
+#[must_use]
+fn build_worktree_tmux_kill_argv(session_name: &str) -> Vec<String> {
+    vec![
+        "kill-session".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+    ]
+}
+
+/// Run `tmux kill-session -t <session_name>` through the
+/// [`traits::ProcessRunner`]/[`traits::Sandbox`] seam (mirrors
+/// `platforms/posix::worktree_tmux::create_worktree_tmux_session`'s pattern
+/// for the kill side — see that module for why `bypass_with_audit` is used
+/// instead of the internal `SandboxedCommand::__new_sandboxed` constructor).
+/// A non-zero exit maps to `Err(stderr)`; a zero exit maps to `Ok(())`
+/// (mirrors 206's `rPe` returning `code===0`). The caller (`ExitWorktreeTool::call`)
+/// treats a failure here as NON-FATAL — 206's `HCd.call` (`if(s)await
+/// rPe(s)`) never inspects `rPe`'s return value before proceeding to remove
+/// the worktree, so a tmux hiccup must never block removal.
+async fn kill_worktree_tmux_session(
+    process: &dyn traits::ProcessRunner,
+    sandbox: &dyn traits::Sandbox,
+    session_name: &str,
+) -> Result<(), String> {
+    let pcmd = traits::ProcessCommand {
+        command: "tmux".to_string(),
+        args: build_worktree_tmux_kill_argv(session_name),
+        cwd: None,
+        env: HashMap::new(),
+        timeout: None,
+        stdin: None,
+    };
+    let sandboxed = sandbox.bypass_with_audit(pcmd, WORKTREE_TMUX_KILL_AUDIT_REASON);
+    let output = process.run(&sandboxed).await.map_err(|e| e.to_string())?;
+    if output.exit_code != 0 {
+        return Err(output.stderr);
+    }
+    Ok(())
+}
+
 /// `ExitWorktreeTool` — restores the original session cwd (and, optionally,
 /// removes the worktree/branch) for a worktree entered via
 /// `EnterWorktreeTool` (worktree 206 parity plan, Task 8).
@@ -764,13 +826,25 @@ impl Tool for EnterWorktreeTool {
 /// above): no active session ⇒ a byte-exact no-op — the 206 "Scope" contract
 /// (never touches a worktree created manually or in a previous session).
 ///
-/// TMUX RESIDUAL: the 206 oracle kills an attached tmux session on `remove`
-/// and leaves it running (surfacing its name) on `keep`. The port has no
-/// worktree-attached tmux wiring — `EnterWorktreeTool` always records
-/// `tmux_session_name: None` — so the `Some(..)` branch in [`Self::call`] is
-/// structurally present and correctly gated, but presently unreachable in
-/// production. Do NOT invent a tmux session name; wire this once a real
-/// worktree↔tmux association exists.
+/// TMUX (worktree tmux launch plan, Task 5): when `session.tmux_session_name`
+/// is `Some(name)` — populated once boot's `--tmux` consumption (Task 4)
+/// exists; today `EnterWorktreeTool` always records `None`, so this branch
+/// is currently unreachable in production but is fully wired and tested —
+/// [`Self::call`] kills the session on `remove` (via
+/// [`kill_worktree_tmux_session`], non-fatally: a kill failure only logs a
+/// `tracing::warn!` and does not block removal) and, on `keep`, leaves it
+/// running and surfaces `name` in the result `data.tmux_session_name` plus an
+/// additive reattach line in the model-facing message. The reattach wording
+/// is byte-recovered from the 2.1.206 binary's `ExitWorktree` tool
+/// (`HCd.call`'s keep branch): `` ` Tmux session ${s} is still running;
+/// reattach with: tmux attach -t ${s}` `` (binary strings @368812-@368822,
+/// near `nDo`/`ELt`'s companion interactive exit-dialog which uses a
+/// differently-worded variant for the CLI's OWN session-exit UI — that
+/// dialog is a separate, non-tool code path and out of scope here). 206
+/// never includes `tmuxSessionName` in `data` on the `remove` path either
+/// (the session is already dead by the time the tool result is built), which
+/// this port matches by leaving `tmux_session_name` absent from `data` on
+/// `remove` rather than surfacing it there.
 ///
 /// ERRORCODE 4/5 OMITTED: the 206 oracle also refuses removal when the
 /// CALLING session isn't the worktree's owner (a pinned/subagent worktree
@@ -1091,24 +1165,36 @@ impl Tool for ExitWorktreeTool {
             vec![session.original_cwd.clone()],
         );
 
-        // 4. Remove (if requested) or leave the worktree on disk (`keep`).
+        // 4. Tmux: kill on `remove`, BEFORE the git-level worktree removal —
+        // mirrors 206's `HCd.call` ordering (`if(s)await rPe(s)` precedes its
+        // `het()` removal call). `keep` never kills (left running; surfaced
+        // in the message/data below). INERT when `tmux_session_name` is
+        // `None` (today's only reachable case in production — see this
+        // type's doc). A kill failure is NON-FATAL: 206 ignores `rPe`'s
+        // return value and proceeds to remove regardless, so this only logs
+        // a warning and continues.
+        if is_remove {
+            if let Some(tmux_name) = session.tmux_session_name.as_deref() {
+                if let Err(err) =
+                    kill_worktree_tmux_session(&*self.ctx.process, &*self.ctx.sandbox, tmux_name)
+                        .await
+                {
+                    tracing::warn!(
+                        session_name = tmux_name,
+                        error = %err,
+                        "ExitWorktree: failed to kill worktree tmux session; continuing removal"
+                    );
+                }
+            }
+        }
+
+        // 5. Remove (if requested) or leave the worktree on disk (`keep`).
         if is_remove {
             if let Err(err) = self.ctx.worktree.remove_worktree(&handle).await {
                 return self
                     .map_error(&invocation_id, started_at.elapsed().as_millis() as u64, err)
                     .await;
             }
-        }
-
-        // 5. Tmux: kill on `remove`, leave running on `keep` (206 behavior).
-        // ALWAYS `None` in the port today (see this type's doc — no
-        // worktree-attached tmux wiring exists); this branch is structurally
-        // present and correctly gated, but unreachable in production.
-        // Deliberately does NOT invent a session name.
-        if let Some(_tmux_name) = session.tmux_session_name.as_deref() {
-            // A real implementation would kill (`remove`) or leave running
-            // (`keep`) the named tmux session here once a worktree↔tmux
-            // association is wired (see module doc's TMUX RESIDUAL note).
         }
 
         // 6. Clear the session record — a further `ExitWorktree` call (with
@@ -1142,15 +1228,39 @@ impl Tool for ExitWorktreeTool {
                 String::new()
             };
         let original_cwd_display = session.original_cwd.to_string_lossy().into_owned();
-        let message = format!("{verb}{branch_suffix_str}\nReturned to {original_cwd_display}");
+        let mut message = format!("{verb}{branch_suffix_str}\nReturned to {original_cwd_display}");
+
+        // Tmux reattach surfacing — ADDITIVE only, on `keep` with a session
+        // name (never on `remove`: it was just killed above, and 206 itself
+        // never puts `tmuxSessionName` in `data` on that path either). The
+        // appended line is byte-recovered from 206's `HCd.call` keep branch
+        // (binary @368812): `` ` Tmux session ${s} is still running;
+        // reattach with: tmux attach -t ${s}` ``, reflowed onto its own line
+        // to fit this port's existing multi-line message shape (which
+        // predates this task and is intentionally left otherwise intact).
+        let tmux_session_name_for_data: Option<String> = if is_remove {
+            None
+        } else {
+            session.tmux_session_name.clone()
+        };
+        if let Some(name) = tmux_session_name_for_data.as_deref() {
+            message.push_str(&format!(
+                "\nTmux session {name} is still running; reattach with: tmux attach -t {name}"
+            ));
+        }
+
+        let mut data = json!({
+            "action": if is_remove { "remove" } else { "keep" },
+            "branch_name": session.branch_name,
+            "worktree_path": session.worktree_path.to_string_lossy(),
+            "original_cwd": original_cwd_display,
+        });
+        if let Some(name) = tmux_session_name_for_data {
+            data["tmux_session_name"] = json!(name);
+        }
 
         Ok(ToolCallResult {
-            data: json!({
-                "action": if is_remove { "remove" } else { "keep" },
-                "branch_name": session.branch_name,
-                "worktree_path": session.worktree_path.to_string_lossy(),
-                "original_cwd": original_cwd_display,
-            }),
+            data,
             model_content: Some(message),
             new_messages: Vec::new(),
             context_modifier: None,
@@ -2105,6 +2215,230 @@ mod tests {
             res.model_content.as_deref(),
             Some("Kept worktree\nReturned to /tmp/repo-detached-exit")
         );
+    }
+
+    // ===== worktree tmux launch plan, Task 5: ExitWorktree tmux keep/remove ===
+
+    /// Records the `tmux` argv (if any) [`ExitWorktreeTool`] runs through
+    /// `ctx.process`, and returns a canned exit code — a hermetic double for
+    /// the [`traits::ProcessRunner`] seam (mirrors the `MockRunner` pattern
+    /// in `platforms/posix/src/worktree_tmux.rs`'s tests).
+    struct RecordingProcess {
+        exit_code: i32,
+        stderr: String,
+        recorded: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+    }
+
+    impl RecordingProcess {
+        fn new(exit_code: i32, stderr: &str) -> Self {
+            Self {
+                exit_code,
+                stderr: stderr.to_string(),
+                recorded: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, Vec<String>)> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl traits::ProcessRunner for RecordingProcess {
+        async fn run(
+            &self,
+            cmd: &traits::SandboxedCommand,
+        ) -> Result<traits::ProcessOutput, traits::ProcessError> {
+            self.recorded.lock().unwrap().push((
+                cmd.inner().command.clone(),
+                cmd.inner().args.clone(),
+            ));
+            Ok(traits::ProcessOutput {
+                stdout: String::new(),
+                stderr: self.stderr.clone(),
+                exit_code: self.exit_code,
+                timed_out: false,
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &traits::SandboxedCommand,
+        ) -> Result<traits::ProcessHandle, traits::ProcessError> {
+            Err(traits::ProcessError::Unsupported)
+        }
+
+        async fn kill(&self, _handle: &traits::ProcessHandle) -> Result<(), traits::ProcessError> {
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// Like [`populate_session`], but additionally sets
+    /// `tmux_session_name: Some(tmux_session_name)` — the launch flow's
+    /// `--tmux` boot consumption (Task 4) is what would populate this in
+    /// production; these tests populate it directly to exercise
+    /// `ExitWorktreeTool`'s tmux keep/remove path in isolation.
+    fn populate_session_with_tmux(
+        bctx: &BuiltinToolContext,
+        original_cwd: &std::path::Path,
+        worktree_path: &std::path::Path,
+        branch_name: &str,
+        tmux_session_name: &str,
+    ) {
+        *bctx.worktree_session.lock().unwrap() = Some(tool_api::WorktreeSession {
+            original_cwd: original_cwd.to_path_buf(),
+            worktree_path: worktree_path.to_path_buf(),
+            branch_name: branch_name.to_string(),
+            base_commit: None,
+            entered_existing: false,
+            tmux_session_name: Some(tmux_session_name.to_string()),
+        });
+        bctx.session_cwd.swap(
+            worktree_path.to_path_buf(),
+            vec![worktree_path.to_path_buf()],
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_remove_with_tmux_session_kills_it_and_still_removes() {
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-tmux-remove"));
+        let (mut bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let process = Arc::new(RecordingProcess::new(0, ""));
+        bctx.process = process.clone();
+        let original_cwd = PathBuf::from("/tmp/repo-tmux-remove");
+        let worktree_path = PathBuf::from("/tmp/repo-tmux-remove/.lingxi/worktrees/feat");
+        populate_session_with_tmux(&bctx, &original_cwd, &worktree_path, "worktree-feat", "wt-x");
+        let tool = ExitWorktreeTool::new(bctx);
+        let res = tool
+            .call(
+                json!({ "action": "remove", "discard_changes": true }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("remove must succeed even with a tmux session attached");
+
+        // The `tmux kill-session -t wt-x` argv was issued.
+        assert_eq!(
+            process.calls(),
+            vec![("tmux".to_string(), build_worktree_tmux_kill_argv("wt-x"))]
+        );
+        // Removal still succeeded — the tmux kill did not block it.
+        assert_eq!(mock.removed().len(), 1);
+        assert!(tool.ctx.worktree_session.lock().unwrap().is_none());
+        // `remove` never surfaces `tmux_session_name` in `data` (206 doesn't
+        // either — the session is already dead by the time the result is
+        // built).
+        assert!(res.data.get("tmux_session_name").is_none());
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some("Removed worktree (branch worktree-feat)\nReturned to /tmp/repo-tmux-remove")
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_remove_tmux_kill_failure_is_non_fatal_and_still_removes() {
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-tmux-kill-fail"));
+        let (mut bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        // Nonzero exit ⇒ `kill_worktree_tmux_session` returns `Err`.
+        let process = Arc::new(RecordingProcess::new(1, "no such session"));
+        bctx.process = process.clone();
+        let original_cwd = PathBuf::from("/tmp/repo-tmux-kill-fail");
+        let worktree_path = PathBuf::from("/tmp/repo-tmux-kill-fail/.lingxi/worktrees/feat");
+        populate_session_with_tmux(&bctx, &original_cwd, &worktree_path, "worktree-feat", "wt-y");
+        let tool = ExitWorktreeTool::new(bctx);
+        let res = tool
+            .call(
+                json!({ "action": "remove", "discard_changes": true }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("a failed tmux kill must NOT fail the remove");
+
+        assert_eq!(
+            process.calls(),
+            vec![("tmux".to_string(), build_worktree_tmux_kill_argv("wt-y"))]
+        );
+        // Removal still succeeded despite the kill failure (non-fatal, warn-and-continue).
+        assert_eq!(mock.removed().len(), 1);
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some("Removed worktree (branch worktree-feat)\nReturned to /tmp/repo-tmux-kill-fail")
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_keep_with_tmux_session_does_not_kill_and_surfaces_name() {
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-tmux-keep"));
+        let (mut bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let process = Arc::new(RecordingProcess::new(0, ""));
+        bctx.process = process.clone();
+        let original_cwd = PathBuf::from("/tmp/repo-tmux-keep");
+        let worktree_path = PathBuf::from("/tmp/repo-tmux-keep/.lingxi/worktrees/feat");
+        populate_session_with_tmux(&bctx, &original_cwd, &worktree_path, "worktree-feat", "wt-z");
+        let tool = ExitWorktreeTool::new(bctx);
+        let res = tool
+            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("keep must succeed");
+
+        // NO tmux call was issued on `keep`.
+        assert!(process.calls().is_empty(), "keep must not kill the tmux session");
+        assert_eq!(mock.removed().len(), 0);
+        // The session name is surfaced in `data` for reattach.
+        assert_eq!(res.data["tmux_session_name"], json!("wt-z"));
+        // ... and in the model-facing message, as an additive reattach line.
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some(
+                "Kept worktree (branch worktree-feat)\nReturned to /tmp/repo-tmux-keep\n\
+                 Tmux session wt-z is still running; reattach with: tmux attach -t wt-z"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_inert_without_tmux_session_name_issues_no_tmux_call() {
+        // `tmux_session_name: None` (today's only reachable case in
+        // production — `EnterWorktreeTool` never populates it) must behave
+        // exactly as before this task: no `tmux` invocation on either
+        // `remove` or `keep`, and no `tmux_session_name` in `data`.
+        for action in ["remove", "keep"] {
+            let mock = Arc::new(MockWorktreeManager::with_root(format!(
+                "/tmp/repo-tmux-inert-{action}"
+            )));
+            let (mut bctx, sink) = make_bctx(mock.clone());
+            bctx.bus.attach_sink(sink.clone()).await;
+            let process = Arc::new(RecordingProcess::new(0, ""));
+            bctx.process = process.clone();
+            let original_cwd = PathBuf::from(format!("/tmp/repo-tmux-inert-{action}"));
+            let worktree_path =
+                PathBuf::from(format!("/tmp/repo-tmux-inert-{action}/.lingxi/worktrees/feat"));
+            populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
+            let tool = ExitWorktreeTool::new(bctx);
+            let input = if action == "remove" {
+                json!({ "action": "remove", "discard_changes": true })
+            } else {
+                json!({ "action": "keep" })
+            };
+            let res = tool
+                .call(input, fresh_ctx(), fresh_tx())
+                .await
+                .unwrap_or_else(|e| panic!("{action} must succeed: {e}"));
+            assert!(
+                process.calls().is_empty(),
+                "no tmux call expected for {action} with tmux_session_name:None"
+            );
+            assert!(res.data.get("tmux_session_name").is_none());
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub mod secure_storage;
 pub mod swarm;
 pub(crate) mod watch_helper;
 pub mod worktree;
+pub mod worktree_tmux;
 pub mod wsl_detect;
 
 pub use bridge::PosixBridgeTransport;

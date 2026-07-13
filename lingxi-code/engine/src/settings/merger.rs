@@ -41,6 +41,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         // Scalar Override (later source wins), same as `telemetryEnabled`.
         ax_screen_reader: next.ax_screen_reader.or(prev.ax_screen_reader),
+        // Scalar Override (later source wins) — `alwaysThinkingEnabled`.
+        always_thinking_enabled: next
+            .always_thinking_enabled
+            .or(prev.always_thinking_enabled),
         // Scalar Override (later source wins) — `skipWebFetchPreflight` (P2-14).
         skip_web_fetch_preflight: next
             .skip_web_fetch_preflight

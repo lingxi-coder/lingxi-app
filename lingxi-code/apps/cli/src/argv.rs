@@ -365,7 +365,12 @@ pub struct Argv {
     pub thinking_display: Option<String>,
 
     /// [DEPRECATED. Use --thinking instead for newer models] (hidden flag)
-    // TODO(max-thinking-tokens): wire into thinking token budget (deprecated, use --thinking)
+    //
+    // Wired: `init::resolve_desktop_config` threads this into the boot session
+    // `ThinkingConfig` via `llm_client::model::thinking::session_thinking_from_env`
+    // as claude-code's `a.maxThinkingTokens` (the `wn` request-build arm) — used
+    // when `MAX_THINKING_TOKENS` env is unset; a value `> 0` pins a fixed budget
+    // (pre-empting adaptive), `0` disables thinking.
     #[arg(long = "max-thinking-tokens", value_name = "tokens", hide = true)]
     pub max_thinking_tokens: Option<u32>,
 

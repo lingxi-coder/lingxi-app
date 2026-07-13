@@ -208,6 +208,96 @@ pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
     thinking != ThinkingConfig::Disabled && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING")
 }
 
+/// Parse a base-10 integer with JavaScript `parseInt(s, 10)` semantics: skip
+/// leading ASCII whitespace, accept an optional leading `+`/`-`, then consume
+/// leading decimal digits and stop at the first non-digit (so `"50000abc"` →
+/// `50000`, `"0x10"` → `0`, `"  42 "` → `42`). Returns `None` for `NaN`
+/// (no leading digit run) — mirroring how claude-code's `parseInt(env,10)`
+/// yields `NaN`, which compares false against both `> 0` and `=== 0`.
+fn js_parse_int_base10(s: &str) -> Option<i64> {
+    let t = s.trim_start_matches([' ', '\t', '\n', '\r', '\u{0c}', '\u{0b}']);
+    let (neg, rest) = match t.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None; // NaN
+    }
+    // Overflow of an absurd value → treat as NaN-ish (falls through to disabled).
+    let mag: i64 = digits.parse().ok()?;
+    Some(if neg { -mag } else { mag })
+}
+
+/// Resolve the boot SESSION [`ThinkingConfig`] from the `MAX_THINKING_TOKENS`
+/// env var, the `--max-thinking-tokens` CLI flag (`cli_budget`), and the
+/// `alwaysThinkingEnabled` setting (`always_thinking`) — byte-mirroring
+/// claude-code's boot thinking resolution (binary v2.1.207 `qIe()` +
+/// the `wn` request-build arm):
+///
+/// ```js
+/// let gm = qIe(), lp = gm !== false ? {type:"adaptive"} : {type:"disabled"};
+/// // (the --thinking flag override omitted here — a separate unwired surface)
+/// let wn = process.env.MAX_THINKING_TOKENS
+///     ? parseInt(process.env.MAX_THINKING_TOKENS, 10)
+///     : a.maxThinkingTokens;                 // the --max-thinking-tokens flag
+/// if (wn !== void 0) {
+///     if (wn > 0)  lp = {type:"enabled", budgetTokens: wn};   // pre-empts adaptive
+///     else if (wn === 0) lp = {type:"disabled"};
+/// }
+/// // qIe(): if(env) return parseInt(env,10)>0;
+/// //        if(settings.alwaysThinkingEnabled===false) return false; return true
+/// ```
+///
+/// A positive env/flag budget PRE-EMPTS adaptive thinking (claude-code sets the
+/// fixed `enabled`+`budgetTokens` config before the adaptive default applies);
+/// `0` hard-disables; a `NaN`/non-positive env value disables (`qIe` returns
+/// `parseInt(env,10) > 0` = false). When neither env nor flag pins a budget the
+/// gate falls to `alwaysThinkingEnabled === false ? disabled : adaptive`. The
+/// `--thinking` flag override (`adaptive`/`enabled`/`disabled`) is a SEPARATE,
+/// still-unwired CLI surface and is intentionally not folded here.
+///
+/// The env var name `MAX_THINKING_TOKENS` is kept UNPREFIXED — claude-code's
+/// name carries no `CLAUDE_`/`ANTHROPIC_` prefix, and this repo keeps such
+/// names verbatim.
+#[must_use]
+pub fn session_thinking_from_env(
+    cli_budget: Option<u32>,
+    always_thinking: Option<bool>,
+) -> ThinkingConfig {
+    // `process.env.MAX_THINKING_TOKENS ? … : …` — an empty value is falsy and
+    // falls through to the flag; any non-empty value is truthy and is parsed.
+    if let Some(raw) = std::env::var("MAX_THINKING_TOKENS")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return match js_parse_int_base10(&raw) {
+            Some(n) if n > 0 => ThinkingConfig::Enabled {
+                budget_tokens: u32::try_from(n).unwrap_or(u32::MAX),
+            },
+            // n <= 0 or NaN → disabled (`qIe`: `parseInt(env,10) > 0` is false).
+            _ => ThinkingConfig::Disabled,
+        };
+    }
+    // env unset → `wn = a.maxThinkingTokens` (the `--max-thinking-tokens` flag).
+    if let Some(budget) = cli_budget {
+        return if budget > 0 {
+            ThinkingConfig::Enabled {
+                budget_tokens: budget,
+            }
+        } else {
+            // budget == 0 → `wn === 0` → disabled.
+            ThinkingConfig::Disabled
+        };
+    }
+    // env + flag both unset → `qIe()`: `alwaysThinkingEnabled === false` off,
+    // else on (adaptive default for adaptive-capable models).
+    if always_thinking == Some(false) {
+        return ThinkingConfig::Disabled;
+    }
+    ThinkingConfig::Adaptive
+}
+
 /// Resolve the SESSION [`ThinkingConfig`] into the per-request
 /// [`crate::ReasoningConfig`] for `model` — the exact logic
 /// `ApiService::build_request` applies to every main-loop AND subagent request
@@ -353,5 +443,158 @@ mod tests {
     #[test]
     fn thinking_config_default_is_adaptive() {
         assert_eq!(ThinkingConfig::default(), ThinkingConfig::Adaptive);
+    }
+
+    // ---- MAX_THINKING_TOKENS / --max-thinking-tokens / alwaysThinkingEnabled ----
+    //
+    // `session_thinking_from_env` reads the process-global `MAX_THINKING_TOKENS`
+    // env var, so every test here serializes on one lock and restores the prior
+    // value (cargo runs a crate's tests in parallel).
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn max_thinking_env_positive_forces_fixed_budget() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("MAX_THINKING_TOKENS", "50000");
+        // A positive env budget PRE-EMPTS adaptive, even with no flag / setting.
+        assert_eq!(
+            session_thinking_from_env(None, None),
+            ThinkingConfig::Enabled {
+                budget_tokens: 50_000
+            }
+        );
+        // parseInt semantics: leading digits, stop at first non-digit.
+        let _g2 = EnvGuard::set("MAX_THINKING_TOKENS", "12000abc");
+        assert_eq!(
+            session_thinking_from_env(None, None),
+            ThinkingConfig::Enabled {
+                budget_tokens: 12_000
+            }
+        );
+    }
+
+    #[test]
+    fn max_thinking_env_zero_or_nan_disables() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("MAX_THINKING_TOKENS", "0");
+        assert_eq!(
+            session_thinking_from_env(None, None),
+            ThinkingConfig::Disabled
+        );
+        // NaN (parseInt("abc",10) is NaN, NaN>0 = false ⇒ qIe returns false).
+        let _g2 = EnvGuard::set("MAX_THINKING_TOKENS", "abc");
+        assert_eq!(
+            session_thinking_from_env(None, None),
+            ThinkingConfig::Disabled
+        );
+        // A negative value is likewise non-positive ⇒ disabled.
+        let _g3 = EnvGuard::set("MAX_THINKING_TOKENS", "-5");
+        assert_eq!(
+            session_thinking_from_env(None, None),
+            ThinkingConfig::Disabled
+        );
+    }
+
+    #[test]
+    fn max_thinking_env_empty_falls_through_to_flag() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // An empty env value is falsy → `wn = a.maxThinkingTokens` (the flag).
+        let _g = EnvGuard::set("MAX_THINKING_TOKENS", "");
+        assert_eq!(
+            session_thinking_from_env(Some(1_234), None),
+            ThinkingConfig::Enabled {
+                budget_tokens: 1_234
+            }
+        );
+    }
+
+    #[test]
+    fn max_thinking_flag_honored_when_env_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset("MAX_THINKING_TOKENS");
+        // flag > 0 → fixed budget (pre-empts adaptive).
+        assert_eq!(
+            session_thinking_from_env(Some(30_000), None),
+            ThinkingConfig::Enabled {
+                budget_tokens: 30_000
+            }
+        );
+        // flag == 0 → disabled (`wn === 0`).
+        assert_eq!(
+            session_thinking_from_env(Some(0), None),
+            ThinkingConfig::Disabled
+        );
+    }
+
+    #[test]
+    fn always_thinking_setting_governs_when_no_budget() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset("MAX_THINKING_TOKENS");
+        // No env, no flag: alwaysThinkingEnabled===false ⇒ disabled.
+        assert_eq!(
+            session_thinking_from_env(None, Some(false)),
+            ThinkingConfig::Disabled
+        );
+        // true / unset ⇒ the adaptive default.
+        assert_eq!(
+            session_thinking_from_env(None, Some(true)),
+            ThinkingConfig::Adaptive
+        );
+        assert_eq!(
+            session_thinking_from_env(None, None),
+            ThinkingConfig::Adaptive
+        );
+    }
+
+    #[test]
+    fn env_budget_pre_empts_flag_and_setting() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("MAX_THINKING_TOKENS", "7777");
+        // env wins over both the flag (0) and alwaysThinkingEnabled=false.
+        assert_eq!(
+            session_thinking_from_env(Some(0), Some(false)),
+            ThinkingConfig::Enabled {
+                budget_tokens: 7_777
+            }
+        );
+    }
+
+    #[test]
+    fn js_parse_int_base10_matches_js_semantics() {
+        assert_eq!(js_parse_int_base10("50000"), Some(50_000));
+        assert_eq!(js_parse_int_base10("  42 "), Some(42));
+        assert_eq!(js_parse_int_base10("12000abc"), Some(12_000));
+        assert_eq!(js_parse_int_base10("0x10"), Some(0)); // radix-10 stops at 'x'
+        assert_eq!(js_parse_int_base10("-7"), Some(-7));
+        assert_eq!(js_parse_int_base10("+9"), Some(9));
+        assert_eq!(js_parse_int_base10("abc"), None); // NaN
+        assert_eq!(js_parse_int_base10(""), None);
+        assert_eq!(js_parse_int_base10("   "), None);
     }
 }

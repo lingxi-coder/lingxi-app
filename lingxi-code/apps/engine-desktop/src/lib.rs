@@ -1381,6 +1381,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cli_plugin_dirs: Vec::new(),
 ///     initial_effort: None,
 ///     plan_mode_instructions: None,
+///     default_model_env_pinned: false,
+///     session_thinking: Default::default(),
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1615,6 +1617,26 @@ pub struct DesktopConfig {
     /// `effort-2025-11-24` beta the service adds when the body has effort).
     /// `None` (the default) ⟶ requests unchanged (no effort field).
     pub initial_effort: Option<String>,
+    /// `true` when [`Self::default_model`] was pinned by the `ANTHROPIC_MODEL`
+    /// env var (claude-code D4 `process.env.ANTHROPIC_MODEL`) rather than by the
+    /// built-in default or the persisted `settings.model`. Kept SEPARATE from
+    /// [`Self::default_model_explicit`] (which stays `--model`-only, matching the
+    /// binary's `userSpecifiedModel` = the `--model` flag) so the `--agent`
+    /// model-override gate is unaffected; it ONLY exempts an env-pinned model
+    /// from the boot connected-provider fallback (the user pinned exactly that
+    /// model via env, so a reroute would defeat the pin). `false` (the default).
+    pub default_model_env_pinned: bool,
+    /// Boot SESSION thinking configuration, resolved host-side from the
+    /// `MAX_THINKING_TOKENS` env var + the `--max-thinking-tokens` flag +
+    /// the `alwaysThinkingEnabled` setting (claude-code `qIe()` + the `wn`
+    /// request-build arm; see `llm_client::model::thinking::
+    /// session_thinking_from_env`). Applied to BOTH the main-loop `ApiService`
+    /// (`.with_thinking`) and the compaction/side-query `ForkedAgentRunner`
+    /// (`.with_session_thinking`), so the summarizer inherits the same intent.
+    /// The env read is host-side (F2-01: `build()` must not read env), so this
+    /// carries the already-resolved config. Defaults to
+    /// [`ThinkingConfig::Adaptive`] — byte-identical to the pre-resolver boot.
+    pub session_thinking: llm_client::model::thinking::ThinkingConfig,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -1773,6 +1795,8 @@ impl std::fmt::Debug for DesktopConfig {
             .field("cli_agent", &self.cli_agent)
             .field("cli_plugin_dirs", &self.cli_plugin_dirs)
             .field("initial_effort", &self.initial_effort)
+            .field("default_model_env_pinned", &self.default_model_env_pinned)
+            .field("session_thinking", &self.session_thinking)
             .finish()
     }
 }
@@ -1821,6 +1845,9 @@ impl Default for DesktopConfig {
             cli_agent: None,
             cli_plugin_dirs: Vec::new(),
             initial_effort: None,
+            // Default: no ANTHROPIC_MODEL env pin; the adaptive-thinking default.
+            default_model_env_pinned: false,
+            session_thinking: llm_client::model::thinking::ThinkingConfig::default(),
         }
     }
 }
@@ -3436,7 +3463,15 @@ pub async fn build(
     // WITHOUT anthropic key/oauth there, so "anthropic disconnected" is
     // meaningless and the reroute would break a working setup).
     let mut default_model_fallback: Option<DefaultModelFallbackNotice> = None;
-    if !cfg.default_model_explicit && api_provider() == ApiProvider::FirstParty {
+    // An `ANTHROPIC_MODEL` env pin (claude-code D4) is exempt from the reroute
+    // just like an explicit `--model`: the user pinned exactly that model, so a
+    // fallback would defeat the pin. `default_model_env_pinned` is kept separate
+    // from `default_model_explicit` (which stays `--model`-only for the `--agent`
+    // override gate); only the fallback treats an env pin as explicit.
+    if !cfg.default_model_explicit
+        && !cfg.default_model_env_pinned
+        && api_provider() == ApiProvider::FirstParty
+    {
         // The anthropic probe is DEFINITIVE only on the stock first-party base
         // URL with no gateway auth override. A custom `api_base`
         // (`LINGXI_API_BASE_URL` — an enterprise/auth-free gateway serving
@@ -3614,6 +3649,11 @@ pub async fn build(
     )
     .with_subscription(subscription.clone())
     .with_request_metadata(request_metadata)
+    // Boot SESSION thinking config, resolved host-side from MAX_THINKING_TOKENS
+    // + --max-thinking-tokens + alwaysThinkingEnabled (claude-code `qIe()`+`wn`).
+    // Default `Adaptive` keeps every existing session byte-identical; a fixed
+    // env/flag budget pre-empts adaptive, `alwaysThinkingEnabled:false` disables.
+    .with_thinking(cfg.session_thinking)
     // Surface API retry/backoff status to the UI (Claude Code's
     // `SystemAPIErrorMessage`): the retry loop reports each backoff and the
     // adapter forwards it to the session output stream (→ TUI).
@@ -4511,12 +4551,12 @@ pub async fn build(
             .with_side_query_client(side_query_client.clone(), orch_cfg.model.clone())
             // (M10 cc2.1.198) the compaction summary call INHERITS the session
             // extended-thinking config (binary: `thinkingConfig: mXt(r)` on the
-            // summarizer `sEt` call @216945141). The session config is the same
-            // `ThinkingConfig::default()` (Adaptive intent) the main-loop
-            // `ApiService` holds — nothing overrides it at boot — and the
-            // model predicates + `LINGXI_DISABLE_THINKING` kill switches apply
-            // per request inside `reasoning_for_request`.
-            .with_session_thinking(llm_client::model::thinking::ThinkingConfig::default()),
+            // summarizer `sEt` call @216945141). This is the SAME resolved
+            // `cfg.session_thinking` the main-loop `ApiService` holds (boot
+            // MAX_THINKING_TOKENS / --max-thinking-tokens / alwaysThinkingEnabled
+            // resolution) — and the model predicates + `LINGXI_DISABLE_THINKING`
+            // kill switches still apply per request inside `reasoning_for_request`.
+            .with_session_thinking(cfg.session_thinking),
     );
     // `/recap` reuses the SAME single-turn forked runner the autocompact
     // summarizer uses — CLONE the `Arc` here BEFORE `forked_runner` moves into
@@ -6876,6 +6916,8 @@ mod tests {
             cli_agent: None,
             cli_plugin_dirs: Vec::new(),
             initial_effort: None,
+            default_model_env_pinned: false,
+            session_thinking: Default::default(),
         };
         (tmp, cfg)
     }
@@ -7325,6 +7367,46 @@ mod tests {
         std::env::remove_var("LINGXI_TEST_REROUTE_KEY_EXPLICIT");
 
         assert!(rt.default_model_fallback.is_none());
+        assert_eq!(rt.orchestrator.default_model(), "claude-sonnet-4-20250514");
+    }
+
+    /// An `ANTHROPIC_MODEL` env pin (claude-code D4) is exempt from the reroute
+    /// exactly like an explicit `--model`, even though `default_model_explicit`
+    /// stays `false` (it is kept `--model`-only for the `--agent` override gate).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serialize env mutation across async tests
+    async fn build_keeps_env_pinned_model_despite_disconnected_provider() {
+        let _guard = DEPR_ENV_LOCK.lock().unwrap();
+        clear_provider_env();
+        let (_tmp, mut cfg) = test_config(true);
+        // NOT an explicit --model choice, but env-pinned via ANTHROPIC_MODEL.
+        cfg.default_model_explicit = false;
+        cfg.default_model_env_pinned = true;
+        cfg.provider_profiles = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "groq".to_string(),
+                serde_json::json!({
+                    "type": "openai",
+                    "baseUrl": "https://api.groq.com/openai/v1",
+                    "apiKeyEnv": "LINGXI_TEST_REROUTE_KEY_ENVPIN",
+                    "models": ["llama-3.3-70b-versatile"]
+                }),
+            );
+            m
+        });
+        std::env::set_var("LINGXI_TEST_REROUTE_KEY_ENVPIN", "k");
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        std::env::remove_var("LINGXI_TEST_REROUTE_KEY_ENVPIN");
+
+        assert!(
+            rt.default_model_fallback.is_none(),
+            "an ANTHROPIC_MODEL env pin must not be rerouted"
+        );
         assert_eq!(rt.orchestrator.default_model(), "claude-sonnet-4-20250514");
     }
 

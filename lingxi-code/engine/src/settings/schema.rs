@@ -177,6 +177,17 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ax_screen_reader: Option<bool>,
 
+    /// Scalar field (later source wins). `alwaysThinkingEnabled`: when set to
+    /// `false`, disables extended thinking for the session UNLESS a fixed budget
+    /// is pinned via the `MAX_THINKING_TOKENS` env var or the
+    /// `--max-thinking-tokens` flag (both pre-empt this). Consumed by the boot
+    /// session `ThinkingConfig` resolver (`llm_client::model::thinking::
+    /// session_thinking_from_env`, binary `qIe()`:
+    /// `if(e.alwaysThinkingEnabled===!1)return!1;return!0`). Key stays
+    /// `alwaysThinkingEnabled` verbatim (config wire key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_thinking_enabled: Option<bool>,
+
     /// Scalar field (later source wins). `skipWebFetchPreflight`: skip the
     /// `WebFetch` domain-blocklist preflight for enterprise hosts whose network
     /// policy blocks outbound connections to `claude.ai`/`api.anthropic.com`.

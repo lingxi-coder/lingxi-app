@@ -82,6 +82,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         cli_agent: None,
         cli_plugin_dirs: Vec::new(),
         initial_effort: None,
+        default_model_env_pinned: false,
+        session_thinking: Default::default(),
     };
     (tmp, cfg)
 }

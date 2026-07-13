@@ -138,6 +138,17 @@ pub trait TaskStatusSink: Send + Sync {
         _usage: Option<traits::task_registry::AgentRunUsage>,
     ) {
     }
+
+    /// Report whether `task_id` has ALREADY reached a terminal status
+    /// (Completed / Failed / Killed). Backs the `drain_pending_kills` guard: a
+    /// worker that finished on its own must not be retroactively flipped to
+    /// `Killed` by a raced pending-kill record (which would clobber the real
+    /// terminal status). Default `false` (no lifecycle info ⇒ flip as before,
+    /// preserving existing behavior); the registry-backed sink overrides it to
+    /// consult the stored task status.
+    async fn is_terminal(&self, _task_id: &str) -> bool {
+        false
+    }
 }
 
 /// No-op [`TaskStatusSink`] — the default when the handler is constructed
@@ -225,14 +236,22 @@ impl LocalBashHandler {
     /// so a child outliving its agent is terminated (claude-code
     /// `killTask`-on-cleanup parity — `killShellTasksForAgent`). Cancelling the
     /// worker drops the in-flight `run()`, which `SIGKILL`s the real OS child;
-    /// status is flipped to `Killed` regardless.
+    /// status is flipped to `Killed` UNLESS the task already reached a terminal
+    /// status (a raced pending-kill record must not clobber a real
+    /// Completed/Failed with `Killed`).
     pub async fn drain_pending_kills(&self) {
         let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
         for (task_id, rec) in pending {
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink
-                .set_status(&task_id, TaskStatus::Killed)
-                .await;
+            // Don't overwrite an already-reported terminal status: a worker that
+            // finished on its own before this (possibly raced) record was
+            // drained keeps its real terminal status rather than being flipped
+            // to Killed.
+            if !self.status_sink.is_terminal(&task_id).await {
+                self.status_sink
+                    .set_status(&task_id, TaskStatus::Killed)
+                    .await;
+            }
         }
     }
 
@@ -356,6 +375,15 @@ impl Task for LocalBashHandler {
             workers.lock().await.remove(&worker_task_id);
         });
 
+        // Hold the `workers` lock ACROSS spawn + insert. The worker's self-remove
+        // (`workers.lock().await.remove`) contends the same lock, so a
+        // fast-completing worker cannot run its remove BEFORE we insert — which
+        // would otherwise leave a stale record the cleanup closure moves to
+        // `pending_kill`, letting `drain_pending_kills` flip an
+        // already-Completed task to Killed. `RuntimeSpawner::spawn` only
+        // schedules the worker (it does not await its completion), so holding
+        // the lock here cannot deadlock.
+        let mut workers = self.workers.lock().await;
         let bg_handle = ctx
             .runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
@@ -365,13 +393,14 @@ impl Task for LocalBashHandler {
         // Record the worker-cancel handle (+ the runtime that minted it) so
         // kill / drain can cancel the in-flight worker — i.e. terminate the one
         // `run()` child — without a fresh ctx.
-        self.workers.lock().await.insert(
+        workers.insert(
             task_id.clone(),
             WorkerCancel {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
             },
         );
+        drop(workers);
 
         // 6. Build the cleanup seam (claude-code `registerCleanup` parity —
         //    `spawnShellTask` registers a cleanup that calls `killTask`). The
@@ -712,6 +741,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((task_id.to_string(), exit_code));
+        }
+        async fn is_terminal(&self, task_id: &str) -> bool {
+            self.statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(id, _)| id == task_id)
+                .is_some_and(|(_, s)| s.is_terminal())
         }
     }
     impl RecordingSink {
@@ -1087,6 +1125,59 @@ mod tests {
         assert!(
             runner.was_aborted(),
             "drain aborted/reaped the in-flight child (drop-guard fired)"
+        );
+    }
+
+    /// `drain_pending_kills` MUST NOT flip an already-terminal task to `Killed`:
+    /// if a still-live record is moved to `pending_kill` by cleanup AFTER the
+    /// worker reported a terminal status, draining it keeps the real terminal
+    /// status (the guard on `TaskStatusSink::is_terminal`).
+    #[tokio::test]
+    async fn drain_pending_kills_preserves_terminal_status() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let runner = BlockingRunner::new();
+        let started = runner.started.clone();
+        let sandbox = StubSandbox::new();
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+
+        let handler =
+            LocalBashHandler::new(runner.clone(), sandbox, mgr).with_status_sink(sink.clone());
+
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let ctx = TaskContext {
+            fs: fs.clone(),
+            runtime,
+        };
+
+        let handle = handler
+            .spawn(
+                TaskSpawnInput::LocalBash {
+                    command: "long".into(),
+                    timeout: None,
+                },
+                ctx,
+            )
+            .await
+            .unwrap();
+
+        // Wait until the child is genuinely in-flight (a live record exists).
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("run() should start (child in-flight)");
+
+        // Model the worker having reported a terminal status just before the
+        // teardown races in (the record is still live in `workers`).
+        sink.set_status(&handle.task_id, TaskStatus::Completed).await;
+
+        // Cleanup moves the live record to pending_kill; drain then runs.
+        (handle.cleanup.as_ref().unwrap())();
+        handler.drain_pending_kills().await;
+
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Completed),
+            "drain must not overwrite an already-terminal Completed with Killed"
         );
     }
 

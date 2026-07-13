@@ -96,6 +96,17 @@ pub struct PermissionCheckContext {
     /// Additive Default-None so the wire shape is forward-compatible (the
     /// declared-partial sub-part of finding #9).
     pub blocked_path: Option<String>,
+    /// A PER-CALL permission mode OVERRIDE as a WIRE string
+    /// (`default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`/`auto`).
+    /// `Some` ⇒ the rule-evaluating gate authorizes THIS call under that mode
+    /// instead of its live/boot mode — the seam a spawned subagent uses to run its
+    /// tool dispatch under a clamped spawn mode (claude-code 2.1.207 Agent `mode` →
+    /// the child's `toolPermissionContext.mode`, threaded from
+    /// [`crate::tool_invoker::SubagentInvocationContext::mode_override`]). `None` ⇒
+    /// the gate's live/boot mode applies (main loop / no override), byte-identical
+    /// to before. Only the rule-evaluating `PolicyPermissionGate` consults it;
+    /// other transports ignore it.
+    pub mode_override: Option<String>,
 }
 
 /// Richer outcome of [`PermissionGate::check_with_context`]: an allow may carry

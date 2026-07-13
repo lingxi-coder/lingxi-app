@@ -119,6 +119,15 @@ pub struct LocalAgentHandler {
     /// [`TaskHandle::cleanup`] closure (which cannot await). Drained by
     /// [`LocalAgentHandler::drain_pending_kills`].
     pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// Runs the terminal keep/cleanup judgment on a background agent's
+    /// isolation worktree (`SubagentSpawnRequest::worktree`) — claude-code
+    /// hands its `getWorktreeResult` closure to the detached async lifecycle,
+    /// so the worker here judges via
+    /// [`traits::worktree::agent_worktree_result`] when the agent reaches a
+    /// terminal state (keep when dirty/ahead, else auto-remove). `None`
+    /// (default) ⇒ no worktree handling: a carried worktree is left in place,
+    /// the conservative direction.
+    worktree_manager: Option<Arc<dyn traits::worktree::WorktreeManager>>,
 }
 
 impl LocalAgentHandler {
@@ -148,7 +157,23 @@ impl LocalAgentHandler {
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
+            worktree_manager: None,
         }
+    }
+
+    /// Wire the worktree manager so a BACKGROUND agent's `isolation:"worktree"`
+    /// worktree (resolved by `AgentTool` before dispatch and carried on
+    /// [`SubagentSpawnRequest::worktree`]) is auto-cleaned — kept when
+    /// dirty/ahead — when the agent reaches a terminal state. This is the
+    /// async-path owner of the same keep/cleanup judgment the sync path runs
+    /// inside `AgentTool` (claude-code's `getWorktreeResult` closure).
+    #[must_use]
+    pub fn with_worktree_manager(
+        mut self,
+        manager: Arc<dyn traits::worktree::WorktreeManager>,
+    ) -> Self {
+        self.worktree_manager = Some(manager);
+        self
     }
 
     /// Wire the persistent/resumable spawn seam (local_agent resume). When set,
@@ -180,14 +205,22 @@ impl LocalAgentHandler {
     /// future for real. This is the async counterpart of the synchronous
     /// cleanup closure: the registry/cleanup-registry calls it on agent
     /// teardown so a subagent outliving its parent is aborted (claude-code
-    /// `killTask`-on-cleanup parity). Status is flipped to `Killed` regardless.
+    /// `killTask`-on-cleanup parity). Status is flipped to `Killed` UNLESS the
+    /// task already reached a terminal status (a raced pending-kill record must
+    /// not clobber a real Completed/Failed with `Killed`).
     pub async fn drain_pending_kills(&self) {
         let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
         for (task_id, rec) in pending {
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink
-                .set_status(&task_id, TaskStatus::Killed)
-                .await;
+            // Don't overwrite an already-reported terminal status: a subagent
+            // that finished on its own before this (possibly raced) record was
+            // drained keeps its real terminal status rather than being flipped
+            // to Killed.
+            if !self.status_sink.is_terminal(&task_id).await {
+                self.status_sink
+                    .set_status(&task_id, TaskStatus::Killed)
+                    .await;
+            }
         }
     }
 }
@@ -258,6 +291,7 @@ impl Task for LocalAgentHandler {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -276,6 +310,16 @@ impl Task for LocalAgentHandler {
             tool_invoker: self.tool_invoker.clone(),
             budget: self.budget.clone(),
         });
+
+        // The isolation worktree `AgentTool` resolved for this agent (if any).
+        // The BACKGROUND lifecycle owns the terminal keep/cleanup judgment —
+        // claude-code hands `getWorktreeResult` to the detached task
+        // (`AgentTool` returns `async_launched` immediately and must NOT clean
+        // up at launch) — so the worker below runs it once the agent reaches a
+        // terminal state. Requires the injected manager; without it the
+        // worktree is left in place (conservative).
+        let agent_worktree = request.worktree.clone();
+        let worktree_manager = self.worktree_manager.clone();
 
         // 5. Drive the subagent to completion inside a runtime-spawned worker
         //    (engine code must not call tokio::spawn directly — D17). The worker
@@ -312,6 +356,17 @@ impl Task for LocalAgentHandler {
                                 status_sink
                                     .set_status(&worker_task_id, TaskStatus::Failed)
                                     .await;
+                                // Terminal (spawn never ran): judge the carried
+                                // isolation worktree so it never leaks.
+                                if let (Some(mgr), Some(handle)) =
+                                    (&worktree_manager, &agent_worktree)
+                                {
+                                    let _ = traits::worktree::agent_worktree_result(
+                                        mgr.as_ref(),
+                                        handle,
+                                    )
+                                    .await;
+                                }
                                 workers.lock().await.remove(&worker_task_id);
                                 return;
                             }
@@ -392,6 +447,13 @@ impl Task for LocalAgentHandler {
                             }
                         }
                     }
+                    // Terminal (Failed / Killed / channel-close — NOT a rest):
+                    // run the worktree keep/cleanup judgment (claude-code
+                    // `getWorktreeResult`): keep when dirty/ahead, else remove.
+                    if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
+                        let _ =
+                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                    }
                     agent_ids.lock().await.remove(&worker_task_id);
                     workers.lock().await.remove(&worker_task_id);
                 })
@@ -439,12 +501,30 @@ impl Task for LocalAgentHandler {
 
                     status_sink.set_status(&worker_task_id, status).await;
 
+                    // Terminal: run the worktree keep/cleanup judgment on the
+                    // carried isolation worktree (claude-code `getWorktreeResult`
+                    // — keep when dirty/ahead, else auto-remove). Runs for ANY
+                    // outcome so a worktree never leaks on a failed/killed agent.
+                    if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
+                        let _ =
+                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                    }
+
                     // The subagent has terminated; drop the cancel record so a late
                     // kill is a graceful no-op (claude-code `status !== 'running'`).
                     workers.lock().await.remove(&worker_task_id);
                 })
             };
 
+        // Hold the `workers` lock ACROSS spawn + insert. The worker's self-remove
+        // (`workers.lock().await.remove`) contends the same lock, so a
+        // fast-completing worker cannot run its remove BEFORE we insert — which
+        // would otherwise leave a stale record the cleanup closure moves to
+        // `pending_kill`, letting `drain_pending_kills` flip an
+        // already-Completed task to Killed. `RuntimeSpawner::spawn` only
+        // schedules the worker (it does not await its completion), so holding
+        // the lock here cannot deadlock.
+        let mut workers = self.workers.lock().await;
         let bg_handle = ctx
             .runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
@@ -453,13 +533,14 @@ impl Task for LocalAgentHandler {
 
         // Record the worker-cancel handle (+ the runtime that minted it) so
         // kill / drain can cancel the in-flight worker without a fresh ctx.
-        self.workers.lock().await.insert(
+        workers.insert(
             task_id.clone(),
             WorkerCancel {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
             },
         );
+        drop(workers);
 
         // 6. Build the synchronous cleanup seam (claude-code `registerCleanup`
         //    parity). The closure cannot await, so it moves any live cancel
@@ -759,6 +840,117 @@ mod tests {
         }
     }
 
+    // ---- Mock WorktreeManager (terminal keep/cleanup judgment) --------------
+
+    /// Judgment-only mock: scripted change summary + a removal recorder.
+    /// `create_worktree` is unreachable here — the handler never CREATES
+    /// worktrees (AgentTool does, before dispatch); it only judges the one
+    /// carried on `SubagentSpawnRequest::worktree`.
+    struct RecordingWorktree {
+        summary: Option<traits::worktree::WorktreeChangeSummary>,
+        removed: StdMutex<Vec<traits::worktree::WorktreeHandle>>,
+    }
+    impl RecordingWorktree {
+        fn new(summary: Option<traits::worktree::WorktreeChangeSummary>) -> Arc<Self> {
+            Arc::new(Self {
+                summary,
+                removed: StdMutex::new(Vec::new()),
+            })
+        }
+        fn removed_count(&self) -> usize {
+            self.removed.lock().unwrap().len()
+        }
+    }
+    #[async_trait]
+    impl traits::worktree::WorktreeManager for RecordingWorktree {
+        async fn create_worktree(
+            &self,
+            _slug: &str,
+            _base_branch: Option<&str>,
+            _copy_includes: &[PathBuf],
+        ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
+            Err(traits::worktree::WorktreeError::Unsupported)
+        }
+        async fn remove_worktree(
+            &self,
+            handle: &traits::worktree::WorktreeHandle,
+        ) -> Result<(), traits::worktree::WorktreeError> {
+            self.removed.lock().unwrap().push(handle.clone());
+            Ok(())
+        }
+        async fn list_worktrees(
+            &self,
+        ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
+            Ok(Vec::new())
+        }
+        async fn cleanup_stale(
+            &self,
+            _max_age: std::time::Duration,
+        ) -> Result<Vec<PathBuf>, traits::worktree::WorktreeError> {
+            Ok(Vec::new())
+        }
+        fn is_supported(&self) -> bool {
+            true
+        }
+        async fn worktree_change_summary(
+            &self,
+            _handle: &traits::worktree::WorktreeHandle,
+        ) -> Result<Option<traits::worktree::WorktreeChangeSummary>, traits::worktree::WorktreeError>
+        {
+            Ok(self.summary)
+        }
+    }
+
+    fn isolation_worktree_handle() -> traits::worktree::WorktreeHandle {
+        traits::worktree::WorktreeHandle {
+            path: PathBuf::from("/repo/.lingxi/worktrees/agent-1"),
+            branch_name: "worktree-agent-1".into(),
+            base_commit: None,
+        }
+    }
+
+    /// A background Agent request carrying the isolation worktree the tool
+    /// resolved before dispatch (the P1-01 ownership transfer).
+    fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
+        SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            prompt: prompt.into(),
+            context_paths: Vec::new(),
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: true,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: Some("worktree".into()),
+            cwd: Some("/repo/.lingxi/worktrees/agent-1".into()),
+            worktree: Some(isolation_worktree_handle()),
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 1,
+            parent_model_override: None,
+        }
+    }
+
+    fn input_with_worktree(prompt: &str) -> TaskSpawnInput {
+        TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::new(),
+            subagent_type: "general-purpose".into(),
+            prompt: prompt.into(),
+            is_backgrounded: true,
+            tool_use_id: None,
+            spawn_request: Some(request_with_worktree(prompt)),
+            inheritance: None,
+        }
+    }
+
     // ---- Recording status sink ---------------------------------------------
 
     #[derive(Default)]
@@ -783,6 +975,15 @@ mod tests {
         ) {
             *self.rest_count.lock().unwrap() += 1;
             *self.last_rest.lock().unwrap() = Some((result, usage));
+        }
+        async fn is_terminal(&self, task_id: &str) -> bool {
+            self.statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(id, _)| id == task_id)
+                .is_some_and(|(_, s)| s.is_terminal())
         }
     }
     impl RecordingSink {
@@ -1179,6 +1380,144 @@ mod tests {
         assert!(read.content.contains("pool full"), "spawn error spooled");
     }
 
+    /// Poll until the handler's live worker map is empty — the worker removes
+    /// its own record LAST (after the terminal status + worktree judgment), so
+    /// an empty map means the judgment definitely ran (or was skipped).
+    async fn await_workers_drained(workers: &Arc<TokioMutex<StdHashMap<String, WorkerCancel>>>) {
+        for _ in 0..400 {
+            if workers.lock().await.is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("worker never drained its cancel record");
+    }
+
+    /// P1-01 (parity 2.1.207): the BACKGROUND lifecycle owns the isolation
+    /// worktree's terminal keep/cleanup judgment (claude hands its
+    /// `getWorktreeResult` closure to the detached task). A CLEAN worktree is
+    /// auto-removed once the worker reaches a terminal state.
+    #[tokio::test]
+    async fn terminal_background_agent_removes_clean_worktree() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0,
+        }));
+        let handler = make_handler(spawner, mgr, sink.clone())
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+        assert_eq!(
+            wt.removed_count(),
+            1,
+            "clean worktree auto-removed at terminal"
+        );
+    }
+
+    /// P1-01: a DIRTY worktree (uncommitted files or commits ahead) is KEPT —
+    /// the terminal judgment must never discard work.
+    #[tokio::test]
+    async fn terminal_background_agent_keeps_dirty_worktree() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Failed("model refused".into()));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 2,
+            commits: 1,
+        }));
+        let handler = make_handler(spawner, mgr, sink.clone())
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        // Runs for ANY terminal outcome (here: Failed) — but a dirty worktree
+        // is kept, not removed.
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
+        await_workers_drained(&workers).await;
+        assert_eq!(wt.removed_count(), 0, "dirty worktree KEPT at terminal");
+    }
+
+    /// P1-01: on the PERSISTENT path the judgment runs ONLY at a terminal
+    /// state — a "comes to rest" turn-set completion must NOT remove the
+    /// worktree (the agent is still alive and resumable in it).
+    #[tokio::test]
+    async fn persistent_agent_worktree_judged_only_at_terminal() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let streaming = Arc::new(MockStreamingSpawner {
+            tx_slot: tx_slot.clone(),
+            resume_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0,
+        }));
+        let handler = make_handler(
+            MockSpawner::new(CannedResult::Pending),
+            mgr,
+            sink.clone(),
+        )
+        .with_streaming_spawner(streaming)
+        .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        // Wait for spawn_persistent to stash the event sender.
+        let tx = {
+            let mut got = None;
+            for _ in 0..200 {
+                if let Some(t) = tx_slot.lock().unwrap().clone() {
+                    got = Some(t);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            got.expect("spawn_persistent should have run")
+        };
+
+        // Turn-set completes → the agent comes to REST (not terminal): the
+        // worktree must survive (the resting agent still works in it).
+        tx.send(completed_event("rest")).await.unwrap();
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(wt.removed_count(), 0, "no judgment at a rest");
+
+        // Channel close ⇒ terminal ⇒ the clean worktree is auto-removed.
+        tx_slot.lock().unwrap().take();
+        drop(tx);
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+        assert_eq!(
+            wt.removed_count(),
+            1,
+            "clean worktree auto-removed at terminal"
+        );
+    }
+
     #[tokio::test]
     async fn kill_cancels_inflight_worker_and_flips_to_killed() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -1273,6 +1612,84 @@ mod tests {
         assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
     }
 
+    /// A fast-completing agent leaves NO stale worker record (the `workers` lock
+    /// is held across spawn+insert so the worker's self-remove is serialized
+    /// after the insert), so a later cleanup + drain finds nothing to kill and
+    /// the reported terminal status stays `Completed` — never clobbered to
+    /// `Killed` by a raced pending-kill record.
+    #[tokio::test]
+    async fn completed_agent_leaves_no_worker_record_and_survives_cleanup() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        let handle = handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        // The worker removed its OWN record; no stale insert remains.
+        await_workers_drained(&workers).await;
+
+        // Cleanup finds no live record ⇒ nothing queued; drain is a no-op.
+        (handle.cleanup.as_ref().unwrap())();
+        handler.drain_pending_kills().await;
+
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Completed),
+            "a completed agent's terminal status is never flipped to Killed"
+        );
+    }
+
+    /// `drain_pending_kills` MUST NOT flip an already-terminal task to `Killed`:
+    /// if a still-live record is moved to `pending_kill` by cleanup AFTER the
+    /// worker reported a terminal status, draining it keeps the real terminal
+    /// status (the guard on `TaskStatusSink::is_terminal`).
+    #[tokio::test]
+    async fn drain_pending_kills_preserves_terminal_status() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        // Pending: the worker parks, so a live record persists in `workers`.
+        let spawner = MockSpawner::new(CannedResult::Pending);
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        let handle = handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        // Wait for the live worker-cancel record.
+        for _ in 0..50 {
+            if !workers.lock().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Model the worker having reported a terminal status just before the
+        // teardown races in (the record is still live in `workers`).
+        sink.set_status(&handle.task_id, TaskStatus::Completed).await;
+
+        // Cleanup moves the live record to pending_kill; drain then runs.
+        (handle.cleanup.as_ref().unwrap())();
+        handler.drain_pending_kills().await;
+
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Completed),
+            "drain must not overwrite an already-terminal Completed with Killed"
+        );
+    }
+
     #[tokio::test]
     async fn variant_subagent_type_drives_the_request() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -1331,6 +1748,7 @@ mod tests {
             mode: Some("plan".into()),
             isolation: Some("worktree".into()),
             cwd: Some("/workspace/subdir".into()),
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: Some(r#"{\"type\":\"object\"}"#.into()),

@@ -400,6 +400,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         hook_session_id: protocol::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
         depth: 0,
+        permission_mode_override: None,
     }
 }
 
@@ -2529,5 +2530,209 @@ async fn preload_order_additional_context_then_skills() {
     assert!(
         ac_idx < skill_idx,
         "additionalContext must precede skills: {texts:?}"
+    );
+}
+
+// ── P1-04: CC 2.1.207 subagent `api_error_partial` recovery ──────────────
+//
+// On a mid-stream API termination whose kind is in `CTy`
+// ({rate_limit,overloaded,server_error}) AND with content already produced, the
+// runner recovers the partial work as a `completed` result with the byte-locked
+// `cutoffNote` prepended — instead of failing the tool and discarding the
+// child's work (`Wyd`/`wTy`, AgentTool sync recovery).
+
+/// Streaming mock whose per-turn scripts are RAW `Result<LlmEvent, LlmError>`
+/// sequences, so a turn can inject a trailing MID-STREAM `Err` (no
+/// `message_stop`). Overrides the streaming seam; the non-streaming path is
+/// unreachable.
+struct ResultStreamMockApiClient {
+    turns: Mutex<VecDeque<Vec<Result<llm_client::LlmEvent, llm_client::LlmError>>>>,
+    calls: AtomicUsize,
+}
+impl ResultStreamMockApiClient {
+    fn new(turns: Vec<Vec<Result<llm_client::LlmEvent, llm_client::LlmError>>>) -> Arc<Self> {
+        Arc::new(Self {
+            turns: Mutex::new(turns.into_iter().collect()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        unreachable!("streaming mock must be driven through messages_create_stream")
+    }
+    async fn messages_create_stream(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+        _effort: Option<serde_json::Value>,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        use futures::StreamExt;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        Ok(futures::stream::iter(events).boxed())
+    }
+}
+
+/// A partial streamed turn: one COMPLETED text block, then a mid-stream `Err`
+/// (no `message_stop`). The block is salvageable; the error is not.
+fn partial_text_then_err(
+    text: &str,
+    err: llm_client::LlmError,
+) -> Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> {
+    use llm_client::{ContentBlock as LB, ContentDelta, LlmEvent};
+    vec![
+        Ok(ev_message_start()),
+        Ok(LlmEvent::ContentBlockStart {
+            index: 0,
+            content_block: LB::Text {
+                text: String::new(),
+                cache_control: None,
+            },
+        }),
+        Ok(LlmEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentDelta::TextDelta { text: text.into() },
+        }),
+        Ok(LlmEvent::ContentBlockStop { index: 0 }),
+        Err(err),
+    ]
+}
+
+/// The exact `cutoffNote` for a server-error-class termination: the
+/// `AgentApiErrorTerminationError` message + the byte-locked incomplete-output
+/// notice (`\u{2014}` = em dash), joined by a single newline.
+const EXPECTED_SERVER_ERROR_CUTOFF: &str = "Agent terminated early due to an API error: API Error: Server error mid-response. The response above may be incomplete.\nEverything below is PARTIAL output recovered from the agent before it was cut off. The agent did NOT finish its task \u{2014} treat these results as incomplete.";
+
+/// A second round-trip cut off by `RateLimited` mid-stream — after a completed
+/// first turn AND with a block salvaged from the failing turn — recovers as a
+/// `Completed` result whose FIRST content block is the exact `cutoffNote`, with
+/// the salvaged partial text following it. NOT a `Failed`.
+#[tokio::test]
+async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
+    // Turn 1: a complete tool_use turn (drives the loop into turn 2 after the
+    // tool is dispatched). Turn 2: a partial text block then a mid-stream 429.
+    let turn1: Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> =
+        streamed_tool_use_turn("Read", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect();
+    let turn2 = partial_text_then_err(
+        "Partial answer before the cutoff",
+        llm_client::LlmError::RateLimited {
+            retry_after: None,
+            scope: None,
+        },
+    );
+    let api = ResultStreamMockApiClient::new(vec![turn1, turn2]);
+    let api2 = api.clone();
+    let invoker = CountingInvoker::new();
+    let ctx = loop_ctx(api, Some(invoker), 10);
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+
+    // No Failed event — the partial was preserved as a completion.
+    assert!(
+        !evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        "a recoverable mid-stream 429 must NOT surface as Failed: {evs:?}"
+    );
+    let result = evs
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("a Completed event carrying the recovered partial");
+
+    let content = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .expect("content array");
+    // First text block is the exact cutoffNote.
+    assert_eq!(
+        content[0].get("text").and_then(serde_json::Value::as_str),
+        Some(EXPECTED_SERVER_ERROR_CUTOFF),
+        "first content block must be the byte-exact cutoffNote"
+    );
+    // The salvaged partial text follows the note.
+    assert!(
+        content.iter().any(|b| b.get("text").and_then(serde_json::Value::as_str)
+            == Some("Partial answer before the cutoff")),
+        "the salvaged mid-turn block must survive: {content:?}"
+    );
+    // Both round-trips were attempted (the loop reached turn 2 before erroring).
+    assert_eq!(api2.call_count(), 2);
+}
+
+/// A qualifying error (`RateLimited`) at request-start on the FIRST turn — with
+/// no content produced yet — still fails (CC's `Zor(r)===void 0` guard: nothing
+/// to recover).
+#[tokio::test]
+async fn qualifying_error_with_no_content_fails() {
+    let api = MockSubagentApiClient::new(vec![Err(llm_client::LlmError::RateLimited {
+        retry_after: None,
+        scope: None,
+    })]);
+    let ctx = loop_ctx(api, Some(CountingInvoker::new()), 10);
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert!(
+        evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        "a qualifying error with an empty transcript must Fail: {evs:?}"
+    );
+    assert!(
+        !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+        "no partial exists to recover, so no Completed: {evs:?}"
+    );
+}
+
+/// A NON-qualifying error (`QuotaExceeded`/`InvalidRequest` — kinds NOT in
+/// `CTy`) fails even when content exists: CC rethrows these terminal API errors.
+#[tokio::test]
+async fn nonqualifying_error_after_content_still_fails() {
+    // Turn 1 completes with a tool_use (content in history + tool dispatched);
+    // turn 2 errors mid-stream with a NON-CTy kind → no recovery.
+    let turn1: Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> =
+        streamed_tool_use_turn("Read", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect();
+    let turn2 = partial_text_then_err(
+        "text that will NOT be recovered",
+        llm_client::LlmError::QuotaExceeded,
+    );
+    let api = ResultStreamMockApiClient::new(vec![turn1, turn2]);
+    let ctx = loop_ctx(api, Some(CountingInvoker::new()), 10);
+    let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    assert!(
+        evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        "a non-CTy error must Fail even with content: {evs:?}"
+    );
+    // The salvaged text must NOT leak into any Completed result.
+    assert!(
+        !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+        "non-qualifying error must not recover a partial: {evs:?}"
     );
 }

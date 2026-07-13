@@ -71,8 +71,12 @@ pub struct SubagentSpawnRequest {
     /// routing is deferred.
     #[serde(default)]
     pub team_name: Option<String>,
-    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
-    /// Carried through; permission-mode application is deferred.
+    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`). The
+    /// spawner clamps it against the parent's live mode (claude-code 2.1.207
+    /// `wKe`/`zol`) and threads the result into the child's tool-dispatch
+    /// permission checks (`SubagentContext::permission_mode_override`) so a
+    /// `mode:"plan"` child gates mutations while reads stay frictionless. The fork
+    /// path leaves it `None`.
     #[serde(default)]
     pub mode: Option<String>,
     /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). Carried
@@ -83,6 +87,19 @@ pub struct SubagentSpawnRequest {
     /// cwd-override behavior is deferred.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// The isolation worktree `AgentTool` created for this agent
+    /// (`isolation:"worktree"`), resolved BEFORE the sync/async dispatch branch
+    /// (claude 2.1.207 runs `createAgentWorktree` before branching and threads
+    /// the handle into both). Carried so the BACKGROUND lifecycle owner (the
+    /// `local_agent` task handler) can run the terminal keep/cleanup judgment —
+    /// claude's `getWorktreeResult` closure handed to the detached task
+    /// ([`crate::worktree::agent_worktree_result`]) — since the tool returns
+    /// `async_launched` immediately and must NOT clean up at launch. The sync
+    /// path's judgment stays in `AgentTool` itself; the spawner ignores this
+    /// field. `#[serde(default)]` + skip-when-`None` so legacy serialized
+    /// payloads round-trip byte-identically (frozen-crate rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::worktree::WorktreeHandle>,
     // ===== Fork-subagent path (codex #5) =====
     // Populated ONLY on the `AgentTool` fork path (subagent_type omitted + the
     // fork gate ON). For every non-fork spawn they stay `None` and the spawner

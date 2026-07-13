@@ -101,6 +101,12 @@ impl ToolInvoker for RegistryToolInvoker {
             let check_ctx = traits::permission_gate::PermissionCheckContext {
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
+                // Per-call permission-mode override (claude-code 2.1.207 Agent
+                // `mode` → the child's `toolPermissionContext.mode`): a
+                // `mode:"plan"` subagent's dispatch authorizes under Plan so
+                // mutations are gated while reads stay frictionless. `None` for the
+                // main thread / a spawn with no override.
+                mode_override: ctx.mode_override.clone(),
                 ..Default::default()
             };
             match gate.check_with_context(name, &input, &check_ctx).await {
@@ -529,6 +535,7 @@ mod tests {
                     tool_use_id: None,
                     depth: 0,
                     parent_model: None,
+                    mode_override: None,
                 },
             )
             .await
@@ -679,6 +686,7 @@ mod tests {
             tool_use_id: None,
             depth: 0,
             parent_model: None,
+            mode_override: None,
         }
     }
 
@@ -767,6 +775,7 @@ mod tests {
             tool_use_id: None,
             depth: 0,
             parent_model: None,
+            mode_override: None,
         }
     }
 
@@ -850,6 +859,7 @@ mod tests {
             tool_use_id: Some(id.to_string()),
             depth: 0,
             parent_model: None,
+            mode_override: None,
         }
     }
 
@@ -892,6 +902,55 @@ mod tests {
         assert_eq!(worker.name, "researcher");
         assert_eq!(worker.team.as_deref(), Some("alpha"));
         assert!(worker.is_async);
+    }
+
+    #[tokio::test]
+    async fn dispatch_threads_mode_override_into_context_gate() {
+        // A spawned subagent's effective permission mode (claude-code 2.1.207
+        // Agent `mode` → the child's `toolPermissionContext.mode`) must reach the
+        // gate's PermissionCheckContext so the dispatch authorizes under that mode.
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let mut ctx = ctx_with_tool_use_id("toolu_plan");
+        ctx.mode_override = Some("plan".to_string());
+        invoker
+            .invoke("TestEcho", json!({ "a": 1 }), ctx)
+            .await
+            .expect("allow dispatches");
+        let seen = seen.lock().unwrap().clone().expect("context gate consulted");
+        assert_eq!(
+            seen.mode_override.as_deref(),
+            Some("plan"),
+            "the child's spawn mode reaches PermissionCheckContext.mode_override"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_leaves_mode_override_none_by_default() {
+        // A dispatch with no spawn-mode override leaves PermissionCheckContext
+        // untagged, so the gate uses its live/boot mode (byte-identical to before).
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        invoker
+            .invoke("TestEcho", json!({}), no_ctx())
+            .await
+            .expect("allow dispatches");
+        let seen = seen.lock().unwrap().clone().expect("context gate consulted");
+        assert_eq!(seen.mode_override, None);
     }
 
     #[tokio::test]

@@ -82,6 +82,15 @@ pub struct SubagentInvocationContext {
     /// `AgentTool.tsx:418` `toolUseContext.options.mainLoopModel`). `None` for the
     /// main thread / legacy call sites (⇒ the invoker keeps its placeholder model).
     pub parent_model: Option<String>,
+    /// The dispatching subagent's EFFECTIVE permission mode as a WIRE string
+    /// (claude-code 2.1.207 Agent `mode` → the child's
+    /// `toolPermissionContext.mode`, `wKe`/`ve`). `Some("plan")` ⇒ the dispatch
+    /// permission gate authorizes THIS call under that mode (a `mode:"plan"` child
+    /// gates mutations — `Edit`/`Write`/`Bash` — while reads stay frictionless);
+    /// `None` ⇒ the gate uses its live/boot mode (the main thread / a spawn with no
+    /// mode override — byte-identical to before). Mapped straight into
+    /// [`crate::permission_gate::PermissionCheckContext::mode_override`].
+    pub mode_override: Option<String>,
 }
 
 /// Failure modes for [`ToolInvoker::invoke`].

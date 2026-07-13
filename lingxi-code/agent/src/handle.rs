@@ -799,6 +799,10 @@ impl PoolSubagentSpawner {
             hook_cwd: std::path::PathBuf::new(),
             // Default 0; `build_subagent_context` overwrites it with `request.depth`.
             depth: 0,
+            // Set by `build_subagent_context` from the clamped spawn `mode` /
+            // definition permission mode (non-fork only). `None` = inherit the
+            // live/boot gate mode.
+            permission_mode_override: None,
         }
     }
 
@@ -974,6 +978,26 @@ impl PoolSubagentSpawner {
         // `request.cwd`. Set it on the context so the runner threads it into every
         // dispatched tool's `cwd`. `None` ⇒ the shared session workspace (legacy).
         ctx.cwd = request.cwd.as_ref().map(std::path::PathBuf::from);
+        // Per-spawn permission mode (claude-code 2.1.207 Agent `mode` → `wKe`/`ve`):
+        // clamp the requested spawn mode against the parent's live mode anchor and
+        // fall back to the agent definition's own permission mode, then thread the
+        // resulting override into the child's tool-dispatch permission checks (via
+        // `SubagentContext::permission_mode_override` → `SubagentInvocationContext`
+        // → the gate's `PermissionCheckContext`). The fork path replays the parent's
+        // rendered context verbatim, so it never applies a spawn-mode override
+        // (mirrors `AgentTool` sending `mode: None` on fork).
+        if !is_fork_spawn {
+            let requested = request
+                .mode
+                .as_deref()
+                .and_then(crate::permission_mode::parse_wire_mode);
+            ctx.permission_mode_override = crate::permission_mode::effective_child_mode(
+                requested,
+                self.permission_mode,
+                ctx.agent_definition.permission_mode,
+            )
+            .map(|m| crate::permission_mode::wire_mode_str(m).to_string());
+        }
         // A persistent (background/resumable) agent parks after each turn-set;
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;
@@ -2213,6 +2237,7 @@ mod tests {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -2256,6 +2281,7 @@ mod tests {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -2590,6 +2616,7 @@ mod tests {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -2671,6 +2698,96 @@ mod tests {
         assert!(Arc::ptr_eq(&inherit.budget, &cloned.budget));
     }
 
+    /// 2.1.207 Agent `mode`: `build_subagent_context` clamps the spawn `mode`
+    /// against the parent's live mode (`wKe`/`ve`) and threads the resulting
+    /// override into `SubagentContext.permission_mode_override`, which the runner
+    /// maps into every dispatched tool's permission check. An explicit `plan` is
+    /// honored under any parent (rank 0); an escalating mode is dropped; the fork
+    /// path never applies a spawn-mode override.
+    #[tokio::test]
+    async fn build_subagent_context_threads_spawn_mode_override() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // Parent live mode = Default (the common case).
+        let spawner = PoolSubagentSpawner::new(pool).with_permission_mode(PermissionMode::Default);
+        let mk_inherit = || SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+        let base_req = || SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: false,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: None,
+        };
+
+        // Explicit `plan` (rank 0) is honored under the Default parent.
+        let mut plan_req = base_req();
+        plan_req.mode = Some("plan".to_string());
+        let plan_ctx = spawner
+            .build_subagent_context(&plan_req, mk_inherit(), false)
+            .await;
+        assert_eq!(
+            plan_ctx.permission_mode_override.as_deref(),
+            Some("plan"),
+            "an explicit mode:\"plan\" spawn must gate the child under Plan"
+        );
+
+        // No spawn mode + a Bubble-default definition ⇒ no override (inherit the
+        // live/boot gate mode; byte-identical to pre-2.1.207).
+        let none_ctx = spawner
+            .build_subagent_context(&base_req(), mk_inherit(), false)
+            .await;
+        assert_eq!(
+            none_ctx.permission_mode_override, None,
+            "a mode-less spawn of a Bubble-default agent inherits the live mode"
+        );
+
+        // An escalating mode (bypassPermissions, rank 4) under a Default parent
+        // (rank 1) is dropped by the clamp — the child cannot escalate.
+        let mut escalate_req = base_req();
+        escalate_req.mode = Some("bypassPermissions".to_string());
+        let escalate_ctx = spawner
+            .build_subagent_context(&escalate_req, mk_inherit(), false)
+            .await;
+        assert_eq!(
+            escalate_ctx.permission_mode_override, None,
+            "a child may not escalate to bypassPermissions above a Default parent"
+        );
+
+        // The fork path replays the parent context verbatim → mode ignored even
+        // when a spawn mode is present.
+        let mut fork_req = base_req();
+        fork_req.mode = Some("plan".to_string());
+        fork_req.fork_parent_system_prompt = Some("parent prompt".to_string());
+        let fork_ctx = spawner
+            .build_subagent_context(&fork_req, mk_inherit(), false)
+            .await;
+        assert_eq!(
+            fork_ctx.permission_mode_override, None,
+            "the fork path never applies a spawn-mode override"
+        );
+    }
+
     /// local_agent "resume" Phase 1: `build_subagent_context(persistent=true)`
     /// sets `SubagentContext.persistent` + `is_async`, so the runner "comes to
     /// rest" (parks awaiting the next inbound message) after each turn-set
@@ -2694,6 +2811,7 @@ mod tests {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -2768,6 +2886,7 @@ mod tests {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -2960,6 +3079,7 @@ mod tests {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,

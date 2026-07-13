@@ -233,6 +233,22 @@ pub fn emit_loop_dynamic_wakeup_scheduled(
     );
 }
 
+/// Emit `tengu_uncompilable_ignore_pattern` with its `site`.
+///
+/// PARITY: binary helper `oeg(site, pattern)` fires
+/// `N("tengu_uncompilable_ignore_pattern",{site:neg[site]})` after warn-logging
+/// the un-compilable pattern. `site` is one of
+/// [`crate::tengu::ignore_pattern::SITES`] (e.g.
+/// [`crate::tengu::ignore_pattern::SITE_WORKTREEINCLUDE`]). The offending
+/// pattern + compile error are surfaced by the caller's own `warn` log, not
+/// this event's payload (matching CC, whose analytics payload is `{site}` only).
+pub fn emit_uncompilable_ignore_pattern(site: &'static str) {
+    tracing::info!(
+        event = crate::tengu::ignore_pattern::UNCOMPILABLE_IGNORE_PATTERN,
+        site = site,
+    );
+}
+
 // -- M5-14 Task 10: release-marker emit-once helpers -------------------------
 
 /// Emit the release markers exactly once per process lifetime.

@@ -793,6 +793,20 @@ impl TeamSpawnSeam for TaskRegistry {
                 other => TeamSpawnError::Internal(other.to_string()),
             })
     }
+
+    /// A teammate task is ALIVE while its stored state is present and
+    /// non-terminal. A terminal status (Completed / Failed / Killed) OR an
+    /// evicted (since-terminal) task both read as "gone" — the mailbox→runner
+    /// pump uses this on its park timeout to stop pumping a dead teammate (so
+    /// its mailbox can be unregistered) even if no message ever arrived to
+    /// surface `Terminated`. A resting PERSISTENT agent keeps a non-terminal
+    /// (Running) status, so it correctly reads as alive.
+    async fn is_alive(&self, task_id: &str) -> bool {
+        match self.get(task_id).await {
+            Some(state) => !state.base().status.is_terminal(),
+            None => false,
+        }
+    }
 }
 
 /// Map a [`TaskError`] from the inherent spawn/kill path onto the narrow

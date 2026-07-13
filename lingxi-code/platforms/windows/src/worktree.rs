@@ -191,6 +191,16 @@ impl WorktreeManager for WindowsWorktreeManager {
                 .map_err(|e| WorktreeError::Io(e.to_string()))?;
         }
 
+        // Post-create `.worktreeinclude` copy — claude-code 2.1.207's
+        // `copyWorktreeIncludeFiles` (fn `TZc`), the last step of the shared
+        // post-create setup `H6i` that runs for BOTH the agent-isolation
+        // worktree and the `--worktree` session flow. Copies the git-ignored
+        // files the repo's `.worktreeinclude` selects (e.g. `.env`, `secrets/`)
+        // into the fresh worktree. Best-effort/infallible, so it never fails a
+        // successful `git worktree add`; runs alongside the literal
+        // `copy_includes` above (which serves the EnterWorktree tool's input).
+        platform_common::copy_worktree_include_files(&self.repo_root, &worktree_path).await;
+
         // Capture the worktree's initial HEAD — claude-code's
         // `originalHeadCommit` — so `worktree_change_summary` can count
         // ahead-commits (`rev-list --count <base>..HEAD`) and a

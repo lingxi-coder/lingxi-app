@@ -485,6 +485,7 @@ impl InProcessTeammateHandler {
             hook_session_id: self.hook_session_id,
             hook_cwd: self.hook_cwd.clone(),
             depth: 0,
+            permission_mode_override: None,
         }
     }
 }

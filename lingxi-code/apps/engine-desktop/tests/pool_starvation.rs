@@ -184,6 +184,7 @@ fn parked_teammate_ctx() -> SubagentContext {
         hook_session_id: protocol::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
         depth: 0,
+        permission_mode_override: None,
     }
 }
 
@@ -217,6 +218,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         mode: None,
         isolation: None,
         cwd: None,
+        worktree: None,
         fork_context_messages: None,
         fork_parent_system_prompt: None,
         schema: None,

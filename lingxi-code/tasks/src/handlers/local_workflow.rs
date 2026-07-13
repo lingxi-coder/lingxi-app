@@ -419,6 +419,7 @@ fn make_request(
         mode: None,
         isolation: opt_str("isolation"),
         cwd: None,
+        worktree: None,
         fork_context_messages: None,
         fork_parent_system_prompt: None,
         // `agent(prompt, { schema })` → structured output. The opt is a JSON

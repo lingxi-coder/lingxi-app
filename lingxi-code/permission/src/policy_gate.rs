@@ -448,7 +448,15 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        let (mode, result) = self.effective_authorize(name, input);
+        // A PER-CALL mode override (a spawned subagent's clamped spawn mode,
+        // claude-code 2.1.207 `ve` → the child's `toolPermissionContext.mode`)
+        // authorizes THIS call under that mode; else the live/boot mode. Only this
+        // dispatch seam reads it, so the shared gate's mode is never mutated (the
+        // parent's own checks are unaffected).
+        let (mode, result) = match ctx.mode_override.as_deref().and_then(parse_settable_mode) {
+            Some(m) => (m, self.policy.authorize_with_mode(name, input, m)),
+            None => self.effective_authorize(name, input),
+        };
         self.decide_outcome_with_context(mode, result, name, input, ctx)
             .await
     }

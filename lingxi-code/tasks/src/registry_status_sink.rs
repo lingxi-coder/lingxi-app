@@ -78,4 +78,18 @@ impl TaskStatusSink for RegistryStatusSink {
             reg.mark_rested(task_id, result, usage).await;
         }
     }
+
+    /// Consult the stored task status so `drain_pending_kills` can skip flipping
+    /// an already-terminal task to `Killed`. An unbound sink, an unknown/evicted
+    /// task, or a lookup error all read as "not terminal" (`false`) — a
+    /// since-evicted terminal task's `set_status` is already a benign `NotFound`
+    /// no-op, so nothing is clobbered either way.
+    async fn is_terminal(&self, task_id: &str) -> bool {
+        if let Some(reg) = self.registry.get() {
+            if let Ok(Some(rec)) = reg.get(task_id).await {
+                return matches!(rec.status.as_str(), "completed" | "failed" | "killed");
+            }
+        }
+        false
+    }
 }

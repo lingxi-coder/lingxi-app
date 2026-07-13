@@ -137,8 +137,19 @@ impl SubagentSpawner for BackgroundAgentSpawner {
 
         // 3. Start the mailbox→runner pump (the injectUserMessageToTeammate
         //    bridge): drains the mailbox into registry.send_message(task_id).
+        //    The pump now RETURNS once the backgrounded agent reaches a terminal
+        //    state (via the seam's `is_alive` liveness re-check); wrap it so that
+        //    on return the mailbox + name index are unregistered — otherwise a
+        //    terminated agent leaks its route and a later `SendMessage` silently
+        //    queues into an undrained inbox. This mirrors claude-code tearing
+        //    down async-agent state on termination.
         let seam: Arc<dyn TeamSpawnSeam> = self.registry.clone();
-        let pump = Box::pin(run_teammate_pump(mailbox, task_id.clone(), seam));
+        let router = self.mailbox_router.clone();
+        let pump_task_id = task_id.clone();
+        let pump = Box::pin(async move {
+            run_teammate_pump(mailbox, pump_task_id, seam).await;
+            router.unregister(&agent_id).await;
+        });
         let _ = self.runtime.spawn("bg-agent-pump", pump).await;
 
         // The spool the handler already allocated (deterministic from task_id).
@@ -174,8 +185,14 @@ mod tests {
 
     /// Records the `is_backgrounded` flag the decorator spawned with, returning
     /// a fixed task id (the spool path is pure `path_for`, so no I/O needed).
+    /// Reports `supports_messages` and answers `send_message` with a scripted
+    /// [`TaskError`] so a test can drive the pump's terminal-stop path.
     struct RecordingHandler {
         seen_backgrounded: Arc<StdMutex<Option<bool>>>,
+        /// When `true`, `send_message` returns [`TaskError::TerminatedTask`]
+        /// (the "runner is gone" signal) so a delivered message drives the pump
+        /// to stop → the decorator unregisters the mailbox.
+        terminate_on_message: bool,
     }
     #[async_trait]
     impl Task for RecordingHandler {
@@ -203,6 +220,21 @@ mod tests {
         }
         async fn kill(&self, _task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
             Ok(())
+        }
+        fn supports_messages(&self) -> bool {
+            self.terminate_on_message
+        }
+        async fn send_message(
+            &self,
+            _task_id: &str,
+            _message: String,
+            _ctx: TaskContext,
+        ) -> Result<(), TaskError> {
+            if self.terminate_on_message {
+                Err(TaskError::TerminatedTask)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -261,6 +293,7 @@ mod tests {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -292,6 +325,7 @@ mod tests {
             TaskType::LocalAgent,
             Arc::new(RecordingHandler {
                 seen_backgrounded: seen.clone(),
+                terminate_on_message: false,
             }),
         );
         let registry = Arc::new(reg);
@@ -335,6 +369,92 @@ mod tests {
             launch.output_file.contains("a-bg-test-1"),
             "output_file is the spawned task's spool path: {}",
             launch.output_file
+        );
+    }
+
+    /// When the backgrounded agent terminates, the pump stops and the decorator
+    /// UNREGISTERS its mailbox + name index — so a later `SendMessage` resolves
+    /// to "not found" instead of silently queueing into an undrained inbox
+    /// (claude-code tears down async-agent state on termination). Here a
+    /// delivered message maps to `Terminated`, driving the pump to stop.
+    #[tokio::test]
+    async fn spawn_async_unregisters_mailbox_when_agent_terminates() {
+        use coordinator::mailbox::{MessageSender, TeammateMessage};
+
+        let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(PosixFileSystem::new(PathBuf::from(dir.path())));
+        let output_manager = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let mut reg = TaskRegistry::new(runtime.clone(), fs, output_manager);
+        let seen = Arc::new(StdMutex::new(None));
+        reg.register_handler(
+            TaskType::LocalAgent,
+            Arc::new(RecordingHandler {
+                seen_backgrounded: seen.clone(),
+                // A delivered message ⇒ TerminatedTask ⇒ the pump stops.
+                terminate_on_message: true,
+            }),
+        );
+        let registry = Arc::new(reg);
+        let mailbox_router = Arc::new(MailboxRouter::new());
+
+        let deco = BackgroundAgentSpawner {
+            inner: Arc::new(InertSpawner),
+            registry,
+            mailbox_router: mailbox_router.clone(),
+            runtime,
+        };
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(MockInvoker),
+            budget: Arc::new(MockBudget),
+        };
+
+        let launch = deco
+            .spawn_async(request(Some("bg2")), inherit)
+            .await
+            .expect("spawn_async should succeed");
+
+        // Precondition: the mailbox + name index are registered.
+        assert!(mailbox_router.get(&launch.agent_id).await.is_some());
+        assert_eq!(
+            mailbox_router.resolve_name("bg2").await,
+            Some(launch.agent_id)
+        );
+
+        // Deliver a message: the pump forwards it → TerminatedTask → the pump
+        // stops → the wrapper unregisters the mailbox + name.
+        mailbox_router
+            .route(
+                &launch.agent_id,
+                TeammateMessage {
+                    from: MessageSender::Coordinator,
+                    content: "die".to_string(),
+                    message_id: "m-1".to_string(),
+                    timestamp: std::time::SystemTime::now(),
+                    request_id: None,
+                },
+            )
+            .await
+            .expect("route delivers into the registered mailbox");
+
+        // The pump runs on the mock runtime's tokio task; poll until the route
+        // and name index are torn down.
+        let mut gone = false;
+        for _ in 0..400 {
+            if mailbox_router.get(&launch.agent_id).await.is_none() {
+                gone = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(gone, "mailbox unregistered after the agent terminated");
+        assert_eq!(
+            mailbox_router.resolve_name("bg2").await,
+            None,
+            "name index cleared after the agent terminated"
         );
     }
 }

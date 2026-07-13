@@ -1050,3 +1050,90 @@ async fn install_records_to_installed_plugins_json_and_is_rediscovered() {
         "re-discovered plugin's command should register"
     );
 }
+
+/// A plugin declaring a `userConfig` (one sensitive + one defaulted
+/// non-sensitive field) plus an `.mcp.json` whose command/args/env reference
+/// `${user_config.*}`.
+fn write_userconfig_mcp_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
+    let plugin_dir = root.join(dir_name);
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+        format!(
+            r#"{{"name":"{plugin_name}","version":"1.0.0","userConfig":{{"API_TOKEN":{{"description":"token","sensitive":true,"required":true}},"REGION":{{"description":"region","sensitive":false,"required":false,"default":"us-east"}}}}}}"#
+        ),
+    )
+    .unwrap();
+    fs::write(
+        plugin_dir.join(".mcp.json"),
+        r#"{"mcpServers":{"api":{"command":"echo","args":["--region","${user_config.REGION}"],"env":{"TOKEN":"${user_config.API_TOKEN}","R":"${user_config.REGION}"}}}}"#,
+    )
+    .unwrap();
+}
+
+/// P2-06: a plugin's resolved `userConfig` (sensitive value from secure
+/// storage, non-sensitive value from the field `default`) is SUBSTITUTED into
+/// its scoped MCP server config — the consumption path the loader stub used to
+/// drop. Verified through the real `enable` → `connect_all` path by reading the
+/// stored connection config back out of the registry.
+#[tokio::test]
+async fn enable_substitutes_user_config_into_scoped_mcp_env() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_userconfig_mcp_plugin(tmp.path(), "uc", "ucplugin");
+
+    let mcp_registry = Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new())));
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    // Sensitive value lives ONLY in secure storage, keyed by the plugin name.
+    credentials
+        .set_plugin_secret("ucplugin", "API_TOKEN", "sk-live-secret")
+        .await
+        .unwrap();
+
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials.clone(),
+        Arc::new(PluginBlocklist::new(String::new())),
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        Arc::new(RwLock::new(CommandRegistry::new())),
+        Arc::new(RwLock::new(SkillRegistry::new())),
+        Arc::new(RwLock::new(HookRegistry::new())),
+        Arc::new(RwLock::new(OutputStyleRegistry::new())),
+        mcp_registry.clone(),
+        Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+        Arc::new(RwLock::new(ToolRegistry::new())),
+    );
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+    // The manifest actually carried the parsed userConfig schema.
+    assert!(manifest.user_config.is_some(), "userConfig parsed from plugin.json");
+
+    manager.enable(&id, manifest, dir).await.expect("enable");
+
+    // Read the stored scoped config back and confirm every ${user_config.*}
+    // reference was substituted (sensitive from storage, non-sensitive default).
+    let conns = mcp_registry.connections.read().await;
+    let state = conns
+        .get("plugin:ucplugin:api")
+        .expect("scoped MCP server materialized");
+    let cfg = serde_json::to_value(state.config()).unwrap();
+    let stdio = &cfg["spec"]["Stdio"];
+    assert_eq!(stdio["env"]["TOKEN"], "sk-live-secret", "sensitive from secure storage");
+    assert_eq!(stdio["env"]["R"], "us-east", "non-sensitive from default");
+    assert_eq!(stdio["args"][1], "us-east", "arg substituted");
+    // The literal template must NOT survive anywhere.
+    assert!(
+        !cfg.to_string().contains("${user_config."),
+        "no unsubstituted ${{user_config.*}} token should remain: {cfg}"
+    );
+}

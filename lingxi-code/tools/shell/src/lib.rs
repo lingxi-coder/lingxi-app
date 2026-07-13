@@ -44,27 +44,35 @@ pub use repl::REPLTool;
 /// call [`register_all_with_cwd_firer`] instead. The mobile composition root
 /// never registers these shell tools at all.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
-    register_all_with_cwd_firer(reg, ctx, None);
+    register_all_with_cwd_firer(reg, ctx, None, None);
 }
 
 /// Register Bash, PowerShell, and REPL tools against `reg`, attaching an
-/// optional `CwdChanged` hook firer to the `BashTool`.
+/// optional `CwdChanged` hook firer AND an optional shared live-cwd cell to the
+/// `BashTool`.
 ///
 /// When `cwd_changed_firer` is `Some(..)`, a foreground `cd` inside a Bash call
 /// that moves the persistent shell cwd fires the `CwdChanged` hook (1:1
-/// `onCwdChangedForHooks`, `Shell.ts:409`). When `None`, the `BashTool` is
-/// byte-identical to the plain [`register_all`] path. Only `BashTool` carries
-/// the firer; PowerShell / REPL are unaffected.
+/// `onCwdChangedForHooks`, `Shell.ts:409`). When `live_cwd` is `Some(..)`, that
+/// cell becomes the `BashTool`'s persistent shell cwd, so a `cd` writes the SAME
+/// live cwd (`getCwd()`/`setCwdState`) the file/search/LSP tools and the
+/// orchestrator read (see [`BashTool::with_live_cwd`]). When both are `None`, the
+/// `BashTool` is byte-identical to the plain [`register_all`] path. Only
+/// `BashTool` is affected; PowerShell / REPL are unchanged.
 pub fn register_all_with_cwd_firer(
     reg: &mut tool_api::ToolRegistry,
     ctx: tool_api::BuiltinToolContext,
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
+    live_cwd: Option<tool_api::LiveCwdCell>,
 ) {
     use std::sync::Arc;
-    let bash = match cwd_changed_firer {
-        Some(firer) => BashTool::new(ctx.clone()).with_cwd_changed_firer(firer),
-        None => BashTool::new(ctx.clone()),
-    };
+    let mut bash = BashTool::new(ctx.clone());
+    if let Some(firer) = cwd_changed_firer {
+        bash = bash.with_cwd_changed_firer(firer);
+    }
+    if let Some(cell) = live_cwd {
+        bash = bash.with_live_cwd(cell);
+    }
     reg.register_builtin(Arc::new(bash));
     reg.register_builtin(Arc::new(PowerShellTool::new(ctx.clone())));
     // REPL is experimental and default-OFF (claude-code 2.1.206 `kO()`): only

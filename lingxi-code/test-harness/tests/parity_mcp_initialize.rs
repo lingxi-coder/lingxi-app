@@ -8,8 +8,10 @@
 //! - `clientInfo.title = "LingXi"` (literal),
 //! - `clientInfo.websiteUrl = "https://claude.com/claude-code"` (literal),
 //! - `clientInfo.version = env!("CARGO_PKG_VERSION")` of `lingxi-mcp`,
-//! - `capabilities.roots` and `capabilities.elicitation` are the LITERAL
-//!   empty objects `{}` (NOT null, NOT missing). The Java MCP SDK rejects
+//! - `capabilities.roots` is `{listChanged:true}` (parity 2.1.207 `J7n()`:
+//!   the client advertises it will send `notifications/roots/list_changed`
+//!   when its working-dir set changes) and `capabilities.elicitation` is the
+//!   LITERAL empty object `{}` (NOT null, NOT missing). The Java MCP SDK rejects
 //!   `{form:{},url:{}}` for elicitation, so we must emit a bare `{}`.
 
 use mcp::initialize_params::InitializeParams;
@@ -62,12 +64,12 @@ fn mcp_initialize_request_matches_claude_code_identity() {
         "version must come from CARGO_PKG_VERSION via CLIENT_VERSION",
     );
 
-    // Capabilities: roots and elicitation are LITERALLY empty objects.
+    // Capabilities: roots is {listChanged:true}, elicitation is a literal {}.
     let caps = &got["capabilities"];
     assert!(caps.is_object(), "capabilities must be an object");
     assert_eq!(
         caps["roots"], fx.expected_capabilities_shape["roots"],
-        "capabilities.roots must be the literal empty object (not null, not missing)",
+        "capabilities.roots must be {{\"listChanged\":true}} (parity 2.1.207 J7n())",
     );
     assert_eq!(
         caps["elicitation"],

@@ -133,6 +133,18 @@ pub struct HookResponse {
     /// original."). Additive default `None`. TODO: wire at the render site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_content: Option<String>,
+    /// `hookSpecificOutput.watchPaths` returned by a `FileChanged` / `CwdChanged`
+    /// hook (claude-code `parseHookJSONOutput`: `"watchPaths" in
+    /// e.hookSpecificOutput && e.hookSpecificOutput.watchPaths`). A hook may add
+    /// paths to the file-changed watch set; the desktop watcher restarts over
+    /// the union when the folded set is non-empty (`fileChangedWatcher.ts`'s
+    /// `if (v.length > 0) updateWatchPaths(v)`), and the `CwdChanged` flow
+    /// re-resolves them against the new cwd. Present-key capture: an empty array
+    /// is still `Some(vec![])` (JS arrays are always truthy), distinguishing it
+    /// from an absent key (`None`); a non-array value is ignored. Additive
+    /// default `None`, so hooks that omit it leave the watch set untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_paths: Option<Vec<String>>,
 }
 
 /// Structured elicitation answer a hook can return, mirroring claude-code's
@@ -319,4 +331,13 @@ pub struct AggregateHookResult {
     /// affecting the stored message). `None` when no hook set it.
     /// TODO: wire the display-override at the message-display render site.
     pub display_content: Option<String>,
+    /// Every `hookSpecificOutput.watchPaths` entry folded from the `FileChanged`
+    /// / `CwdChanged` hook results, in execution order (claude-code `v3r` / `E3r`
+    /// return `{ results, watchPaths, systemMessages }`, where `watchPaths` is
+    /// the concatenation of each fired hook's `hookSpecificOutput.watchPaths`).
+    /// The desktop file-changed watcher restarts over the union when non-empty
+    /// (`if (v.length > 0) updateWatchPaths(v)`); an empty vec leaves the watch
+    /// set unchanged. Additive default empty, so callers with no such hook are
+    /// unaffected (byte-identical).
+    pub watch_paths: Vec<String>,
 }

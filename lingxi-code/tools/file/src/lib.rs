@@ -199,14 +199,41 @@ pub fn check_read_before_write(
 /// `MultiEditTool` is name-routed into Edit dispatch (claude-code parity) and
 /// registered here alongside the other built-ins.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    register_all_with_live_cwd(reg, ctx, None);
+}
+
+/// Register all seven file/search tools, injecting an optional shared live-cwd
+/// cell (claude-code `getCwd()`/`Ct()`) into the tools that read the live cwd:
+/// `Read` (the "File does not exist" note), `Glob`, and `Grep` (their default
+/// search dir, "does not exist" notes, and result relativization). When `None`
+/// (mobile / offline factory), every tool falls back to `ctx.workspace` —
+/// byte-identical to [`register_all`]. The three write/edit tools and Notebook
+/// take no cwd cell (they resolve absolute/trusted paths only).
+pub fn register_all_with_live_cwd(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    live_cwd: Option<tool_api::LiveCwdCell>,
+) {
     use std::sync::Arc;
-    reg.register_builtin(Arc::new(FileReadTool::new(ctx.clone())));
+    let read = match &live_cwd {
+        Some(cell) => FileReadTool::new(ctx.clone()).with_live_cwd(cell.clone()),
+        None => FileReadTool::new(ctx.clone()),
+    };
+    reg.register_builtin(Arc::new(read));
     reg.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(MultiEditTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
-    reg.register_builtin(Arc::new(GlobTool::new(ctx.clone())));
-    reg.register_builtin(Arc::new(GrepTool::new(ctx)));
+    let glob = match &live_cwd {
+        Some(cell) => GlobTool::new(ctx.clone()).with_live_cwd(cell.clone()),
+        None => GlobTool::new(ctx.clone()),
+    };
+    reg.register_builtin(Arc::new(glob));
+    let grep = match live_cwd {
+        Some(cell) => GrepTool::new(ctx).with_live_cwd(cell),
+        None => GrepTool::new(ctx),
+    };
+    reg.register_builtin(Arc::new(grep));
 }
 
 #[cfg(test)]

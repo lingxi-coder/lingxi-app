@@ -575,6 +575,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: self.body.clone(),
+                body_bytes: Vec::new(),
             })
         }
 

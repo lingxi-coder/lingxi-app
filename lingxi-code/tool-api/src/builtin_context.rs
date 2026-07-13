@@ -37,6 +37,20 @@ use traits::tts::TextToSpeech;
 use traits::voice::VoiceRecorder;
 use traits::worktree::WorktreeManager;
 
+/// A shared, live "current working directory" cell — the `getCwd()` /
+/// `setCwdState` analog (claude-code's single session-global `Pt.cwd`).
+///
+/// The desktop `BashTool` is the single writer: a foreground `cd` commits the
+/// post-`cd` directory here (via its `pwd -P` readback), and the file/search/LSP
+/// tools READ it as their live cwd — matching claude-code, where Glob's default
+/// dir, the Glob/Grep/Read "does not exist" cwd notes, and the LSP root all read
+/// live `Ct()`. Injected via each tool's `with_live_cwd` builder rather than as a
+/// [`BuiltinToolContext`] field: that struct is built by a full literal in the
+/// FORBIDDEN `engine-mobile` code, so a new field would break it. Tools with no
+/// cell injected (mobile, tests) fall back to [`BuiltinToolContext::workspace`]
+/// — byte-identical to the pre-cell behavior.
+pub type LiveCwdCell = Arc<std::sync::Mutex<PathBuf>>;
+
 /// Static surface every builtin tool needs at construction time.
 ///
 /// Cloning is cheap — every field is `Arc` or a small owned vec.
@@ -249,6 +263,22 @@ pub struct BuiltinToolContext {
     /// by the TUI, so `/sandbox` flips sandboxing for the live session and the
     /// bash tool's next command observes it via [`Self::effective_sandbox_runtime`].
     pub sandbox_enabled_override: Option<Arc<std::sync::atomic::AtomicBool>>,
+
+    /// Mirror of `settings.skipWebFetchPreflight` (CC 2.1.207 zod:
+    /// `skipWebFetchPreflight:E.boolean().optional().describe("Skip the WebFetch
+    /// blocklist check for enterprise environments with restrictive security
+    /// policies")`). When `true`, `WebFetchTool` skips the domain-blocklist
+    /// preflight entirely — the enterprise escape hatch for hosts whose network
+    /// policy blocks outbound connections to `claude.ai`/`api.anthropic.com`
+    /// (binary `if(!Mi().skipWebFetchPreflight)switch((await DSd(g)).status){…}`;
+    /// leaked `utils.ts:423-424`). Populated at the two live composition roots
+    /// (`engine-desktop` + `engine-mobile`) from the merged `settings.json`;
+    /// `false` at every non-live / test construction site (frozen behavior).
+    ///
+    /// RESIDUAL: CC re-reads the live merged setting on every fetch (hot-reloads
+    /// on a settings change); this bool is frozen at tool registration. A
+    /// provider closure would be needed to close that minor divergence.
+    pub skip_web_fetch_preflight: bool,
 }
 
 impl BuiltinToolContext {

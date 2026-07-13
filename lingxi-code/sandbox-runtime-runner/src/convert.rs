@@ -30,6 +30,22 @@
 //!   verbatim.
 //! - **`enable_weaker_nested_sandbox` / `enable_weaker_network_isolation`** —
 //!   engine `bool` → runtime `Option<bool>` as `Some(bool)`.
+//! - **`allow_apple_events`** — engine `bool` → runtime `Option<bool>` as
+//!   `Some(bool)`. Forwarded so the manager emits the macOS Apple Events block
+//!   (`appleevent-send` + the `appleeventsd` mach-lookup + `lsopen`). claude-code
+//!   parity: the sandbox-adapter sets `allowAppleEvents` on the srt config it
+//!   initializes (2.1.207 @223928133) and the manager reads it (@216407085
+//!   `Bjh(){return Cl?.allowAppleEvents}`). Before this, the live runner dropped
+//!   it (`None` ⇒ manager reads `false`), so sandboxed `open`/`osascript`/
+//!   browser-auth could never be enabled — a real behavioral gap vs CC.
+//! - **`allow_pty`** — INTENTIONALLY left `None`. claude-code has NO `allowPty`
+//!   settings key (2.1.207 @212793011 zod schema / @212939769 settings-key
+//!   allowlist both omit it), and its sandbox-adapter never forwards one into the
+//!   srt config — all 7 binary `allowPty` occurrences are internal to the
+//!   vendored sandbox-runtime package, so in real CC usage it is always undefined
+//!   ⇒ false. Forwarding the engine field here would be ANTI-parity. Only the
+//!   legacy SBPL wrap path (`sandbox::wrap`) honors the engine field, for callers
+//!   that set it directly.
 //! - **`bwrap_path` / `socat_path`** — the engine config has NO such fields, so
 //!   the runtime values are left `None` (the manager falls back to `$PATH`).
 //!
@@ -105,9 +121,17 @@ pub fn to_runtime_config(engine: &EngineConfig) -> RuntimeConfig {
         },
         enable_weaker_nested_sandbox: Some(engine.enable_weaker_nested_sandbox),
         enable_weaker_network_isolation: Some(engine.enable_weaker_network_isolation),
-        allow_apple_events: None,
+        // Forward the engine's resolved allowAppleEvents so the manager emits the
+        // macOS Apple Events block. claude-code parity: the sandbox-adapter sets
+        // `allowAppleEvents` on the srt config (2.1.207 @223928133) and the
+        // manager reads it (@216407085). See the module mapping notes.
+        allow_apple_events: Some(engine.allow_apple_events),
         ripgrep: Some(ripgrep),
         mandatory_deny_search_depth: None,
+        // KEEP `None`: claude-code's sandbox-adapter NEVER forwards `allowPty`
+        // into the srt config (it has no `allowPty` settings key — 2.1.207
+        // @212793011 / @212939769). Forwarding the engine field would be
+        // anti-parity. See the module mapping notes.
         allow_pty: None,
         seccomp: None,
         // Engine config has no bwrap/socat path overrides — fall back to $PATH.
@@ -260,6 +284,44 @@ mod tests {
     fn ignore_violations_none_when_empty() {
         let rt = to_runtime_config(&EngineConfig::default());
         assert!(rt.ignore_violations.is_none());
+    }
+
+    #[test]
+    fn forwards_allow_apple_events_true() {
+        // Engine allowAppleEvents=true must reach the srt config as Some(true) so
+        // the manager emits the macOS Apple Events block (CC parity @223928133).
+        let mut engine = engine_full();
+        engine.allow_apple_events = true;
+        let rt = to_runtime_config(&engine);
+        assert_eq!(rt.allow_apple_events, Some(true));
+    }
+
+    #[test]
+    fn forwards_allow_apple_events_default_false() {
+        // Default engine ⇒ Some(false), matching the Some(bool) convention used
+        // for enable_weaker_*.
+        let rt = to_runtime_config(&EngineConfig::default());
+        assert_eq!(rt.allow_apple_events, Some(false));
+    }
+
+    #[test]
+    fn allow_pty_always_none_regardless_of_engine() {
+        // CC-parity guard: claude-code's sandbox-adapter has NO `allowPty`
+        // settings key and never forwards one into the srt config (all 7 binary
+        // `allowPty` hits are internal to the vendored sandbox-runtime package —
+        // 2.1.207 @212793011 / @212939769). The live runner must therefore leave
+        // `allow_pty: None` even when the engine field is set. Forwarding it would
+        // be anti-parity; do NOT "fix" this into `Some(engine.allow_pty)`.
+        let mut engine = engine_full();
+        engine.allow_pty = true;
+        let rt = to_runtime_config(&engine);
+        assert!(
+            rt.allow_pty.is_none(),
+            "allow_pty must stay None to match CC (adapter never forwards allowPty)"
+        );
+        assert!(to_runtime_config(&EngineConfig::default())
+            .allow_pty
+            .is_none());
     }
 
     #[test]

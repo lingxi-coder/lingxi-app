@@ -223,6 +223,7 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
         status: 200,
         headers: vec![],
         body: String::new(),
+        body_bytes: Vec::new(),
     }));
 
     let runtime = Arc::new(MockRuntimeSpawner::default());

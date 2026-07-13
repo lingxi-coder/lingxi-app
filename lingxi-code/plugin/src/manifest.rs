@@ -86,9 +86,10 @@ pub struct ComponentPath {
 
 /// User-config schema declared by a plugin.
 ///
-/// Sensitive fields are routed through [`secret::CredentialManager`];
-/// non-sensitive required fields are pulled from
-/// [`PluginManifest::settings`] at load time.
+/// Sensitive fields are routed through [`secret::CredentialManager`]'s
+/// plugin-secret storage; non-sensitive values are pulled from the settings-file
+/// `pluginConfigs[plugin].options` map (falling back to a field's declared
+/// `default`) at load time. See [`crate::loader::resolve_user_config`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserConfigSchema {
     /// Map of field name to declared field.
@@ -96,14 +97,62 @@ pub struct UserConfigSchema {
 }
 
 /// One declared user-config field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserConfigField {
     /// Help text for the host UI.
+    #[serde(default)]
     pub description: String,
     /// If `true` the value is fetched through the secret-storage backend.
+    #[serde(default)]
     pub sensitive: bool,
     /// If `true` the loader fails when the value is missing.
+    #[serde(default)]
     pub required: bool,
+    /// Optional default value applied when no configured value is present
+    /// (non-sensitive only — secrets are never defaulted). Mirrors claude-code's
+    /// `if(p.default!==void 0)u[d]=p.default` substitution-context seeding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
+/// A plugin's persisted `userConfig` state at one settings scope: the
+/// on-disk `pluginConfigs[plugin]` object.
+///
+/// Byte-parity with claude-code's zod
+/// `pluginConfigs:record(string,object({mcpServers,options}))`: `options` holds
+/// top-level non-sensitive userConfig values; `mcp_servers` holds per-server
+/// overrides keyed by logical server name. Sensitive values are NEVER stored
+/// here — they live in secure storage (see [`secret::CredentialManager`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginUserConfig {
+    /// Top-level non-sensitive userConfig values (`options`).
+    #[serde(default)]
+    pub options: serde_json::Map<String, serde_json::Value>,
+    /// Per-server non-sensitive overrides (`mcpServers[server]`).
+    #[serde(rename = "mcpServers", default)]
+    pub mcp_servers: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+}
+
+impl PluginUserConfig {
+    /// Extract the `pluginConfigs` map from a settings-file JSON object (the
+    /// shape [`migrations::settings_update::read_settings_map`] returns),
+    /// yielding `plugin-id -> PluginUserConfig`. Missing / malformed entries are
+    /// skipped. This is the read side of the settings `pluginConfigs` scope.
+    #[must_use]
+    pub fn from_settings_map(
+        settings: &serde_json::Map<String, serde_json::Value>,
+    ) -> HashMap<String, PluginUserConfig> {
+        let mut out = HashMap::new();
+        let Some(configs) = settings.get("pluginConfigs").and_then(|v| v.as_object()) else {
+            return out;
+        };
+        for (plugin, entry) in configs {
+            if let Ok(parsed) = serde_json::from_value::<PluginUserConfig>(entry.clone()) {
+                out.insert(plugin.clone(), parsed);
+            }
+        }
+        out
+    }
 }
 
 /// A channel the plugin binds to an MCP server.

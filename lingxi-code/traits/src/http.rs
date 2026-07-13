@@ -195,7 +195,15 @@ pub trait HttpTransport: Send + Sync {
                 body: resp.body,
             });
         }
-        Ok(Box::pin(OnceBytes(Some(Ok(resp.body.into_bytes())))))
+        // Prefer the raw wire bytes when the transport captured them; fall back
+        // to re-encoding the (lossy) String body for producers that set only
+        // `body` (test mocks, non-transport producers).
+        let bytes = if resp.body_bytes.is_empty() {
+            resp.body.into_bytes()
+        } else {
+            resp.body_bytes
+        };
+        Ok(Box::pin(OnceBytes(Some(Ok(bytes)))))
     }
 
     /// Open a raw byte stream, also capturing the HTTP status and response
@@ -315,6 +323,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 body: "hello".to_string(),
+                body_bytes: Vec::new(),
             })
         }
         async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -391,6 +400,7 @@ mod tests {
                     status: 301,
                     headers: vec![("location".to_string(), "https://other.example/".to_string())],
                     body: String::new(),
+                    body_bytes: Vec::new(),
                 })
             }
             async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {

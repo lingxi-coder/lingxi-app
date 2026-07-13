@@ -73,6 +73,7 @@ impl HttpTransport for MockHttp {
             status: canned.status,
             headers: vec![],
             body: canned.body,
+            body_bytes: Vec::new(),
         })
     }
 

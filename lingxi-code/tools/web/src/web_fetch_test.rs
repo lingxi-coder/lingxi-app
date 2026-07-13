@@ -314,7 +314,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     /// Serializes every test that touches the process-global
     /// `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var. The skip test *sets* it; the
-    /// preflight-dependent `call()` tests *read* it (via `skip_web_fetch_preflight`)
+    /// preflight-dependent `call()` tests *read* it (via `skip_web_fetch_preflight_env`)
     /// and would be corrupted if the skip test's mutation leaked into them while
     /// running in parallel. Mirrors the `HOME_LOCK` env-isolation idiom. A tokio
     /// mutex (not `std`) keeps the guard `Send` across the `.await` points in the
@@ -343,6 +343,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status,
             headers: vec![],
             body: body.to_string(),
+            body_bytes: Vec::new(),
         })
     }
 
@@ -450,6 +451,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 429,
             headers: vec![("Retry-After".into(), "30".into())],
             body: String::new(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let result = tool
@@ -580,10 +582,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .expect("must have user-agent header");
-        // R-V1: UA carries the claude-code parity-target version (2.1.206), not
+        // R-V1: UA carries the claude-code parity-target version (2.1.207), not
         // LingXi's CARGO_PKG_VERSION.
         assert_eq!(
-            ua_value, "Claude-User (claude-code/2.1.206; +https://support.anthropic.com/)",
+            ua_value, "Claude-User (claude-code/2.1.207; +https://support.anthropic.com/)",
             "WebFetch UA must be claude-code's `Claude-User (...)` form with the parity version"
         );
     }
@@ -966,8 +968,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
         std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
-        // Sanity-check the helper sees the truthy value.
-        assert!(skip_web_fetch_preflight());
+        // Sanity-check the env fallback sees the truthy value.
+        assert!(skip_web_fetch_preflight_env());
 
         let (ctx, http, _sink) = make_web_ctx();
         // ONLY the fetch is enqueued — no preflight response. If the preflight
@@ -990,6 +992,77 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(reqs.len(), 1);
         assert!(!reqs[0].url.contains("/api/web/domain_info"));
         assert_eq!(reqs[0].url, "https://skip-preflight.example/page");
+    }
+
+    #[tokio::test]
+    async fn ctx_skip_web_fetch_preflight_field_issues_no_domain_info_request() {
+        // parity 2.1.207 P2-14: the faithful gate is `settings.skipWebFetchPreflight`,
+        // threaded via `BuiltinToolContext::skip_web_fetch_preflight`. With the env
+        // fallback UNSET, setting the ctx field alone must skip the domain-blocklist
+        // preflight (binary `if(!Mi().skipWebFetchPreflight){…}`).
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        assert!(!skip_web_fetch_preflight_env(), "env fallback must be off");
+
+        let (mut ctx, http, _sink) = make_web_ctx();
+        ctx.skip_web_fetch_preflight = true;
+        // ONLY the fetch is enqueued — no preflight response. If the preflight
+        // fired, it would consume this and the body assertion would fail.
+        http.enqueue(ok_response(200, "no preflight here"));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://ctx-skip-preflight.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("fetch must proceed when the ctx setting skips preflight");
+
+        assert_eq!(res.data["result"], "no preflight here");
+        let reqs = http.received_requests();
+        // Exactly one request — the fetch — and NO domain_info preflight.
+        assert_eq!(reqs.len(), 1);
+        assert!(!reqs[0].url.contains("/api/web/domain_info"));
+        assert_eq!(reqs[0].url, "https://ctx-skip-preflight.example/page");
+    }
+
+    #[tokio::test]
+    async fn ctx_field_false_and_no_env_runs_the_preflight() {
+        // Negative/precedence guard: ctx field default (`false`) + env fallback
+        // UNSET ⇒ the domain-blocklist preflight DOES run (a domain_info request
+        // precedes the fetch), matching CC's default `!skipWebFetchPreflight` path.
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+
+        let (ctx, http, _sink) = make_web_ctx();
+        assert!(!ctx.skip_web_fetch_preflight, "ctx field defaults to false");
+        // Preflight allows, then the fetch returns the body.
+        http.enqueue(preflight_allow());
+        http.enqueue(ok_response(200, "fetched after preflight"));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://run-preflight.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("fetch must proceed after an allowed preflight");
+
+        assert_eq!(res.data["result"], "fetched after preflight");
+        let reqs = http.received_requests();
+        // preflight (1) + fetch (1) = 2; the first request is the domain_info GET.
+        assert_eq!(reqs.len(), 2);
+        assert!(
+            reqs[0].url.contains("/api/web/domain_info?domain="),
+            "the preflight must run first: {}",
+            reqs[0].url
+        );
     }
 
     // ---- redirect loop drives request_no_follow (transport no-follow) -------
@@ -1033,6 +1106,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![],
                 body: "WRONG-PATH: plain request was called".into(),
+                body_bytes: Vec::new(),
             })
         }
         async fn request_no_follow(
@@ -1061,6 +1135,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status,
             headers: vec![("location".into(), location.to_string())],
             body: String::new(),
+            body_bytes: Vec::new(),
         }
     }
 
@@ -1140,6 +1215,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![],
                 body: "final body".into(),
+                body_bytes: Vec::new(),
             },
         ]);
         let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
@@ -1219,6 +1295,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 301,
             headers: vec![],
             body: String::new(),
+            body_bytes: Vec::new(),
         }]);
         let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
         let tool = WebFetchTool::new(ctx);
@@ -1316,6 +1393,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Doc</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1360,6 +1438,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>NoPrompt</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1396,6 +1475,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: "# Raw markdown".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1434,6 +1514,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: big,
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1467,6 +1548,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: "# md".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1498,6 +1580,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Fallback</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let tool = WebFetchTool::new(ctx).with_side_query(std::sync::Arc::new(EmptySideQuery));
             let res = tool
@@ -1522,6 +1605,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Recovered</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let tool =
                 WebFetchTool::new(ctx).with_side_query(std::sync::Arc::new(FailingSideQuery));
@@ -1549,6 +1633,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "text/html".into())],
             body: "<h1>Title</h1><p>Body text</p>".into(),
+            body_bytes: Vec::new(),
         }));
         let capture = std::sync::Arc::new(markdown_apply::CapturingSideQuery {
             captured: std::sync::Mutex::new(None),
@@ -1585,6 +1670,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "text/html".into())],
             body: "<h1>Hi</h1>".into(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let res = tool
@@ -1614,14 +1700,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.blocking_lock();
         for truthy in ["1", "true", "TRUE", "Yes", "on", " on "] {
             std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", truthy);
-            assert!(skip_web_fetch_preflight(), "{truthy:?} must be truthy");
+            assert!(skip_web_fetch_preflight_env(), "{truthy:?} must be truthy");
         }
         for falsy in ["0", "false", "no", "off", "", "garbage"] {
             std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", falsy);
-            assert!(!skip_web_fetch_preflight(), "{falsy:?} must be falsy");
+            assert!(!skip_web_fetch_preflight_env(), "{falsy:?} must be falsy");
         }
         std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
-        assert!(!skip_web_fetch_preflight(), "unset must be falsy");
+        assert!(!skip_web_fetch_preflight_env(), "unset must be falsy");
     }
 
     /// Build a web ctx whose workspace is `workspace` (so binary-persist writes
@@ -1696,6 +1782,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "application/pdf".into())],
             body: body.to_string(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let res = tool
@@ -1736,6 +1823,75 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(std::fs::read(entries[0].path()).unwrap(), body.as_bytes());
     }
 
+    // PARITY (P3-ALL): a genuinely-binary body (invalid UTF-8) must be persisted
+    // BYTE-IDENTICALLY to the wire. The transport carries the raw bytes in
+    // `HttpResponse.body_bytes` (populated by reqwest's `resp.bytes()` —
+    // claude-code's `responseType:"arraybuffer"`); the lossy `body` String is
+    // NOT byte-identical, so persisting `body.as_bytes()` would corrupt the
+    // artifact. This pins that WebFetch persists the raw `body_bytes`.
+    #[tokio::test]
+    async fn binary_body_persists_raw_bytes_not_lossy_string() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (ctx, http, _sink) = make_web_ctx_with_workspace(tmp.path().to_path_buf());
+        // `%PDF-1.4` then NUL + invalid-UTF8 bytes (0xFF 0xFE 0x89) — these are
+        // replaced by U+FFFD under lossy decoding, so the String differs from
+        // the wire both in bytes and in length.
+        let raw: Vec<u8> = vec![
+            0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34, 0x00, 0xFF, 0xFE, 0x89,
+        ];
+        let lossy = String::from_utf8_lossy(&raw).into_owned();
+        assert_ne!(
+            lossy.as_bytes(),
+            raw.as_slice(),
+            "sanity: lossy String must differ from the raw wire bytes"
+        );
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/pdf".into())],
+            body: lossy,
+            body_bytes: raw.clone(),
+        }));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://binary.example/raw.pdf" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        // The reported byte count is the RAW wire length (arraybuffer byteLength).
+        assert_eq!(res.data["bytes"], raw.len());
+        // The footer shows the raw byte size.
+        let content = res.data["result"].as_str().unwrap();
+        assert!(
+            content.contains(&format!(
+                "\n\n[Binary content (application/pdf, {}) also saved to ",
+                crate::persist::human_size(raw.len() as u64)
+            )),
+            "missing binary footer: {content}"
+        );
+        // The persisted artifact is byte-identical to the WIRE, not to the lossy
+        // String — the whole point of P3-ALL.
+        let results_dir = tmp.path().join(".lingxi").join("tool-results");
+        let entries: Vec<_> = std::fs::read_dir(&results_dir)
+            .expect("tool-results dir created")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one persisted artifact");
+        let saved = std::fs::read(entries[0].path()).unwrap();
+        assert_eq!(saved, raw, "persisted artifact must be the raw wire bytes");
+        assert_ne!(
+            saved,
+            String::from_utf8_lossy(&raw).into_owned().into_bytes(),
+            "persisted artifact must NOT be the lossy-decoded String bytes"
+        );
+    }
+
     // PARITY (#94): a NON-binary (text/html) body does NOT persist and gets NO
     // footer.
     #[tokio::test]
@@ -1750,6 +1906,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
             body: "<p>hi</p>".into(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let res = tool

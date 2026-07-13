@@ -21,6 +21,28 @@ pub struct McpServerConfig {
     /// When true the registry must not auto-connect at startup.
     #[allow(dead_code)] // honoured by the connect loop in Plan 13
     pub disabled: bool,
+    /// Per-server `tools/call` timeout (ms): the config `timeout` field, with
+    /// the sse/http `request_timeout_ms` alias folded in at parse time (RAn:
+    /// `timeout ??= min(request_timeout_ms, 300_000)`). `None` = no per-server
+    /// override → the shared BHs resolver ([`crate::client::mcp_tool_timeout_for`])
+    /// falls back to the `MCP_TOOL_TIMEOUT` env var / 100_000_000 default. Kept
+    /// OFF [`McpTransportSpec`] on purpose so it never perturbs the
+    /// `getServerKey`/`oauth::server_key` config hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// `alwaysLoad`: force every tool from this server into the prompt, never
+    /// deferred behind tool search ("Equivalent to setting defer_loading:false
+    /// on the API"). OR'd into each tool's `always_load` bit at list time.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub always_load: bool,
+}
+
+/// `skip_serializing_if` predicate: omit a `bool` field from the serialized
+/// form when it holds its `false` default (keeps the on-wire shape unchanged
+/// for the common case).
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Origin of an [`McpServerConfig`]; drives the approval policy.

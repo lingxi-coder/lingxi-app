@@ -92,6 +92,7 @@ impl HttpTransport for MockXaa {
             status,
             headers: vec![],
             body,
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -173,6 +174,7 @@ async fn xaa_token_exchange_4xx_clears_id_token() {
                 status,
                 headers: vec![],
                 body,
+                body_bytes: Vec::new(),
             })
         }
         async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {

@@ -72,6 +72,20 @@ pub struct SandboxConvertContext {
     /// MANAGED settings; `filesystem.allow_read` is REPLACED by the MANAGED-source
     /// `sandbox.filesystem.allowRead` paths. `None` ⇒ no restriction.
     pub managed_read_paths: Option<Vec<String>>,
+    /// `allowAppleEvents` SOURCE-RESTRICTED override. claude-code honors this
+    /// setting ONLY from user, managed/policy, or CLI `--settings` (`flagSettings`)
+    /// sources — project & local `.lingxi/settings*.json` are IGNORED
+    /// (sandbox-adapter.ts 2.1.207 @223928133: `allowAppleEvents:[...managedSources,
+    /// wr("flagSettings"), userSettings].map(z => z?.sandbox?.allowAppleEvents)
+    /// .find(z => z !== undefined)` — first-defined wins over the RESTRICTED source
+    /// list only; the general merge `e.sandbox?.X` is NOT used for this field).
+    /// lingxi-core merges to a single `SettingsJson`, so the per-source resolution
+    /// is done at the composition root and the result threaded here. `Some(v)` ⇒
+    /// set `allow_apple_events = v`; `None` ⇒ leave the default (`false`), matching
+    /// CC's `.find(...) === undefined ⇒ manager reads false`. The merged-blob
+    /// `sandbox.allowAppleEvents` is intentionally NOT applied in
+    /// [`convert_settings_to_runtime_config`] so project/local can never set it.
+    pub allow_apple_events_override: Option<bool>,
 }
 
 /// Parse a `Tool(content)` permission rule string into `(tool, content)`.
@@ -281,12 +295,10 @@ pub fn convert_settings_to_runtime_config(
         if let Some(v) = s.enable_weaker_network_isolation {
             cfg.enable_weaker_network_isolation = v;
         }
-        if let Some(v) = s.allow_pty {
-            cfg.allow_pty = v;
-        }
-        if let Some(v) = s.allow_apple_events {
-            cfg.allow_apple_events = v;
-        }
+        // `allowPty` has NO settings key in claude-code (see
+        // [`SandboxSettingsJson`]); `allowAppleEvents` is source-restricted and is
+        // applied via `ctx.allow_apple_events_override` below (NOT from this merged
+        // blob, so project/local settings can never set it — CC parity @223928133).
         if let Some(v) = &s.excluded_commands {
             cfg.excluded_commands.clone_from(v);
         }
@@ -306,6 +318,18 @@ pub fn convert_settings_to_runtime_config(
     }
     if let Some(read_paths) = &ctx.managed_read_paths {
         cfg.filesystem.allow_read = read_paths.clone();
+    }
+
+    // allowAppleEvents SOURCE RESTRICTION (applied LAST). claude-code honors
+    // `allowAppleEvents` only from user / managed-policy / CLI `--settings`
+    // sources — project & local settings are ignored (sandbox-adapter.ts
+    // @223928133). The composition root resolves the effective value per-source
+    // (first-defined wins managed → flag → user) and threads it here. `None` ⇒
+    // leave the default `false` (CC: `.find(...) === undefined` ⇒ manager reads
+    // false). This deliberately supersedes any `sandbox.allowAppleEvents` in the
+    // merged settings blob, so project/local can never enable Apple Events.
+    if let Some(v) = ctx.allow_apple_events_override {
+        cfg.allow_apple_events = v;
     }
 
     cfg
@@ -511,6 +535,57 @@ pub fn linux_glob_pattern_warnings(settings: &SettingsJson) -> Vec<String> {
 fn has_globs_excluding_trailing_double_star(path: &str) -> bool {
     let stripped = path.strip_suffix("/**").unwrap_or(path);
     stripped.chars().any(|c| matches!(c, '*' | '?' | '[' | ']'))
+}
+
+#[cfg(test)]
+mod apple_events_source_tests {
+    use super::{convert_settings_to_runtime_config, SandboxConvertContext};
+    use crate::runtime_config::SettingsJson;
+
+    fn convert(json: &str, ctx: &SandboxConvertContext) -> bool {
+        let settings: SettingsJson = serde_json::from_str(json).expect("settings parse");
+        convert_settings_to_runtime_config(&settings, ctx).allow_apple_events
+    }
+
+    #[test]
+    fn default_false_without_override() {
+        assert!(!convert("{}", &SandboxConvertContext::default()));
+    }
+
+    #[test]
+    fn merged_blob_does_not_set_apple_events() {
+        // A `sandbox.allowAppleEvents: true` present in the MERGED settings blob
+        // must NOT flip the flag — claude-code source-restricts allowAppleEvents
+        // (@223928133), so it is applied ONLY via `ctx.allow_apple_events_override`.
+        // This models a project/local settings tier trying to enable it: ignored.
+        let json = r#"{"sandbox": {"allowAppleEvents": true}}"#;
+        assert!(
+            !convert(json, &SandboxConvertContext::default()),
+            "merged-blob allowAppleEvents must be ignored (project/local can't set it)"
+        );
+    }
+
+    #[test]
+    fn context_override_true_enables() {
+        let ctx = SandboxConvertContext {
+            allow_apple_events_override: Some(true),
+            ..Default::default()
+        };
+        assert!(convert("{}", &ctx));
+        // Even with a merged blob explicitly false, the honored-source override wins.
+        assert!(convert(r#"{"sandbox": {"allowAppleEvents": false}}"#, &ctx));
+    }
+
+    #[test]
+    fn context_override_false_disables() {
+        let ctx = SandboxConvertContext {
+            allow_apple_events_override: Some(false),
+            ..Default::default()
+        };
+        // Honored source set it to false: stays false, and a merged-blob `true`
+        // (e.g. from an ignored project tier) cannot override it.
+        assert!(!convert(r#"{"sandbox": {"allowAppleEvents": true}}"#, &ctx));
+    }
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ impl HttpTransport for NoopTransport {
             status: 200,
             headers: vec![],
             body: "{}".into(),
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {

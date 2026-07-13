@@ -42,6 +42,8 @@ fn mock_config() -> McpServerConfig {
         },
         scope: ConfigScope::User,
         disabled: false,
+        timeout_ms: None,
+        always_load: false,
     }
 }
 

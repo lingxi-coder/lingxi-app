@@ -131,6 +131,7 @@ impl HttpTransport for MockAs {
             status: canned.status,
             headers: vec![],
             body: canned.body,
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -359,6 +360,8 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         },
         scope: ConfigScope::Project,
         disabled: false,
+        timeout_ms: None,
+        always_load: false,
     }
 }
 
@@ -531,6 +534,8 @@ async fn static_token_server_spec_is_unchanged() {
         },
         scope: ConfigScope::Project,
         disabled: false,
+        timeout_ms: None,
+        always_load: false,
     };
 
     registry.connect(config.clone()).await.expect("connect ok");
@@ -805,6 +810,7 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
                 status,
                 headers: vec![],
                 body,
+                body_bytes: Vec::new(),
             })
         }
         async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -1099,6 +1105,7 @@ impl HttpTransport for XaaHttp {
             status,
             headers: vec![],
             body,
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {

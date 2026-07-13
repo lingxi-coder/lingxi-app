@@ -958,6 +958,23 @@ impl BashTool {
         self.cwd_changed_firer = Some(firer);
         self
     }
+
+    /// Adopt the shared live-cwd cell as this tool's persistent shell cwd
+    /// (builder; default keeps the private per-`BashTool` cell).
+    ///
+    /// This makes `BashTool` the single writer of claude-code's session-global
+    /// `getCwd()`/`setCwdState` (`Pt.cwd`): a foreground `cd` commits the
+    /// post-`cd` directory into the SAME cell the file/search/LSP tools read as
+    /// their live cwd and the orchestrator reads for hook payloads / JSONL — so
+    /// there is one live cwd, not a `BashTool`-local one plus a firer-tracked
+    /// copy. The desktop composition root passes the same `current_cwd` cell it
+    /// hands the `CwdChanged` firer and the orchestrator; mobile / tests skip
+    /// this and keep the private cell (byte-identical isolated behavior).
+    #[must_use]
+    pub fn with_live_cwd(mut self, cell: tool_api::LiveCwdCell) -> Self {
+        self.shell_cwd = cell;
+        self
+    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {

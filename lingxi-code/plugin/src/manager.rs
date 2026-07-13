@@ -15,9 +15,11 @@
 use crate::blocklist::PluginBlocklist;
 use crate::lifecycle::PluginState;
 use crate::loader::resolve_user_config;
-use crate::manifest::PluginManifest;
+use crate::manifest::{PluginManifest, PluginUserConfig};
 use crate::source::PluginSource;
 use crate::strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
+use crate::user_config;
+use serde_json::{Map, Value};
 
 use command_api::CommandRegistry;
 use hooks::HookRegistry;
@@ -86,6 +88,11 @@ pub struct PluginManager {
     credentials: Arc<CredentialManager>,
     blocklist: Arc<PluginBlocklist>,
     strict: Arc<StrictPluginOnlyPolicy>,
+    /// Persisted non-sensitive `userConfig` state, keyed by plugin identity
+    /// (matching `manifest.name`). Read from the settings `pluginConfigs` scope
+    /// at construction (via [`Self::with_plugin_configs`]); empty otherwise.
+    /// Sensitive values are NOT here — they come from [`CredentialManager`].
+    plugin_configs: HashMap<String, PluginUserConfig>,
 
     // The 8 registries we materialize into:
     command_registry: Arc<RwLock<CommandRegistry>>,
@@ -131,6 +138,7 @@ impl PluginManager {
             credentials,
             blocklist,
             strict,
+            plugin_configs: HashMap::new(),
             command_registry,
             skill_registry,
             hook_registry,
@@ -140,6 +148,17 @@ impl PluginManager {
             tool_registry,
             plugin_mcp_names: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Seed the persisted `userConfig` state (settings `pluginConfigs`) the
+    /// loader resolves non-sensitive values from. The composition root reads
+    /// this from the active settings scope (see
+    /// [`PluginUserConfig::from_settings_map`]) and threads it in; tests and
+    /// callers with no persisted config leave it empty.
+    #[must_use]
+    pub fn with_plugin_configs(mut self, configs: HashMap<String, PluginUserConfig>) -> Self {
+        self.plugin_configs = configs;
+        self
     }
 
     /// Install a plugin from `source`.
@@ -480,9 +499,30 @@ impl PluginManager {
         manifest: &PluginManifest,
         install_dir: &Path,
     ) -> Result<(), PluginManagerError> {
-        let _user_config = resolve_user_config(manifest, &self.credentials)
+        // Resolve the plugin's `userConfig` into the `${user_config.KEY}`
+        // substitution map: non-sensitive values from the settings
+        // `pluginConfigs[plugin].options` scope, sensitive values live from
+        // secure storage (see `resolve_user_config`). The result is CONSUMED
+        // below (substituted into the plugin's MCP server configs), not dropped.
+        //
+        // The plugin identity used for both the secret namespace and the
+        // pluginConfigs lookup is `manifest.name`. (Follow-up: the composition
+        // root should key `pluginConfigs` by the installed `name@marketplace`
+        // id; `with_plugin_configs` supplies a map matching this key.)
+        let plugin_key = manifest.name.as_str();
+        let options = self
+            .plugin_configs
+            .get(plugin_key)
+            .map(|c| c.options.clone())
+            .unwrap_or_default();
+        let user_config = resolve_user_config(manifest, plugin_key, &options, &self.credentials)
             .await
             .map_err(|e| PluginManagerError::Loader(e.to_string()))?;
+        // The substitution context keyed by the bare field name.
+        let subst_ctx: Map<String, Value> = match user_config {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        };
 
         // All-or-nothing ordering: VALIDATE every fallible input BEFORE
         // mutating any live registry, so a rejected plugin never leaves an
@@ -665,6 +705,10 @@ impl PluginManager {
                 .map(|cfg| {
                     let mut scoped = cfg.clone();
                     scoped.name = format!("plugin:{plugin_name}:{}", cfg.name);
+                    // Substitute `${user_config.KEY}` references (command / args
+                    // / env, and remote url / headers) with the resolved values
+                    // — the primary consumption path for a plugin's userConfig.
+                    substitute_mcp_config(&mut scoped, &subst_ctx);
                     scoped
                 })
                 .collect()
@@ -756,6 +800,50 @@ impl PluginManager {
             }
         }
         Ok(())
+    }
+}
+
+/// Substitute `${user_config.KEY}` references into an MCP server config's
+/// transport spec, in place. Covers the substitutable string surfaces: the
+/// Stdio `command` / `args` / `env` values, and remote (`Sse` / `Http` /
+/// `WebSocket`) `url` + `headers` values. Non-substitutable specs (`InProcess`,
+/// `SseIde`, `SdkControl`) carry no userConfig-derived string and are left
+/// untouched. A no-op when the substitution context is empty (the common
+/// no-userConfig case), so a plugin without userConfig is byte-unchanged.
+fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
+    use traits::McpTransportSpec;
+    if ctx.is_empty() {
+        return;
+    }
+    match &mut cfg.spec {
+        McpTransportSpec::Stdio { command, args, env } => {
+            *command = user_config::substitute_string_field(command, ctx);
+            *args = user_config::substitute_args(args, ctx);
+            for v in env.values_mut() {
+                *v = user_config::substitute_string_field(v, ctx);
+            }
+        }
+        McpTransportSpec::Sse { url, headers, .. } => {
+            *url = user_config::substitute_string_field(url, ctx);
+            for v in headers.values_mut() {
+                *v = user_config::substitute_string_field(v, ctx);
+            }
+        }
+        McpTransportSpec::Http { url, headers, .. } => {
+            *url = user_config::substitute_string_field(url, ctx);
+            for v in headers.values_mut() {
+                *v = user_config::substitute_string_field(v, ctx);
+            }
+        }
+        McpTransportSpec::WebSocket { url, headers } => {
+            *url = user_config::substitute_string_field(url, ctx);
+            for v in headers.values_mut() {
+                *v = user_config::substitute_string_field(v, ctx);
+            }
+        }
+        McpTransportSpec::InProcess { .. }
+        | McpTransportSpec::SseIde { .. }
+        | McpTransportSpec::SdkControl { .. } => {}
     }
 }
 

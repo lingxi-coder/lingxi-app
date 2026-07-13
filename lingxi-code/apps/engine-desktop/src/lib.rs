@@ -371,6 +371,147 @@ fn should_enforce_permissions(
     }
 }
 
+/// Everything the boot permission-policy construction folds out of the
+/// settings tiers, produced by [`load_boot_permission_tiers`].
+struct BootPermissionTiers {
+    /// Permission rules accumulated from every tier (bucketed by source at
+    /// `PermissionPolicy::from_rules` time; `authorize` walks them by priority).
+    rules: Vec<permission::PermissionRule>,
+    /// Highest-priority `permissions.defaultMode` (tiers are read in ascending
+    /// priority, so the last write — the managed tier — wins).
+    mode: permission::PermissionMode,
+    /// Sticky `disableBypassPermissionsMode: "disable"` killswitch — true when
+    /// ANY tier (managed included) disables `BypassPermissions` mode.
+    bypass_disabled: bool,
+    /// Union of every tier's `permissions.additionalDirectories` (raw paths;
+    /// `authorize` resolves them against the policy roots via `expand_path`).
+    additional_working_dirs: Vec<std::path::PathBuf>,
+    /// Raw tier texts in ASCENDING priority INCLUDING the managed tier(s) —
+    /// feeds the sandbox-auto-allow derivation (last write wins, so a managed
+    /// `sandbox.*` overrides user/project/local).
+    raw_tiers: Vec<String>,
+}
+
+/// Read the boot permission-settings tiers in ASCENDING priority — user →
+/// project → local → managed (policySettings) — and fold them into rules +
+/// scalars for the boot `PermissionPolicy` (parity 2.1.207 P1-10).
+///
+/// Tier semantics (claude-code `SETTING_SOURCES`: `userSettings→projectSettings
+/// →localSettings→flagSettings→policySettings`, later overrides earlier;
+/// `flagSettings` has no boot analog here — spec §4e):
+/// - settings.local.json is read after project so an `AllowAlways` persisted
+///   there is honored on the next enforced boot; rules from every tier
+///   ACCUMULATE (deny-wins is behavior-first in `authorize`).
+/// - `--setting-sources` scope `(include_user, include_project)` gates the
+///   user tier and the project+local tiers respectively — but NOT the managed
+///   tier: claude-code's `Xv()` unconditionally re-adds `"policySettings"` to
+///   the allowed-source set, so managed rules can NEVER be excluded.
+/// - Managed tiers (`managed-settings.json` + `managed-settings.d/*.json`,
+///   already ascending from `managed_settings_raw_tiers`) parse with
+///   `PermissionRuleSource::PolicySettings` (`RKt()→Fwt("policySettings")`),
+///   so enterprise deny/ask/allow rules bind on the boot policy and decisions
+///   cite "enterprise managed settings". Managed `defaultMode` /
+///   `disableBypassPermissionsMode` / `additionalDirectories` fold like any
+///   other tier (read LAST → managed scalars win).
+/// - `allowManagedPermissionRulesOnly` lockdown (claude-code `$wt()`): when ANY
+///   managed tier sets the top-level flag true, only `PolicySettings`-sourced
+///   rules are retained — "User, project, local, and CLI argument permission
+///   rules are ignored." (Scalar folds are NOT affected; the schema scopes the
+///   lockdown to permission RULES.)
+async fn load_boot_permission_tiers(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+    setting_source_scope: (bool, bool),
+) -> BootPermissionTiers {
+    let mut rules = Vec::new();
+    let mut mode = permission::PermissionMode::Default;
+    let mut bypass_disabled = false;
+    let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
+    // Retain each tier's raw text (in ascending priority) so the
+    // sandbox-auto-allow config can be derived from the SAME settings.
+    let mut raw_tiers: Vec<String> = Vec::new();
+    let (incl_user_settings, incl_project_settings) = setting_source_scope;
+    for (path, source, included) in [
+        (
+            lingxi_home.join("settings.json"),
+            permission::PermissionRuleSource::UserSettings,
+            incl_user_settings,
+        ),
+        (
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            permission::PermissionRuleSource::ProjectSettings,
+            incl_project_settings,
+        ),
+        (
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            permission::PermissionRuleSource::LocalSettings,
+            incl_project_settings,
+        ),
+    ] {
+        if !included {
+            continue;
+        }
+        if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+            match permission::permission_rules_from_settings_json(&raw, source) {
+                Ok(mut r) => rules.append(&mut r),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "skipping malformed settings permissions"
+                ),
+            }
+            if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+                mode = m; // later tiers read last → their defaultMode wins
+            }
+            if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+                bypass_disabled = true; // sticky: any tier disabling wins
+            }
+            // (#34) Union this tier's additionalDirectories into the
+            // working-dir set (claude-code merges across SETTING_SOURCES).
+            additional_working_dirs
+                .extend(permission::additional_directories_from_settings_json(&raw));
+            raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
+        }
+    }
+    // Managed (policySettings) tier — HIGHEST priority, read LAST. Deliberately
+    // NOT gated by `--setting-sources` (see the doc comment above).
+    let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+    for raw in &managed_tiers {
+        match permission::permission_rules_from_settings_json(
+            raw,
+            permission::PermissionRuleSource::PolicySettings,
+        ) {
+            Ok(mut r) => rules.append(&mut r),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "skipping malformed managed settings permissions"
+            ),
+        }
+        if let Some(m) = permission::default_mode_from_settings_json(raw) {
+            mode = m; // managed read last → its defaultMode wins
+        }
+        if permission::bypass_permissions_disabled_from_settings_json(raw) {
+            bypass_disabled = true; // managed killswitch binds (sticky)
+        }
+        additional_working_dirs
+            .extend(permission::additional_directories_from_settings_json(raw));
+    }
+    if managed_tiers
+        .iter()
+        .any(|raw| permission::allow_managed_permission_rules_only_from_settings_json(raw))
+    {
+        rules.retain(|r| r.source == permission::PermissionRuleSource::PolicySettings);
+    }
+    raw_tiers.extend(managed_tiers);
+    BootPermissionTiers {
+        rules,
+        mode,
+        bypass_disabled,
+        additional_working_dirs,
+        raw_tiers,
+    }
+}
+
 /// Whether the live cron scheduler should run. Faithful to claude-code's
 /// `isKairosCronEnabled` LOCAL kill-switch (`ScheduleCronTool/prompt.ts:34/38`):
 /// the `LINGXI_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
@@ -380,6 +521,35 @@ fn should_enforce_permissions(
 /// LingXi has no GrowthBook substrate — but its default-true state is.)
 fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
     !traits::env::is_env_truthy(disable_cron_env)
+}
+
+/// Expand a raw additional-working-dir entry (settings `additionalDirectories`
+/// or CLI `--add-dir`) into an absolute path suitable for
+/// [`tool_api::BuiltinToolContext::trusted_dirs`], mirroring the permission
+/// policy's `expand_path`: `~`/`~/…` resolve against `home`, a relative path
+/// resolves against `cwd`, an absolute path is taken verbatim. Lexical only —
+/// `canonicalize_and_validate` still resolves symlinks/`..` on each file-tool
+/// use, so the file-tool allowed set matches claude-code `FY(t)` (cwd +
+/// additionalWorkingDirectories) rather than hard-blocking `--add-dir` roots.
+fn expand_trusted_dir(
+    raw: &std::path::Path,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let s = raw.to_string_lossy();
+    let t = s.trim();
+    if t == "~" {
+        home.map_or_else(|| std::path::PathBuf::from(t), std::path::Path::to_path_buf)
+    } else if let Some(rest) = t.strip_prefix("~/") {
+        home.map_or_else(|| std::path::PathBuf::from(t), |h| h.join(rest))
+    } else {
+        let p = std::path::Path::new(t);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        }
+    }
 }
 
 /// Fold the `sandbox` subsection of the settings tiers (ascending priority, last
@@ -480,6 +650,45 @@ fn managed_only_sandbox_overrides(
     let reads = reads_only
         .then(|| sandbox::policy_convert::managed_read_path_allowlist(&managed, settings_dir));
     (domains, reads)
+}
+
+/// Resolve the SOURCE-RESTRICTED `allowAppleEvents` value. claude-code honors
+/// this sandbox setting ONLY from user, managed/policy, or CLI `--settings`
+/// (`flagSettings`) sources — project & local `.lingxi/settings*.json` are
+/// IGNORED (sandbox-adapter.ts 2.1.207 @223928133:
+/// `allowAppleEvents:[...managedSources, wr("flagSettings"), userSettings]
+/// .map(z => z?.sandbox?.allowAppleEvents).find(z => z !== undefined)`).
+/// First-defined wins in order managed/policy → flag → user; CC pre-folds the
+/// file-based managed tiers into ONE object, so we merge them the same
+/// whole-`sandbox`-block last-write-wins way `managed_only_sandbox_overrides`
+/// does (drop-ins override the base) before reading the flag. The engine has no
+/// boot-time `--settings` analog (see the `sandbox_runtime_cfg` comment on
+/// `flagSettings`), so the flag slot is skipped. Returns `None` when no honored
+/// source set it — matching CC's `.find(...) === undefined ⇒ manager reads
+/// `false``. Threaded onto
+/// [`SandboxConvertContext::allow_apple_events_override`].
+fn apple_events_override(
+    managed_raw_tiers: &[String],
+    user_settings_raw: Option<&str>,
+) -> Option<bool> {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+    // Managed/policy sources first (pre-merged, last-write-wins across tiers).
+    let mut merged_managed: Option<SandboxSettingsJson> = None;
+    for raw in managed_raw_tiers {
+        if let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) {
+            if let Some(s) = parsed.sandbox {
+                merged_managed = Some(s);
+            }
+        }
+    }
+    if let Some(v) = merged_managed.and_then(|s| s.allow_apple_events) {
+        return Some(v);
+    }
+    // flagSettings has no boot-time analog in the engine (skipped) — then user.
+    user_settings_raw
+        .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
+        .and_then(|s| s.sandbox)
+        .and_then(|s| s.allow_apple_events)
 }
 
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
@@ -744,8 +953,9 @@ pub fn desktop_tool_registry(
     // Offline / snapshot path: no command registry to back the Skill tool, so it
     // gets the hermetic `EmptySkillLoader` (tool name unchanged → snapshot-safe).
     // No `CwdChanged` firer here either (offline factory has no hook executor) —
-    // the BashTool is the byte-identical no-firer variant.
-    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None, None);
+    // the BashTool is the byte-identical no-firer variant. No shared live-cwd
+    // cell either: every tool falls back to `ctx.workspace` / the process cwd.
+    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None, None, None);
     reg
 }
 
@@ -1001,9 +1211,15 @@ pub fn register_desktop_tools(
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
+    live_cwd: Option<tool_api::LiveCwdCell>,
 ) -> tool_cron::WakeupSchedulerCell {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
-    tool_file::register_all(reg, ctx.clone());
+    // (P2-08) The shared live-cwd cell (`getCwd()`/`Ct()`): the desktop `BashTool`
+    // writes it on a `cd`, and Read/Glob/Grep + the LSP tool read it as their live
+    // cwd (default search dir, "does not exist" cwd notes, relative path root),
+    // 1:1 with claude-code's single session-global cwd. `None` (offline factory)
+    // falls every tool back to `ctx.workspace` / the process cwd — byte-identical.
+    tool_file::register_all_with_live_cwd(reg, ctx.clone(), live_cwd.clone());
     // BASH.4 `onCwdChangedForHooks` (Shell.ts:409): when a firer is supplied (real
     // desktop sessions wire one over the shared `Arc<HookExecutorImpl>`), a `cd`
     // inside a Bash call fires the `CwdChanged` hook. `None` (the offline
@@ -1011,7 +1227,7 @@ pub fn register_desktop_tools(
     // registered tool NAMES are unchanged either way, so the locked tool-list
     // snapshot is unaffected. `engine-mobile` never reaches this call (it does
     // not register the shell tools).
-    tool_shell::register_all_with_cwd_firer(reg, ctx.clone(), cwd_changed_firer);
+    tool_shell::register_all_with_cwd_firer(reg, ctx.clone(), cwd_changed_firer, live_cwd.clone());
     tool_web::register_all(reg, ctx.clone(), web_side_query);
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
@@ -1074,7 +1290,7 @@ pub fn register_desktop_tools(
     }
     tool_worktree::register_all(reg, ctx.clone());
     tool_mcp::register_all(reg, ctx.clone());
-    tool_lsp::register_all(reg, ctx);
+    tool_lsp::register_all_with_live_cwd(reg, ctx, live_cwd);
     wakeup_cell
 }
 
@@ -1164,6 +1380,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cli_agent: None,
 ///     cli_plugin_dirs: Vec::new(),
 ///     initial_effort: None,
+///     plan_mode_instructions: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -2298,6 +2515,25 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
     engine::settings::Settings::load(inputs)
         .ok()
         .and_then(|eff| eff.settings.output_style)
+}
+
+/// Load the merged `settings.skipWebFetchPreflight` (project + user + env layers)
+/// for the given project dir. Mirrors [`load_merged_output_style`] (same
+/// `engine::settings::Settings::load` seam). When true, the `WebFetch` tool skips
+/// the domain-blocklist preflight (CC 2.1.207 `!Mi().skipWebFetchPreflight` gate,
+/// parity P2-14). Returns `false` on any load failure or when the key is unset —
+/// the frozen default (preflight runs).
+fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.skip_web_fetch_preflight)
+        .unwrap_or(false)
 }
 
 /// (M4 cc2.1.198) Merge the `--agents <json>` flag agents into the dir-loaded
@@ -3873,8 +4109,9 @@ pub async fn build(
     //        delegates to the inner gate's prompt (or auto-allows a read-only
     //        tool to avoid an ask-storm). Unset (the DEFAULT) leaves the
     //        always-allow NoOp/Adapter gate untouched — NO behavior change.
-    //        Reads the SAME two settings files as the hooks loader above
-    //        (project read last → its `defaultMode` wins). File-glob content
+    //        Reads the user/project/local settings files PLUS the managed
+    //        (policySettings) tier — read last, so a managed `defaultMode`
+    //        wins (parity 2.1.207 P1-10). File-glob content
     //        matching (3a) + subagent/teammate-path enforcement (3b) now land
     //        too; only Bash/WebFetch content matching (3a-bash) stays tool-wide.
     // (PERM.1) Enforce permissions BY DEFAULT on the CLI/desktop path (parity
@@ -3921,87 +4158,43 @@ pub async fn build(
     // `None` only when enforcement is off (no boot policy is built) — the
     // `tool_ctx` literal then falls back to a Default-mode policy with roots.
     let mut boot_permission_policy: Option<Arc<permission::PermissionPolicy>> = None;
+    // The session's additional working directories (settings
+    // `additionalDirectories` union CLI `--add-dir`), captured out of the
+    // enforcement branch so BOTH the file-tool `trusted_dirs` (below) and the
+    // MCP registry `roots/list` source see them. claude-code's file tools
+    // (`FY(t)`) and `roots/list` (`r1d()`) BOTH advertise cwd +
+    // additionalWorkingDirectories — file tools inside an `--add-dir` root are
+    // allowed, not hard-blocked (parity 2.1.207 P1-08). Raw entries (`~`,
+    // relative) are expanded when they land in `trusted_dirs`. Assigned in BOTH
+    // arms below (the full union when enforcing; `--add-dir` only otherwise), so
+    // it is always initialized before its later reads.
+    let boot_additional_working_dirs: Vec<std::path::PathBuf>;
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
-        let mut rules = Vec::new();
-        let mut mode = permission::PermissionMode::Default;
-        // Retain each tier's raw text (in ascending priority) so the
-        // sandbox-auto-allow config can be derived from the SAME settings.
-        let mut raw_tiers: Vec<String> = Vec::new();
-        // Bypass-permissions killswitch: if ANY tier sets
-        // `disableBypassPermissionsMode: "disable"`, the policy refuses
-        // `BypassPermissions` mode (`authorize` falls back to Ask). Sticky
-        // across tiers — a disable is not overridable upward (claude-code).
-        let mut bypass_disabled = false;
-        // (#34) Extra working dirs from `permissions.additionalDirectories`,
-        // unioned across tiers (claude-code `TGd` folds each tier's
-        // `additionalDirectories` into `additionalWorkingDirectories`, which
-        // `b$` unions with cwd for the `kF` acceptEdits auto-allow set). The
-        // sole populator of `PermissionPolicy::additional_working_dirs`; without
-        // it an acceptEdits write under an `additionalDirectories` entry ASKS
-        // instead of auto-allowing. Entries stay RAW (relative / `~` / absolute);
-        // `authorize` resolves them against `roots` via `expand_path` (same as
-        // claude-code's `LXr` path resolution).
-        let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
-        // Read the three persistable rule tiers in ASCENDING priority so
-        // the highest-priority `defaultMode` wins (last write). settings.local.json
-        // (3c) is read LAST so an `AllowAlways` persisted there is loaded back
-        // and honored on the next enforced boot (closing the persist↔enforce
-        // round-trip); rules from every tier accumulate (bucketed by source,
-        // `authorize` walks them by priority).
-        // `--setting-sources` scope (default `(true, true)` = all tiers):
-        // gate the user tier on `include_user` and the project + local tiers
-        // on `include_project` (local folds into project, mirroring the
-        // `Settings::load_scoped` semantics the CLI already applies to the
-        // provider/routing loaders), so e.g. `--setting-sources project` does
-        // NOT load user-level permission rules / defaultMode.
-        let (incl_user_settings, incl_project_settings) = cfg.setting_source_scope;
-        for (path, source, included) in [
-            (
-                cfg.lingxi_home.join("settings.json"),
-                permission::PermissionRuleSource::UserSettings,
-                incl_user_settings,
-            ),
-            (
-                cwd.join(branding::DOT_DIR).join("settings.json"),
-                permission::PermissionRuleSource::ProjectSettings,
-                incl_project_settings,
-            ),
-            (
-                cwd.join(branding::DOT_DIR).join("settings.local.json"),
-                permission::PermissionRuleSource::LocalSettings,
-                incl_project_settings,
-            ),
-        ] {
-            if !included {
-                continue;
-            }
-            if let Ok(raw) = tokio::fs::read_to_string(&path).await {
-                match permission::permission_rules_from_settings_json(&raw, source) {
-                    Ok(mut r) => rules.append(&mut r),
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        path = %path.display(),
-                        "skipping malformed settings permissions"
-                    ),
-                }
-                if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-                    mode = m; // local settings read last → its defaultMode wins
-                }
-                if permission::bypass_permissions_disabled_from_settings_json(&raw) {
-                    bypass_disabled = true; // sticky: any tier disabling wins
-                }
-                // (#34) Union this tier's additionalDirectories into the
-                // working-dir set (claude-code merges across SETTING_SOURCES).
-                additional_working_dirs
-                    .extend(permission::additional_directories_from_settings_json(&raw));
-                raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
-            }
-        }
+        // Read the persistable rule tiers in ASCENDING priority — user →
+        // project → local (3c: settings.local.json read after project so a
+        // persisted `AllowAlways` is honored on the next enforced boot), then
+        // the managed (policySettings) tier LAST/highest so enterprise
+        // deny/ask/allow rules bind and managed `defaultMode` /
+        // `disableBypassPermissionsMode` win (parity 2.1.207 P1-10). The
+        // `--setting-sources` scope gates user/project+local but NOT managed
+        // (claude-code `Xv()` force-includes `policySettings`); a managed
+        // `allowManagedPermissionRulesOnly: true` drops every non-managed rule.
+        // Full tier semantics on `load_boot_permission_tiers`.
+        let BootPermissionTiers {
+            rules,
+            mut mode,
+            bypass_disabled,
+            mut additional_working_dirs,
+            raw_tiers,
+        } = load_boot_permission_tiers(&cfg.lingxi_home, &cwd, cfg.setting_source_scope).await;
         // CLI `--add-dir <directories...>`: union the host-provided dirs into
         // the working-dir set, exactly like a settings-tier
         // `additionalDirectories` entry (claude-code "Additional directories
         // to allow tool access to").
         additional_working_dirs.extend(cfg.add_dir.iter().cloned());
+        // Capture the union (settings additionalDirectories + --add-dir) for the
+        // file-tool `trusted_dirs` and MCP `roots/list` source below.
+        boot_additional_working_dirs = additional_working_dirs.clone();
         let rule_count = rules.len();
         // Phase 3a: supply the filesystem roots so file-path CONTENT rules
         // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
@@ -4021,21 +4214,13 @@ pub async fn build(
         // disabled in settings (`enabled = false`). OUTSIDE enforce mode this
         // whole block is skipped, so the layer stays a permanent no-op there.
         //
-        // Managed (policySettings) tier — HIGHEST priority, appended LAST so
-        // the sandbox-auto-allow fold (last write wins) lets a managed
-        // `sandbox.*` override user/project/local (SETTING_SOURCES:
-        // …→localSettings→flagSettings→policySettings). This is for the
-        // SANDBOX-AUTO-ALLOW derivation ONLY: it is built on a clone, so the
-        // managed raw text is NOT injected into `raw_tiers` (which feeds no
-        // rule parsing here — rules use `rules`/`mode`/`bypass_disabled`
-        // accumulated above). Managed permission RULES are a separate concern
-        // (spec §6) and are deliberately NOT loaded here.
-        let sandbox_raw_tiers: Vec<String> = {
-            let mut v = raw_tiers.clone();
-            v.extend(crate::settings_watch::managed_settings_raw_tiers().await);
-            v
-        };
-        let raw_tier_refs: Vec<&str> = sandbox_raw_tiers.iter().map(String::as_str).collect();
+        // `raw_tiers` already ends with the managed (policySettings) tier —
+        // `load_boot_permission_tiers` appends it LAST/highest, so the
+        // sandbox-auto-allow fold (last write wins) lets a managed `sandbox.*`
+        // override user/project/local (SETTING_SOURCES: …→localSettings→
+        // flagSettings→policySettings) with ONE disk read shared between the
+        // permission-rule and sandbox derivations (parity 2.1.207 P1-10).
+        let raw_tier_refs: Vec<&str> = raw_tiers.iter().map(String::as_str).collect();
         let sandbox_auto_allow = sandbox_auto_allow_from_settings_tiers(&raw_tier_refs, &cwd);
         // CLI-resolved mode is the highest-priority source (TS orderedModes:
         // the CLI flag / --permission-mode outranks the settings defaultMode).
@@ -4076,6 +4261,11 @@ pub async fn build(
         );
         Arc::new(permission::PolicyPermissionGate::new(policy, perms))
     } else {
+        // Enforcement off: the settings `additionalDirectories` tiers are not
+        // loaded here, but the CLI `--add-dir` dirs still widen file-tool access
+        // and the MCP roots (claude-code's `additionalWorkingDirectories` are
+        // independent of permission mode).
+        boot_additional_working_dirs = cfg.add_dir.clone();
         perms
     };
 
@@ -4265,7 +4455,11 @@ pub async fn build(
             posix as Arc<dyn mcp::RawConnectionProvider>,
         )
         .with_hook_dispatcher(Some(elicitation_dispatcher))
-        .with_oauth(mcp_oauth_deps),
+        .with_oauth(mcp_oauth_deps)
+        // Advertise the session's additional working dirs (settings
+        // `additionalDirectories` + `--add-dir`) on every server's `roots/list`,
+        // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].
+        .with_additional_roots(boot_additional_working_dirs.clone()),
     );
     mcp_registry.connect_all(mcp_configs).await;
     tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
@@ -4754,8 +4948,17 @@ pub async fn build(
     };
     let sandbox_runtime_cfg = {
         let mut tiers: Vec<String> = Vec::new();
+        // Read the USER tier (lingxi_home/settings.json) separately so the
+        // source-restricted `allowAppleEvents` resolution can consult it: CC honors
+        // allowAppleEvents from user / managed / flag only, NOT project/local.
+        let user_settings_raw =
+            tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+                .await
+                .ok();
+        if let Some(raw) = &user_settings_raw {
+            tiers.push(raw.clone());
+        }
         for p in [
-            cfg.lingxi_home.join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.local.json"),
         ] {
@@ -4778,6 +4981,11 @@ pub async fn build(
         // conversion overrides the merged allowlist when the flag is set.
         let (managed_allowed_domains, managed_read_paths) =
             managed_only_sandbox_overrides(&managed_tiers, &cwd);
+        // allowAppleEvents: source-restricted to user / managed / flag (project &
+        // local are IGNORED — CC parity @223928133). First-defined wins managed →
+        // flag(none) → user; `None` leaves the default `false`.
+        let allow_apple_events_override =
+            apple_events_override(&managed_tiers, user_settings_raw.as_deref());
         // Seed the `SandboxConvertContext` with the boot-resolvable hardening
         // paths so the settings/skills denyWrite defense actually fires
         // (sandbox-adapter.ts:225-299). Seeds with no boot analog
@@ -4797,6 +5005,7 @@ pub async fn build(
             skills_dirs: vec![to_s(cwd.join(branding::DOT_DIR).join("skills"))],
             managed_allowed_domains,
             managed_read_paths,
+            allow_apple_events_override,
             ..Default::default()
         };
         sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)
@@ -4891,6 +5100,22 @@ pub async fn build(
     let sandbox_desc_auto_allow = sandbox_runtime_cfg.auto_allow_bash_if_sandboxed;
     let sandbox_desc_fallback = sandbox_runtime_cfg.are_unsandboxed_commands_allowed();
     let sandbox_desc_deps_ok = sandbox_deps.errors.is_empty();
+    // File-tool trusted dirs = cwd FIRST, then every additional working dir
+    // (settings `additionalDirectories` + `--add-dir`), expanded and deduped.
+    // claude-code allows file tools (Read/Edit/Write/Glob/Grep/NotebookEdit)
+    // inside `additionalWorkingDirectories`; without this they hard-error on any
+    // `--add-dir` path (parity 2.1.207 P1-08).
+    let trusted_dirs = {
+        let home = dirs::home_dir();
+        let mut dirs_vec = vec![cwd.clone()];
+        for raw in &boot_additional_working_dirs {
+            let expanded = expand_trusted_dir(raw, &cwd, home.as_deref());
+            if !dirs_vec.contains(&expanded) {
+                dirs_vec.push(expanded);
+            }
+        }
+        dirs_vec
+    };
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -4901,13 +5126,17 @@ pub async fn build(
         read_deny_exclude_globs,
         fs: Arc::new(PosixFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
-        trusted_dirs: vec![cwd.clone()],
+        trusted_dirs,
         process: Arc::new(PosixProcess::new()),
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
         sandbox_runtime: sandbox_runtime_cfg,
         // (/sandbox) Live-toggle cell shared with the TUI (see above).
         sandbox_enabled_override: Some(sandbox_toggle.clone()),
+        // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the
+        // domain-blocklist preflight (enterprise escape hatch). Read from the
+        // merged settings via the same `Settings::load` seam as outputStyle.
+        skip_web_fetch_preflight: load_merged_skip_web_fetch_preflight(&cwd),
         // Inject the LIVE runner: the desktop session routes its sandboxed
         // bash/powershell/skill commands through `sandbox-runtime`'s
         // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),
@@ -5152,6 +5381,10 @@ pub async fn build(
         Some(skill_loader),
         cwd_changed_firer,
         Some(side_query_client.clone()),
+        // (P2-08) The SAME shared live-cwd cell the `CwdChanged` firer and the
+        // orchestrator (`.with_current_cwd`) hold, so the desktop `BashTool` is
+        // the single writer of the live cwd Read/Glob/Grep + LSP read.
+        Some(current_cwd_cell.clone()),
     );
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`
@@ -7384,7 +7617,9 @@ mod tests {
     /// (M3 cc2.1.198) `--safe-mode` / `--bare` boot: the SAME project-settings
     /// `SessionStart` hook fixture the positive test above proves LOADS must
     /// NOT load when the gates are set (bare `V5d.hooks:!0`; safe mode's
-    /// `UQr()` keeps only the policySettings tier, which lingxi doesn't load).
+    /// `UQr()` keeps only the policySettings tier, which lingxi doesn't load
+    /// for HOOKS — managed permission RULES do load, see
+    /// `load_boot_permission_tiers` / parity 2.1.207 P1-10).
     #[tokio::test]
     async fn safe_mode_and_bare_skip_settings_hooks_at_boot() {
         use super::CustomizationGates;
@@ -8143,6 +8378,61 @@ mod tests {
         );
     }
 
+    /// `allowAppleEvents` is SOURCE-RESTRICTED: claude-code honors it only from
+    /// user / managed-policy / CLI `--settings` — project & local `.lingxi`
+    /// settings are IGNORED (sandbox-adapter.ts 2.1.207 @223928133). The desktop
+    /// composition root computes the effective value via `apple_events_override`
+    /// (managed → flag(none) → user, first-defined wins) and threads it onto the
+    /// convert context; the general tier fold must NOT set it from project/local.
+    #[test]
+    fn apple_events_override_source_restriction() {
+        use super::apple_events_override;
+        let on = r#"{"sandbox":{"allowAppleEvents":true}}"#.to_string();
+        let off = r#"{"sandbox":{"allowAppleEvents":false}}"#.to_string();
+
+        // No honored source set it → None (⇒ default false downstream).
+        assert_eq!(apple_events_override(&[], None), None);
+        assert_eq!(
+            apple_events_override(&[], Some(r#"{"sandbox":{}}"#)),
+            None
+        );
+
+        // User tier sets it (no managed) → honored.
+        assert_eq!(apple_events_override(&[], Some(&on)), Some(true));
+        assert_eq!(apple_events_override(&[], Some(&off)), Some(false));
+
+        // Managed set → managed wins over user (first-defined managed → user).
+        assert_eq!(
+            apple_events_override(std::slice::from_ref(&on), Some(&off)),
+            Some(true),
+            "managed allowAppleEvents must win over the user tier"
+        );
+        assert_eq!(
+            apple_events_override(std::slice::from_ref(&off), Some(&on)),
+            Some(false),
+            "managed false must win over a user true"
+        );
+
+        // Multiple managed tiers: last write wins (drop-ins override the base),
+        // mirroring CC's pre-merge of the file-based managed sources.
+        assert_eq!(
+            apple_events_override(&[on.clone(), off.clone()], None),
+            Some(false)
+        );
+
+        // A managed tier WITHOUT the field but user WITH it → user honored.
+        assert_eq!(
+            apple_events_override(&[r#"{"sandbox":{"enabled":true}}"#.to_string()], Some(&on)),
+            Some(true)
+        );
+
+        // Malformed managed tiers are skipped, user still consulted.
+        assert_eq!(
+            apple_events_override(&["not json".to_string()], Some(&on)),
+            Some(true)
+        );
+    }
+
     // ── IMPL-R3: managed (policySettings) tier in the sandbox derivation ──────
     //
     // claude-code's `getInitialSettings()`/`loadSettingsFromDisk()` always folds
@@ -8388,6 +8678,248 @@ mod tests {
             &ctx,
         );
         assert!(!cfg.enabled, "no tiers → sandbox disabled (opt-in default)");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    // ── P1-10 (parity 2.1.207): managed (policySettings) PERMISSION RULES in
+    // the boot policy ────────────────────────────────────────────────────────
+    //
+    // claude-code `RKt()` gathers permission rules from EVERY setting source
+    // (`SETTING_SOURCES: userSettings→projectSettings→localSettings→
+    // flagSettings→policySettings`), with the managed tier last/highest;
+    // `Xv()` force-includes "policySettings" even under `--setting-sources`;
+    // `$wt()` (`allowManagedPermissionRulesOnly === true` in managed settings)
+    // makes `RKt()` return ONLY the managed rules. These tests exercise the
+    // extracted boot fold `load_boot_permission_tiers` with the same
+    // `LINGXI_MANAGED_DIR` tempdir override as the sandbox tests above (same
+    // `MANAGED_ENV_LOCK` serialization).
+
+    /// Tempdir pair standing in for `lingxi_home` and `cwd` (with `.lingxi/`).
+    fn perm_tier_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        std::fs::create_dir_all(cwd.path().join(branding::DOT_DIR)).expect("mk .lingxi");
+        (home, cwd)
+    }
+
+    /// (P1-10 T1) managed `permissions.deny: ["Bash(rm:*)"]` + a user-tier
+    /// allow of the SAME spec → the boot-built policy DENIES (deny-wins is
+    /// behavior-first) and the decision cites the `PolicySettings` source
+    /// ("enterprise managed settings").
+    #[tokio::test]
+    async fn managed_permission_deny_rule_binds_and_cites_policy_settings() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"permissions":{"deny":["Bash(rm:*)"]}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let (home, cwd) = perm_tier_dirs();
+        std::fs::write(
+            home.path().join("settings.json"),
+            r#"{"permissions":{"allow":["Bash(rm:*)"]}}"#,
+        )
+        .expect("write user settings");
+
+        let tiers =
+            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert_eq!(tiers.rules.len(), 2, "user allow + managed deny both load");
+        assert!(
+            tiers
+                .rules
+                .iter()
+                .any(|r| r.source == permission::PermissionRuleSource::PolicySettings),
+            "managed tier rules must parse with PermissionRuleSource::PolicySettings"
+        );
+        // The managed raw text also feeds the sandbox derivation (appended last).
+        assert_eq!(tiers.raw_tiers.len(), 2, "user tier + managed tier raw texts");
+
+        let policy = permission::PermissionPolicy::from_rules(tiers.mode, tiers.rules);
+        let res = policy.authorize(
+            "Bash",
+            &serde_json::json!({ "command": "rm -rf scratch" }),
+        );
+        match res {
+            permission::PermissionResult::Deny { reason, .. } => match reason {
+                permission::PermissionDecisionReason::MatchedRule { rule } => assert_eq!(
+                    rule.source,
+                    permission::PermissionRuleSource::PolicySettings,
+                    "the deny must cite the managed (enterprise) rule"
+                ),
+                other => panic!("expected MatchedRule reason, got {other:?}"),
+            },
+            other => panic!("managed deny must win over user allow, got {other:?}"),
+        }
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (P1-10 T2) managed `defaultMode: "plan"` vs user `defaultMode:
+    /// "acceptEdits"` → managed (read LAST/highest) wins.
+    #[tokio::test]
+    async fn managed_default_mode_overrides_user_default_mode() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"permissions":{"defaultMode":"plan"}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let (home, cwd) = perm_tier_dirs();
+        std::fs::write(
+            home.path().join("settings.json"),
+            r#"{"permissions":{"defaultMode":"acceptEdits"}}"#,
+        )
+        .expect("write user settings");
+
+        let tiers =
+            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert_eq!(
+            tiers.mode,
+            permission::PermissionMode::Plan,
+            "managed defaultMode is highest priority"
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (P1-10 T3) managed `disableBypassPermissionsMode: "disable"` with NO
+    /// user/project killswitch → the boot fold reports the killswitch (the
+    /// call site sets `policy.bypass_killswitch_active` from it).
+    #[tokio::test]
+    async fn managed_bypass_killswitch_binds() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"permissions":{"disableBypassPermissionsMode":"disable"}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let (home, cwd) = perm_tier_dirs();
+        let tiers =
+            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert!(
+            tiers.bypass_disabled,
+            "managed disableBypassPermissionsMode:\"disable\" must activate the killswitch"
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (P1-10 T4) `--setting-sources` scope excluding user AND project tiers
+    /// still loads the managed tier (claude-code `Xv()` unconditionally
+    /// re-adds "policySettings" — managed rules can NEVER be excluded).
+    #[tokio::test]
+    async fn setting_sources_scope_cannot_exclude_managed_tier() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"permissions":{"deny":["WebFetch"]}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let (home, cwd) = perm_tier_dirs();
+        std::fs::write(
+            home.path().join("settings.json"),
+            r#"{"permissions":{"allow":["Read"]}}"#,
+        )
+        .expect("write user settings");
+
+        // Scope (false, false): user + project/local tiers excluded.
+        let tiers =
+            super::load_boot_permission_tiers(home.path(), cwd.path(), (false, false)).await;
+        assert_eq!(tiers.rules.len(), 1, "only the managed rule loads");
+        assert_eq!(
+            tiers.rules[0].source,
+            permission::PermissionRuleSource::PolicySettings
+        );
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (P1-10 T5) managed `allowManagedPermissionRulesOnly: true` (top-level)
+    /// drops user/project/local rules — only `PolicySettings` rules survive
+    /// (claude-code `$wt()` → `RKt()` returns `Fwt("policySettings")` only).
+    #[tokio::test]
+    async fn managed_only_lockdown_drops_non_managed_rules() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"allowManagedPermissionRulesOnly":true,"permissions":{"deny":["Bash(rm:*)"]}}"#,
+        )
+        .expect("write managed");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let (home, cwd) = perm_tier_dirs();
+        std::fs::write(
+            home.path().join("settings.json"),
+            r#"{"permissions":{"allow":["WebFetch","Read"]}}"#,
+        )
+        .expect("write user settings");
+        std::fs::write(
+            cwd.path().join(branding::DOT_DIR).join("settings.json"),
+            r#"{"permissions":{"ask":["Edit"]}}"#,
+        )
+        .expect("write project settings");
+
+        let tiers =
+            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert_eq!(tiers.rules.len(), 1, "only the managed deny survives the lockdown");
+        assert_eq!(
+            tiers.rules[0].source,
+            permission::PermissionRuleSource::PolicySettings
+        );
+        assert_eq!(tiers.rules[0].value.tool_name, "Bash");
+
+        std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    /// (P1-10 T6) `managed-settings.d/` drop-in rules load AFTER the base
+    /// managed file (alphabetical): rules from BOTH accumulate as
+    /// `PolicySettings`, and the drop-in's `defaultMode` (read last) wins
+    /// over the base managed file's.
+    #[tokio::test]
+    async fn managed_drop_in_permission_rules_load_after_base() {
+        let _g = MANAGED_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("managed-settings.json"),
+            r#"{"permissions":{"deny":["Bash(rm:*)"],"defaultMode":"acceptEdits"}}"#,
+        )
+        .expect("write base");
+        let drop_in = tmp.path().join("managed-settings.d");
+        std::fs::create_dir_all(&drop_in).expect("mkdir drop-in");
+        std::fs::write(
+            drop_in.join("10-org.json"),
+            r#"{"permissions":{"deny":["WebFetch"],"defaultMode":"plan"}}"#,
+        )
+        .expect("write drop-in");
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
+
+        let (home, cwd) = perm_tier_dirs();
+        let tiers =
+            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert_eq!(tiers.rules.len(), 2, "base + drop-in rules both accumulate");
+        assert!(tiers
+            .rules
+            .iter()
+            .all(|r| r.source == permission::PermissionRuleSource::PolicySettings));
+        assert_eq!(
+            tiers.mode,
+            permission::PermissionMode::Plan,
+            "the drop-in (read after base) wins the defaultMode fold"
+        );
 
         std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
     }

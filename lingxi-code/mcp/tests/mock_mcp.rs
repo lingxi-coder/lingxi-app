@@ -173,9 +173,10 @@ async fn initialize_emits_literal_claude_code_clientinfo() {
         frame.contains(r#""protocolVersion":"2025-11-25""#),
         "literal protocolVersion must appear, got: {frame}",
     );
-    // Capabilities are EXACTLY {"roots":{},"elicitation":{}}.
+    // Capabilities are EXACTLY {"roots":{"listChanged":true},"elicitation":{}}
+    // (parity 2.1.207 J7n(): roots advertises listChanged:true).
     assert!(
-        frame.contains(r#""capabilities":{"roots":{},"elicitation":{}}"#),
+        frame.contains(r#""capabilities":{"roots":{"listChanged":true},"elicitation":{}}"#),
         "literal capability shape must appear, got: {frame}",
     );
 }

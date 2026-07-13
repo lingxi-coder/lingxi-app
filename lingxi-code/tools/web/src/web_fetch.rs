@@ -359,23 +359,16 @@ pub fn is_dns_failure(msg: &str) -> bool {
         || lower.contains("nodename nor servname")
 }
 
-/// Whether the domain blocklist preflight should be skipped for this fetch.
+/// LingXi-local env fallback for skipping the domain-blocklist preflight.
 ///
-/// Mirrors `settings.skipWebFetchPreflight` (`utils.ts:423-424`) — the
-/// enterprise-customer escape hatch for hosts whose network policy blocks
-/// outbound connections to `claude.ai`/`api.anthropic.com`.
-///
-/// **Interim wiring (flagged):** the faithful source is a settings-derived
-/// `BuiltinToolContext::skip_web_fetch_preflight` field populated at tool
-/// registration. Threading that field touches `tool-api`'s shared
-/// `builtin_context.rs` plus the registration site in the composition crate —
-/// out of this batch's `tool-web`-only scope (and it would collide with Batch 5's
-/// `builtin_context.rs` edit). The batch spec explicitly sanctions an env-var
-/// interim: `LINGXI_SKIP_WEBFETCH_PREFLIGHT` truthy (`1`/`true`/`yes`/`on`,
-/// case-insensitive) skips the preflight. Follow-up: replace this with the
-/// context field once both `builtin_context.rs` fields land together.
+/// The faithful source is now `settings.skipWebFetchPreflight`, threaded through
+/// `BuiltinToolContext::skip_web_fetch_preflight` (parity 2.1.207 P2-14) and
+/// checked first at the gate. CC 2.1.207 has NO environment-variable equivalent
+/// (its only mechanism is the settings key), so this env var is a LingXi-local
+/// convenience retained as an OR-fallback: `LINGXI_SKIP_WEBFETCH_PREFLIGHT`
+/// truthy (`1`/`true`/`yes`/`on`, case-insensitive) also skips the preflight.
 #[must_use]
-fn skip_web_fetch_preflight() -> bool {
+fn skip_web_fetch_preflight_env() -> bool {
     std::env::var("LINGXI_SKIP_WEBFETCH_PREFLIGHT")
         .ok()
         .is_some_and(|v| {
@@ -414,14 +407,14 @@ impl WebFetchTool {
     }
 
     fn user_agent() -> String {
-        // claude-code WebFetch User-Agent (v2.1.206: `Claude-User (${tg()}; +...)`):
+        // claude-code WebFetch User-Agent (v2.1.207: `Claude-User (${tg()}; +...)`):
         // `Claude-User (claude-code/<version>; +https://support.anthropic.com/)`.
         // The `Claude-User (...)` wrapper is how Anthropic web infra recognizes
         // claude-code fetch traffic (distinct from the api-client UA).
         // R-V1: the version is claude-code's VERSION (the parity target,
         // `traits::CLAUDE_CODE_VERSION`), NOT LingXi's CARGO_PKG_VERSION — every
         // WebFetch GET previously sent `claude-code/0.12.0` to Anthropic infra +
-        // target servers instead of `claude-code/2.1.206`.
+        // target servers instead of `claude-code/2.1.207`.
         format!(
             "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
             traits::CLAUDE_CODE_VERSION
@@ -921,9 +914,13 @@ Usage notes:\n\
 
         // Domain blocklist preflight (`utils.ts:420-435`). Runs on every host
         // (cache-miss path only — a URL cache hit returned above) unless the
-        // user opted to skip it. `Blocked`/`CheckFailed` map to the byte-locked
-        // user-facing error messages; `Allowed` continues to the fetch.
-        if !skip_web_fetch_preflight() {
+        // user opted to skip it. The faithful gate is `settings.skipWebFetchPreflight`
+        // (binary `if(!Mi().skipWebFetchPreflight)switch((await DSd(g)).status){…}`),
+        // threaded here via `ctx.skip_web_fetch_preflight`; the
+        // `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var is a LingXi-local OR-fallback
+        // (CC has no env equivalent). `Blocked`/`CheckFailed` map to the
+        // byte-locked user-facing error messages; `Allowed` continues to the fetch.
+        if !(self.ctx.skip_web_fetch_preflight || skip_web_fetch_preflight_env()) {
             match crate::blocklist::check_domain_blocklist(self.ctx.http.as_ref(), &host).await {
                 crate::blocklist::DomainCheckResult::Allowed => {}
                 crate::blocklist::DomainCheckResult::Blocked => {
@@ -1133,7 +1130,15 @@ Usage notes:\n\
             }
             Ok(resp) => {
                 let status = resp.status;
-                let body_bytes = resp.body.len();
+                // The reported byte count is the RAW wire length (matches
+                // claude-code's arraybuffer `byteLength`). For a binary body the
+                // lossy `body` String length differs from the wire (U+FFFD is 3
+                // bytes), so prefer `body_bytes` when the transport captured it.
+                let body_bytes = if resp.body_bytes.is_empty() {
+                    resp.body.len()
+                } else {
+                    resp.body_bytes.len()
+                };
 
                 // Transfer cap (`utils.ts:112` `maxContentLength`): a body larger
                 // than 10 MB is rejected, NOT truncated (TS: axios throws). The M1
@@ -1165,15 +1170,20 @@ Usage notes:\n\
                 // persist error, the footer is simply skipped (`if(!("error"in
                 // h))`).
                 //
-                // RESIDUAL: the M1 `HttpResponse.body` is a `String` (UTF-8 text),
-                // so for a genuinely-binary body the original bytes are already
-                // lost to UTF-8 decoding upstream — we persist `body.as_bytes()`,
-                // which is faithful for text-ish/over-cap bodies and exercises the
-                // full predicate/persist/footer path, but is NOT byte-identical to
-                // the wire for true binaries. Full fidelity needs a `Vec<u8>`
-                // transport body (a cross-subsystem change — see report).
+                // The transport now carries the raw wire bytes alongside the
+                // lossy `body` String (`HttpResponse.body_bytes`, populated by
+                // reqwest's `resp.bytes()` — claude-code's
+                // `responseType:"arraybuffer"`), so a genuinely-binary body
+                // (PDF/image/invalid-UTF8) is persisted byte-identically to the
+                // wire. Falls back to `body.as_bytes()` for producers (test
+                // mocks / non-transport) that populate only the String body.
+                let raw_body: &[u8] = if resp.body_bytes.is_empty() {
+                    resp.body.as_bytes()
+                } else {
+                    &resp.body_bytes
+                };
                 let (persisted_path, persisted_size) =
-                    self.persist_binary(&content_type, resp.body.as_bytes());
+                    self.persist_binary(&content_type, raw_body);
 
                 // HTML->markdown (claude-code converts HTML; non-HTML is used as-is).
                 // Behind `web-markdown`; feature off => content is the raw body.

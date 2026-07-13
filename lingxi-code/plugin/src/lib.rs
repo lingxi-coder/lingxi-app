@@ -26,6 +26,7 @@ mod mcpb;
 pub mod source;
 pub mod strict_policy;
 pub mod trust;
+pub mod user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
 pub use blocklist::PluginBlocklist;
@@ -37,8 +38,8 @@ pub use lifecycle::PluginState;
 pub use loader::{resolve_user_config, LoaderError};
 pub use manager::{PluginManager, PluginManagerError};
 pub use manifest::{
-    ComponentPath, PluginChannel, PluginComponents, PluginManifest, UserConfigField,
-    UserConfigSchema,
+    ComponentPath, PluginChannel, PluginComponents, PluginManifest, PluginUserConfig,
+    UserConfigField, UserConfigSchema,
 };
 pub use marketplace::MarketplaceManager;
 pub use source::PluginSource;

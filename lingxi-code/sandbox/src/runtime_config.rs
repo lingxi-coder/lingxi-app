@@ -382,9 +382,26 @@ pub struct SandboxSettingsJson {
     pub enable_weaker_nested_sandbox: Option<bool>,
     /// Override `SandboxRuntimeConfig::enable_weaker_network_isolation`.
     pub enable_weaker_network_isolation: Option<bool>,
-    /// Override `SandboxRuntimeConfig::allow_pty`.
-    pub allow_pty: Option<bool>,
+    // NB: there is intentionally NO `allow_pty` settings key. claude-code's
+    // `SandboxSettingsSchema` has no `allowPty` field (2.1.207 @212793011 zod
+    // schema / @212939769 settings-key allowlist both omit it), and its
+    // sandbox-adapter never forwards one into the srt config — all 7 binary
+    // `allowPty` occurrences are internal to the vendored sandbox-runtime package.
+    // An `allowPty` key in a user settings.json is an UNKNOWN field: stripped and
+    // never honored (matching CC). Do NOT re-add a settings override here — it
+    // would be anti-parity. The engine `SandboxRuntimeConfig::allow_pty` field
+    // stays for the legacy SBPL wrap path and the srt config schema, which
+    // legitimately carry it.
     /// Override `SandboxRuntimeConfig::allow_apple_events`.
+    ///
+    /// SOURCE-RESTRICTED: claude-code honors `allowAppleEvents` ONLY from user,
+    /// managed/policy, or CLI `--settings` (`flagSettings`) sources — project
+    /// `.lingxi/settings.json` and `.lingxi/settings.local.json` are IGNORED
+    /// (2.1.207 @223928133). This field is parsed by the composition root's
+    /// per-source resolution, which threads the effective value via
+    /// [`crate::policy_convert::SandboxConvertContext::allow_apple_events_override`];
+    /// it is NOT applied from the merged settings blob in
+    /// [`crate::policy_convert::convert_settings_to_runtime_config`].
     pub allow_apple_events: Option<bool>,
     /// Override `SandboxRuntimeConfig::excluded_commands`.
     pub excluded_commands: Option<Vec<String>>,

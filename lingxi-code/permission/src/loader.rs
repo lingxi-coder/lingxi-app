@@ -32,6 +32,13 @@ use serde::Deserialize;
 struct SettingsTop {
     #[serde(default)]
     permissions: Option<PermissionsBlock>,
+    /// TOP-LEVEL managed-settings lockdown flag (a sibling of `permissions`,
+    /// NOT inside it — claude-code schema: `allowManagedPermissionRulesOnly:
+    /// E.boolean().optional()`). Only meaningful when set in the managed
+    /// (policySettings) tier; consumed via
+    /// [`allow_managed_permission_rules_only_from_settings_json`].
+    #[serde(default, rename = "allowManagedPermissionRulesOnly")]
+    allow_managed_permission_rules_only: Option<bool>,
 }
 
 /// The `permissions` block. `allow`/`deny`/`ask` are arrays of rule strings;
@@ -154,6 +161,25 @@ pub fn additional_directories_from_settings_json(raw: &str) -> Vec<std::path::Pa
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Does this settings file set the managed-only permission-rule lockdown?
+/// True iff the TOP-LEVEL `allowManagedPermissionRulesOnly` is exactly `true`.
+///
+/// 1:1 with claude-code `$wt()` (`wr("policySettings")?.
+/// allowManagedPermissionRulesOnly===!0`): when ANY managed tier sets it true
+/// (`u.some((g)=>g.allowManagedPermissionRulesOnly===!0)` in the managed-tier
+/// fold), `RKt()` returns ONLY the policySettings rules — schema text: "When
+/// true (and set in managed settings), only permission rules (allow/deny/ask)
+/// from managed settings are respected. User, project, local, and CLI argument
+/// permission rules are ignored." The caller applies the retain; this helper is
+/// the pure per-file parse (best-effort like the other loaders here).
+#[must_use]
+pub fn allow_managed_permission_rules_only_from_settings_json(raw: &str) -> bool {
+    serde_json::from_str::<SettingsTop>(raw)
+        .ok()
+        .and_then(|t| t.allow_managed_permission_rules_only)
+        == Some(true)
 }
 
 #[cfg(test)]
@@ -304,6 +330,47 @@ mod tests {
             f(r#"{ "permissions": { "allow": ["Read"], "additionalDirectories": ["a"] } }"#),
             vec![PathBuf::from("a")]
         );
+    }
+
+    #[test]
+    fn allow_managed_permission_rules_only_parses_top_level() {
+        let f = allow_managed_permission_rules_only_from_settings_json;
+        // TOP-LEVEL true → lockdown.
+        assert!(f(r#"{ "allowManagedPermissionRulesOnly": true }"#));
+        // Coexists with a permissions block.
+        assert!(f(
+            r#"{ "allowManagedPermissionRulesOnly": true, "permissions": { "deny": ["Bash(rm:*)"] } }"#
+        ));
+        // Exactly-true semantics (`===!0`): false / absent / wrong type → off.
+        assert!(!f(r#"{ "allowManagedPermissionRulesOnly": false }"#));
+        assert!(!f("{}"));
+        assert!(!f("not json"));
+        // INSIDE `permissions` is the WRONG place (schema keeps it top-level) —
+        // must not trigger the lockdown.
+        assert!(!f(
+            r#"{ "permissions": { "allowManagedPermissionRulesOnly": true } }"#
+        ));
+    }
+
+    /// The caller-side retain (mirroring claude-code `RKt()` under `$wt()`):
+    /// when the lockdown is set, only `PolicySettings`-sourced rules survive.
+    #[test]
+    fn managed_only_lockdown_retain_drops_non_managed_rules() {
+        let user =
+            permission_rules_from_settings_json(r#"{ "permissions": { "allow": ["WebFetch"] } }"#,
+                PermissionRuleSource::UserSettings)
+            .unwrap();
+        let managed = permission_rules_from_settings_json(
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+            PermissionRuleSource::PolicySettings,
+        )
+        .unwrap();
+        let mut rules: Vec<PermissionRule> = user.into_iter().chain(managed).collect();
+        assert_eq!(rules.len(), 2);
+        rules.retain(|r| r.source == PermissionRuleSource::PolicySettings);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].value.tool_name, "Bash");
+        assert!(matches!(rules[0].behavior, PermissionBehavior::Deny));
     }
 
     #[test]

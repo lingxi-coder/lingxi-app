@@ -87,6 +87,7 @@ async fn execute_maps_request_and_response() {
             ("Retry-After".to_string(), "7".to_string()),
         ],
         body: r#"{"id":"msg_1"}"#.to_string(),
+        body_bytes: Vec::new(),
     }));
     let bridge = LlmTransportBridge::new(fake);
 
@@ -128,6 +129,7 @@ async fn execute_body_bytes_pass_through_verbatim_and_suppress_json_body() {
         status: 200,
         headers: vec![],
         body: "{}".to_string(),
+        body_bytes: Vec::new(),
     }));
     let bridge = LlmTransportBridge::new(fake);
 
@@ -167,6 +169,7 @@ async fn execute_without_body_bytes_keeps_json_body_behavior() {
         status: 200,
         headers: vec![],
         body: "{}".to_string(),
+        body_bytes: Vec::new(),
     }));
     let bridge = LlmTransportBridge::new(fake);
 
@@ -196,6 +199,7 @@ async fn execute_passes_error_statuses_through_as_data() {
         headers: vec![],
         body: r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow"}}"#
             .to_string(),
+        body_bytes: Vec::new(),
     }));
     let bridge = LlmTransportBridge::new(fake);
 

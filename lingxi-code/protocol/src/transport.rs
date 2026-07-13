@@ -50,7 +50,23 @@ pub struct HttpResponse {
     /// Response headers as ordered (name, value) pairs.
     pub headers: Vec<(String, String)>,
     /// Response body (typically UTF-8 JSON or SSE text).
+    ///
+    /// For binary responses this is the *lossy* UTF-8 decoding of the wire
+    /// bytes (`String::from_utf8_lossy`); consumers that need byte-exact
+    /// fidelity (e.g. WebFetch's binary-artifact persist) must read
+    /// [`Self::body_bytes`] instead.
     pub body: String,
+    /// Raw response-body bytes exactly as received on the wire, *before* any
+    /// UTF-8 decoding — mirrors the [`HttpRequest::body_bytes`] precedent.
+    ///
+    /// Empty when the producer captured only [`Self::body`] (e.g. test mocks
+    /// and non-transport producers); production transports populate BOTH
+    /// `body` (via `from_utf8_lossy`) and this field, so a genuinely-binary
+    /// body (PDF/image/invalid-UTF8) survives byte-identically to consumers
+    /// such as WebFetch's raw-artifact save. `skip_serializing_if` keeps the
+    /// serialized shape unchanged for producers that leave it empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_bytes: Vec<u8>,
 }
 
 /// A single Server-Sent Events frame.
@@ -133,5 +149,43 @@ mod tests {
             req2.body_bytes.as_deref(),
             Some(&[0x00u8, 0xFF, 0x10, 0x7F][..])
         );
+    }
+
+    #[test]
+    fn http_response_body_bytes_empty_omitted_from_json() {
+        let resp = HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: "{}".into(),
+            body_bytes: Vec::new(),
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !s.contains("body_bytes"),
+            "empty body_bytes must be omitted for backward-compatible shape; got: {s}"
+        );
+        // Legacy JSON without the field still deserializes (serde default).
+        let legacy = r#"{"status":200,"headers":[],"body":"{}"}"#;
+        let resp2: HttpResponse = serde_json::from_str(legacy).unwrap();
+        assert!(resp2.body_bytes.is_empty());
+    }
+
+    #[test]
+    fn http_response_body_bytes_preserves_invalid_utf8() {
+        // A genuinely-binary body: `0xFF 0xFE` are invalid UTF-8, so the lossy
+        // `body` String differs byte-for-byte from the raw wire bytes.
+        let raw = vec![0x25, 0x50, 0x44, 0x46, 0x00, 0xFF, 0xFE];
+        let resp = HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: String::from_utf8_lossy(&raw).into_owned(),
+            body_bytes: raw.clone(),
+        };
+        // The lossy String is NOT byte-identical to the wire (proves the field
+        // is load-bearing, not merely a copy of `body`).
+        assert_ne!(resp.body.as_bytes(), raw.as_slice());
+        let s = serde_json::to_string(&resp).unwrap();
+        let resp2: HttpResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(resp2.body_bytes, raw, "raw bytes must survive round-trip");
     }
 }

@@ -48,11 +48,20 @@ pub struct FileChangedFire {
 /// the real impl over its shared `Arc<HookExecutorImpl>`.
 #[async_trait]
 pub trait FileChangedFirer: Send + Sync {
-    /// Fire the `FileChanged` hook for a watched file that mutated on disk.
+    /// Fire the `FileChanged` hook for a watched file that mutated on disk and
+    /// return any `hookSpecificOutput.watchPaths` the fired hooks produced,
+    /// resolved to absolute paths (empty when none).
+    ///
+    /// Parity: claude-code's `handleFileEvent` runs `v3r(path, event)` and, when
+    /// the returned `watchPaths` is non-empty, calls `updateWatchPaths` to
+    /// restart the watcher over the added paths (`fileChangedWatcher.ts:108-131`
+    /// — the "dynamic watch paths" feedback loop). The desktop watcher folds the
+    /// returned paths into its watch set and restarts.
     ///
     /// Best-effort: implementations MUST NOT propagate hook failures — a
-    /// failing or absent hook is swallowed so the watch loop always continues.
-    async fn fire(&self, fire: FileChangedFire);
+    /// failing or absent hook is swallowed (returning no paths) so the watch
+    /// loop always continues.
+    async fn fire(&self, fire: FileChangedFire) -> Vec<PathBuf>;
 }
 
 /// Convenience alias for an optional firer.

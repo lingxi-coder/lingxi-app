@@ -177,6 +177,21 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ax_screen_reader: Option<bool>,
 
+    /// Scalar field (later source wins). `skipWebFetchPreflight`: skip the
+    /// `WebFetch` domain-blocklist preflight for enterprise hosts whose network
+    /// policy blocks outbound connections to `claude.ai`/`api.anthropic.com`.
+    /// CC 2.1.207 settings zod (verbatim):
+    /// `skipWebFetchPreflight:E.boolean().optional().describe("Skip the WebFetch
+    /// blocklist check for enterprise environments with restrictive security
+    /// policies")`. Consumed by `WebFetchTool` via
+    /// `BuiltinToolContext::skip_web_fetch_preflight` — when true the tool skips
+    /// the blocklist check entirely (binary
+    /// `if(!Mi().skipWebFetchPreflight)switch((await DSd(g)).status){…}`;
+    /// leaked `utils.ts:423-424` `if(!settings.skipWebFetchPreflight){…}`).
+    /// Scalar-override merge (not in `MERGE_STRATEGIES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_web_fetch_preflight: Option<bool>,
+
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -397,6 +412,38 @@ mod tests {
         assert!(
             strategy_for("outputStyle").is_none(),
             "outputStyle must default to Override (scalar), not be registered DeepMerge"
+        );
+    }
+
+    #[test]
+    fn skip_web_fetch_preflight_parses_roundtrips_and_is_scalar_override() {
+        // CC 2.1.207 zod: `skipWebFetchPreflight:E.boolean().optional()`. A
+        // settings.json carrying `"skipWebFetchPreflight": true` must parse into
+        // the typed `Some(true)` (unknown-key tolerance alone would strip it, so
+        // the value would never be ACCESSIBLE to the WebFetch tool).
+        let json = r#"{ "skipWebFetchPreflight": true, "model": "claude-sonnet-4-5" }"#;
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("skipWebFetchPreflight bool must parse");
+        assert_eq!(parsed.skip_web_fetch_preflight, Some(true));
+        assert!(
+            parsed.model.is_some(),
+            "sibling fields must survive the load"
+        );
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"skipWebFetchPreflight\":true"), "{back}");
+        // Absent ⇒ None (distinct from `Some(false)`), and NOT emitted on
+        // re-serialize (skip_serializing_if).
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert_eq!(absent.skip_web_fetch_preflight, None);
+        assert!(!serde_json::to_string(&absent)
+            .unwrap()
+            .contains("skipWebFetchPreflight"));
+        // Scalar-override merge (later layer wins) — must NOT be a registered
+        // ConcatDedup/DeepMerge field (falls through to the default Override).
+        assert!(
+            strategy_for("skipWebFetchPreflight").is_none(),
+            "skipWebFetchPreflight must be scalar-override (later source wins)"
         );
     }
 

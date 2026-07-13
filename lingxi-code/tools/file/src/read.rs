@@ -867,13 +867,39 @@ pub fn add_line_numbers(content: &str, start_line: u64) -> String {
 /// `FileReadTool` — reads a UTF-8 file inside the trusted-dirs whitelist.
 pub struct FileReadTool {
     ctx: BuiltinToolContext,
+    /// Optional shared live-cwd cell (claude-code `getCwd()`/`Ct()`). When
+    /// injected (desktop), the "File does not exist. Note: your current working
+    /// directory is …" note and its `suggest_path_under_cwd` base follow the
+    /// post-`cd` directory; when absent (mobile/tests) they fall back to
+    /// `ctx.workspace`.
+    live_cwd: Option<tool_api::LiveCwdCell>,
 }
 
 impl FileReadTool {
     /// Construct a new tool. Cheap — only clones the shared `Arc`s.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            live_cwd: None,
+        }
+    }
+
+    /// Inject the shared live-cwd cell (builder; default is `None`). The desktop
+    /// composition root passes the SAME cell the `BashTool` writes on a `cd`.
+    #[must_use]
+    pub fn with_live_cwd(mut self, cell: tool_api::LiveCwdCell) -> Self {
+        self.live_cwd = Some(cell);
+        self
+    }
+
+    /// The effective live cwd: the injected cell's value if present, else the
+    /// static `ctx.workspace` (claude-code `Ct()` fallback for the no-cell case).
+    fn cwd_now(&self) -> std::path::PathBuf {
+        self.live_cwd
+            .as_ref()
+            .map(|c| c.lock().unwrap().clone())
+            .unwrap_or_else(|| self.ctx.workspace.clone())
     }
 
     async fn emit_started(&self, invocation_id: &str, path: &std::path::Path) {
@@ -1049,13 +1075,13 @@ impl FileReadTool {
     /// else if (similarFilename) message += ` Did you mean ${similarFilename}?`
     /// ```
     ///
-    /// The cwd is sourced from the tool's `BuiltinToolContext` (`self.ctx.
-    /// workspace`, the project workspace path — the established `getCwd()` analog
-    /// used by `grep`/`glob`), canonicalized (`std::fs::canonicalize`, mirroring
-    /// TS `getCwd()` returning a realpath-resolved cwd) with a fallback to the
-    /// unresolved workspace so the message + the `suggest_path_under_cwd` prefix
-    /// comparison both use the symlink-resolved form. The suffix is the
-    /// byte-exact TS `" Did you mean {x}?"`.
+    /// The cwd is the LIVE cwd ([`Self::cwd_now`] — the injected shared cell if
+    /// present, else `self.ctx.workspace`), canonicalized
+    /// (`std::fs::canonicalize`, mirroring TS `getCwd()` returning a
+    /// realpath-resolved cwd) with a fallback to the unresolved path so the
+    /// message + the `suggest_path_under_cwd` prefix comparison both use the
+    /// symlink-resolved form. The suffix is the byte-exact TS `" Did you mean
+    /// {x}?"`.
     ///
     /// NotFound gate: this method is only ever invoked on the ENOENT branch of
     /// `call` (every call site is inside `if e.kind() == ErrorKind::NotFound`),
@@ -1076,10 +1102,10 @@ impl FileReadTool {
             return Err(ToolError::Io(err.to_string()));
         }
         self.emit_failed(invocation_id, "io_metadata").await;
-        // `getCwd()` analog: the project workspace, realpath-resolved (matching
+        // `getCwd()` analog: the LIVE cwd (`Ct()`), realpath-resolved (matching
         // TS's already-resolved cwd) with a fallback to the unresolved path.
-        let cwd = std::fs::canonicalize(&self.ctx.workspace)
-            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        let live_cwd = self.cwd_now();
+        let cwd = std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
         // Base message: `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${cwd}.`.
         let mut message = format!(
             "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
@@ -2763,6 +2789,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_path_inside_additional_trusted_dir() {
+        // parity 2.1.207 P1-08: file tools accept a path inside an `--add-dir` /
+        // settings `additionalDirectories` root (trusted_dirs = [cwd, extra]),
+        // not just cwd. claude-code allows file tools in additionalWorkingDirectories.
+        let cwd = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let target = extra.path().join("note.txt");
+        std::fs::write(&target, "hello from extra").unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![cwd.path().to_path_buf(), extra.path().to_path_buf()],
+        );
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["file"]["content"], "hello from extra");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_path_outside_all_trusted_dirs() {
+        // With two trusted dirs [cwd, extra], a path outside BOTH is still
+        // blocked. Symlink inside `extra` pointing out → canonicalize escapes.
+        let cwd = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target_real = outside.path().join("secret.txt");
+        std::fs::write(&target_real, "x").unwrap();
+        let link = extra.path().join("escape");
+        std::os::unix::fs::symlink(&target_real, &link).unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![cwd.path().to_path_buf(), extra.path().to_path_buf()],
+        );
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": link.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::PathBlocked { .. }),
+            "expected PathBlocked, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn empty_file_emits_empty_warning_model_content() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("empty.txt");
@@ -4032,6 +4116,40 @@ mod tests {
         );
         // Still an Io error variant.
         assert!(matches!(err, ToolError::Io(_)), "got: {err:?}");
+    }
+
+    // ── P2-08: the "File does not exist" note prints the LIVE cwd ─────────────
+
+    #[tokio::test]
+    async fn live_cwd_cell_drives_file_not_found_note() {
+        // A missing file under the workspace validates, reaching the not-found
+        // arm; its cwd-note must print the injected LIVE cwd (tmp/sub), NOT the
+        // workspace (tmp) — 1:1 with claude-code's `getCwd()`/`Ct()`.
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let missing = tmp.path().join("missing.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(sub.clone()));
+        let tool = FileReadTool::new(ctx).with_live_cwd(cell);
+        let err = tool
+            .call(
+                json!({ "file_path": missing.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        // The note shows the canonicalized LIVE cwd (tmp/sub), ending in `/sub.`.
+        let canon_sub = std::fs::canonicalize(&sub).unwrap();
+        assert!(
+            msg.contains(&format!(
+                "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
+                canon_sub.display()
+            )),
+            "expected the note to print the live cwd (tmp/sub), got: {msg}"
+        );
     }
 
     #[tokio::test]

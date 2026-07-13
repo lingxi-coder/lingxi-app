@@ -67,7 +67,7 @@ impl OrchestratorFileChangedFirer {
 
 #[async_trait]
 impl FileChangedFirer for OrchestratorFileChangedFirer {
-    async fn fire(&self, fire: FileChangedFire) {
+    async fn fire(&self, fire: FileChangedFire) -> Vec<PathBuf> {
         // Map the fire's path/kind onto the `HookEvent::FileChanged` variant;
         // the envelope builder serializes these as the wire `file_path` /
         // `event` (executor.rs build_lifecycle_envelope_body).
@@ -86,9 +86,27 @@ impl FileChangedFirer for OrchestratorFileChangedFirer {
         };
         // Best-effort: the executor never errors out of `execute`, so a
         // misbehaving / absent hook degrades to a no-op and never breaks the
-        // watch loop. The aggregate result is intentionally dropped —
-        // `FileChanged` is observational.
-        let _ = self.hooks.execute(event, ctx).await;
+        // watch loop. `FileChanged` is observational for its decision, but the
+        // aggregated `watchPaths` drive the "dynamic watch paths" feedback loop
+        // (`fileChangedWatcher.ts:108-131`) — resolve each against the engine
+        // cwd (a relative matcher is anchored to cwd, mirroring
+        // `resolveWatchPaths`) and return the deduped set for the watcher to
+        // fold in and restart.
+        let agg = self.hooks.execute(event, ctx).await;
+        let mut out: Vec<PathBuf> = Vec::new();
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for raw in agg.watch_paths {
+            let p = std::path::Path::new(&raw);
+            let resolved = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                self.cwd.join(p)
+            };
+            if seen.insert(resolved.clone()) {
+                out.push(resolved);
+            }
+        }
+        out
     }
 }
 

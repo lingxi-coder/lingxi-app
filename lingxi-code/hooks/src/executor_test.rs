@@ -2923,6 +2923,7 @@ mod http_agent_dispatch_tests {
                 status: self.status,
                 headers: Vec::new(),
                 body: self.body.clone(),
+                body_bytes: Vec::new(),
             })
         }
         async fn stream_sse(

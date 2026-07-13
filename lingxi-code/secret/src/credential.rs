@@ -36,6 +36,14 @@ fn provider_key_account(id: &str) -> String {
     format!("provider-key-{id}")
 }
 
+/// Keychain account name for a sensitive plugin `userConfig` value, namespaced
+/// by the owning `plugin` identity and field `key`. Mirrors claude-code's
+/// `pluginSecrets` `${plugin}/${key}` keying (`plugin-secret-` prefix keeps it
+/// distinct from provider keys under the shared `lingxi` service).
+fn plugin_secret_account(plugin: &str, key: &str) -> String {
+    format!("plugin-secret-{plugin}/{key}")
+}
+
 /// A full Anthropic OAuth credential set as returned by [`CredentialManager::get_oauth_tokens`].
 ///
 /// `access_token` / `refresh_token` are wrapped in [`Secret`] so they redact in
@@ -230,6 +238,73 @@ impl CredentialManager {
         let s = String::from_utf8(raw.expose_secret_bytes().to_vec())
             .map_err(|_| CredentialError::Unavailable)?;
         Ok(Some(Secret::new(s)))
+    }
+
+    /// Persist a sensitive plugin `userConfig` value in [`SecureStorage`],
+    /// keyed by the owning `plugin` identity and field `key`. Stored under the
+    /// shared `service = "lingxi"` keychain at
+    /// `plugin-secret-{plugin}/{key}`, labelled [`SecretKind::PluginSecret`].
+    ///
+    /// Parity with claude-code's `pluginSecrets`: a plugin's `sensitive: true`
+    /// userConfig fields NEVER land in settings.json — only here. Overwrites any
+    /// existing entry so re-configuring rotates the value. Not cached: the
+    /// loader reads it live so a freshly stored secret takes effect on the next
+    /// plugin load without a restart.
+    pub async fn set_plugin_secret(
+        &self,
+        plugin: &str,
+        key: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError> {
+        let metadata = SecureStorageMetadata {
+            created_at: self.clock.now(),
+            last_accessed: None,
+            kind: SecretKind::PluginSecret {
+                plugin: plugin.to_string(),
+                key: key.to_string(),
+            }
+            .as_dto(),
+        };
+        let data = SecureStorageData::new(secret.as_bytes().to_vec(), metadata);
+        self.storage
+            .store("lingxi", &plugin_secret_account(plugin, key), data)
+            .await?;
+        Ok(())
+    }
+
+    /// Load a sensitive plugin `userConfig` value stored under `(plugin, key)`.
+    /// Returns `Ok(None)` when no value has been stored (the loader then treats
+    /// the field as absent — required ⇒ `MissingRequired`, optional ⇒ skipped).
+    pub async fn get_plugin_secret(
+        &self,
+        plugin: &str,
+        key: &str,
+    ) -> Result<Option<Secret<String>>, CredentialError> {
+        let Some(raw) = self
+            .storage
+            .retrieve("lingxi", &plugin_secret_account(plugin, key))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let s = String::from_utf8(raw.expose_secret_bytes().to_vec())
+            .map_err(|_| CredentialError::Unavailable)?;
+        Ok(Some(Secret::new(s)))
+    }
+
+    /// Delete a sensitive plugin `userConfig` value under `(plugin, key)`.
+    /// Idempotent — deleting a missing entry is not an error. Used by the
+    /// uninstall path (claude-code `deletePluginOptions` clears the plugin's
+    /// keychain `pluginSecrets`).
+    pub async fn delete_plugin_secret(
+        &self,
+        plugin: &str,
+        key: &str,
+    ) -> Result<(), CredentialError> {
+        self.storage
+            .delete("lingxi", &plugin_secret_account(plugin, key))
+            .await?;
+        Ok(())
     }
 
     /// Persist a full Anthropic OAuth credential set.
@@ -775,6 +850,96 @@ mod oauth_tests {
         assert_eq!(raw.expose_secret_bytes(), b"ghu_token");
         let expected_kind = SecretKind::GenericApiKey {
             provider: "github-copilot".to_string(),
+        }
+        .as_dto();
+        assert_eq!(raw.metadata.kind, expected_kind);
+    }
+
+    // ── Plugin userConfig secret round-trips ────────────────────────────────
+
+    #[tokio::test]
+    async fn plugin_secret_round_trips() {
+        let (_storage, cm) = manager();
+        cm.set_plugin_secret("weather@acme", "API_KEY", "sk-secret")
+            .await
+            .expect("set");
+        let got = cm
+            .get_plugin_secret("weather@acme", "API_KEY")
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(got.expose_secret(), "sk-secret");
+    }
+
+    #[tokio::test]
+    async fn plugin_secret_absent_is_none() {
+        let (_storage, cm) = manager();
+        assert!(cm
+            .get_plugin_secret("weather@acme", "API_KEY")
+            .await
+            .expect("get")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn plugin_secret_delete_is_idempotent() {
+        let (_storage, cm) = manager();
+        cm.set_plugin_secret("p", "K", "v").await.expect("set");
+        cm.delete_plugin_secret("p", "K").await.expect("delete");
+        assert!(cm.get_plugin_secret("p", "K").await.expect("get").is_none());
+        // Second delete on an empty slot is not an error.
+        cm.delete_plugin_secret("p", "K")
+            .await
+            .expect("idempotent delete");
+    }
+
+    #[tokio::test]
+    async fn plugin_secrets_isolated_by_plugin_and_key() {
+        let (_storage, cm) = manager();
+        cm.set_plugin_secret("p1", "K", "a").await.expect("set a");
+        cm.set_plugin_secret("p2", "K", "b").await.expect("set b");
+        cm.set_plugin_secret("p1", "K2", "c").await.expect("set c");
+        assert_eq!(
+            cm.get_plugin_secret("p1", "K")
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "a"
+        );
+        assert_eq!(
+            cm.get_plugin_secret("p2", "K")
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "b"
+        );
+        assert_eq!(
+            cm.get_plugin_secret("p1", "K2")
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "c"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_secret_persisted_under_lingxi_service_with_plugin_kind() {
+        let (storage, cm) = manager();
+        cm.set_plugin_secret("weather@acme", "API_KEY", "sk-x")
+            .await
+            .expect("set");
+        let raw = storage
+            .retrieve("lingxi", "plugin-secret-weather@acme/API_KEY")
+            .await
+            .expect("retrieve")
+            .expect("present");
+        assert_eq!(raw.expose_secret_bytes(), b"sk-x");
+        let expected_kind = SecretKind::PluginSecret {
+            plugin: "weather@acme".to_string(),
+            key: "API_KEY".to_string(),
         }
         .as_dto();
         assert_eq!(raw.metadata.kind, expected_kind);

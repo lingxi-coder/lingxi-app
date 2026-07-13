@@ -757,6 +757,8 @@ mod tests {
             spec,
             scope: ConfigScope::User,
             disabled: false,
+            timeout_ms: None,
+            always_load: false,
         }
     }
     fn stdio_spec(command: &str, args: &[&str]) -> McpTransportSpec {

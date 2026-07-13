@@ -1167,6 +1167,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     initial_effort: None,
 ///     // `None` ⟶ inert: no `-w`/`--worktree` boot launch.
 ///     worktree_launch: None,
+///     // `None` ⟶ inert: no `--tmux` worktree tmux session.
+///     tmux_launch: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1408,9 +1410,25 @@ pub struct DesktopConfig {
     /// `build()` mints a random slug via the same
     /// [`tool_worktree::worktree::gen_random_slug`] helper `EnterWorktree`
     /// uses for a name-less create. `Some(name)` ⟶ that name is the slug.
-    /// `--tmux` (`WorktreeSession.tmux_session_name`) is a separate,
-    /// not-yet-wired field (Task 4).
+    /// `--tmux` (`WorktreeSession.tmux_session_name`) is threaded separately
+    /// via [`Self::tmux_launch`] (Task 4).
     pub worktree_launch: Option<String>,
+    /// CLI `--tmux[=mode]` (worktree-tmux-launch plan, Task 4): create a
+    /// detached tmux session (`tmux new-session -d -s <name> -c <path>`) for
+    /// the worktree `worktree_launch` creates, recording the session name
+    /// into `WorktreeSession.tmux_session_name`. `None` (the default, and the
+    /// only value every host but `apps/cli` currently supplies, and every
+    /// `apps/cli` session that omits `--tmux`) ⟶ INERT — no tmux session is
+    /// created, `tmux_session_name` stays `None`, boot is byte-identical to
+    /// before this field existed. `Some(mode)` ⟶ `apply_worktree_launch`
+    /// creates the session AFTER the worktree itself is created+swapped+
+    /// recorded; a tmux failure is logged and does NOT fail boot (the
+    /// worktree launch itself already succeeded). `--tmux` requires
+    /// `worktree_launch.is_some()` — `Some` here with `worktree_launch ==
+    /// None` is a hard boot failure ([`BuildError::TmuxRequiresWorktree`]),
+    /// mirroring the 206 constraint "Create a tmux session for the worktree
+    /// (requires --worktree)".
+    pub tmux_launch: Option<String>,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -1619,6 +1637,8 @@ impl Default for DesktopConfig {
             initial_effort: None,
             // Default: no `-w`/`--worktree` flag ⟶ inert boot (no worktree).
             worktree_launch: None,
+            // Default: no `--tmux` flag ⟶ inert boot (no tmux session).
+            tmux_launch: None,
         }
     }
 }
@@ -1985,6 +2005,13 @@ pub enum BuildError {
     /// downgrade rather than a recoverable default.
     #[error("--worktree launch failed: {0}")]
     WorktreeLaunch(String),
+    /// `cfg.tmux_launch` was `Some` (the user passed `--tmux`) while
+    /// `cfg.worktree_launch` was `None` (no `-w`/`--worktree`). Mirrors the CLI's
+    /// own `--tmux` doc ("Create a tmux session for the worktree (requires
+    /// --worktree)") as a hard boot failure rather than silently ignoring the
+    /// flag — worktree-tmux-launch plan Task 4.
+    #[error("--tmux requires --worktree")]
+    TmuxRequiresWorktree,
 }
 
 /// Build a fully-wired desktop [`DesktopRuntime`] from a deterministic
@@ -2785,15 +2812,34 @@ impl llm_client::RetryReporter for OutputRetryReporter {
 ///
 /// INERT INVARIANT: `worktree_launch == None` (the default, and every host
 /// but a CLI session with `-w`/`--worktree` set) is a complete no-op — no
-/// create, no swap, `ctx.worktree_session` untouched.
+/// create, no swap, `ctx.worktree_session` untouched. `tmux_launch == None`
+/// (the default) is independently inert — no tmux session is created and
+/// `tmux_session_name` stays `None` — even when `worktree_launch` is `Some`.
 ///
-/// `--tmux` (`WorktreeSession.tmux_session_name`) is a separate, not-yet-wired
-/// concern (Task 4); this always records `tmux_session_name: None`.
+/// (worktree-tmux-launch plan, Task 4) `tmux_launch: Some(_)` requires
+/// `worktree_launch: Some(_)` (mirrors the CLI's own `--tmux` doc: "Create a
+/// tmux session for the worktree (requires --worktree)"); `Some` tmux with
+/// `None` worktree is a hard boot failure
+/// ([`BuildError::TmuxRequiresWorktree`]), not a silent ignore. When both are
+/// `Some`, AFTER the worktree above is created + swapped + recorded, this
+/// derives the session name ([`platform_posix::worktree_tmux::worktree_tmux_session_name`],
+/// keyed on the PRE-swap `original_cwd` as the repo root) and creates a
+/// detached tmux session for it
+/// ([`platform_posix::worktree_tmux::create_worktree_tmux_session`]) through
+/// `ctx.process`/`ctx.sandbox`. A tmux failure is logged
+/// (`tracing::warn!`) and does NOT fail boot — the worktree launch itself
+/// already succeeded, and `WorktreeSession.tmux_session_name` simply stays
+/// `None` — only a tmux SUCCESS writes the name into the shared
+/// `ctx.worktree_session` cell.
 async fn apply_worktree_launch(
     worktree_launch: &Option<String>,
+    tmux_launch: &Option<String>,
     ctx: &BuiltinToolContext,
 ) -> Result<(), BuildError> {
     let Some(name_or_empty) = worktree_launch else {
+        if tmux_launch.is_some() {
+            return Err(BuildError::TmuxRequiresWorktree);
+        }
         return Ok(());
     };
     let slug = if name_or_empty.is_empty() {
@@ -2803,17 +2849,19 @@ async fn apply_worktree_launch(
     };
     // Captured BEFORE the swap below — the pre-launch boot cwd, which
     // `ExitWorktree` later restores (same contract as
-    // `EnterWorktreeTool::record_worktree_session`).
+    // `EnterWorktreeTool::record_worktree_session`), and (Task 4) the repo
+    // root the tmux session name is derived from.
     let original_cwd = ctx.session_cwd.cwd();
     let handle = ctx
         .worktree
         .create_worktree(&slug, None, &[])
         .await
         .map_err(|e| BuildError::WorktreeLaunch(e.to_string()))?;
+    let worktree_path = handle.path.clone();
     ctx.session_cwd
         .swap(handle.path.clone(), vec![handle.path.clone()]);
     *ctx.worktree_session.lock().unwrap() = Some(tool_api::WorktreeSession {
-        original_cwd,
+        original_cwd: original_cwd.clone(),
         worktree_path: handle.path,
         branch_name: handle.branch_name,
         base_commit: handle.base_commit,
@@ -2821,9 +2869,40 @@ async fn apply_worktree_launch(
         // one), so `ExitWorktree` may remove it — same as
         // `EnterWorktreeTool::call_create`'s `entered_existing: false`.
         entered_existing: false,
-        // `--tmux` wiring is Task 4; left unset here.
+        // Populated below (Task 4) when `tmux_launch.is_some()` AND the tmux
+        // session actually gets created; `None` otherwise.
         tmux_session_name: None,
     });
+
+    if tmux_launch.is_some() {
+        let session_name =
+            platform_posix::worktree_tmux::worktree_tmux_session_name(&original_cwd, &slug);
+        match platform_posix::worktree_tmux::create_worktree_tmux_session(
+            ctx.process.as_ref(),
+            ctx.sandbox.as_ref(),
+            &session_name,
+            &worktree_path,
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Some(session) = ctx.worktree_session.lock().unwrap().as_mut() {
+                    session.tmux_session_name = Some(session_name);
+                }
+            }
+            Err(e) => {
+                // Non-fatal: the worktree itself was already created+entered
+                // above, so a tmux hiccup must not fail boot — it only means
+                // `WorktreeSession.tmux_session_name` stays `None`.
+                tracing::warn!(
+                    error = %e,
+                    session_name = %session_name,
+                    "--tmux: failed to create the worktree tmux session; continuing without it"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -5112,7 +5191,10 @@ pub async fn build(
     // so boot is byte-identical to before this field existed. A `--worktree`
     // that cannot be created is a HARD boot failure, not a silent degrade to
     // the plain cwd — the user explicitly asked for an isolated worktree.
-    apply_worktree_launch(&cfg.worktree_launch, &tool_ctx).await?;
+    // (Task 4) `cfg.tmux_launch` additionally creates a detached tmux session
+    // for that worktree — independently inert when `None` (see the function
+    // doc); a tmux failure is logged, not a hard boot failure.
+    apply_worktree_launch(&cfg.worktree_launch, &cfg.tmux_launch, &tool_ctx).await?;
     // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
     //        coordinator session passes `Some(CoordinatorWiring { team, mode,
     //        spawn_seam })` so the coordinator `TeamCreate` / `TeamDelete` are
@@ -6680,6 +6762,9 @@ mod tests {
             // No `-w`/`--worktree` flag by default; individual worktree-launch
             // tests override this field via struct-update syntax.
             worktree_launch: None,
+            // No `--tmux` flag by default; individual tmux-launch tests
+            // override this field via struct-update syntax.
+            tmux_launch: None,
         };
         (tmp, cfg)
     }
@@ -6701,7 +6786,7 @@ mod tests {
             vec![boot_cwd.clone()],
         );
 
-        super::apply_worktree_launch(&None, &ctx)
+        super::apply_worktree_launch(&None, &None, &ctx)
             .await
             .expect("None must never fail");
 
@@ -6738,7 +6823,7 @@ mod tests {
         let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
         ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
 
-        super::apply_worktree_launch(&Some("feat".to_string()), &ctx)
+        super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
             .await
             .expect("create must succeed against the injected WorktreeManager");
 
@@ -6771,6 +6856,197 @@ mod tests {
             session.tmux_session_name, None,
             "--tmux wiring is a separate task; boot launch always records None"
         );
+    }
+
+    // ── worktree-tmux-launch plan Task 4: `--tmux` boot tmux session ────────
+
+    /// In-test `ProcessRunner` that records every command it's handed and
+    /// returns a canned exit code — lets Task 4's tests assert BOTH the
+    /// resulting `tmux_session_name` and whether a tmux call happened at all
+    /// (the without-`--tmux` case must issue none). Mirrors the `MockRunner`
+    /// pattern in `platform_posix::worktree_tmux`'s own tests.
+    struct RecordingProcessRunner {
+        exit_code: i32,
+        calls: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+    }
+
+    impl RecordingProcessRunner {
+        fn new(exit_code: i32) -> Self {
+            Self {
+                exit_code,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl traits::ProcessRunner for RecordingProcessRunner {
+        async fn run(
+            &self,
+            cmd: &traits::SandboxedCommand,
+        ) -> Result<traits::ProcessOutput, traits::ProcessError> {
+            let inner = cmd.inner();
+            self.calls
+                .lock()
+                .unwrap()
+                .push((inner.command.clone(), inner.args.clone()));
+            Ok(traits::ProcessOutput {
+                stdout: String::new(),
+                stderr: if self.exit_code == 0 {
+                    String::new()
+                } else {
+                    "boom".to_string()
+                },
+                exit_code: self.exit_code,
+                timed_out: false,
+            })
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &traits::SandboxedCommand,
+        ) -> Result<traits::ProcessHandle, traits::ProcessError> {
+            Err(traits::ProcessError::Unsupported)
+        }
+
+        async fn kill(&self, _handle: &traits::ProcessHandle) -> Result<(), traits::ProcessError> {
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// `--worktree feat --tmux` (both `Some`), tmux invocation succeeds (exit
+    /// 0): `apply_worktree_launch` must create exactly one tmux session and
+    /// record ITS EXACT derived name
+    /// ([`platform_posix::worktree_tmux::worktree_tmux_session_name`], keyed
+    /// on the pre-swap boot cwd as the repo root + the `--worktree` slug) into
+    /// the shared `worktree_session.tmux_session_name`.
+    #[tokio::test]
+    async fn apply_worktree_launch_with_tmux_creates_and_records_session_name() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/tmux-ok");
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+        let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        let runner = Arc::new(RecordingProcessRunner::new(0));
+        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+
+        super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
+            .await
+            .expect("worktree + tmux launch must succeed");
+
+        assert_eq!(runner.call_count(), 1, "exactly one tmux invocation");
+
+        let expected_name =
+            platform_posix::worktree_tmux::worktree_tmux_session_name(&boot_cwd, "feat");
+        let session = ctx
+            .worktree_session
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("worktree_session must be populated");
+        assert_eq!(session.tmux_session_name, Some(expected_name));
+    }
+
+    /// A tmux invocation that fails (non-zero exit) must NOT fail boot — the
+    /// worktree itself already succeeded — and must leave
+    /// `tmux_session_name` as `None` (only a tmux SUCCESS records the name).
+    #[tokio::test]
+    async fn apply_worktree_launch_tmux_failure_is_non_fatal() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/tmux-fail");
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+        let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        let runner = Arc::new(RecordingProcessRunner::new(1));
+        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+
+        super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
+            .await
+            .expect("a tmux failure must not fail boot");
+
+        assert_eq!(runner.call_count(), 1, "tmux was attempted exactly once");
+        let session = ctx
+            .worktree_session
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("worktree_session must still be populated — the worktree itself succeeded");
+        assert_eq!(
+            session.tmux_session_name, None,
+            "a failed tmux create must leave tmux_session_name None"
+        );
+    }
+
+    /// INERT companion: `--worktree feat` WITHOUT `--tmux` must issue NO tmux
+    /// call at all (not merely record `None` — the process runner must never
+    /// be invoked), and `tmux_session_name` stays `None`.
+    #[tokio::test]
+    async fn apply_worktree_launch_without_tmux_flag_issues_no_tmux_call() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/tmux-inert");
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+        let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        let runner = Arc::new(RecordingProcessRunner::new(0));
+        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+
+        super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
+            .await
+            .expect("worktree-only launch must succeed");
+
+        assert_eq!(runner.call_count(), 0, "no --tmux flag must issue no tmux call");
+        let session = ctx
+            .worktree_session
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("worktree_session must be populated");
+        assert_eq!(
+            session.tmux_session_name, None,
+            "no --tmux flag must leave tmux_session_name None"
+        );
+    }
+
+    /// `--tmux` requires `--worktree`: `tmux_launch.is_some()` with
+    /// `worktree_launch: None` must be a hard boot failure
+    /// (`BuildError::TmuxRequiresWorktree`), not a silent ignore, and must
+    /// never touch `worktree_session`.
+    #[tokio::test]
+    async fn apply_worktree_launch_tmux_without_worktree_is_a_hard_error() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd =
+            std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/tmux-requires-worktree");
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+
+        let err = super::apply_worktree_launch(&None, &Some(String::new()), &ctx)
+            .await
+            .expect_err("--tmux without --worktree must be a hard boot failure");
+        assert!(matches!(err, super::BuildError::TmuxRequiresWorktree));
+        assert!(ctx.worktree_session.lock().unwrap().is_none());
     }
 
     /// worktree-tmux-launch plan Task 3, boot-level integration test: driving

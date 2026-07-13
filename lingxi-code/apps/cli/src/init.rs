@@ -217,6 +217,11 @@ pub enum InitError {
     /// since the user explicitly asked for an isolated worktree.
     #[error("--worktree launch failed: {0}")]
     WorktreeLaunch(String),
+    /// (worktree-tmux-launch plan, Task 4) `--tmux` was passed without
+    /// `-w`/`--worktree` — a hard boot failure (the flag's own doc: "requires
+    /// --worktree").
+    #[error("--tmux requires --worktree")]
+    TmuxRequiresWorktree,
 }
 
 impl From<engine_desktop::BuildError> for InitError {
@@ -227,6 +232,7 @@ impl From<engine_desktop::BuildError> for InitError {
             engine_desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
             engine_desktop::BuildError::SandboxUnavailable(m) => Self::SandboxUnavailable(m),
             engine_desktop::BuildError::WorktreeLaunch(m) => Self::WorktreeLaunch(m),
+            engine_desktop::BuildError::TmuxRequiresWorktree => Self::TmuxRequiresWorktree,
         }
     }
 }
@@ -694,6 +700,13 @@ pub(crate) fn resolve_desktop_config(
         // `Some("")` for a bare `-w` (`build()` mints a random slug), or
         // `Some(name)` for an explicit name — threaded verbatim.
         worktree_launch: argv.worktree.clone(),
+        // (worktree-tmux-launch plan, Task 4) `--tmux[=mode]`: `argv.tmux` is
+        // `None` when the flag is absent (inert — no worktree tmux session),
+        // `Some("")` for a bare `--tmux` (native mode sentinel), or
+        // `Some(mode)` for `--tmux=classic` — threaded verbatim. `build()`
+        // hard-errors if this is `Some` while `worktree_launch` is `None`
+        // (the CLI's own `--tmux` doc: "requires --worktree").
+        tmux_launch: argv.tmux.clone(),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It

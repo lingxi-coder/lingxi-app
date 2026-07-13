@@ -83,6 +83,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         cli_plugin_dirs: Vec::new(),
         initial_effort: None,
         worktree_launch: None,
+        tmux_launch: None,
     };
     (tmp, cfg)
 }

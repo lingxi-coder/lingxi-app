@@ -277,6 +277,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Electron bridge has no `-w`/`--worktree` flag; inert boot (no
         // worktree launch).
         worktree_launch: None,
+        // The Electron bridge has no `--tmux` flag; inert (no tmux session).
+        tmux_launch: None,
     }
 }
 
@@ -631,6 +633,7 @@ mod tests {
             cli_plugin_dirs: Vec::new(),
             initial_effort: None,
             worktree_launch: None,
+            tmux_launch: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

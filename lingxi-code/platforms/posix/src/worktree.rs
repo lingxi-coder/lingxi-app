@@ -326,6 +326,71 @@ impl WorktreeManager for PosixWorktreeManager {
         true
     }
 
+    async fn enter_existing(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        // Verify `path` is an existing directory that is (part of) a git
+        // worktree. `git -C <path> rev-parse --is-inside-work-tree` is the
+        // cheapest reliable probe: it succeeds inside any worktree (main
+        // checkout or linked) and fails (non-zero exit / spawn error) on a
+        // missing path or a non-git directory.
+        if !tokio::fs::try_exists(path)
+            .await
+            .map_err(|e| WorktreeError::Io(e.to_string()))?
+        {
+            return Err(WorktreeError::Io(format!(
+                "worktree path does not exist: {}",
+                path.display()
+            )));
+        }
+
+        let probe = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .arg("rev-parse")
+            .arg("--is-inside-work-tree")
+            .output()
+            .await
+            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+        if !probe.status.success() {
+            return Err(WorktreeError::Git(format!(
+                "not a git worktree: {}",
+                path.display()
+            )));
+        }
+
+        // Resolve the checked-out branch. `--abbrev-ref HEAD` returns the
+        // branch name, or the literal `HEAD` when detached — pass either
+        // through as-is (no branch to report is still faithfully reported).
+        let branch_out = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .arg("rev-parse")
+            .arg("--abbrev-ref")
+            .arg("HEAD")
+            .output()
+            .await
+            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+        if !branch_out.status.success() {
+            return Err(WorktreeError::Git(
+                String::from_utf8_lossy(&branch_out.stderr).into_owned(),
+            ));
+        }
+        let branch_name = String::from_utf8_lossy(&branch_out.stdout)
+            .trim()
+            .to_string();
+
+        Ok(WorktreeHandle {
+            path: path.to_path_buf(),
+            branch_name,
+            // Unknown when entering an existing worktree — no creation-time
+            // baseline was captured (matches `create_worktree`'s `None` on a
+            // best-effort `rev-parse HEAD` failure).
+            base_commit: None,
+        })
+    }
+
     async fn worktree_change_summary(
         &self,
         handle: &WorktreeHandle,
@@ -566,6 +631,55 @@ mod create_tests {
             .await
             .unwrap();
         assert_eq!(copied, "API_KEY=secret");
+    }
+
+    #[tokio::test]
+    async fn enter_existing_resolves_branch_and_path_of_real_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        let handle = PosixWorktreeManager::new(repo.clone())
+            .create_worktree("feature", None, &[])
+            .await
+            .unwrap();
+
+        let entered = PosixWorktreeManager::new(repo)
+            .enter_existing(&handle.path)
+            .await
+            .unwrap();
+        assert_eq!(entered.path, handle.path);
+        assert_eq!(entered.branch_name, "worktree-feature");
+        assert_eq!(entered.base_commit, None);
+    }
+
+    #[tokio::test]
+    async fn enter_existing_errors_on_missing_path() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        let missing = repo.join("does-not-exist");
+        let err = PosixWorktreeManager::new(repo)
+            .enter_existing(&missing)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn enter_existing_errors_on_non_worktree_directory() {
+        // A repo whose manager we probe with, and an entirely separate
+        // tempdir (no `git init` at all, not nested inside any repo) that
+        // is not a git worktree.
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        let not_git_dir = TempDir::new().unwrap();
+        let not_git = not_git_dir.path().to_path_buf();
+        let err = PosixWorktreeManager::new(repo)
+            .enter_existing(&not_git)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::Git(_)));
     }
 
     #[tokio::test]

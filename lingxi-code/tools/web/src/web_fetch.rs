@@ -359,23 +359,16 @@ pub fn is_dns_failure(msg: &str) -> bool {
         || lower.contains("nodename nor servname")
 }
 
-/// Whether the domain blocklist preflight should be skipped for this fetch.
+/// LingXi-local env fallback for skipping the domain-blocklist preflight.
 ///
-/// Mirrors `settings.skipWebFetchPreflight` (`utils.ts:423-424`) — the
-/// enterprise-customer escape hatch for hosts whose network policy blocks
-/// outbound connections to `claude.ai`/`api.anthropic.com`.
-///
-/// **Interim wiring (flagged):** the faithful source is a settings-derived
-/// `BuiltinToolContext::skip_web_fetch_preflight` field populated at tool
-/// registration. Threading that field touches `tool-api`'s shared
-/// `builtin_context.rs` plus the registration site in the composition crate —
-/// out of this batch's `tool-web`-only scope (and it would collide with Batch 5's
-/// `builtin_context.rs` edit). The batch spec explicitly sanctions an env-var
-/// interim: `LINGXI_SKIP_WEBFETCH_PREFLIGHT` truthy (`1`/`true`/`yes`/`on`,
-/// case-insensitive) skips the preflight. Follow-up: replace this with the
-/// context field once both `builtin_context.rs` fields land together.
+/// The faithful source is now `settings.skipWebFetchPreflight`, threaded through
+/// `BuiltinToolContext::skip_web_fetch_preflight` (parity 2.1.207 P2-14) and
+/// checked first at the gate. CC 2.1.207 has NO environment-variable equivalent
+/// (its only mechanism is the settings key), so this env var is a LingXi-local
+/// convenience retained as an OR-fallback: `LINGXI_SKIP_WEBFETCH_PREFLIGHT`
+/// truthy (`1`/`true`/`yes`/`on`, case-insensitive) also skips the preflight.
 #[must_use]
-fn skip_web_fetch_preflight() -> bool {
+fn skip_web_fetch_preflight_env() -> bool {
     std::env::var("LINGXI_SKIP_WEBFETCH_PREFLIGHT")
         .ok()
         .is_some_and(|v| {
@@ -921,9 +914,13 @@ Usage notes:\n\
 
         // Domain blocklist preflight (`utils.ts:420-435`). Runs on every host
         // (cache-miss path only — a URL cache hit returned above) unless the
-        // user opted to skip it. `Blocked`/`CheckFailed` map to the byte-locked
-        // user-facing error messages; `Allowed` continues to the fetch.
-        if !skip_web_fetch_preflight() {
+        // user opted to skip it. The faithful gate is `settings.skipWebFetchPreflight`
+        // (binary `if(!Mi().skipWebFetchPreflight)switch((await DSd(g)).status){…}`),
+        // threaded here via `ctx.skip_web_fetch_preflight`; the
+        // `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var is a LingXi-local OR-fallback
+        // (CC has no env equivalent). `Blocked`/`CheckFailed` map to the
+        // byte-locked user-facing error messages; `Allowed` continues to the fetch.
+        if !(self.ctx.skip_web_fetch_preflight || skip_web_fetch_preflight_env()) {
             match crate::blocklist::check_domain_blocklist(self.ctx.http.as_ref(), &host).await {
                 crate::blocklist::DomainCheckResult::Allowed => {}
                 crate::blocklist::DomainCheckResult::Blocked => {

@@ -2471,6 +2471,25 @@ fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
         .and_then(|eff| eff.settings.output_style)
 }
 
+/// Load the merged `settings.skipWebFetchPreflight` (project + user + env layers)
+/// for the given project dir. Mirrors [`load_merged_output_style`] (same
+/// `engine::settings::Settings::load` seam). When true, the `WebFetch` tool skips
+/// the domain-blocklist preflight (CC 2.1.207 `!Mi().skipWebFetchPreflight` gate,
+/// parity P2-14). Returns `false` on any load failure or when the key is unset —
+/// the frozen default (preflight runs).
+fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.skip_web_fetch_preflight)
+        .unwrap_or(false)
+}
+
 /// (M4 cc2.1.198) Merge the `--agents <json>` flag agents into the dir-loaded
 /// catalog. The flag payload is an EXPLICIT request: it survives `--bare` but
 /// not safe mode (binary @223080769 `if(r&&!Hc("agents",{explicitlyRequested:
@@ -5045,6 +5064,10 @@ pub async fn build(
         sandbox_runtime: sandbox_runtime_cfg,
         // (/sandbox) Live-toggle cell shared with the TUI (see above).
         sandbox_enabled_override: Some(sandbox_toggle.clone()),
+        // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the
+        // domain-blocklist preflight (enterprise escape hatch). Read from the
+        // merged settings via the same `Settings::load` seam as outputStyle.
+        skip_web_fetch_preflight: load_merged_skip_web_fetch_preflight(&cwd),
         // Inject the LIVE runner: the desktop session routes its sandboxed
         // bash/powershell/skill commands through `sandbox-runtime`'s
         // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),

@@ -41,6 +41,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         // Scalar Override (later source wins), same as `telemetryEnabled`.
         ax_screen_reader: next.ax_screen_reader.or(prev.ax_screen_reader),
+        // Scalar Override (later source wins) — `skipWebFetchPreflight` (P2-14).
+        skip_web_fetch_preflight: next
+            .skip_web_fetch_preflight
+            .or(prev.skip_web_fetch_preflight),
         // Scalar Override — `askUserQuestionTimeout` (enum 60s|5m|10m|never).
         ask_user_question_timeout: next
             .ask_user_question_timeout

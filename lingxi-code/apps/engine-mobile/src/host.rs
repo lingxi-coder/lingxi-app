@@ -698,6 +698,11 @@ pub async fn build_mobile_inner(
     // Read(deny) → Grep/Glob search-exclude globs, resolved from the policy below
     // (empty when no Read-deny rule ⇒ unchanged default).
     let mut read_deny_exclude_globs: Vec<String> = Vec::new();
+    // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the domain-blocklist
+    // preflight. Mobile has no `engine::settings::Settings::load` seam (no `engine`
+    // dep), so it reads the key directly from the SAME settings.json tiers the perms
+    // loop below reads, scalar-override (later tier wins). `false` by default.
+    let mut skip_web_fetch_preflight = false;
     // (#3 shell-expansion) Capture the boot `Arc<PermissionPolicy>` before it is
     // consumed by `PolicyPermissionGate::new`, so `tool_ctx.permission_policy`
     // shares the SAME base policy the model-facing gate enforces (the prompt
@@ -746,6 +751,16 @@ pub async fn build_mobile_inner(
                 }
                 if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                     bypass_disabled = true; // sticky: any tier disabling wins
+                }
+                // (P2-14) Scalar-override: a tier that declares the key overrides
+                // (sources are ordered user → project → local, so local wins).
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(b) = v
+                        .get("skipWebFetchPreflight")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        skip_web_fetch_preflight = b;
+                    }
                 }
                 additional_working_dirs
                     .extend(permission::additional_directories_from_settings_json(&raw));
@@ -892,6 +907,9 @@ pub async fn build_mobile_inner(
         // Mobile has no interactive `/sandbox` toggle (no live TUI); the frozen
         // `sandbox_runtime` above governs — full Android/iOS sandboxing intact.
         sandbox_enabled_override: None,
+        // (P2-14) `settings.skipWebFetchPreflight`, read from the settings.json
+        // tiers in the perms loop above (scalar-override, local wins).
+        skip_web_fetch_preflight,
         // RUNNER ↔ AVAILABILITY COUPLING (#5): the live `SandboxRuntimeRunner`
         // (domain/proxy/policy enforcement) requires host forward proxies +
         // bwrap/seatbelt — desktop-OS primitives a phone (iOS/Android,

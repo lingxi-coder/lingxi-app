@@ -314,7 +314,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     /// Serializes every test that touches the process-global
     /// `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var. The skip test *sets* it; the
-    /// preflight-dependent `call()` tests *read* it (via `skip_web_fetch_preflight`)
+    /// preflight-dependent `call()` tests *read* it (via `skip_web_fetch_preflight_env`)
     /// and would be corrupted if the skip test's mutation leaked into them while
     /// running in parallel. Mirrors the `HOME_LOCK` env-isolation idiom. A tokio
     /// mutex (not `std`) keeps the guard `Send` across the `.await` points in the
@@ -966,8 +966,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         crate::cache::clear_web_fetch_cache();
         crate::blocklist::clear_domain_check_cache();
         std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
-        // Sanity-check the helper sees the truthy value.
-        assert!(skip_web_fetch_preflight());
+        // Sanity-check the env fallback sees the truthy value.
+        assert!(skip_web_fetch_preflight_env());
 
         let (ctx, http, _sink) = make_web_ctx();
         // ONLY the fetch is enqueued — no preflight response. If the preflight
@@ -990,6 +990,77 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(reqs.len(), 1);
         assert!(!reqs[0].url.contains("/api/web/domain_info"));
         assert_eq!(reqs[0].url, "https://skip-preflight.example/page");
+    }
+
+    #[tokio::test]
+    async fn ctx_skip_web_fetch_preflight_field_issues_no_domain_info_request() {
+        // parity 2.1.207 P2-14: the faithful gate is `settings.skipWebFetchPreflight`,
+        // threaded via `BuiltinToolContext::skip_web_fetch_preflight`. With the env
+        // fallback UNSET, setting the ctx field alone must skip the domain-blocklist
+        // preflight (binary `if(!Mi().skipWebFetchPreflight){…}`).
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        assert!(!skip_web_fetch_preflight_env(), "env fallback must be off");
+
+        let (mut ctx, http, _sink) = make_web_ctx();
+        ctx.skip_web_fetch_preflight = true;
+        // ONLY the fetch is enqueued — no preflight response. If the preflight
+        // fired, it would consume this and the body assertion would fail.
+        http.enqueue(ok_response(200, "no preflight here"));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://ctx-skip-preflight.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("fetch must proceed when the ctx setting skips preflight");
+
+        assert_eq!(res.data["result"], "no preflight here");
+        let reqs = http.received_requests();
+        // Exactly one request — the fetch — and NO domain_info preflight.
+        assert_eq!(reqs.len(), 1);
+        assert!(!reqs[0].url.contains("/api/web/domain_info"));
+        assert_eq!(reqs[0].url, "https://ctx-skip-preflight.example/page");
+    }
+
+    #[tokio::test]
+    async fn ctx_field_false_and_no_env_runs_the_preflight() {
+        // Negative/precedence guard: ctx field default (`false`) + env fallback
+        // UNSET ⇒ the domain-blocklist preflight DOES run (a domain_info request
+        // precedes the fetch), matching CC's default `!skipWebFetchPreflight` path.
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+
+        let (ctx, http, _sink) = make_web_ctx();
+        assert!(!ctx.skip_web_fetch_preflight, "ctx field defaults to false");
+        // Preflight allows, then the fetch returns the body.
+        http.enqueue(preflight_allow());
+        http.enqueue(ok_response(200, "fetched after preflight"));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://run-preflight.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("fetch must proceed after an allowed preflight");
+
+        assert_eq!(res.data["result"], "fetched after preflight");
+        let reqs = http.received_requests();
+        // preflight (1) + fetch (1) = 2; the first request is the domain_info GET.
+        assert_eq!(reqs.len(), 2);
+        assert!(
+            reqs[0].url.contains("/api/web/domain_info?domain="),
+            "the preflight must run first: {}",
+            reqs[0].url
+        );
     }
 
     // ---- redirect loop drives request_no_follow (transport no-follow) -------
@@ -1614,14 +1685,14 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _env = SKIP_ENV_LOCK.blocking_lock();
         for truthy in ["1", "true", "TRUE", "Yes", "on", " on "] {
             std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", truthy);
-            assert!(skip_web_fetch_preflight(), "{truthy:?} must be truthy");
+            assert!(skip_web_fetch_preflight_env(), "{truthy:?} must be truthy");
         }
         for falsy in ["0", "false", "no", "off", "", "garbage"] {
             std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", falsy);
-            assert!(!skip_web_fetch_preflight(), "{falsy:?} must be falsy");
+            assert!(!skip_web_fetch_preflight_env(), "{falsy:?} must be falsy");
         }
         std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
-        assert!(!skip_web_fetch_preflight(), "unset must be falsy");
+        assert!(!skip_web_fetch_preflight_env(), "unset must be falsy");
     }
 
     /// Build a web ctx whose workspace is `workspace` (so binary-persist writes

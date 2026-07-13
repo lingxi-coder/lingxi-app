@@ -461,6 +461,26 @@ impl PermissionPolicy {
         if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, true) {
             return ask_with_rule(rule, tool_name);
         }
+        // 1e. POSSIBLY-EMPTY `$VAR` REMOVAL FORCED-ASK (claude-code 2.1.205 `GIu`,
+        //     run inside the too-complex bash-checker branch `hHg`, bin
+        //     @219788895). An `rm`/`rmdir` whose target is a possibly-empty
+        //     variable path (`rm -rf $UNSET/*` → `rm -rf /*` when unset/empty)
+        //     ALWAYS asks with a byte-locked SafetyCheck message
+        //     (`classifier_approvable:false`) and CANNOT be auto-allowed by ANY
+        //     rule. ORDER (1:1 with `hHg`, which runs `GIu` after the deny walks
+        //     and BEFORE honoring any exact/prefix allow): this sits AFTER the
+        //     deny + tool-wide/content ask walks and BEFORE the sandbox
+        //     auto-allow (1d), the dangerous-removal / path guards (2/2b/2b'),
+        //     the exact-match allow short-circuit (2c-exact), and the allow walk
+        //     — so an exact `Bash(rm -rf $UNSET/*)` rule cannot bypass it.
+        //     Gated on the AST `TooComplex` verdict (feature `bash-ast`) to
+        //     mirror the too-complex branch: a parseable, resolvable-variable
+        //     command (`A=/tmp; rm -rf $A/*`) is NOT force-asked here. Roots-
+        //     independent, matching `GIu`'s raw text scan.
+        #[cfg(feature = "bash-ast")]
+        if let Some(ask) = Self::shell_dangerous_rm_variable_ask(tool_name, input) {
+            return ask;
+        }
         // 1d. SANDBOX AUTO-ALLOW (claude-code `bashToolHasPermission`'s
         //     sandbox branch, `bashPermissions.ts:1829-1843` + `checkSandboxAutoAllow`).
         //     When sandboxing is enabled AND `autoAllowBashIfSandboxed` (default
@@ -1227,6 +1247,41 @@ impl PermissionPolicy {
         self.sed_constraint_ask(command, roots, mode)
     }
 
+    /// Shell-only possibly-empty `$VAR` removal FORCED-ASK (the 1e layer) —
+    /// claude-code 2.1.205 `GIu`, run inside the too-complex bash-checker branch
+    /// `hHg`. Returns the byte-locked `SafetyCheck` ask (with
+    /// `classifier_approvable: false`) when the command is (a) classified
+    /// `TooComplex` by the AST parser AND (b) contains an `rm`/`rmdir` whose
+    /// target is a possibly-empty variable path
+    /// ([`crate::dangerous_removal::dangerous_rm_on_variable_path`]); else
+    /// `None`. The `TooComplex` gate mirrors `hHg` (CC reaches `GIu` only after
+    /// the AST failed to statically resolve the command), so a parseable command
+    /// whose variable is resolvable (`A=/tmp; rm -rf $A/*`) is not force-asked.
+    #[cfg(feature = "bash-ast")]
+    fn shell_dangerous_rm_variable_ask(
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Option<PermissionResult> {
+        if !shell_command::is_shell_tool(tool_name) {
+            return None;
+        }
+        let command = shell_command::command_from_input(input)?;
+        // Too-complex gate (`hHg` runs `GIu` only on the too-complex branch).
+        if !matches!(
+            crate::bash_ast_security::parse_for_security(command),
+            crate::bash_ast_security::ParseForSecurityResult::TooComplex { .. }
+        ) {
+            return None;
+        }
+        let (cmd, target) =
+            crate::dangerous_removal::dangerous_rm_on_variable_path(command)?;
+        // NOTE(telemetry): CC emits `tengu_bash_dangerous_rm_too_complex` here
+        // (`hHg`). The permission crate emits no AST-branch tengu events yet —
+        // same as the sibling `tengu_bash_ast_too_complex`, which is likewise
+        // unemitted — so the emission is deferred to the engine layer.
+        Some(ask_dangerous_rm_variable_path(tool_name, cmd, &target))
+    }
+
     /// Shell-only bash command-injection safety ASK (the 2c layer). Splits the
     /// command into subcommands ([`crate::shell_command::split_command`], the
     /// claude-code `splitCommand` analogue), strips each subcommand's output
@@ -1848,6 +1903,34 @@ fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
         reason: PermissionDecisionReason::SafetyCheck {
             reason: message.clone(),
             classifier_approvable: true,
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Possibly-empty `$VAR` removal FORCED-ASK: an `rm`/`rmdir` whose target is a
+/// variable expansion that points at the filesystem root when the variable is
+/// unset/empty (claude-code 2.1.205 `GIu` → `b0t`). Tagged
+/// [`PermissionDecisionReason::SafetyCheck`] with `classifier_approvable: false`
+/// (`b0t` sets `classifierApprovable:!1`) so NO classifier and NO exact/prefix
+/// allow rule can auto-approve it. Message + reason are byte-locked to the
+/// 2.1.207 binary (`hHg`); `cmd` is `"rm"`/`"rmdir"` and `target` the offending
+/// argument.
+#[cfg(feature = "bash-ast")]
+fn ask_dangerous_rm_variable_path(tool_name: &str, cmd: &str, target: &str) -> PermissionResult {
+    let message = format!(
+        "Dangerous {cmd} operation detected: '{target}'\n\nThis target is a shell variable expansion that points at the filesystem root (or a top-level directory) when the variable is unset or empty — e.g. `rm -rf $UNSET/*` becomes `rm -rf /*`. This requires explicit approval and cannot be auto-allowed by permission rules."
+    );
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::SafetyCheck {
+            reason: format!("Dangerous {cmd} operation on possibly-empty variable path: {target}"),
+            classifier_approvable: false,
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),

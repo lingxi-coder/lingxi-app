@@ -715,6 +715,203 @@ fn strip_surrounding_quotes(path: &str) -> &str {
     s
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// claude-code 2.1.205 `GIu` — forced ASK for an `rm`/`rmdir` targeting a
+// possibly-empty `$VAR` path (`rm -rf $UNSET/*` becomes `rm -rf /*` when the
+// variable is unset/empty). This is a PURE TEXT SCAN (it does NOT resolve
+// variables). CC runs it ONLY on the too-complex bash-checker branch (`hHg`,
+// bin @219788895) — after the deny walks and before honoring any exact allow
+// rule — so an exact `Bash(rm -rf $UNSET/*)` rule cannot bypass it. The wiring
+// in [`crate::policy`] gates it on the AST `TooComplex` verdict to mirror the
+// too-complex branch: a parseable command whose variable IS resolvable (e.g.
+// `A=/tmp; rm -rf $A/*`) must be excluded by that gate, NOT here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+macro_rules! lazy_regex {
+    ($name:ident, $pat:expr) => {
+        fn $name() -> &'static regex::Regex {
+            static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            RE.get_or_init(|| regex::Regex::new($pat).expect("valid regex"))
+        }
+    };
+}
+
+// GIu gate: `/\brm(?:dir)?\b/`.
+lazy_regex!(rm_word_re, r"\brm(?:dir)?\b");
+// `t.replace(/\\\r?\n/g," ")` — collapse a `\`-continuation to a space.
+lazy_regex!(backslash_newline_re, r"\\\r?\n");
+// `.replace(/`[^`]*`/g," ")` — blank whole backtick spans.
+lazy_regex!(backtick_span_re, r"`[^`]*`");
+// `.replace(/\$\([^()]*\)/g," ")` — blank a `$(…)` command substitution (no
+// nested paren). The sibling non-`$` `(…)` pass is [`blank_plain_paren`].
+lazy_regex!(dollar_paren_re, r"\$\([^()]*\)");
+// `r.split(/[;|\n\r]|&&/)` — GIu's inner subcommand split.
+lazy_regex!(giu_piece_re, r"[;|\n\r]|&&");
+// `o.slice(i[0].length).split(/\s+/)` — JS whitespace split (keeps a leading/
+// trailing "" element, unlike `str::split_whitespace`).
+lazy_regex!(ws_split_re, r"\s+");
+// `a[l].replace(/[)\]}]+$/,"")` — trim a trailing run of `)`/`]`/`}`.
+lazy_regex!(trailing_bracket_re, r"[)\]}]+$");
+// `/^[\d&]*[<>]/` — a token that looks like a redirection operator.
+lazy_regex!(redirect_start_re, r"^[\d&]*[<>]");
+// `/^(?:[0-9]+|&)?(?:>>?[|&]?|<<?<?|<>)$/` — a COMPLETE redirection operator
+// (its operand, the next arg, is then skipped).
+lazy_regex!(
+    redirect_full_re,
+    r"^(?:[0-9]+|&)?(?:>>?[|&]?|<<?<?|<>)$"
+);
+// TS `Okg` (bin @219709311): a target beginning with an optionally
+// double-quoted `$VAR` / `${VAR}`, then `/`, then one of `*`, `$`, `/`, a
+// quote, or end-of-string.
+lazy_regex!(
+    okg_re,
+    r#"^"?\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)"?/(?:\*|\$|/|["']|$)"#
+);
+// TS `Lkg` (bin @219709311): an `rm`/`rmdir` invocation — optional `NAME=val`
+// env prefixes, an optional `\`, an optional path prefix (`/usr/bin/`), then
+// `rm` or `rmdir` followed by whitespace or end-of-string. Group 1 = the name.
+lazy_regex!(
+    lkg_re,
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*\+?=[^\s]*\s+)*\\?(?:[^\s=]*/)?(rm|rmdir)(?:\s|$)"
+);
+
+/// Iteratively blank `$(…)` and non-`$` `(…)` groups (no nested parens) to a
+/// fixed point — the port of `GIu`'s
+/// `for(let n="";n!==r;)n=r,r=r.replace(/\$\([^()]*\)/g," ").replace(/(?<!\$)\([^()]*\)/g," ")`.
+fn strip_paren_groups(input: &str) -> String {
+    let mut r = input.to_string();
+    loop {
+        let prev = r.clone();
+        r = dollar_paren_re().replace_all(&r, " ").into_owned();
+        r = blank_plain_paren(&r);
+        if r == prev {
+            break;
+        }
+    }
+    r
+}
+
+/// Blank every `(…)` group (no nested paren) whose `(` is NOT immediately
+/// preceded by `$`, each → one space — the `replace(/(?<!\$)\([^()]*\)/g," ")`
+/// pass (`regex` has no lookbehind). Scans left-to-right over the ORIGINAL
+/// string, exactly like a JS global replace with lookbehind.
+fn blank_plain_paren(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '(' && !(i > 0 && chars[i - 1] == '$') {
+            // Find a matching ')' with no '(' before it (the `[^()]*)` arm).
+            let mut j = i + 1;
+            let mut closed = false;
+            while j < chars.len() {
+                let cj = chars[j];
+                if cj == '(' {
+                    break;
+                }
+                if cj == ')' {
+                    closed = true;
+                    break;
+                }
+                j += 1;
+            }
+            if closed {
+                out.push(' ');
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Rewrite a bare background `&` to `;`, preserving `&&` and the fd-dup /
+/// redirect forms (`>&`, `&>`, `<&`) — the port of
+/// `replace(/(?<![<>&])&(?![<>&])/g,";")`.
+fn rewrite_bare_ampersand(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for i in 0..chars.len() {
+        if chars[i] == '&' {
+            let prev_bad = i > 0 && matches!(chars[i - 1], '<' | '>' | '&');
+            let next_bad = i + 1 < chars.len() && matches!(chars[i + 1], '<' | '>' | '&');
+            if !prev_bad && !next_bad {
+                out.push(';');
+                continue;
+            }
+        }
+        out.push(chars[i]);
+    }
+    out
+}
+
+/// Faithful port of claude-code 2.1.205 `GIu` (bin @219697281). Scans a raw
+/// shell `command` for an `rm`/`rmdir` whose target is a possibly-empty `$VAR`
+/// path (matches [`okg_re`]) and returns the FIRST `(command_name, target)`
+/// hit, or `None`. `command_name` is `"rm"` or `"rmdir"`; `target` is the
+/// offending argument with any trailing `)`/`]`/`}` run trimmed (as in `GIu`).
+///
+/// This does NOT resolve variables. CC reaches `GIu` only after the AST marked
+/// the command too-complex, so the caller MUST apply that gate — see the module
+/// note above.
+#[must_use]
+pub fn dangerous_rm_on_variable_path(command: &str) -> Option<(&'static str, String)> {
+    // GIu: if(!e.includes("$")||!/\brm(?:dir)?\b/.test(e))return null;
+    if !command.contains('$') || !rm_word_re().is_match(command) {
+        return None;
+    }
+    for sub in crate::shell_command::split_command(command) {
+        // r = t.replace(/\\\r?\n/g," ").replace(/`[^`]*`/g," ").trimStart();
+        let step1 = backslash_newline_re().replace_all(&sub, " ").into_owned();
+        let step2 = backtick_span_re().replace_all(&step1, " ").into_owned();
+        let mut r = step2.trim_start().to_string();
+        // while(r.startsWith("(")||r.startsWith("{"))r=r.slice(1).trimStart();
+        while r.starts_with('(') || r.starts_with('{') {
+            r = r[1..].trim_start().to_string();
+        }
+        // Iteratively blank $(…) and non-$ (…) groups.
+        r = strip_paren_groups(&r);
+        // r = r.replace(/(?<![<>&])&(?![<>&])/g,";");
+        let r = rewrite_bare_ampersand(&r);
+        // for(let n of r.split(/[;|\n\r]|&&/)) …
+        for piece in giu_piece_re().split(&r) {
+            let o = piece.trim_start();
+            let Some(caps) = lkg_re().captures(o) else {
+                continue;
+            };
+            let m0 = caps.get(0).expect("group 0 always present");
+            let cmd: &'static str = if &caps[1] == "rmdir" { "rmdir" } else { "rm" };
+            let after = &o[m0.end()..];
+            let args: Vec<&str> = ws_split_re().split(after).collect();
+            let mut l = 0usize;
+            while l < args.len() {
+                let c = trailing_bracket_re().replace(args[l], "");
+                let c = c.as_ref();
+                if c.is_empty() || c.starts_with('-') || c.starts_with('\'') {
+                    l += 1;
+                    continue;
+                }
+                if redirect_start_re().is_match(c) {
+                    // A redirection operator: skip its operand (the next arg)
+                    // when the token is a COMPLETE operator, then skip the token.
+                    if redirect_full_re().is_match(c) {
+                        l += 1;
+                    }
+                    l += 1;
+                    continue;
+                }
+                if okg_re().is_match(c) {
+                    return Some((cmd, c.to_string()));
+                }
+                l += 1;
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,5 +1259,100 @@ mod tests {
         assert!(!q6r("../foo")); // leading .. (no preceding real seg)
         assert!(!q6r("./foo"));
         assert!(!q6r("a/b/c"));
+    }
+
+    // ── GIu: possibly-empty `$VAR` removal target (claude-code 2.1.205) ──
+
+    #[test]
+    fn giu_okg_regex_matches_variable_root_targets() {
+        // Bare, quoted, braced; `/` followed by *, $, /, quote, or end-of-string.
+        assert!(okg_re().is_match("$UNSET/*"));
+        assert!(okg_re().is_match("\"$VAR\"/*"));
+        assert!(okg_re().is_match("${VAR}/*"));
+        assert!(okg_re().is_match("$VAR/$OTHER"));
+        assert!(okg_re().is_match("$VAR//x"));
+        assert!(okg_re().is_match("$VAR/\"quoted\""));
+        assert!(okg_re().is_match("$VAR/")); // trailing slash → end-of-string arm
+                                             // Negatives.
+        assert!(!okg_re().is_match("$VAR")); // no slash after the var
+        assert!(!okg_re().is_match("$VAR/foo")); // `/` then a plain letter
+        assert!(!okg_re().is_match("/etc/*")); // no leading variable
+        assert!(!okg_re().is_match("'$VAR'/*")); // leading single quote (only `"` allowed)
+    }
+
+    #[test]
+    fn giu_lkg_regex_matches_rm_invocations() {
+        assert_eq!(&lkg_re().captures("rm -rf x").unwrap()[1], "rm");
+        assert_eq!(&lkg_re().captures("rmdir x").unwrap()[1], "rmdir");
+        assert_eq!(&lkg_re().captures("/usr/bin/rm x").unwrap()[1], "rm");
+        assert_eq!(&lkg_re().captures("A=1 B=2 rm x").unwrap()[1], "rm");
+        assert_eq!(&lkg_re().captures("\\rm x").unwrap()[1], "rm");
+        assert!(lkg_re().captures("ls x").is_none());
+        assert!(lkg_re().captures("remove x").is_none()); // not a whole-word rm
+    }
+
+    #[test]
+    fn giu_detects_bare_and_quoted_and_braced_variable_targets() {
+        for (cmd, want) in [
+            ("rm -rf $UNSET/*", ("rm", "$UNSET/*")),
+            ("rm -rf \"$VAR\"/*", ("rm", "\"$VAR\"/*")),
+            ("rm -rf ${VAR}/*", ("rm", "${VAR}/*")),
+            ("rm -rf $VAR/$OTHER", ("rm", "$VAR/$OTHER")),
+            ("rmdir $DIR/*", ("rmdir", "$DIR/*")),
+        ] {
+            let (c, t) = dangerous_rm_on_variable_path(cmd)
+                .unwrap_or_else(|| panic!("{cmd} should be flagged"));
+            assert_eq!((c, t.as_str()), want, "for {cmd}");
+        }
+    }
+
+    #[test]
+    fn giu_negative_cases() {
+        // No `$` → gated out.
+        assert!(dangerous_rm_on_variable_path("rm -rf /etc/*").is_none());
+        // `$VAR` with no `/…` root pattern.
+        assert!(dangerous_rm_on_variable_path("rm -rf $VAR").is_none());
+        // Single-quoted target — the `'`-leading arg is skipped, and even the
+        // dequoted-looking form doesn't satisfy Okg's leading `"?\$`.
+        assert!(dangerous_rm_on_variable_path("rm -rf '$VAR/*'").is_none());
+        // A resolvable-looking var behind a slash-then-letter is not a root glob.
+        assert!(dangerous_rm_on_variable_path("rm -rf $VAR/subdir").is_none());
+        // Non-rm command.
+        assert!(dangerous_rm_on_variable_path("ls $VAR/*").is_none());
+    }
+
+    #[test]
+    fn giu_finds_target_hidden_behind_benign_subcommand() {
+        let (c, t) = dangerous_rm_on_variable_path("echo hi && rm -rf $VAR/*").unwrap();
+        assert_eq!((c, t.as_str()), ("rm", "$VAR/*"));
+        // A background `&` (GIu rewrites `&`→`;` then splits).
+        let (c2, t2) = dangerous_rm_on_variable_path("sleep 1 & rm -rf $VAR/*").unwrap();
+        assert_eq!((c2, t2.as_str()), ("rm", "$VAR/*"));
+    }
+
+    #[test]
+    fn giu_strips_backticks_and_command_substitution_and_leading_group() {
+        // Leading `(`/`{` are stripped before matching Lkg (the trailing `)` is
+        // a separate arg reached only after the target is already matched).
+        let (_, t) = dangerous_rm_on_variable_path("( rm -rf $VAR/* )").unwrap();
+        assert_eq!(t, "$VAR/*");
+        // A `$()` command substitution earlier in the line is blanked, so the
+        // rm target after `;` is still reached.
+        let (_, t2) =
+            dangerous_rm_on_variable_path("x=$(date) ; rm -rf $VAR/*").unwrap();
+        assert_eq!(t2, "$VAR/*");
+        // A backtick span is blanked.
+        let (_, t3) = dangerous_rm_on_variable_path("echo `id` ; rm -rf $VAR/*").unwrap();
+        assert_eq!(t3, "$VAR/*");
+    }
+
+    #[test]
+    fn giu_skips_redirect_operands_and_trims_trailing_brackets() {
+        // A redirect operator + operand are skipped, then the real target found.
+        let (_, t) = dangerous_rm_on_variable_path("rm -rf > /tmp/log $VAR/*").unwrap();
+        assert_eq!(t, "$VAR/*");
+        // Trailing `)`/`]`/`}` are trimmed off the returned target.
+        let (_, t2) = dangerous_rm_on_variable_path("rm -rf $VAR/*}}").unwrap();
+        assert_eq!(t2, "$VAR/*");
     }
 }

@@ -4474,6 +4474,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `true` when a hook returned a `Block` decision, signalling the caller to
     /// ABORT the turn before any API call. Strict no-op (returns `false`) when
     /// no matching hook is registered, so existing flows are unaffected.
+    ///
+    /// Two `hookSpecificOutput` fields are applied here (P2-04), matching the
+    /// binary's prompt-hook switch:
+    /// - `sessionTitle` renames the session via the same custom-title write
+    ///   path as `/rename` (claude `kje(title,"hook")`), applied for any
+    ///   outcome (not only on block).
+    /// - On a `Block`, a warning message is rendered to the output stream —
+    ///   claude `dPs`/`Tc(...,"warning",void 0,!0)`:
+    ///   `"UserPromptSubmit operation blocked by hook:\n{reason}"`, and unless
+    ///   the hook set `suppressOriginalPrompt`, `"\n\nOriginal prompt: {prompt}"`
+    ///   is appended. The reason defaults to `"Blocked by hook"` when the hook
+    ///   omits one (`e.reason||"Blocked by hook"`). The message is display-only
+    ///   (isMeta warning) — the turn still aborts (`shouldQuery:!1`).
     async fn fire_user_prompt_submit(&self, prompt: &str) -> bool {
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
@@ -4485,7 +4498,37 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
-        matches!(agg.decision, Some(hooks::response::HookDecision::Block))
+
+        // `hookSpecificOutput.sessionTitle` — rename the session (claude
+        // applies it regardless of the block outcome). Best-effort: no writer
+        // wired (library/test callers) ⇒ silent no-op, an empty title is
+        // ignored.
+        if let Some(title) = agg.session_title.as_deref() {
+            if !title.is_empty() {
+                if let Some(writer) = self.jsonl_writer.as_ref() {
+                    let session_id = self.session.lock().await.session_id;
+                    let _ = writer
+                        .append_custom_title(&session_id.as_uuid().to_string(), title)
+                        .await;
+                }
+            }
+        }
+
+        let blocked = matches!(agg.decision, Some(hooks::response::HookDecision::Block));
+        if blocked {
+            let reason = agg
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Blocked by hook".to_string());
+            let base = format!("UserPromptSubmit operation blocked by hook:\n{reason}");
+            let warning = if agg.suppress_original_prompt {
+                base
+            } else {
+                format!("{base}\n\nOriginal prompt: {prompt}")
+            };
+            self.output.emit_text(&warning).await;
+        }
+        blocked
     }
 
     /// Fire the `MessageDisplay` hooks at the BEGIN of an assistant-message
@@ -4852,11 +4895,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         summary: String,
         tokens_freed: u64,
     ) {
-        // `trigger` is part of the TS PostCompact `matchQuery` but the
-        // `HookEvent::PostCompact` wire builder emits an empty `trigger` field
-        // (`hooks/executor.rs:768`); accepted here for call-site symmetry with
-        // `fire_pre_compact` and forward-compatibility if the payload widens.
-        let _ = trigger;
+        // `trigger` (`manual` / `auto`) is threaded onto the `PostCompact`
+        // event so it becomes the TS `matchQuery` (claude `getMatchingHooks`
+        // `i = r.trigger`) AND rides the wire payload — a hook matcher of
+        // `"manual"` / `"auto"` now filters correctly.
         let ctx = self.lifecycle_hook_ctx(false).await;
         let _ = self
             .hooks
@@ -4864,6 +4906,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 HookEvent::PostCompact {
                     summary,
                     tokens_freed,
+                    trigger: trigger.to_string(),
                 },
                 ctx,
             )

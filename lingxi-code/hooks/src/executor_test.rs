@@ -1158,11 +1158,13 @@ mod command_arm_tests {
             HookEvent::PostCompact {
                 summary: "did the thing".into(),
                 tokens_freed: 1234,
+                trigger: "manual".into(),
             },
         )
         .await;
         assert!(stdin.contains(r#""hook_event_name":"PostCompact""#));
         assert!(stdin.contains(r#""compact_summary":"did the thing""#));
+        assert!(stdin.contains(r#""trigger":"manual""#));
     }
 
     #[tokio::test]
@@ -1200,9 +1202,15 @@ mod command_arm_tests {
 
     #[tokio::test]
     async fn setup_event_serializes_through_command_arm() {
-        let stdin = dispatch_and_capture(HookEventType::Setup, HookEvent::Setup).await;
+        let stdin = dispatch_and_capture(
+            HookEventType::Setup,
+            HookEvent::Setup {
+                trigger: "init".into(),
+            },
+        )
+        .await;
         assert!(stdin.contains(r#""hook_event_name":"Setup""#));
-        assert!(stdin.contains(r#""trigger":"""#));
+        assert!(stdin.contains(r#""trigger":"init""#));
     }
 
     #[tokio::test]
@@ -1524,6 +1532,7 @@ mod command_arm_tests {
                 HookEvent::PostCompact {
                     summary: "s".into(),
                     tokens_freed: 0,
+                    trigger: "auto".into(),
                 },
                 "PostCompact",
             ),
@@ -1551,7 +1560,12 @@ mod command_arm_tests {
                 },
                 "PermissionDenied",
             ),
-            (HookEvent::Setup, "Setup"),
+            (
+                HookEvent::Setup {
+                    trigger: "init".into(),
+                },
+                "Setup",
+            ),
             (
                 HookEvent::SubagentStart {
                     agent_id: protocol::AgentId::new(),

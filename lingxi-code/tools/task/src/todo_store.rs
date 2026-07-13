@@ -8,18 +8,29 @@
 //! (`pending`/`in_progress`/`completed`) — the V2 status enum — which is a
 //! SEPARATE space from the Product-B `TASK_STATUSES` in `task.rs`.
 //!
-//! ## Single-process divergence
+//! ## Cross-process serialisation
 //!
 //! claude-code serialises concurrent swarm agents with an on-disk
-//! `proper-lockfile` (`utils/tasks.ts:95-108` `LOCK_OPTIONS` retry budget sized
-//! for ~10 racing processes). This port is single-process, so we replace the
-//! file lock with an in-process per-directory `tokio::sync::Mutex` kept in a
-//! global registry: two `TodoStore` handles pointing at the same tasks dir share
-//! one mutex, which serialises `create`/`update`/`delete` exactly as the file
-//! lock did for the in-process case. The retry/backoff budget is therefore
-//! irrelevant (there is never a foreign lock holder to wait on). We also resolve
-//! `getTaskListId()` to the session id directly (the teammate / team-name
-//! branches collapse to the session in single-process).
+//! `proper-lockfile` (`utils/tasks.ts` `LOCK_OPTIONS` retry budget sized for ~10
+//! racing processes). Two LingXi OS processes CAN touch one tasks dir (a
+//! detached `--bg` worker plus an `--resume` attach, or an env-shared
+//! `LINGXI_TASK_LIST_ID`), so a purely in-process lock would allow duplicate
+//! ids (`create`) and lost updates (`update`). We therefore match claude-code:
+//!
+//! * an in-process per-directory `tokio::sync::Mutex` (a global registry keyed
+//!   by dir) as a cheap fast-path so same-process contention never burns the
+//!   file-lock retry budget, PLUS
+//! * a `mkdir`-based cross-process [`crate::proper_lockfile`] lock around the
+//!   read-modify-write, with the SAME on-disk artifacts claude-code produces:
+//!   - `create` locks the list-level lock target `<dir>/.lock` (pre-created as
+//!     an empty file, TS `writeFile(t,"",{flag:"wx"})`) → lock dir `.lock.lock`;
+//!   - `update` locks the per-task file `<id>.json` → lock dir `<id>.json.lock`;
+//!   - `delete` bumps the high-water mark and unlinks WITHOUT a lock (matching
+//!     claude-code `deleteTask`), cascading through locked `update`s;
+//!   - `get`/`list` take no lock (parse failures swallowed), like claude-code.
+//!
+//! We also resolve `getTaskListId()` to the session id directly (the teammate /
+//! team-name branches collapse to the session in single-process).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -182,6 +193,25 @@ impl TodoStore {
         self.dir.join(HIGH_WATER_MARK_FILE)
     }
 
+    /// List-level lock target (`<dir>/.lock`). claude-code `createTask` locks
+    /// this file for the whole list; the actual lock artifact is the directory
+    /// `<dir>/.lock.lock` created by [`crate::proper_lockfile`].
+    fn list_lock_target(&self) -> PathBuf {
+        self.dir.join(".lock")
+    }
+
+    /// Ensure the list-level lock target file exists (claude-code
+    /// `writeFile(t,"",{flag:"wx"})` — create empty, tolerate `EEXIST`), so the
+    /// mkdir-based lock has a stable sibling to guard.
+    fn ensure_list_lock_target(&self) {
+        let path = self.list_lock_target();
+        // `create_new` == flag "wx"; an existing file (or a benign race) is fine.
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path);
+    }
+
     fn ensure_dir(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)
     }
@@ -238,6 +268,15 @@ impl TodoStore {
     pub async fn create(&self, mut task: TodoTask) -> std::io::Result<String> {
         let _guard = self.lock.lock().await;
         self.ensure_dir()?;
+        // Cross-process serialisation: hold the list-level lock across
+        // highest_id() -> write so two processes never assign the same id.
+        // Best-effort — a failure to acquire (only under sustained >retry-budget
+        // contention) degrades to the previous in-process-only behaviour rather
+        // than making create newly fallible.
+        self.ensure_list_lock_target();
+        let _xlock = crate::proper_lockfile::lock(&self.list_lock_target())
+            .await
+            .ok();
         let id = (self.highest_id() + 1).to_string();
         task.id.clone_from(&id);
         self.write_task(&task)?;
@@ -284,7 +323,13 @@ impl TodoStore {
     /// if the task does not exist / cannot be read. `id` is always preserved.
     pub async fn update(&self, id: &str, mutate: impl FnOnce(&mut TodoTask)) -> Option<TodoTask> {
         let _guard = self.lock.lock().await;
-        let content = std::fs::read_to_string(self.task_path(id)).ok()?;
+        // Cross-process serialisation: claude-code `updateTask` locks the
+        // individual task file (`<id>.json` -> `<id>.json.lock`) around its
+        // read-merge-write, so a concurrent process cannot lose this update.
+        // Best-effort acquire (see `create`).
+        let task_path = self.task_path(id);
+        let _xlock = crate::proper_lockfile::lock(&task_path).await.ok();
+        let content = std::fs::read_to_string(&task_path).ok()?;
         let mut task = serde_json::from_str::<TodoTask>(&content).ok()?;
         mutate(&mut task);
         task.id = id.to_string();
@@ -358,15 +403,19 @@ mod tests {
     use serde_json::json;
 
     fn temp_store() -> (TodoStore, std::path::PathBuf) {
+        // A process-wide counter guarantees per-call uniqueness: the wall-clock
+        // nanos alone collide when several test threads call this concurrently
+        // on a coarse-resolution clock.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut dir = std::env::temp_dir();
         let unique = format!(
-            "lingxi-todo-store-{}-{}",
+            "lingxi-todo-store-{}-{}-{}",
             std::process::id(),
-            // Monotonic-ish unique suffix without external deps.
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         );
         dir.push(unique);
         (TodoStore::in_dir(dir.clone()), dir)
@@ -497,6 +546,40 @@ mod tests {
             .unwrap();
         assert_eq!(c, "3");
         assert!(!store.delete("999").await);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mutations_leave_no_stale_lock_directories() {
+        let (store, dir) = temp_store();
+        let id = store
+            .create(TodoTask::new("s".into(), "d".into(), None, Map::new()))
+            .await
+            .unwrap();
+        // create() locks the list-level target: the empty `.lock` file persists
+        // (claude-code leaves it too) but the lock *directory* is released.
+        assert!(
+            dir.join(".lock").is_file(),
+            "list lock target `.lock` should be a persisted empty file"
+        );
+        assert!(
+            !dir.join(".lock.lock").exists(),
+            "list lock dir `.lock.lock` must be released after create()"
+        );
+
+        store
+            .update(&id, |t| t.status = TodoState::InProgress)
+            .await
+            .unwrap();
+        assert!(
+            !dir.join(format!("{id}.json.lock")).exists(),
+            "per-task lock dir `<id>.json.lock` must be released after update()"
+        );
+
+        // The lock artifacts never masquerade as tasks.
+        let all = store.list().await;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, id);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -20,6 +20,7 @@
 )]
 
 pub mod monitor;
+pub mod proper_lockfile;
 pub mod reminder;
 pub mod task;
 pub mod todo_store;

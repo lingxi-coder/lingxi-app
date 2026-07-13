@@ -7922,8 +7922,11 @@ As you answer the user's questions, you can use the following context:\n\
     /// registry's terminal-not-notified tasks (CONSUME-ONCE — the registry marks
     /// each `notified` + evicts on drain) and renders their `<task-notification>`
     /// blocks (claude-code's per-task-type `enqueue*Notification` formats) inside
-    /// one `<system-reminder>` meta user message. Appended ONLY to the per-turn
-    /// OUTGOING snapshot, never `session.history` / JSONL, so it never
+    /// one `<system-reminder>` meta user message, stamped at the front with the
+    /// `NON_USER_INPUT_HEADER` provenance header (claude-code's `v6r`, applied to
+    /// every `task-notification`-origin user message so the model never treats a
+    /// machine-generated completion as user consent). Appended ONLY to the
+    /// per-turn OUTGOING snapshot, never `session.history` / JSONL, so it never
     /// accumulates. No delta set is needed — draining the registry IS the dedup.
     pub(crate) async fn task_notification_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.task_notifications.as_ref()?;
@@ -11556,16 +11559,20 @@ mod skill_listing_reminder_tests {
             .await
             .expect("turn-0 task notification")
             .text_content();
-        assert_eq!(
-            t0,
-            "<system-reminder>\n\
+        let body = "<system-reminder>\n\
 <task-notification>\n\
 <task-id>b12345678</task-id>\n\
 <output-file>/tmp/tasks/b12345678.output</output-file>\n\
 <status>completed</status>\n\
 <summary>Background command \"run tests\" completed (exit code 0)</summary>\n\
 </task-notification>\n\
-</system-reminder>"
+</system-reminder>";
+        assert_eq!(
+            t0,
+            format!(
+                "{}{body}",
+                crate::prompt::task_notification::NON_USER_INPUT_HEADER
+            )
         );
         // Turn 1: consume-once — the notified+evicted task must NOT re-appear.
         assert!(

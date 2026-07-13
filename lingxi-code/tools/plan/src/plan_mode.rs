@@ -143,11 +143,14 @@ static EMPTY_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
-/// `ExitPlanMode` input schema — port of `ExitPlanModeV2Tool.ts:64-89`. Accepts
-/// an optional `allowedPrompts` array of prompt-based permission requests, each
-/// `{tool:"Bash", prompt:string}`. The schema is a `passthrough()` in TS (extra
-/// keys allowed so `normalizeToolInput` can inject `plan`/`planFilePath`), hence
-/// `additionalProperties: true` here.
+/// `ExitPlanMode` input schema — port of 2.1.206 `Btd`
+/// (`ExitPlanModeV2Tool.ts`): `E.strictObject({allowedPrompts:
+/// E.array(Poy()).optional().describe("Deprecated: no longer used.")})
+/// .passthrough()`. `allowedPrompts` is now a DEPRECATED field ("no longer
+/// used." — was the old prompt-based-permission array); its `Poy()` item shape
+/// `{tool:"Bash", prompt:string}` is retained byte-exact. The `.passthrough()`
+/// (extra keys allowed so `normalizeToolInput` can inject `plan`/`planFilePath`)
+/// maps to `additionalProperties: true` here.
 // Mirrors the pre-existing `EMPTY_INPUT_SCHEMA` `once_cell::Lazy` style above;
 // `allow` keeps this batch from adding a net-new pedantic warning while staying
 // consistent with the surrounding code (a `LazyLock` migration is out of scope).
@@ -161,7 +164,7 @@ static EXIT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "allowedPrompts": {
                 "type": "array",
-                "description": "Prompt-based permissions needed to implement the plan. These describe categories of actions rather than specific commands.",
+                "description": "Deprecated: no longer used.",
                 "items": {
                     "type": "object",
                     "properties": {

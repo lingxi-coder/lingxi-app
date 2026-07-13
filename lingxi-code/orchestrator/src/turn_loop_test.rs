@@ -1369,6 +1369,121 @@ mod read_file_state_tests {
         );
     }
 
+    // ----- P1-06 composition-root read-state-map sharing -----
+
+    #[tokio::test]
+    async fn with_read_state_map_adopts_the_composition_root_arc() {
+        // The crux of P1-06: the builder OVERWRITES the constructor's fresh
+        // default with the SAME `Arc` the composition root passes into the file
+        // tools' `BuiltinToolContext`, so both sides observe one registry.
+        let shared = tool_api::read_file_state::new_read_file_state_map();
+        let orch =
+            orch_with_tools(PathBuf::from("/tmp"), vec![]).with_read_state_map(shared.clone());
+        assert!(
+            Arc::ptr_eq(&orch.read_state_map, &shared),
+            "with_read_state_map must adopt the shared Arc, not keep the default"
+        );
+        // A set through the composition-root handle is visible on the
+        // orchestrator's field (the same allocation).
+        tool_api::read_file_state::set(
+            &shared,
+            PathBuf::from("/tmp/wired.txt"),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "wired\n".into(),
+                mtime_ms: 7,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+        assert!(
+            tool_api::read_file_state::get(
+                &orch.read_state_map,
+                std::path::Path::new("/tmp/wired.txt")
+            )
+            .is_some(),
+            "a set through the shared map must be visible on the orchestrator"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_read_state_map_feeds_post_compact_restore() {
+        // End-to-end wiring proof: when the composition root shares its map (the
+        // one the file tools write via `readFileState.set`) into the
+        // orchestrator, a tool's read feeds the post-compact file restore. Before
+        // P1-06 the orchestrator held a THIRD, unshared map, so this restore was
+        // always empty in production.
+        use compaction::CompactionOrchestrator;
+        use protocol::{ConversationMessage, MessageId};
+        use traits::OrchestratorHandle;
+
+        // The composition-root-owned map (also handed to `BuiltinToolContext`).
+        let shared = tool_api::read_file_state::new_read_file_state_map();
+        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
+            .with_compaction(Arc::new(CompactionOrchestrator::new(10)))
+            .with_read_state_map(shared.clone());
+        let orch = Arc::new(orch);
+
+        {
+            let session = orch.session();
+            let mut s = session.lock().await;
+            for i in 0..20 {
+                s.history.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "turn-{i} padded body text to push the token estimate over the threshold"
+                    ),
+                ));
+            }
+        }
+
+        // A tool's `readFileState.set` goes through the SHARED handle (as the
+        // real `FileReadTool` does via its `BuiltinToolContext.read_file_state`).
+        tool_api::read_file_state::set(
+            &shared,
+            PathBuf::from("/tmp/tool_read.rs"),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "fn tool_read() {}\n".into(),
+                mtime_ms: 321,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+
+        orch.force_compact().await.expect("force_compact ok");
+
+        // The shared map is drained/cleared post-compact.
+        assert!(
+            orch.read_state_map.lock().unwrap().is_empty(),
+            "shared read_state_map must be cleared after compaction"
+        );
+
+        // The tool's read was restored as a post-compact attachment — proving the
+        // share, not the orchestrator's own now-removed default, fed the restore.
+        let session = orch.session();
+        let s = session.lock().await;
+        let restored = s.history.iter().any(|m| match m {
+            ConversationMessage::User {
+                content,
+                is_meta: true,
+                ..
+            } => content.iter().any(|b| match b {
+                protocol::ContentBlock::Text { text } => {
+                    text.contains("restored after compaction")
+                        && text.contains("/tmp/tool_read.rs")
+                        && text.contains("fn tool_read() {}")
+                }
+                _ => false,
+            }),
+            _ => false,
+        });
+        assert!(
+            restored,
+            "a tool's read through the shared map must feed post-compact restore"
+        );
+    }
+
     #[tokio::test]
     async fn cache_skips_errored_read() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -4883,11 +4883,18 @@ pub async fn build(
     let sandbox_desc_auto_allow = sandbox_runtime_cfg.auto_allow_bash_if_sandboxed;
     let sandbox_desc_fallback = sandbox_runtime_cfg.are_unsandboxed_commands_allowed();
     let sandbox_desc_deps_ok = sandbox_deps.errors.is_empty();
+    // P1-06: ONE per-session read-file-state registry (claude-code's single
+    // `readFileState` map on the `ToolUseContext`). Created here, cloned into
+    // every file tool's `BuiltinToolContext` below, and the SAME `Arc` handed to
+    // the orchestrator via `.with_read_state_map(...)` at the builder chain, so a
+    // tool's `readFileState.set` feeds the orchestrator's post-compact restore
+    // (and the staleness / `/files` consumers).
+    let read_state_map = tool_api::read_file_state::new_read_file_state_map();
     let tool_ctx = BuiltinToolContext {
-        // FILE.B: file tools share one read-state map for the (future) staleness
-        // guard / Read-dedup; the composition-root Arc-share with the orchestrator
-        // is wired when a consumer (FILE.A/D/E/F) reads it.
-        read_file_state: tool_api::read_file_state::new_read_file_state_map(),
+        // FILE.B / P1-06: file tools share the ONE per-session read-state map
+        // (staleness guard, Read-dedup) — the SAME `Arc` the orchestrator adopts
+        // via `.with_read_state_map(read_state_map)` below.
+        read_file_state: read_state_map.clone(),
         // Read(deny) → Grep/Glob search excludes (resolved from the boot policy
         // above; empty when enforcement is off or no Read-deny rule applies).
         read_deny_exclude_globs,
@@ -5440,7 +5447,12 @@ pub async fn build(
     // `TodoStore` for the active list each turn, resolving the list id via the
     // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
     // needs no provider; it reads `session.todos` directly.
-    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()));
+    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+    // P1-06: hand the orchestrator the SAME `readFileState` map the file tools'
+    // `BuiltinToolContext` share (created just above), so a tool's
+    // `readFileState.set` feeds the post-compact file restore + staleness /
+    // `/files` consumers — 1:1 with claude-code's single per-session map.
+    .with_read_state_map(read_state_map);
 
     // P0.1 ACTIVATION (gated, default OFF). When `LINGXI_MEMDIR_PREFETCH`
     // is truthy, wire the memdir-backed memory selector so relevant

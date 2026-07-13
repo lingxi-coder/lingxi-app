@@ -126,8 +126,10 @@ mod turn_loop_test;
 /// MRU LRU at ≥3 (`a,b,c,a` → TS `[a,c,b]` vs `[a,b,c]`). Silently skips an
 /// absent/non-string path or unknown tool. Populates only the ordered `Vec`;
 /// the richer [`ConversationOrchestrator::read_state_map`] (1:1 TS
-/// `readFileState`) is filled by the tools' own `read_file_state.set` over a
-/// shared `Arc`. NotebookEdit's `~`/trim skip and BashTool writes are unported.
+/// `readFileState`) is filled by the tools' own `read_file_state.set` over the
+/// `Arc` the composition root shares into BOTH the tools' `BuiltinToolContext`
+/// and the orchestrator via [`ConversationOrchestrator::with_read_state_map`]
+/// (P1-06). NotebookEdit's `~`/trim skip and BashTool writes are unported.
 async fn record_read_file_state(
     orch: &ConversationOrchestrator,
     name: &str,

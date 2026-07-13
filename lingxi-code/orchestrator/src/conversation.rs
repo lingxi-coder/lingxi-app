@@ -948,15 +948,19 @@ pub struct ConversationOrchestrator {
     /// offset, limit}`) — the 1:1 port of claude-code's `readFileState` map
     /// (`FileReadTool.ts:1032`). Kept SEPARATE from the `read_file_state`
     /// `Vec` above, which preserves the existing `/files` ordering semantics.
-    /// The orchestrator shares this `Arc` with the file tools' construction-
-    /// time `BuiltinToolContext` so a tool's `readFileState.set` is visible
-    /// here (and to the future staleness guards / Read dedup).
+    /// The composition root creates ONE map, passes a clone into the file
+    /// tools' `BuiltinToolContext`, and shares the SAME `Arc` here via
+    /// [`Self::with_read_state_map`] (P1-06), so a tool's `readFileState.set`
+    /// (Read/Edit/Write/…) is visible here — 1:1 with claude-code's single
+    /// per-session map on the `ToolUseContext`. Tests / binaries without a
+    /// composition root keep the constructor's fresh default (unshared, but
+    /// harmless — nothing populates it, so consumers observe an empty map).
     ///
     /// CONSUMED post-compact (#59): [`Self::restore_post_compact_attachments`]
     /// snapshots this registry, clears it, and re-attaches the most-recent files
-    /// after the compaction boundary (`K2p`/`Pqn`). The composition root shares
-    /// this `Arc` into the file tools' `BuiltinToolContext`. The staleness guards
-    /// (D/E/F) and Read dedup (A) are later additional consumers.
+    /// after the compaction boundary (`K2p`/`Pqn`). The staleness guards
+    /// (D/E/F) and Read dedup (A) are additional in-tool consumers of the SAME
+    /// shared map.
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
     /// Task 8 (llm-client future-work batch 3): the last rate-limit snapshot
     /// forwarded to [`traits::OutputStream::emit_rate_limit`], for the
@@ -1308,6 +1312,26 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_jsonl_writer(&self) -> bool {
         self.jsonl_writer.is_some()
+    }
+
+    /// Share the per-session read-file-state registry (claude-code's
+    /// `readFileState` map) with the file tools. Builder-style — the
+    /// composition root creates ONE
+    /// [`tool_api::read_file_state::ReadFileStateMap`], passes a clone into the
+    /// file tools' [`tool_api::BuiltinToolContext`], and hands the SAME `Arc`
+    /// here, so a tool's `readFileState.set` (Read/Edit/Write/NotebookEdit) is
+    /// visible to the orchestrator's post-compact restore, `/files`, and the
+    /// staleness consumers — 1:1 with claude-code's single per-session map on
+    /// the `ToolUseContext` (P1-06). Overwrites the fresh, unshared default the
+    /// constructor allocated. Wired at the desktop + mobile composition roots;
+    /// tests that need a live registry can call this with a map they also seed.
+    #[must_use]
+    pub fn with_read_state_map(
+        mut self,
+        map: tool_api::read_file_state::ReadFileStateMap,
+    ) -> Self {
+        self.read_state_map = map;
+        self
     }
 
     /// Seed the JSONL parent-uuid chain pointer so the FIRST append after a

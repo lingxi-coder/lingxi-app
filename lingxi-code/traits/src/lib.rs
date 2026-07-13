@@ -55,6 +55,7 @@ pub mod task_registry;
 pub mod team_registry;
 pub mod team_spawn;
 pub mod tool_invoker;
+pub mod traffic_mode;
 pub mod tts;
 pub mod voice;
 pub mod web_search;

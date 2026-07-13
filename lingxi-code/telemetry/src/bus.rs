@@ -44,8 +44,17 @@ impl AnalyticsBus {
     /// Synchronous log. If no sink is attached, the event is buffered (oldest
     /// evicted at capacity). When the killswitch is active the event is
     /// silently dropped.
+    ///
+    /// The event is also dropped when the traffic-mode privacy gate has
+    /// telemetry disabled (CC `F$e()` — `DISABLE_TELEMETRY` / `DO_NOT_TRACK` /
+    /// non-essential-traffic). Gating here means every current and future sink
+    /// inherits the suppression, matching CC where `F$e()` silences all
+    /// `tengu_*` telemetry egress.
     pub async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
         if self.killswitch.is_active() {
+            return;
+        }
+        if traits::traffic_mode::is_telemetry_disabled() {
             return;
         }
         if let Some(sink) = self.sink.read().await.as_ref() {
@@ -131,5 +140,59 @@ impl AnalyticsBus {
             *guard = Some(Arc::new(NoOpSink));
         }
         bus
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sink::LogEventMetadata;
+    use crate::sinks::InMemorySink;
+    use std::sync::Mutex;
+
+    /// `DISABLE_TELEMETRY` is process-global; serialize the gate cases. No other
+    /// test in this crate's unit-test binary drives the bus (the sink tests call
+    /// sinks directly), so the window where the var is set is confined here.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear() {
+        for v in [
+            "DISABLE_TELEMETRY",
+            "DO_NOT_TRACK",
+            "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
+
+    /// With telemetry enabled (clean env) events reach the sink; once the
+    /// privacy gate disables telemetry (CC `F$e()`), `log_event` drops them
+    /// before they can reach any sink.
+    #[tokio::test]
+    async fn privacy_gate_suppresses_events() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+
+        let sink = Arc::new(InMemorySink::new());
+        let bus = AnalyticsBus::new();
+        bus.attach_sink(sink.clone()).await;
+
+        // Clean env ⇒ telemetry enabled ⇒ event delivered.
+        bus.log_event("tengu_test_event", LogEventMetadata::default())
+            .await;
+        assert_eq!(sink.events().await.len(), 1, "delivered when enabled");
+
+        // DO_NOT_TRACK ⇒ F$e()==true ⇒ suppressed.
+        std::env::set_var("DO_NOT_TRACK", "1");
+        bus.log_event("tengu_test_event", LogEventMetadata::default())
+            .await;
+        assert_eq!(
+            sink.events().await.len(),
+            1,
+            "no new event under DO_NOT_TRACK"
+        );
+
+        clear();
     }
 }

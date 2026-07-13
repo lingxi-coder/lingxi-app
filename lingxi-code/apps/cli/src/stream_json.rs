@@ -1143,7 +1143,13 @@ pub fn build_init_params(
         agents,
         skills,
         plugins: plugins_json,
-        analytics_disabled: false,
+        // Port of CC `tK()`'s `F$e()` term (`analyticsDisabled: tK()`): the
+        // telemetry-disabled portion of the privacy gate (DISABLE_TELEMETRY /
+        // DO_NOT_TRACK / non-essential-traffic). CC's `tK()` also ORs in a
+        // config-privacy check (`zKm()`) and a third-party-gateway check
+        // (`o_()`); the former surface isn't ported and the latter is a LingXi
+        // accepted divergence (multi-provider), so only the F$e() term is wired.
+        analytics_disabled: traits::traffic_mode::is_telemetry_disabled(),
         product_feedback_disabled: false,
         memory_paths,
         fast_mode_state: fast_mode_state.to_string(),
@@ -1230,6 +1236,35 @@ mod tests {
             !tools.contains(&"Agent".to_string()),
             "Agent should not remain in tools list"
         );
+    }
+
+    /// `analytics_disabled` reflects the traffic-mode privacy gate (CC
+    /// `tK()`'s `F$e()` term): `false` with a clean env, `true` under
+    /// `DO_NOT_TRACK`. Serialized on a process-global lock because it mutates
+    /// env and other tests in this binary build init params too.
+    #[tokio::test]
+    async fn analytics_disabled_tracks_privacy_gate() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for v in ["DO_NOT_TRACK", "DISABLE_TELEMETRY"] {
+            std::env::remove_var(v);
+        }
+
+        let params = make_params("sess");
+        assert!(
+            !params.analytics_disabled,
+            "clean env ⇒ analytics enabled"
+        );
+
+        std::env::set_var("DO_NOT_TRACK", "1");
+        let params = make_params("sess");
+        assert!(
+            params.analytics_disabled,
+            "DO_NOT_TRACK=1 ⇒ analytics disabled"
+        );
+
+        std::env::remove_var("DO_NOT_TRACK");
     }
 
     /// Verify text accumulation — multiple `emit_text` calls on the same

@@ -383,6 +383,10 @@ struct BootPermissionTiers {
     /// Sticky `disableBypassPermissionsMode: "disable"` killswitch — true when
     /// ANY tier (managed included) disables `BypassPermissions` mode.
     bypass_disabled: bool,
+    /// Sticky `disableAutoMode: "disable"` killswitch (claude-code `Bpa()`) —
+    /// true when ANY tier disables auto mode at either settings position. Set on
+    /// the boot policy and applied at mode-load (auto → default downgrade).
+    auto_mode_disabled: bool,
     /// Union of every tier's `permissions.additionalDirectories` (raw paths;
     /// `authorize` resolves them against the policy roots via `expand_path`).
     additional_working_dirs: Vec<std::path::PathBuf>,
@@ -426,6 +430,7 @@ async fn load_boot_permission_tiers(
     let mut rules = Vec::new();
     let mut mode = permission::PermissionMode::Default;
     let mut bypass_disabled = false;
+    let mut auto_mode_disabled = false;
     let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
     // Retain each tier's raw text (in ascending priority) so the
     // sandbox-auto-allow config can be derived from the SAME settings.
@@ -466,6 +471,9 @@ async fn load_boot_permission_tiers(
             if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                 bypass_disabled = true; // sticky: any tier disabling wins
             }
+            if permission::auto_mode_disabled_from_settings_json(&raw) {
+                auto_mode_disabled = true; // sticky: any tier disabling wins (Bpa)
+            }
             // (#34) Union this tier's additionalDirectories into the
             // working-dir set (claude-code merges across SETTING_SOURCES).
             additional_working_dirs
@@ -493,6 +501,9 @@ async fn load_boot_permission_tiers(
         if permission::bypass_permissions_disabled_from_settings_json(raw) {
             bypass_disabled = true; // managed killswitch binds (sticky)
         }
+        if permission::auto_mode_disabled_from_settings_json(raw) {
+            auto_mode_disabled = true; // managed auto-mode killswitch binds (sticky)
+        }
         additional_working_dirs
             .extend(permission::additional_directories_from_settings_json(raw));
     }
@@ -507,6 +518,7 @@ async fn load_boot_permission_tiers(
         rules,
         mode,
         bypass_disabled,
+        auto_mode_disabled,
         additional_working_dirs,
         raw_tiers,
     }
@@ -4186,6 +4198,7 @@ pub async fn build(
             rules,
             mut mode,
             bypass_disabled,
+            auto_mode_disabled,
             mut additional_working_dirs,
             raw_tiers,
         } = load_boot_permission_tiers(&cfg.lingxi_home, &cwd, cfg.setting_source_scope).await;
@@ -4231,6 +4244,27 @@ pub async fn build(
         if cfg.permission_mode != permission::PermissionMode::Default {
             mode = cfg.permission_mode;
         }
+        // Auto-mode availability gate — claude-code `xms` mode-load downgrade
+        // (`if(t==="auto"&&!P0())return"default"`). When the resolved mode is
+        // `auto` but auto mode is unavailable (the `disableAutoMode` settings
+        // killswitch, or the boot model does not support it), silently downgrade
+        // to `default` so the session never boots INTO an unavailable auto mode.
+        // The local denial circuit-breaker is fresh at boot; Statsig
+        // remote-disable is a documented omission; provider is resolved as
+        // `"firstParty"` (multi-provider mapping deferred — see
+        // `permission::auto_gate`).
+        if mode == permission::PermissionMode::Auto {
+            let (gated, _reason) = permission::apply_auto_mode_gate(
+                mode,
+                &permission::AutoGateInputs {
+                    disabled_by_settings: auto_mode_disabled,
+                    circuit_broken: false,
+                    model: cfg.default_model.clone(),
+                    provider: "firstParty".to_string(),
+                },
+            );
+            mode = gated;
+        }
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
@@ -4243,6 +4277,9 @@ pub async fn build(
                 permission::powershell_parse::SystemPwshParser,
             ));
         policy.bypass_killswitch_active = bypass_disabled;
+        // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
+        // refuses `auto` when any tier set `disableAutoMode: "disable"`.
+        policy.auto_mode_disabled = auto_mode_disabled;
         // Resolve the active Read(deny) rules to search-exclude globs while
         // the policy is still in scope (before it moves into the gate).
         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);

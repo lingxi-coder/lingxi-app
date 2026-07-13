@@ -717,6 +717,10 @@ pub async fn build_mobile_inner(
         // settings `defaultMode:bypassPermissions` becomes an unguarded allow-all
         // on mobile, which has no interactive bypass-safety guard either.
         let mut bypass_disabled = false;
+        // Auto-mode killswitch (`Bpa()`), sticky across tiers — mirrors desktop
+        // (`policy.auto_mode_disabled`). Feeds both the boot mode-load downgrade
+        // and the live `set_permission_mode` auto rejection.
+        let mut auto_mode_disabled = false;
         // Audit fix (#12): `permissions.additionalDirectories`, unioned across
         // tiers, so an AcceptEdits write under a settings-declared extra dir
         // auto-allows (mirrors desktop's `.with_working_dirs`); empty ⇒ unchanged.
@@ -752,6 +756,9 @@ pub async fn build_mobile_inner(
                 if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                     bypass_disabled = true; // sticky: any tier disabling wins
                 }
+                if permission::auto_mode_disabled_from_settings_json(&raw) {
+                    auto_mode_disabled = true; // sticky: any tier disabling wins (Bpa)
+                }
                 // (P2-14) Scalar-override: a tier that declares the key overrides
                 // (sources are ordered user → project → local, so local wins).
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
@@ -774,11 +781,31 @@ pub async fn build_mobile_inner(
             home: std::env::var_os("HOME").map(std::path::PathBuf::from),
             lingxi_home: cfg.lingxi_home.clone(),
         };
+        // Auto-mode availability gate — claude-code `xms` mode-load downgrade:
+        // a resolved `auto` mode downgrades to `default` when unavailable (the
+        // `disableAutoMode` killswitch or an auto-unsupported boot model). Local
+        // breaker fresh at boot; provider `"firstParty"` (multi-provider mapping
+        // deferred — see `permission::auto_gate`).
+        if mode == PermissionMode::Auto {
+            let (gated, _reason) = permission::apply_auto_mode_gate(
+                mode,
+                &permission::AutoGateInputs {
+                    disabled_by_settings: auto_mode_disabled,
+                    circuit_broken: false,
+                    model: cfg.default_model.clone(),
+                    provider: "firstParty".to_string(),
+                },
+            );
+            mode = gated;
+        }
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs);
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;
+        // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
+        // refuses `auto` when any tier set `disableAutoMode: "disable"`.
+        policy.auto_mode_disabled = auto_mode_disabled;
         let policy = Arc::new(policy);
         // Resolve active Read(deny) rules to search-exclude globs before the
         // policy moves into the gate (same as the desktop composition root).

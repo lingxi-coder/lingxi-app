@@ -66,6 +66,16 @@ pub struct PermissionPolicy {
     pub denial_tracking: Mutex<DenialTrackingState>,
     /// Killswitch that overrides `BypassPermissions` back to `Ask`.
     pub bypass_killswitch_active: bool,
+    /// Auto-mode killswitch — 1:1 with claude-code `Bpa()` (the
+    /// `disableAutoMode == "disable"` settings flag at either position). When
+    /// `true`, the live `set_permission_mode` gate refuses `auto`
+    /// ([`crate::PolicyPermissionGate::set_permission_mode`]) with the byte-exact
+    /// `Cannot set permission mode to auto: auto mode disabled by settings`
+    /// message, mirroring the boot mode-load downgrade
+    /// ([`crate::auto_gate::apply_auto_mode_gate`]). Set at engine boot from any
+    /// disabling settings tier via [`crate::auto_mode_disabled_from_settings_json`].
+    /// Defaults to `false`.
+    pub auto_mode_disabled: bool,
     /// Was the session ORIGINALLY started with `BypassPermissions` available?
     /// 1:1 with TS `ToolPermissionContext.isBypassPermissionsModeAvailable`.
     /// When `true`, `Plan` mode ALSO bypasses permissions (claude-code
@@ -132,6 +142,7 @@ impl PermissionPolicy {
             ask_rules: HashMap::new(),
             denial_tracking: Mutex::new(DenialTrackingState::default()),
             bypass_killswitch_active: false,
+            auto_mode_disabled: false,
             bypass_permissions_available: false,
             roots: None,
             stripped_dangerous: Vec::new(),

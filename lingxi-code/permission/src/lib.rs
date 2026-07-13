@@ -7,6 +7,7 @@
 
 pub mod allow_suggestion;
 pub mod auto_edit_safety;
+pub mod auto_gate;
 #[cfg(feature = "bash-ast")]
 pub mod bash_ast_security;
 pub mod bash_security;
@@ -51,6 +52,10 @@ pub use auto_edit_safety::{
     is_dangerous_file_path_to_auto_edit, normalize_case_for_comparison, AutoEditSafety,
     DANGEROUS_DIRECTORIES, DANGEROUS_FILES,
 };
+pub use auto_gate::{
+    apply_auto_mode_gate, auto_mode_available, auto_mode_denial_reason, cannot_set_auto_message,
+    model_supports_auto_mode, provider_allows_auto_mode, AutoGateDenialReason, AutoGateInputs,
+};
 pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use bypass_guard::{enforce_bypass_safety, BypassEnv};
 pub use classifier::is_classifier_permissions_enabled;
@@ -77,8 +82,8 @@ pub use headless_gate::DenyOnAskGate;
 pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json,
-    bypass_permissions_disabled_from_settings_json, default_mode_from_settings_json,
-    permission_rules_from_settings_json,
+    auto_mode_disabled_from_settings_json, bypass_permissions_disabled_from_settings_json,
+    default_mode_from_settings_json, permission_rules_from_settings_json,
 };
 pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;

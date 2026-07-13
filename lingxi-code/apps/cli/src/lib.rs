@@ -769,15 +769,48 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 /// with NO bypass-safety guard: the guard runs exactly once in [`run_cli`]
 /// (before mode dispatch, for all modes), so the interactive paths that call
 /// this helper to re-derive the mode must NOT re-run it. Returns
-/// `(mode, notice)` where `notice` is `Some` only when the bypass killswitch
-/// suppressed a requested bypass (`permissionModeNotification`).
+/// `(mode, notice)` where `notice` is `Some` when the bypass killswitch
+/// suppressed a requested bypass, OR when the auto-mode availability gate
+/// downgraded a requested `auto` (`permissionModeNotification`).
+///
+/// The auto-mode gate (claude-code `xms` mode-load downgrade + the
+/// `kickOutOfAutoIfNeeded` notification) runs AFTER the pure
+/// `initialPermissionModeFromCLI` resolution: when the resolved mode is `Auto`
+/// but auto mode is unavailable (`disableAutoMode` settings killswitch or the
+/// active model does not support it), the mode is downgraded to `Default` and
+/// the byte-exact `Jce()` reason (`"auto mode disabled by settings"` /
+/// `"auto mode unavailable for this model"`) is surfaced as the startup notice.
+/// The local denial circuit-breaker is fresh at boot (never tripped); Statsig
+/// remote-disable is a documented omission. The provider is resolved as
+/// `"firstParty"` at this CLI surface (multi-provider provider-mapping into the
+/// gate is deferred — see [`permission::auto_gate`]).
 pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMode, Option<String>) {
     let settings = read_cli_mode_settings(argv);
-    permission::initial_permission_mode_from_cli(
+    let (mode, notice) = permission::initial_permission_mode_from_cli(
         argv.permission_mode.as_deref(),
         argv.dangerously_skip_permissions,
         &settings,
-    )
+    );
+    if mode != permission::PermissionMode::Auto {
+        return (mode, notice);
+    }
+    // Auto was requested (CLI flag or settings `defaultMode: auto`). Apply the
+    // availability gate; downgrade + notify when closed.
+    let model = argv
+        .model
+        .clone()
+        .unwrap_or_else(|| engine_desktop::DesktopConfig::default().default_model);
+    let inputs = permission::AutoGateInputs {
+        disabled_by_settings: settings.auto_mode_disabled,
+        circuit_broken: false,
+        model,
+        provider: "firstParty".to_string(),
+    };
+    match permission::apply_auto_mode_gate(mode, &inputs) {
+        (permission::PermissionMode::Auto, _) => (mode, notice),
+        (downgraded, Some(reason)) => (downgraded, Some(reason.message().to_string())),
+        (downgraded, None) => (downgraded, notice),
+    }
 }
 
 /// Build [`permission::CliModeSettings`] from the merged user+project
@@ -802,10 +835,12 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut default_mode = None;
     let mut bypass_disabled = false;
+    let mut auto_mode_disabled = false;
     let home = incl_user.then(|| crate::run::lingxi_home_dir().join("settings.json"));
     let proj = incl_project.then(|| project_dir.join(branding::DOT_DIR).join("settings.json"));
     // User first, then project (ascending priority): project read last wins on
-    // `defaultMode`; `bypass_disabled` is sticky across tiers.
+    // `defaultMode`; `bypass_disabled` / `auto_mode_disabled` are sticky across
+    // tiers (any tier disabling wins — `Bpa()`).
     for path in [home, proj].into_iter().flatten() {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Some(m) = permission::default_mode_from_settings_json(&raw) {
@@ -814,11 +849,15 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
             if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                 bypass_disabled = true;
             }
+            if permission::auto_mode_disabled_from_settings_json(&raw) {
+                auto_mode_disabled = true;
+            }
         }
     }
     permission::CliModeSettings {
         default_mode,
         bypass_disabled,
+        auto_mode_disabled,
     }
 }
 
@@ -1031,6 +1070,111 @@ mod cli_mode_settings_tests {
             Some(permission::PermissionMode::AcceptEdits)
         );
         assert!(s.bypass_disabled);
+
+        if let Some(cwd) = prior_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        match prior_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// A settings `disableAutoMode: "disable"` (either position) sets the
+    /// auto-mode killswitch in the resolved [`permission::CliModeSettings`].
+    #[test]
+    fn reads_auto_mode_killswitch() {
+        let _g = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_home = std::env::var_os("HOME");
+        let prior_cwd = std::env::current_dir().ok();
+
+        let home = tempfile::tempdir().expect("home tempdir");
+        let proj = tempfile::tempdir().expect("proj tempdir");
+        let proj_lingxi = proj.path().join(".lingxi");
+        std::fs::create_dir_all(&proj_lingxi).expect("mkdir .lingxi");
+        std::fs::write(
+            proj_lingxi.join("settings.json"),
+            r#"{"permissions":{"disableAutoMode":"disable"}}"#,
+        )
+        .expect("write settings");
+        std::env::set_var("HOME", home.path());
+        std::env::set_current_dir(proj.path()).expect("chdir proj");
+
+        let s = read_cli_mode_settings(&argv());
+        assert!(s.auto_mode_disabled);
+
+        if let Some(cwd) = prior_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        match prior_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// `--permission-mode auto` + `disableAutoMode: "disable"` → the session
+    /// boots `Default` with the byte-exact `auto mode disabled by settings`
+    /// notice (claude-code `xms` downgrade + `Jce("settings")`).
+    #[test]
+    fn resolve_downgrades_auto_when_disabled_by_settings() {
+        let _g = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_home = std::env::var_os("HOME");
+        let prior_cwd = std::env::current_dir().ok();
+
+        let home = tempfile::tempdir().expect("home tempdir");
+        let proj = tempfile::tempdir().expect("proj tempdir");
+        let proj_lingxi = proj.path().join(".lingxi");
+        std::fs::create_dir_all(&proj_lingxi).expect("mkdir .lingxi");
+        std::fs::write(
+            proj_lingxi.join("settings.json"),
+            r#"{"disableAutoMode":"disable"}"#,
+        )
+        .expect("write settings");
+        std::env::set_var("HOME", home.path());
+        std::env::set_current_dir(proj.path()).expect("chdir proj");
+
+        let mut a = argv();
+        a.permission_mode = Some("auto".to_string());
+        let (mode, notice) = resolve_permission_mode(&a);
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some("auto mode disabled by settings"));
+
+        if let Some(cwd) = prior_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        match prior_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// `--permission-mode auto` on an auto-UNSUPPORTED model (no settings) →
+    /// boots `Default` with `auto mode unavailable for this model`
+    /// (`Jce("model")`, the `dUe` deny-list).
+    #[test]
+    fn resolve_downgrades_auto_on_unsupported_model() {
+        let _g = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior_home = std::env::var_os("HOME");
+        let prior_cwd = std::env::current_dir().ok();
+
+        // Empty settings dirs (no killswitch) — the ONLY closed gate is the model.
+        let home = tempfile::tempdir().expect("home tempdir");
+        let proj = tempfile::tempdir().expect("proj tempdir");
+        std::env::set_var("HOME", home.path());
+        std::env::set_current_dir(proj.path()).expect("chdir proj");
+
+        let mut a = argv();
+        a.permission_mode = Some("auto".to_string());
+        a.model = Some("claude-sonnet-4-5".to_string()); // legacy → auto-unsupported
+        let (mode, notice) = resolve_permission_mode(&a);
+        assert_eq!(mode, permission::PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some("auto mode unavailable for this model"));
 
         if let Some(cwd) = prior_cwd {
             let _ = std::env::set_current_dir(cwd);

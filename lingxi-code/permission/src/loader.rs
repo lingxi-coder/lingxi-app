@@ -39,6 +39,12 @@ struct SettingsTop {
     /// [`allow_managed_permission_rules_only_from_settings_json`].
     #[serde(default, rename = "allowManagedPermissionRulesOnly")]
     allow_managed_permission_rules_only: Option<bool>,
+    /// TOP-LEVEL `disableAutoMode` killswitch. claude-code's schema declares
+    /// `disableAutoMode: E.enum(["disable"]).optional()` at BOTH the top level
+    /// AND inside `permissions` (`Bpa()` checks both positions); this is the
+    /// top-level sibling. Consumed via [`auto_mode_disabled_from_settings_json`].
+    #[serde(default, rename = "disableAutoMode")]
+    disable_auto_mode: Option<String>,
 }
 
 /// The `permissions` block. `allow`/`deny`/`ask` are arrays of rule strings;
@@ -55,6 +61,10 @@ struct PermissionsBlock {
     default_mode: Option<String>,
     #[serde(default, rename = "disableBypassPermissionsMode")]
     disable_bypass_permissions_mode: Option<String>,
+    /// `permissions.disableAutoMode` — the auto-mode killswitch at its
+    /// permissions-block position (`Bpa()`'s `e.permissions?.disableAutoMode`).
+    #[serde(default, rename = "disableAutoMode")]
+    disable_auto_mode: Option<String>,
     /// Extra directories (beyond cwd) inside which `acceptEdits`/auto-allow
     /// treats edits as writable. 1:1 with claude-code `permissions.additionalDirectories`,
     /// which `TGd` folds into `ToolPermissionContext.additionalWorkingDirectories`
@@ -113,8 +123,10 @@ pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
         // #32: claude-code's settings `defaultMode` enum includes "auto"
         // (`E.enum(["default","acceptEdits","bypassPermissions","plan","dontAsk",
         // "auto"])`). Accepted at parse; the actual runtime ENTRY into auto-mode
-        // is further gated (model gate + circuit-breaker + disableAutoMode) — a
-        // separate concern, out of scope here.
+        // is further gated (model gate + circuit-breaker + disableAutoMode) by
+        // [`crate::auto_gate`] — the boot mode-load path applies
+        // [`crate::auto_gate::apply_auto_mode_gate`], which downgrades `auto` to
+        // `default` when the gate is closed (claude-code `xms`).
         "auto" => Some(PermissionMode::Auto),
         _ => None,
     }
@@ -131,6 +143,30 @@ pub fn bypass_permissions_disabled_from_settings_json(raw: &str) -> bool {
         .ok()
         .and_then(|t| t.permissions)
         .and_then(|p| p.disable_bypass_permissions_mode)
+        .as_deref()
+        == Some("disable")
+}
+
+/// Does this settings file DISABLE auto mode? True iff `disableAutoMode ==
+/// "disable"` at EITHER position — top-level `disableAutoMode` OR
+/// `permissions.disableAutoMode` — 1:1 with claude-code's `Bpa()`
+/// (`e.disableAutoMode==="disable"||e.permissions?.disableAutoMode==="disable"`).
+///
+/// The `disableAutoMode` schema is `E.enum(["disable"]).optional()` at both
+/// positions, so `"disable"` is the only meaningful value. When any settings
+/// tier disables it, [`crate::PermissionPolicy::auto_mode_disabled`] is set so
+/// both the boot mode-load gate ([`crate::auto_gate::apply_auto_mode_gate`]) and
+/// the live `set_permission_mode` gate refuse `auto`.
+#[must_use]
+pub fn auto_mode_disabled_from_settings_json(raw: &str) -> bool {
+    let Ok(top) = serde_json::from_str::<SettingsTop>(raw) else {
+        return false;
+    };
+    if top.disable_auto_mode.as_deref() == Some("disable") {
+        return true;
+    }
+    top.permissions
+        .and_then(|p| p.disable_auto_mode)
         .as_deref()
         == Some("disable")
 }
@@ -274,6 +310,29 @@ mod tests {
         assert!(!f(
             r#"{ "permissions": { "disableBypassPermissionsMode": "enable" } }"#
         ));
+        assert!(!f(r#"{ "permissions": {} }"#));
+        assert!(!f("{}"));
+        assert!(!f("not json"));
+    }
+
+    #[test]
+    fn auto_mode_killswitch_parses_both_positions() {
+        let f = auto_mode_disabled_from_settings_json;
+        // TOP-LEVEL position.
+        assert!(f(r#"{ "disableAutoMode": "disable" }"#));
+        // permissions-block position.
+        assert!(f(r#"{ "permissions": { "disableAutoMode": "disable" } }"#));
+        // Both set → still true.
+        assert!(f(
+            r#"{ "disableAutoMode": "disable", "permissions": { "disableAutoMode": "disable" } }"#
+        ));
+        // Coexists with other keys.
+        assert!(f(
+            r#"{ "permissions": { "disableAutoMode": "disable", "allow": ["Read"] } }"#
+        ));
+        // Only "disable" counts (enum(["disable"])); anything else / absent → false.
+        assert!(!f(r#"{ "disableAutoMode": "enable" }"#));
+        assert!(!f(r#"{ "permissions": { "disableAutoMode": "" } }"#));
         assert!(!f(r#"{ "permissions": {} }"#));
         assert!(!f("{}"));
         assert!(!f("not json"));

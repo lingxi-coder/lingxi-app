@@ -553,9 +553,24 @@ impl PermissionGate for PolicyPermissionGate {
     /// - an UNKNOWN mode is NOT an error: the binary reads the mode raw, acks
     ///   `{mode}`, and `transitionPermissionMode` no-ops an unrecognized mode
     ///   (classifier off), so we ack WITHOUT changing the live mode.
-    /// - `auto` is accepted unconditionally: the binary only gates it behind
-    ///   `feature('TRANSCRIPT_CLASSIFIER')`, which is OFF in the external build,
-    ///   so the auto-availability check is unreachable here (matching parity).
+    /// - `auto` is gated by claude-code 2.1.207's `Nle`
+    ///   (`setPermissionModeWithGuards`): `if(e==="auto"&&!P0()){...error:
+    ///   \`Cannot set permission mode to auto: ${Jce(One())}\`}`. We evaluate the
+    ///   two runtime-available `P0()` inputs — the `disableAutoMode` settings
+    ///   killswitch ([`crate::PermissionPolicy::auto_mode_disabled`]) and the
+    ///   local denial circuit-breaker — and reject with the byte-exact message
+    ///   for the [`crate::auto_gate::AutoGateDenialReason::Settings`] /
+    ///   [`crate::auto_gate::AutoGateDenialReason::CircuitBreaker`] cases.
+    ///
+    ///   REMAINDER (documented): `P0()`'s third input, the model gate
+    ///   (`dUe(wi())`), is not evaluated at THIS live surface — the policy does
+    ///   not carry the active model/provider. The model gate is enforced
+    ///   authoritatively at BOOT (the [`crate::auto_gate::apply_auto_mode_gate`]
+    ///   mode-load downgrade in the engine boot), so a session on an
+    ///   auto-unsupported model boots in `Default` and never reaches this path
+    ///   in `Auto`. A live runtime switch to `auto` on an unsupported model is
+    ///   the only uncovered case (parity gap: it is accepted here where the
+    ///   binary would reject with `auto mode unavailable for this model`).
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
         let Some(parsed) = parse_settable_mode(mode) else {
             // Unknown mode: accept + ack, but do not mutate the live mode.
@@ -567,6 +582,27 @@ impl PermissionGate for PolicyPermissionGate {
             }
             if !self.policy.bypass_permissions_available {
                 return Err("Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions".to_string());
+            }
+        }
+        if parsed == PermissionMode::Auto {
+            // `Nle`: reject `auto` when `!P0()`. Report `One()`'s reason
+            // (settings precedes circuit-breaker), rendering the byte-exact
+            // `Cannot set permission mode to auto: <Jce(reason)>`.
+            let reason = if self.policy.auto_mode_disabled {
+                Some(crate::auto_gate::AutoGateDenialReason::Settings)
+            } else if self
+                .policy
+                .denial_tracking
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_circuit_broken()
+            {
+                Some(crate::auto_gate::AutoGateDenialReason::CircuitBreaker)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(crate::auto_gate::cannot_set_auto_message(reason));
             }
         }
         *self

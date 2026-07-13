@@ -341,6 +341,7 @@ fn build_effective_policy(
     policy = policy.with_working_dirs(base.additional_working_dirs.clone());
     policy = policy.with_bypass_available(base.bypass_permissions_available);
     policy.bypass_killswitch_active = base.bypass_killswitch_active;
+    policy.auto_mode_disabled = base.auto_mode_disabled;
     policy
 }
 

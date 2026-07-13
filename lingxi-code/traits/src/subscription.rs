@@ -51,11 +51,14 @@ impl SubscriptionSnapshot {
         )
     }
 
-    /// `getRateLimitTier() === 'default_claude_max_20x'`
-    /// (`RateLimitMessage.tsx:75`).
+    /// 2.1.206 `Tdo`'s `isMax20x` (binary @221158587): `oly =
+    /// subscriptionType==="max" && rateLimitTier==="default_claude_max_20x"`
+    /// — a TWO-conjunct check (pre-206 `RateLimitMessage.tsx:75` checked the
+    /// tier alone; 206 additionally requires the `"max"` subscription type).
     #[must_use]
     pub fn is_max20x(&self) -> bool {
-        self.rate_limit_tier.as_deref() == Some("default_claude_max_20x")
+        self.subscription_type.as_deref() == Some("max")
+            && self.rate_limit_tier.as_deref() == Some("default_claude_max_20x")
     }
 
     /// Port of `isOverageProvisioningAllowed` (`auth.ts:1623-1643`): must be a
@@ -263,16 +266,38 @@ mod tests {
     #[test]
     fn max20x_is_exact_tier_match() {
         let max20 = SubscriptionSnapshot {
+            subscription_type: Some("max".to_string()),
             rate_limit_tier: Some("default_claude_max_20x".to_string()),
             ..SubscriptionSnapshot::default()
         };
         assert!(max20.is_max20x());
 
         let max5 = SubscriptionSnapshot {
+            subscription_type: Some("max".to_string()),
             rate_limit_tier: Some("default_claude_max_5x".to_string()),
             ..SubscriptionSnapshot::default()
         };
         assert!(!max5.is_max20x());
+    }
+
+    #[test]
+    fn max20x_requires_max_subscription_type_206_tdo() {
+        // 206 `Tdo`'s `isMax20x` is a two-conjunct check
+        // (`subscriptionType==="max" && rateLimitTier==="default_claude_max_20x"`).
+        // A snapshot with the tier but a non-"max" subscription type (or no
+        // subscription type at all) must NOT satisfy it.
+        let tier_only = SubscriptionSnapshot {
+            rate_limit_tier: Some("default_claude_max_20x".to_string()),
+            ..SubscriptionSnapshot::default()
+        };
+        assert!(!tier_only.is_max20x());
+
+        let pro_with_tier = SubscriptionSnapshot {
+            subscription_type: Some("pro".to_string()),
+            rate_limit_tier: Some("default_claude_max_20x".to_string()),
+            ..SubscriptionSnapshot::default()
+        };
+        assert!(!pro_with_tier.is_max20x());
     }
 
     #[test]

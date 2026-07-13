@@ -414,14 +414,14 @@ impl WebFetchTool {
     }
 
     fn user_agent() -> String {
-        // claude-code WebFetch User-Agent (v2.1.183: `Claude-User (${tg()}; +...)`):
+        // claude-code WebFetch User-Agent (v2.1.206: `Claude-User (${tg()}; +...)`):
         // `Claude-User (claude-code/<version>; +https://support.anthropic.com/)`.
         // The `Claude-User (...)` wrapper is how Anthropic web infra recognizes
         // claude-code fetch traffic (distinct from the api-client UA).
         // R-V1: the version is claude-code's VERSION (the parity target,
         // `traits::CLAUDE_CODE_VERSION`), NOT LingXi's CARGO_PKG_VERSION — every
         // WebFetch GET previously sent `claude-code/0.12.0` to Anthropic infra +
-        // target servers instead of `claude-code/2.1.183`.
+        // target servers instead of `claude-code/2.1.206`.
         format!(
             "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
             traits::CLAUDE_CODE_VERSION

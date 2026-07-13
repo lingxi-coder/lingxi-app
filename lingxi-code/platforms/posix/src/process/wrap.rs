@@ -47,7 +47,7 @@ pub const ENV_AI_AGENT: &str = "AI_AGENT";
 /// optional value).
 ///
 /// R-V1: the version is claude-code's `VERSION` (the parity target), NOT LingXi's
-/// `CARGO_PKG_VERSION`. claude-code v2.1.183 emits `claude-code_2-1-183_agent`;
+/// `CARGO_PKG_VERSION`. claude-code v2.1.206 emits `claude-code_2-1-206_agent`;
 /// using `CARGO_PKG_VERSION` (0.12.0) leaked `claude-code_0-12-0_agent` to every
 /// child process / hook reading `AI_AGENT`. LingXi is a 1:1 copy, so it presents
 /// the claude-code version it replicates.
@@ -175,9 +175,9 @@ mod tests {
             .and_then(|s| s.strip_suffix("_agent"))
             .expect("prefix/suffix present");
         assert!(!mid.contains('.'), "version dots must be dashed: {v}");
-        // R-V1: the version is the claude-code parity target (2.1.183 → 2-1-183),
+        // R-V1: the version is the claude-code parity target (2.1.206 → 2-1-206),
         // NOT LingXi's CARGO_PKG_VERSION.
-        assert_eq!(v, "claude-code_2-1-183_agent");
+        assert_eq!(v, "claude-code_2-1-206_agent");
         assert_eq!(
             v,
             format!(

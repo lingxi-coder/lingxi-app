@@ -567,10 +567,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .expect("must have user-agent header");
-        // R-V1: UA carries the claude-code parity-target version (2.1.183), not
+        // R-V1: UA carries the claude-code parity-target version (2.1.206), not
         // LingXi's CARGO_PKG_VERSION.
         assert_eq!(
-            ua_value, "Claude-User (claude-code/2.1.183; +https://support.anthropic.com/)",
+            ua_value, "Claude-User (claude-code/2.1.206; +https://support.anthropic.com/)",
             "WebFetch UA must be claude-code's `Claude-User (...)` form with the parity version"
         );
     }

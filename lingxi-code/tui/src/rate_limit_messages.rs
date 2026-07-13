@@ -2639,4 +2639,179 @@ mod tests {
         assert_eq!(qcg_limit_name(None, &unknown), None);
         assert_eq!(qcg_limit_name(Some("overage"), &unknown), None);
     }
+
+    // ── Task 14: end-to-end byte-exact matrix through `compose_rate_limit`
+    // ────────────────────────────────────────────────────────────────────
+    //
+    // Every test above drives the composer through the env-injectable
+    // `compose_with` seam. These drive the REAL public entry point,
+    // `compose_rate_limit(&RateLimitInfo, &SubscriptionSnapshot)` — the one
+    // `chat_widget` actually calls — so the `USER_TYPE` /
+    // `DISABLE_EXTRA_USAGE_COMMAND` env-var plumbing is pinned end-to-end
+    // too, not just the pure core. No other test in this crate touches
+    // either var, so clearing them here is deterministic and race-free
+    // under the parallel test harness (nothing else mutates or depends on
+    // their value concurrently).
+
+    fn clear_rate_limit_env() {
+        std::env::remove_var("USER_TYPE");
+        std::env::remove_var("DISABLE_EXTRA_USAGE_COMMAND");
+    }
+
+    #[test]
+    fn e2e_overage_allowed_warning_close_to_credit_limit() {
+        clear_rate_limit_env();
+        // rejected + overageStatus allowed_warning → isUsingOverage → the
+        // 2.1.206 close-to-limit copy, non-usage-based default snapshot.
+        let info = RateLimitInfo {
+            status: Some("rejected".into()),
+            overage_status: Some("allowed_warning".into()),
+            ..RateLimitInfo::default()
+        };
+        let got = compose_rate_limit(&info, &SubscriptionSnapshot::default()).unwrap();
+        assert_eq!(got.text, "You're close to your usage credit limit");
+        assert_eq!(got.upsell, None, "warnings carry no dim upsell line");
+    }
+
+    #[test]
+    fn e2e_rejected_out_of_credits_personal_upsell_wired_through_gid() {
+        clear_rate_limit_env();
+        // overageStatus rejected, reason out_of_credits, non-usage-based
+        // (pro, stripe billing) → "You're out of usage credits · resets
+        // {t}", and — unlike the pure-core tests above — the upsell here is
+        // computed by the REAL `Gid` wiring inside `compose_rate_limit`
+        // (pro + extra-usage-command-enabled + no server-hide headers →
+        // UPGRADE_OR_USAGE_CREDITS).
+        let ts = ts_in(1800);
+        let info = RateLimitInfo {
+            status: Some("rejected".into()),
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("out_of_credits".into()),
+            overage_resets_at: Some(ts),
+            ..RateLimitInfo::default()
+        };
+        let got = compose_rate_limit(&info, &pro()).unwrap();
+        assert_eq!(
+            got.text,
+            format!("You're out of usage credits \u{b7} resets {}", reset(ts))
+        );
+        assert_eq!(
+            got.upsell.as_deref(),
+            Some(upsell::UPGRADE_OR_USAGE_CREDITS)
+        );
+
+        // Absent reset (`overage_resets_at: None`) drops the suffix entirely.
+        let info_no_reset = RateLimitInfo {
+            overage_resets_at: None,
+            ..info
+        };
+        let got = compose_rate_limit(&info_no_reset, &pro()).unwrap();
+        assert_eq!(got.text, "You're out of usage credits");
+    }
+
+    #[test]
+    fn e2e_rejected_out_of_credits_org_usage_based_billing_add_funds() {
+        clear_rate_limit_env();
+        // Team admin, usage-based org billing, out_of_credits →
+        // "Your org is out of usage · add funds to continue"; the Gid
+        // upsell for this exact shape is the team admin-enable copy (the
+        // org's billing_type isn't Stripe/Apple/Google, so the extra-usage
+        // command itself is disabled).
+        let sub = usage_based(team(false, Some("admin")));
+        let info = RateLimitInfo {
+            status: Some("rejected".into()),
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("out_of_credits".into()),
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_rate_limit(&info, &sub).unwrap();
+        assert_eq!(
+            got.text,
+            "Your org is out of usage \u{b7} add funds to continue"
+        );
+        assert_eq!(
+            got.upsell.as_deref(),
+            Some(upsell::USAGE_CREDITS_ADMIN_ENABLE)
+        );
+    }
+
+    #[test]
+    fn e2e_seven_day_overage_included_fable5_jid_suppresses_upsell() {
+        clear_rate_limit_env();
+        // `jid = rateLimitType==="seven_day_overage_included" ||
+        // errorCode==="credits_required"` hard-nulls the upsell BEFORE
+        // `Gid` ever runs — even for a pro subscriber who would otherwise
+        // get a real upsell line. Text uses the NEW 206 "Fable 5 limit"
+        // naming (`qcg`/`Ucg`).
+        let info = RateLimitInfo {
+            status: Some("rejected".into()),
+            rate_limit_type: Some("seven_day_overage_included".into()),
+            ..RateLimitInfo::default()
+        };
+        let got = compose_rate_limit(&info, &pro()).unwrap();
+        assert_eq!(got.text, "You've hit your Fable 5 limit");
+        assert_eq!(
+            got.upsell, None,
+            "jid gate hard-nulls the upsell before Gid runs"
+        );
+    }
+
+    #[test]
+    fn e2e_credits_required_jid_suppresses_upsell() {
+        clear_rate_limit_env();
+        // Same `jid` gate, driven by `credits_required` instead of the
+        // rate-limit-type disjunct.
+        let info = RateLimitInfo {
+            credits_required: true,
+            ..rejected(Some("five_hour"), None)
+        };
+        let got = compose_rate_limit(&info, &pro()).unwrap();
+        assert_eq!(got.text, "You've hit your session limit");
+        assert_eq!(
+            got.upsell, None,
+            "jid gate hard-nulls the upsell before Gid runs"
+        );
+    }
+
+    #[test]
+    fn e2e_approaching_five_hour_pro_early_warning_with_upgrade_upsell() {
+        clear_rate_limit_env();
+        // allowed_warning, utilization >= 0.7, five_hour, pro subscriber →
+        // the early-warning text (getEarlyWarningText / `jcg`) with the
+        // `/upgrade to keep using LingXi` suffix appended by
+        // getWarningUpsellText (`Wcg`). Warnings never populate the
+        // separate `upsell` field (only error-severity notices do — this
+        // suffix lives INSIDE `text`).
+        let ts = ts_in(3600);
+        let info = RateLimitInfo {
+            status: Some("allowed_warning".into()),
+            rate_limit_type: Some("five_hour".into()),
+            utilization: Some(0.8),
+            resets_at: Some(ts),
+            ..RateLimitInfo::default()
+        };
+        let got = compose_rate_limit(&info, &pro()).unwrap();
+        assert_eq!(
+            got.text,
+            format!(
+                "You've used 80% of your session limit \u{b7} resets {} \u{b7} /upgrade to keep using LingXi",
+                reset(ts)
+            )
+        );
+        assert_eq!(got.upsell, None);
+    }
+
+    #[test]
+    fn e2e_inert_non_subscriber_rejected_has_no_upsell_leakage() {
+        clear_rate_limit_env();
+        // `Gid` `shouldShowUpsell = Eyt()||Bo()` reduces to
+        // `sub.is_subscriber` (Eyt() is a hard `false` constant in 2.1.206).
+        // A default (non-subscriber / non-Anthropic-session) snapshot on a
+        // rejected status must therefore compose with NO `/usage-credits`
+        // upsell — proving non-subscriber sessions get no upsell leakage
+        // from the 206 migration.
+        let info = rejected(Some("five_hour"), None);
+        let got = compose_rate_limit(&info, &SubscriptionSnapshot::default()).unwrap();
+        assert_eq!(got.upsell, None);
+    }
 }

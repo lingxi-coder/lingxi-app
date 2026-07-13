@@ -10,18 +10,26 @@
 //! Per-kind head order (everything before the common trailer), for the fields
 //! this engine actually emits:
 //! - **user**: `parentUuid, isSidechain, [promptId,] type, message, [isMeta,]
-//!   uuid, timestamp`
+//!   [isVisibleInTranscriptOnly,] [isCompactSummary,] uuid, timestamp` (the
+//!   two compact-summary flags ride between `message` and `uuid`, per real
+//!   2.1.207 summary lines).
 //! - **assistant (normal)**: `parentUuid, isSidechain, message, [requestId,]
 //!   type, uuid, timestamp`
 //! - **assistant (api-error)**: `parentUuid, isSidechain, type, uuid,
 //!   timestamp, message, [requestId,] [error,] isApiErrorMessage,
 //!   [apiErrorStatus]`
-//! - **system**: `parentUuid, [logicalParentUuid,] isSidechain, type, message,
-//!   [isMeta,] uuid, timestamp` (the port emits an inner `{role,content}`
-//!   `message`; claude's flattened `subtype`/`content` top-level system
-//!   envelope is an UNPORTED feature, so those siblings — when present in
-//!   `extra` — are tail-appended verbatim rather than synthesized into claude's
-//!   positions).
+//! - **system (compact boundary, `extra.subtype == "compact_boundary"`)**:
+//!   `parentUuid, [logicalParentUuid,] isSidechain, type, subtype, content,
+//!   [isMeta,] level, compactMetadata, uuid, timestamp` — claude's FLATTENED
+//!   boundary envelope (real 2.1.207 transcripts); these lines carry NO inner
+//!   `message`.
+//! - **system (other)**: `parentUuid, [logicalParentUuid,] isSidechain, type,
+//!   message, [isMeta,] uuid, timestamp` (the port emits an inner
+//!   `{role,content}` `message`; claude's flattened `subtype`/`content`
+//!   top-level system envelope is ported only for the compact-boundary
+//!   subtype, so on other system lines those siblings — when present in
+//!   `extra` — are tail-appended verbatim rather than synthesized into
+//!   claude's positions).
 //!
 //! Common trailer (every kind): `userType, [entrypoint,] cwd, sessionId,
 //! version, [gitBranch,] [slug]`. Any UNRECOGNIZED `extra` key (an unported
@@ -178,6 +186,20 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "apiErrorStatus",
 ];
 
+/// `extra` keys the USER head consumes (between `message` and `uuid`): the
+/// compact-summary envelope flags, emitted in claude's on-disk order
+/// (`..., "message":…, "isVisibleInTranscriptOnly":true, "isCompactSummary":
+/// true, "uuid":…` — real 2.1.207 transcripts). Skipped from the tail ONLY on
+/// user lines, so a non-user line carrying them still round-trips verbatim.
+const USER_HEAD_EXTRA: &[&str] = &["isVisibleInTranscriptOnly", "isCompactSummary"];
+
+/// `extra` keys the `subtype:"compact_boundary"` SYSTEM head consumes —
+/// claude's flattened boundary envelope (`type, subtype, content, level,
+/// compactMetadata, uuid, timestamp`, real 2.1.207 transcripts; boundary lines
+/// carry NO inner `message`). Skipped from the tail only when the boundary
+/// head emitted them.
+const BOUNDARY_HEAD_EXTRA: &[&str] = &["subtype", "content", "level", "compactMetadata"];
+
 // Hand-written `Serialize` so the outer JSONL keys land in claude-code's EXACT
 // per-kind order (see module docs). `Deserialize` stays derived — the reader is
 // order-independent. VALUES are byte-identical to the derived impl; only key
@@ -196,12 +218,19 @@ impl Serialize for JsonlMessage {
         let is_assistant = self.message_type == "assistant";
         let is_system = self.message_type == "system";
         let is_api_error = self.extra.contains_key("isApiErrorMessage");
+        // Compact-boundary system line: claude flattens the system envelope
+        // (`subtype`/`content`/`level`/`compactMetadata` are top-level
+        // siblings, no inner `message`). Only THIS system subtype gets the
+        // flattened head; other system lines keep the generic arm below.
+        let is_compact_boundary = is_system
+            && self.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary");
 
         // (a) parentUuid — ALWAYS first, emitted even when null.
         map.serialize_entry("parentUuid", &self.parent_uuid)?;
         // (b) logicalParentUuid — system places it right after parentUuid. The
-        //     port only ever sets it on a (future) compact boundary; omitted
-        //     when None to match the TS `undefined` skip.
+        //     port sets it on compact-boundary lines (which carry
+        //     `parentUuid: null` + the real parent here, the claude chain
+        //     reset); omitted when None to match the TS `undefined` skip.
         if self.logical_parent_uuid.is_some() {
             map.serialize_entry("logicalParentUuid", &self.logical_parent_uuid)?;
         }
@@ -209,7 +238,11 @@ impl Serialize for JsonlMessage {
         map.serialize_entry("isSidechain", &self.is_sidechain)?;
 
         if is_user {
-            // (d) user head: promptId?, type, message, isMeta?, uuid, timestamp.
+            // (d) user head: promptId?, type, message, isMeta?,
+            //     isVisibleInTranscriptOnly?, isCompactSummary?, uuid,
+            //     timestamp. The two compact-summary flags sit between
+            //     `message` and `uuid` on claude's persisted summary lines
+            //     (real 2.1.207 transcripts).
             if let Some(pid) = &self.prompt_id {
                 map.serialize_entry("promptId", pid)?;
             }
@@ -217,6 +250,12 @@ impl Serialize for JsonlMessage {
             map.serialize_entry("message", &self.message)?;
             if let Some(v) = self.extra.get("isMeta") {
                 map.serialize_entry("isMeta", v)?;
+            }
+            if let Some(v) = self.extra.get("isVisibleInTranscriptOnly") {
+                map.serialize_entry("isVisibleInTranscriptOnly", v)?;
+            }
+            if let Some(v) = self.extra.get("isCompactSummary") {
+                map.serialize_entry("isCompactSummary", v)?;
             }
             map.serialize_entry("uuid", &self.uuid)?;
             map.serialize_entry("timestamp", &self.timestamp)?;
@@ -253,11 +292,39 @@ impl Serialize for JsonlMessage {
             map.serialize_entry("type", &self.message_type)?;
             map.serialize_entry("uuid", &self.uuid)?;
             map.serialize_entry("timestamp", &self.timestamp)?;
+        } else if is_compact_boundary {
+            // (f1) compact-boundary system head — claude's flattened envelope
+            //      (real 2.1.207 transcripts): type, subtype, content,
+            //      [isMeta?,] level, compactMetadata, uuid, timestamp. NO
+            //      inner `message` — claude never writes one on boundary
+            //      lines, so `self.message` (Null) is intentionally skipped.
+            //      (`isMeta` only appears on pre-2.1.199 boundary lines; kept
+            //      near its historical slot for tolerant round-trips.)
+            map.serialize_entry("type", &self.message_type)?;
+            if let Some(v) = self.extra.get("subtype") {
+                map.serialize_entry("subtype", v)?;
+            }
+            if let Some(v) = self.extra.get("content") {
+                map.serialize_entry("content", v)?;
+            }
+            if let Some(v) = self.extra.get("isMeta") {
+                map.serialize_entry("isMeta", v)?;
+            }
+            if let Some(v) = self.extra.get("level") {
+                map.serialize_entry("level", v)?;
+            }
+            if let Some(v) = self.extra.get("compactMetadata") {
+                map.serialize_entry("compactMetadata", v)?;
+            }
+            map.serialize_entry("uuid", &self.uuid)?;
+            map.serialize_entry("timestamp", &self.timestamp)?;
         } else {
             // (f) system + any other kind: type, message, isMeta?, uuid,
             //     timestamp. The port emits an inner `message`; claude's
             //     flattened system envelope (subtype/content as top-level
-            //     siblings) is unported, so those `extra` keys tail-append.
+            //     siblings) is ported ONLY for the compact-boundary subtype
+            //     (arm f1); other system subtypes tail-append their `extra`
+            //     keys as before.
             map.serialize_entry("type", &self.message_type)?;
             map.serialize_entry("message", &self.message)?;
             if let Some(v) = self.extra.get("isMeta") {
@@ -266,7 +333,6 @@ impl Serialize for JsonlMessage {
             map.serialize_entry("uuid", &self.uuid)?;
             map.serialize_entry("timestamp", &self.timestamp)?;
         }
-        let _ = is_system;
 
         // (h) Common trailer — same emit/skip predicates as the derived impl,
         //     only the POSITION moves (it now follows the per-kind envelope).
@@ -287,9 +353,16 @@ impl Serialize for JsonlMessage {
         }
 
         // (i) Tail — any UNRECOGNIZED extra key (unported claude field), in
-        //     `extra` iteration order, so round-trips of those survive.
+        //     `extra` iteration order, so round-trips of those survive. Keys a
+        //     per-kind head already emitted are skipped ONLY for that kind.
         for (k, v) in &self.extra {
             if RECOGNIZED_EXTRA.contains(&k.as_str()) {
+                continue;
+            }
+            if is_user && USER_HEAD_EXTRA.contains(&k.as_str()) {
+                continue;
+            }
+            if is_compact_boundary && BOUNDARY_HEAD_EXTRA.contains(&k.as_str()) {
                 continue;
             }
             map.serialize_entry(k, v)?;

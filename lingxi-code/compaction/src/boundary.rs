@@ -63,6 +63,7 @@ impl CompactTrigger {
 /// tailUuid? }`). The Batch 5 `annotate_boundary_with_preserved_segment`
 /// fills this in; Batch 4 only carries the field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreservedSegment {
     /// `uuid` of the first preserved (kept) message.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,12 +77,39 @@ pub struct PreservedSegment {
     pub tail_uuid: Option<String>,
 }
 
+/// Re-parenting list for a preserved (`messagesToKeep`) tail — the loader's
+/// cold-load re-splice (`E$_`) re-parents each of `uuids` onto `anchor_uuid`
+/// in sequence, splicing the verbatim tail back in AFTER the summary.
+///
+/// TS: `compactMetadata.preservedMessages` (`{anchorUuid, uuids, allUuids}`,
+/// on-disk key order verified against real 2.1.207 transcripts).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreservedMessages {
+    /// `uuid` of the message the preserved tail splices AFTER (the last
+    /// summary message for suffix-preserving compaction).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_uuid: Option<String>,
+    /// `uuid`s of the preserved chain-participant messages, in order.
+    pub uuids: Vec<String>,
+    /// `uuid`s of EVERY preserved message (TS keeps non-chain participants
+    /// here too; this port preserves only chain participants, so the two
+    /// lists coincide).
+    pub all_uuids: Vec<String>,
+}
+
 /// Rich metadata stamped onto a compact-boundary marker.
 ///
 /// TS: `SystemCompactBoundaryMessage.compactMetadata` plus the
 /// `preCompactDiscoveredTools` carry (`compact.ts:608`/`:1025`) and the
 /// `logicalParentUuid` relink (`createCompactBoundaryMessage`).
+/// Serialization is the CC `compactMetadata` wire shape (camelCase keys, in
+/// CC's on-disk key order for the fields this port emits) — the JSONL writer
+/// persists `serde_json::to_value(&metadata)` (minus `logicalParentUuid`,
+/// which is a TOP-LEVEL line field, not a `compactMetadata` member) on the
+/// `subtype:"compact_boundary"` system line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompactBoundaryMetadata {
     /// `'manual' | 'auto'`.
     pub trigger: CompactTrigger,
@@ -103,6 +131,9 @@ pub struct CompactBoundaryMetadata {
     /// Relink metadata for a preserved tail (Batch 5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_segment: Option<PreservedSegment>,
+    /// The loader's re-splice list for a preserved tail (`preservedMessages`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserved_messages: Option<PreservedMessages>,
     /// `uuid` of the last pre-compact message, used to relink the boundary into
     /// the on-disk chain (`logicalParentUuid`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,7 +175,10 @@ pub fn create_compact_boundary(
         messages_summarized,
         pre_compact_discovered_tools: tools,
         preserved_segment: None,
-        logical_parent_uuid: last_pre_compact_message_uuid.map(|u| u.to_string()),
+        preserved_messages: None,
+        // Bare 8-4-4-4-12 uuid (NOT the `msg:`-prefixed Display form) — this
+        // value must match on-disk JSONL line uuids, which are raw.
+        logical_parent_uuid: last_pre_compact_message_uuid.map(|u| u.as_uuid().to_string()),
     };
 
     let marker = ConversationMessage::System {
@@ -174,18 +208,43 @@ pub fn preserved_segment_for_tail(
     let tail = kept_tail.last()?;
     Some(PreservedSegment {
         head_uuid: Some(message_uuid(head)),
-        anchor_uuid: anchor_uuid.map(MessageId::to_string),
+        anchor_uuid: anchor_uuid.map(|u| u.as_uuid().to_string()),
         tail_uuid: Some(message_uuid(tail)),
+    })
+}
+
+/// Build a [`PreservedMessages`] re-splice list from a kept tail + anchor.
+///
+/// TS stamps `compactMetadata.preservedMessages = {anchorUuid, uuids,
+/// allUuids}` alongside `preservedSegment`; the loader (`E$_`) re-parents
+/// `uuids` onto `anchorUuid` in sequence at cold load. This port keeps only
+/// chain participants in memory, so `uuids == allUuids`. Returns `None` for an
+/// empty tail, mirroring [`preserved_segment_for_tail`].
+#[must_use]
+pub fn preserved_messages_for_tail(
+    kept_tail: &[ConversationMessage],
+    anchor_uuid: Option<&MessageId>,
+) -> Option<PreservedMessages> {
+    if kept_tail.is_empty() {
+        return None;
+    }
+    let uuids: Vec<String> = kept_tail.iter().map(message_uuid).collect();
+    Some(PreservedMessages {
+        anchor_uuid: anchor_uuid.map(|u| u.as_uuid().to_string()),
+        all_uuids: uuids.clone(),
+        uuids,
     })
 }
 
 /// The `uuid` of a [`ConversationMessage`] as the boundary relink uses it
 /// (TS messages carry a `uuid`; here the [`MessageId`] is the stable id).
+/// BARE 8-4-4-4-12 form (`as_uuid()`, NOT the `msg:`-prefixed Display) — these
+/// values must match on-disk JSONL line uuids, which are raw.
 fn message_uuid(message: &ConversationMessage) -> String {
     match message {
         ConversationMessage::User { id, .. }
         | ConversationMessage::Assistant { id, .. }
-        | ConversationMessage::System { id, .. } => id.to_string(),
+        | ConversationMessage::System { id, .. } => id.as_uuid().to_string(),
     }
 }
 
@@ -219,6 +278,7 @@ pub fn create_compact_boundary_with_preserved_tail(
         discovered_tools,
     );
     metadata.preserved_segment = preserved_segment_for_tail(kept_tail, anchor_uuid);
+    metadata.preserved_messages = preserved_messages_for_tail(kept_tail, anchor_uuid);
     (marker, metadata)
 }
 
@@ -305,7 +365,7 @@ mod tests {
         );
         assert_eq!(
             meta.logical_parent_uuid.as_deref(),
-            Some(&*last.to_string())
+            Some(&*last.as_uuid().to_string())
         );
         assert_eq!(meta.preserved_segment, None);
 
@@ -429,18 +489,21 @@ mod tests {
         let m1 = user("kept-1");
         let m2 = user("kept-2");
         let head_id = match &m0 {
-            ConversationMessage::User { id, .. } => id.to_string(),
+            ConversationMessage::User { id, .. } => id.as_uuid().to_string(),
             _ => unreachable!(),
         };
         let tail_id = match &m2 {
-            ConversationMessage::User { id, .. } => id.to_string(),
+            ConversationMessage::User { id, .. } => id.as_uuid().to_string(),
             _ => unreachable!(),
         };
         let seg = preserved_segment_for_tail(&[m0, m1, m2], Some(&anchor))
             .expect("non-empty tail yields a segment");
         assert_eq!(seg.head_uuid.as_deref(), Some(head_id.as_str()));
         assert_eq!(seg.tail_uuid.as_deref(), Some(tail_id.as_str()));
-        assert_eq!(seg.anchor_uuid.as_deref(), Some(&*anchor.to_string()));
+        assert_eq!(
+            seg.anchor_uuid.as_deref(),
+            Some(&*anchor.as_uuid().to_string())
+        );
     }
 
     #[test]
@@ -459,9 +522,24 @@ mod tests {
         );
         assert!(is_compact_boundary(&marker));
         let seg = meta.preserved_segment.expect("preserved segment set");
-        assert_eq!(seg.anchor_uuid.as_deref(), Some(&*anchor.to_string()));
+        assert_eq!(
+            seg.anchor_uuid.as_deref(),
+            Some(&*anchor.as_uuid().to_string())
+        );
         assert!(seg.head_uuid.is_some());
         assert!(seg.tail_uuid.is_some());
+        // The re-splice list mirrors the segment: same anchor, one uuid per
+        // kept message, `uuids == allUuids` (this port keeps only chain
+        // participants).
+        let pm = meta.preserved_messages.expect("preserved messages set");
+        assert_eq!(
+            pm.anchor_uuid.as_deref(),
+            Some(&*anchor.as_uuid().to_string())
+        );
+        assert_eq!(pm.uuids.len(), 2);
+        assert_eq!(pm.uuids, pm.all_uuids);
+        assert_eq!(pm.uuids.first(), seg.head_uuid.as_ref());
+        assert_eq!(pm.uuids.last(), seg.tail_uuid.as_ref());
     }
 
     #[test]
@@ -479,23 +557,74 @@ mod tests {
             None,
         );
         assert_eq!(meta.preserved_segment, None);
+        assert_eq!(meta.preserved_messages, None);
     }
 
     #[test]
     fn metadata_serializes_omitting_empty_optionals() {
+        // Wire shape = CC's camelCase `compactMetadata` keys (real-transcript
+        // verified: `{"trigger":"auto","preTokens":42,...}`).
         let (_m, meta) = create_compact_boundary(CompactTrigger::Auto, 42, None, None, None, &[]);
         let v = serde_json::to_value(&meta).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.get("trigger").and_then(|t| t.as_str()), Some("auto"));
         assert_eq!(
-            obj.get("pre_tokens").and_then(serde_json::Value::as_u64),
+            obj.get("preTokens").and_then(serde_json::Value::as_u64),
             Some(42)
         );
         // empty / None fields are omitted from the wire shape
-        assert!(!obj.contains_key("user_context"));
-        assert!(!obj.contains_key("messages_summarized"));
-        assert!(!obj.contains_key("pre_compact_discovered_tools"));
-        assert!(!obj.contains_key("preserved_segment"));
-        assert!(!obj.contains_key("logical_parent_uuid"));
+        assert!(!obj.contains_key("userContext"));
+        assert!(!obj.contains_key("messagesSummarized"));
+        assert!(!obj.contains_key("preCompactDiscoveredTools"));
+        assert!(!obj.contains_key("preservedSegment"));
+        assert!(!obj.contains_key("preservedMessages"));
+        assert!(!obj.contains_key("logicalParentUuid"));
+    }
+
+    #[test]
+    fn metadata_wire_keys_are_camel_case_in_cc_order() {
+        // Populated metadata serializes CC's exact camelCase keys, with the
+        // nested preservedSegment/preservedMessages shapes
+        // (`{headUuid,anchorUuid,tailUuid}` / `{anchorUuid,uuids,allUuids}`).
+        let anchor = MessageId::new();
+        let kept = vec![user("kept-a"), user("kept-b")];
+        let (_m, meta) = create_compact_boundary_with_preserved_tail(
+            CompactTrigger::Auto,
+            1000,
+            None,
+            Some("ctx".to_string()),
+            Some(9),
+            &["Read".to_string()],
+            &kept,
+            Some(&anchor),
+        );
+        let v = serde_json::to_value(&meta).unwrap();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "trigger",
+                "preTokens",
+                "userContext",
+                "messagesSummarized",
+                "preCompactDiscoveredTools",
+                "preservedSegment",
+                "preservedMessages",
+            ]
+        );
+        let seg_keys: Vec<&str> = v["preservedSegment"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(seg_keys, vec!["headUuid", "anchorUuid", "tailUuid"]);
+        let pm_keys: Vec<&str> = v["preservedMessages"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(pm_keys, vec!["anchorUuid", "uuids", "allUuids"]);
     }
 }

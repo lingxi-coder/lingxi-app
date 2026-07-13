@@ -2404,14 +2404,14 @@ impl ConversationOrchestrator {
         // the byte-exact `"Conversation compacted"` sentinel) instead of the ad-hoc
         // `[Compacted N → M]` marker, so the TUI scrollback + next-turn system-prompt
         // assembly see the same boundary TS emits. The rich `CompactBoundaryMetadata`
-        // has no orchestrator-side consumer yet (no sidecar store / no
-        // `get_messages_after_compact_boundary` caller), so it is discarded here; a
-        // follow-up that persists it can swap `_metadata` for a real store.
+        // is persisted below as the boundary line's `compactMetadata` (P1-05), so a
+        // cold `--resume` reconstructs the post-compact transition.
         //
         // #58: when a tail was preserved, the boundary carries a
         // `preserved_segment` (`WAo`): head = first kept msg, anchor = the LAST
-        // summary message (suffix-preserving splice point), tail = last kept msg.
-        // The anchor is the last of `result.messages` (the summary set). When the
+        // summary message (suffix-preserving splice point), tail = last kept msg —
+        // plus the loader's `preserved_messages` re-splice list (`E$_`). The
+        // anchor is the last of `result.messages` (the summary set). When the
         // tail is empty, `create_compact_boundary_with_preserved_tail` yields
         // `preserved_segment: None`, identical to the plain constructor.
         let anchor_uuid = if preserved_tail.is_empty() {
@@ -2422,7 +2422,7 @@ impl ConversationOrchestrator {
                 .last()
                 .map(protocol::ConversationMessage::id)
         };
-        let (marker, _metadata) = compaction::create_compact_boundary_with_preserved_tail(
+        let (marker, metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
             0,
             None,
@@ -2452,13 +2452,14 @@ impl ConversationOrchestrator {
         let mut history_after = Vec::with_capacity(
             result.messages.len() + 1 + preserved_tail.len() + restored_attachments.len(),
         );
+        let tail_preserved = !preserved_tail.is_empty();
         history_after.push(marker.clone());
-        history_after.extend(result.messages);
+        history_after.extend(result.messages.iter().cloned());
         // #58: the usage-zeroed verbatim tail (`messagesToKeep`).
         history_after.extend(preserved_tail);
         // Restored file attachments ride after the summary + kept tail (the
         // `attachments` slot in `buildPostCompactMessages`).
-        history_after.extend(restored_attachments);
+        history_after.extend(restored_attachments.iter().cloned());
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
@@ -2475,12 +2476,41 @@ impl ConversationOrchestrator {
         // main-thread resets fire.
         compaction::run_post_compact_cleanup(None);
 
-        // Persist the boundary marker to the optional JSONL writer so a
-        // `--resume` of this session sees the compaction transition (the
-        // summary user message(s) inside `result.messages` are the compactor's
-        // output; the marker is the orchestrator-side boundary). Best-effort —
-        // a write failure never fails the turn.
-        self.persist_message_to_jsonl(&marker).await;
+        // P1-05: persist the full compaction transition (claude 2.1.207
+        // `insertMessageChain` + the compact flow), so a cold `--resume`
+        // reconstructs exactly the post-compact state. Best-effort — a write
+        // failure never fails the turn.
+        //
+        // 1. The boundary line: `parentUuid: null` (chain reset — a tip→root
+        //    walk stops here) with the real parent stashed in
+        //    `logicalParentUuid`, plus the flattened `subtype:"compact_boundary"`
+        //    / `content` / `level:"info"` / `compactMetadata` envelope.
+        // 2. The summary user line(s) (`isCompactSummary` +
+        //    `isVisibleInTranscriptOnly`), chained off the boundary.
+        // 3. The preserved verbatim tail is NOT rewritten — its lines are
+        //    already on disk (claude doesn't rewrite them either); the
+        //    boundary's `preservedSegment`/`preservedMessages` metadata carries
+        //    the loader's re-splice info. The chain pointer is reset to the
+        //    tail's LAST on-disk line so subsequent lines parent off the kept
+        //    tail, exactly like claude (whose writer chains off the in-memory
+        //    array `[boundary, ...summary, ...messagesToKeep, ...]`, skipping
+        //    already-persisted members).
+        // 4. Restored file attachments, chained after the tail (the
+        //    `attachments` slot of `buildPostCompactMessages`).
+        let pre_boundary_last_uuid = self.last_jsonl_uuid.lock().await.clone();
+        self.persist_compact_boundary_to_jsonl(&marker, &metadata)
+            .await;
+        for m in &result.messages {
+            self.persist_compact_summary_to_jsonl(m).await;
+        }
+        if tail_preserved {
+            if let Some(tail_last) = pre_boundary_last_uuid {
+                *self.last_jsonl_uuid.lock().await = Some(tail_last);
+            }
+        }
+        for m in &restored_attachments {
+            self.persist_message_to_jsonl(m).await;
+        }
 
         // Best-effort emit so the TUI hears about it.
         self.output
@@ -3727,7 +3757,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         msg: &ConversationMessage,
         parent_override: Option<String>,
     ) {
-        self.persist_message_to_jsonl_inner(msg, parent_override, None)
+        self.persist_message_to_jsonl_inner(msg, parent_override, None, false)
             .await;
     }
 
@@ -3740,17 +3770,114 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         msg: &ConversationMessage,
         env: ApiErrorEnvelope,
     ) {
-        self.persist_message_to_jsonl_inner(msg, None, Some(env))
+        self.persist_message_to_jsonl_inner(msg, None, Some(env), false)
             .await;
     }
 
-    /// Shared append body for [`Self::persist_message_to_jsonl_with_parent`] and
-    /// [`Self::persist_api_error_message_to_jsonl`].
+    /// Persist a compaction summary user line, stamping the top-level
+    /// `isVisibleInTranscriptOnly: true` + `isCompactSummary: true` envelope
+    /// flags. 1:1 with claude 2.1.207's summary persist
+    /// (`$r({content: v9r(...), isCompactSummary: !0,
+    /// isVisibleInTranscriptOnly: !0})`, round-tripped by the writer's
+    /// `...f.isCompactSummary===!0&&{isCompactSummary:!0}`); the line chains
+    /// off `last_jsonl_uuid` (the compact-boundary line).
+    pub(crate) async fn persist_compact_summary_to_jsonl(&self, msg: &ConversationMessage) {
+        self.persist_message_to_jsonl_inner(msg, None, None, true)
+            .await;
+    }
+
+    /// Persist the compact-boundary system line (P1-05) — claude 2.1.207's
+    /// `insertMessageChain` chain reset: the boundary gets `parentUuid: null`
+    /// (`CC(d)` ⇒ `{parentUuid: p?null:f, logicalParentUuid: p?i:void 0}`) with
+    /// the real parent (the last pre-compact on-disk line) stashed in
+    /// `logicalParentUuid`, plus the flattened system envelope
+    /// (`subtype:"compact_boundary"`, `content:"Conversation compacted"`,
+    /// `level:"info"`, camelCase `compactMetadata`) and NO inner `message`.
+    /// Best-effort like every other JSONL append; advances `last_jsonl_uuid`
+    /// to the boundary's uuid on success so the summary line chains off it.
+    async fn persist_compact_boundary_to_jsonl(
+        &self,
+        marker: &ConversationMessage,
+        metadata: &compaction::CompactBoundaryMetadata,
+    ) {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id_str = self.session.lock().await.session_id.to_string();
+        // The real parent this line WOULD have chained to — claude stashes it
+        // in `logicalParentUuid` and writes `parentUuid: null`.
+        let logical_parent = self.last_jsonl_uuid.lock().await.clone();
+        let git_branch = self.resolve_git_branch().await;
+
+        // `compactMetadata` wire value: CompactBoundaryMetadata serializes
+        // claude's camelCase keys; `logicalParentUuid` is a TOP-LEVEL line
+        // field (`x9r` spreads it as a message-level sibling), never a
+        // `compactMetadata` member — strip it defensively.
+        let mut compact_metadata =
+            serde_json::to_value(metadata).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = compact_metadata.as_object_mut() {
+            obj.remove("logicalParentUuid");
+        }
+        let content = match marker {
+            ConversationMessage::System { content, .. } => content.clone(),
+            _ => compaction::BOUNDARY_CONTENT.to_string(),
+        };
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "subtype".to_string(),
+            serde_json::Value::String("compact_boundary".to_string()),
+        );
+        extra.insert("content".to_string(), serde_json::Value::String(content));
+        extra.insert(
+            "level".to_string(),
+            serde_json::Value::String("info".to_string()),
+        );
+        extra.insert("compactMetadata".to_string(), compact_metadata);
+
+        let jmsg = session::JsonlMessage {
+            message_type: "system".to_string(),
+            uuid: marker.id().as_uuid().to_string(),
+            parent_uuid: None,
+            session_id: session_id_str.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            // Boundary lines carry NO inner `message` (the schema's
+            // compact-boundary arm skips the field entirely).
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: logical_parent,
+            extra,
+        };
+        let uuid_for_chain = jmsg.uuid.clone();
+        match writer.append(&jmsg).await {
+            Ok(()) => {
+                *self.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
+                telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "jsonl writer append failed");
+                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+            }
+        }
+    }
+
+    /// Shared append body for [`Self::persist_message_to_jsonl_with_parent`],
+    /// [`Self::persist_api_error_message_to_jsonl`] and
+    /// [`Self::persist_compact_summary_to_jsonl`].
     async fn persist_message_to_jsonl_inner(
         &self,
         msg: &ConversationMessage,
         parent_override: Option<String>,
         api_error: Option<ApiErrorEnvelope>,
+        compact_summary: bool,
     ) {
         let Some(writer) = self.jsonl_writer.as_ref() else {
             return;
@@ -3774,7 +3901,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
         let prompt_id = self.prompt_id_for_message(msg).await;
-        let jmsg = self.to_jsonl_message_with_inner_id(
+        let mut jmsg = self.to_jsonl_message_with_inner_id(
             msg,
             &session_id_str,
             parent_uuid,
@@ -3787,6 +3914,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             None,
             api_error.as_ref(),
         );
+        // Compaction summary user line: stamp the top-level envelope flags in
+        // claude's on-disk order (`isVisibleInTranscriptOnly` before
+        // `isCompactSummary`, between `message` and `uuid` — the schema's user
+        // arm emits them there).
+        if compact_summary {
+            jmsg.extra.insert(
+                "isVisibleInTranscriptOnly".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            jmsg.extra
+                .insert("isCompactSummary".to_string(), serde_json::Value::Bool(true));
+        }
         let uuid_for_chain = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
             Ok(()) => {

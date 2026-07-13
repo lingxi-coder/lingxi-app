@@ -1002,7 +1002,18 @@ pub fn build_conversation_chain(
     };
     let tip_session_id = tip.session_id.clone();
 
+    // (4b) Compact-boundary re-splice (`E$_`, 2.1.207): each
+    // `subtype:"compact_boundary"` line with `compactMetadata.preservedMessages`
+    // re-parents its preserved tail onto the anchor (the last summary line), so
+    // the tip→root walk below rejoins the post-compact chain — [boundary ←
+    // summary ← preserved tail ← …] — instead of following the tail's on-disk
+    // parents back into the FULL pre-compact history. Empty on transcripts
+    // without preserved-tail compactions (zero-cost common path).
+    let reparent = preserved_tail_reparents(loaded);
+
     // (5) Walk tip → root, cycle-guarded, stop on missing parent; reverse.
+    // Boundary lines carry `parentUuid: null` (the claude chain reset), so the
+    // walk stops there naturally and the summarized prefix never re-enters.
     let mut chain: Vec<JsonlMessage> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut current: Option<&JsonlMessage> = Some(tip);
@@ -1015,8 +1026,16 @@ pub fn build_conversation_chain(
             );
             break;
         }
-        chain.push(node.clone());
-        current = match node.parent_uuid.as_deref() {
+        // Apply the (4b) re-parent overlay: patch the pushed clone so the
+        // returned chain is self-consistent (each entry's parentUuid points at
+        // its in-chain predecessor), mirroring `E$_`'s in-place mutation.
+        let mut entry = node.clone();
+        if let Some(p) = reparent.get(node.uuid.as_str()) {
+            entry.parent_uuid = Some(p.clone());
+        }
+        let parent = entry.parent_uuid.clone();
+        chain.push(entry);
+        current = match parent.as_deref() {
             Some(p) => by_uuid.get(p), // None here ⇒ missing parent ⇒ loop ends
             None => None,              // reached the root
         };
@@ -1037,6 +1056,72 @@ pub fn build_conversation_chain(
 /// non-string — mirrors TS's `m.message.id` truthiness gate.
 fn message_id(m: &JsonlMessage) -> Option<&str> {
     m.message.get("id").and_then(Value::as_str)
+}
+
+/// Compact-boundary preserved-tail re-parent overlay — the `E$_` pass
+/// (claude 2.1.207): for every `type:"system"`/`subtype:"compact_boundary"`
+/// line carrying `compactMetadata.preservedMessages` (`{anchorUuid, uuids,
+/// allUuids}`), re-parent each preserved uuid onto the rolling anchor in
+/// sequence — `uuids[0].parentUuid = anchorUuid`, `uuids[1].parentUuid =
+/// uuids[0]`, … — splicing the verbatim kept tail back in AFTER the summary.
+/// Without this, the post-compact suffix (whose first new line parents off the
+/// tail's last on-disk line) walks straight through the tail into the FULL
+/// pre-compact history and never reaches the summary/boundary.
+///
+/// Returns a `line uuid → new parent uuid` overlay (empty when no boundary
+/// carries preserved metadata). Port adaptation: claude's in-memory history is
+/// already one-block-per-message, so its preserved uuids ARE on-disk line
+/// uuids; this engine merges assistant blocks in memory and splits them
+/// per-block on write, so a preserved id that matches no outer `uuid` is
+/// resolved to every assistant line sharing that inner `message.id`, in file
+/// order (the write-side split invariant). Unresolvable ids are skipped
+/// (best-effort, like the tolerant walk).
+fn preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String, String> {
+    let mut reparent: HashMap<String, String> = HashMap::new();
+    for line in &loaded.messages_in_order {
+        if line.message_type != "system"
+            || line.extra.get("subtype").and_then(Value::as_str) != Some("compact_boundary")
+        {
+            continue;
+        }
+        let Some(pm) = line
+            .extra
+            .get("compactMetadata")
+            .and_then(|cm| cm.get("preservedMessages"))
+        else {
+            continue;
+        };
+        let Some(mut anchor) = pm
+            .get("anchorUuid")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(uuids) = pm.get("uuids").and_then(Value::as_array) else {
+            continue;
+        };
+        for preserved in uuids.iter().filter_map(Value::as_str) {
+            // Resolve the preserved id to its on-disk line(s): outer `uuid`
+            // first; else the per-block assistant siblings sharing this inner
+            // `message.id`, in file order.
+            let mut resolved: Vec<&str> = Vec::new();
+            if loaded.by_uuid.contains_key(preserved) {
+                resolved.push(preserved);
+            } else {
+                for m in &loaded.messages_in_order {
+                    if m.message_type == "assistant" && message_id(m) == Some(preserved) {
+                        resolved.push(m.uuid.as_str());
+                    }
+                }
+            }
+            for line_uuid in resolved {
+                reparent.insert(line_uuid.to_string(), anchor);
+                anchor = line_uuid.to_string();
+            }
+        }
+    }
+    reparent
 }
 
 /// True when `m` is a `user` line whose inner `message.content` is an array

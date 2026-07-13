@@ -175,3 +175,64 @@ fn unrecognized_extra_key_tail_appended_after_trailer() {
         "{s}"
     );
 }
+
+// ---------- P1-05: compact-boundary + compact-summary persistence ----------
+
+#[test]
+fn compact_boundary_line_round_trip_is_byte_equivalent() {
+    // Real claude 2.1.207 on-disk boundary shape (anonymized): parentUuid null
+    // (chain reset), logicalParentUuid, flattened system envelope (subtype,
+    // content, level, compactMetadata), NO inner `message`, then uuid,
+    // timestamp, trailer.
+    let original = r#"{"parentUuid":null,"logicalParentUuid":"3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8","isSidechain":false,"type":"system","subtype":"compact_boundary","content":"Conversation compacted","level":"info","compactMetadata":{"trigger":"manual","preTokens":587092,"preservedSegment":{"headUuid":"a4a2d767-b61c-4358-b7c4-99603c36557d","anchorUuid":"05dff8f7-6c3f-45ee-83f8-7f728e8f7b5d","tailUuid":"3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8"},"preservedMessages":{"anchorUuid":"05dff8f7-6c3f-45ee-83f8-7f728e8f7b5d","uuids":["a4a2d767-b61c-4358-b7c4-99603c36557d","3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8"],"allUuids":["a4a2d767-b61c-4358-b7c4-99603c36557d","3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8"]}},"uuid":"1b537b0d-d441-490d-9b2a-6021ca6db237","timestamp":"2026-07-11T14:20:51.951Z","userType":"external","entrypoint":"cli","cwd":"/tmp/proj","sessionId":"0330afb2-f6ba-4fd7-bbe0-878cb4c550c5","version":"2.1.207","gitBranch":"main"}"#;
+    let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    // Chain reset semantics survive the parse.
+    assert_eq!(parsed.parent_uuid, None);
+    assert_eq!(
+        parsed.logical_parent_uuid.as_deref(),
+        Some("3c1ca7ec-9e3f-44cd-a6e1-457cbaecc9a8")
+    );
+    let reemitted = serde_json::to_string(&parsed).expect("serialize");
+    assert_eq!(reemitted, original);
+}
+
+#[test]
+fn compact_summary_user_line_round_trip_is_byte_equivalent() {
+    // Real claude 2.1.207 summary-line shape (anonymized): the top-level
+    // isVisibleInTranscriptOnly + isCompactSummary flags ride between
+    // `message` and `uuid`.
+    let original = r#"{"parentUuid":"1b537b0d-d441-490d-9b2a-6021ca6db237","isSidechain":false,"promptId":"f3b2f9f0-9a67-4b7e-9f52-8f2f9d3f6a11","type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation."},"isVisibleInTranscriptOnly":true,"isCompactSummary":true,"uuid":"9a1b2c3d-4e5f-6789-abcd-ef0123456789","timestamp":"2026-07-11T14:20:52.000Z","userType":"external","entrypoint":"cli","cwd":"/tmp/proj","sessionId":"0330afb2-f6ba-4fd7-bbe0-878cb4c550c5","version":"2.1.207","gitBranch":"main"}"#;
+    let parsed: JsonlMessage = serde_json::from_str(original).expect("parse");
+    let reemitted = serde_json::to_string(&parsed).expect("serialize");
+    assert_eq!(reemitted, original);
+}
+
+#[test]
+fn non_boundary_system_line_keeps_generic_envelope() {
+    // A system line WITHOUT the compact_boundary subtype keeps the generic
+    // head (type, message, uuid, timestamp) and tail-appends unrecognized
+    // extras — the flattened arm is boundary-only.
+    let mut extra: Map<String, Value> = Map::new();
+    extra.insert("subtype".into(), Value::String("other_subtype".into()));
+    let msg = JsonlMessage {
+        message_type: "system".into(),
+        uuid: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".into(),
+        parent_uuid: None,
+        session_id: "11111111-2222-3333-4444-555555555555".into(),
+        timestamp: "2026-05-25T14:30:00.000Z".into(),
+        cwd: "/x".into(),
+        version: "0.6.0".into(),
+        message: json!({"role":"system","content":"note"}),
+        is_sidechain: false,
+        user_type: None,
+        git_branch: None,
+        entrypoint: None,
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
+        extra,
+    };
+    let s = serde_json::to_string(&msg).expect("ser");
+    let expected = r#"{"parentUuid":null,"isSidechain":false,"type":"system","message":{"role":"system","content":"note"},"uuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","timestamp":"2026-05-25T14:30:00.000Z","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0","subtype":"other_subtype"}"#;
+    assert_eq!(s, expected);
+}

@@ -278,15 +278,29 @@ async fn writer_output_equals_compacted_fixture() {
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = JsonlWriter::new(path.clone(), fs);
 
-    // The boundary line carries `subtype` + `compactMetadata` as OUTER fields
-    // via `extra`. Build the extra Map in the same insertion order as the
-    // fixture: subtype first, compactMetadata second.
+    // The boundary line carries claude's FLATTENED system envelope as OUTER
+    // fields via `extra` — `subtype`/`content`/`level`/`compactMetadata` (the
+    // serializer's compact-boundary arm emits them at claude's 2.1.207
+    // positions: type, subtype, content, level, compactMetadata, uuid,
+    // timestamp) — plus `parentUuid: null` + `logicalParentUuid` (the chain
+    // reset) and NO inner `message`.
     let mut boundary_extra: Map<String, Value> = Map::new();
     boundary_extra.insert("subtype".into(), Value::String("compact_boundary".into()));
     boundary_extra.insert(
-        "compactMetadata".into(),
-        json!({"preservedSegment": false, "compactedMessageCount": 50}),
+        "content".into(),
+        Value::String("Conversation compacted".into()),
     );
+    boundary_extra.insert("level".into(), Value::String("info".into()));
+    boundary_extra.insert(
+        "compactMetadata".into(),
+        json!({"trigger": "manual", "preTokens": 50}),
+    );
+
+    // The summary user line carries the top-level compact-summary flags,
+    // emitted in claude's on-disk order between `message` and `uuid`.
+    let mut summary_extra: Map<String, Value> = Map::new();
+    summary_extra.insert("isVisibleInTranscriptOnly".into(), Value::Bool(true));
+    summary_extra.insert("isCompactSummary".into(), Value::Bool(true));
 
     let messages: Vec<JsonlMessage> = vec![
         JsonlMessage {
@@ -334,19 +348,21 @@ async fn writer_output_equals_compacted_fixture() {
         JsonlMessage {
             message_type: "system".into(),
             uuid: UUID3.into(),
-            parent_uuid: Some(UUID2.into()),
+            // Chain reset: `parentUuid: null`, real parent in logicalParentUuid.
+            parent_uuid: None,
             session_id: SESSION1.into(),
             timestamp: TS3.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({"role":"system","content":"[compacted: 50 messages summarized]"}),
+            // Boundary lines carry NO inner `message` (skipped on write).
+            message: Value::Null,
             is_sidechain: false,
             user_type: None,
             git_branch: None,
             entrypoint: None,
             slug: None,
             prompt_id: None,
-            logical_parent_uuid: None,
+            logical_parent_uuid: Some(UUID2.into()),
             extra: boundary_extra,
         },
         JsonlMessage {
@@ -357,7 +373,7 @@ async fn writer_output_equals_compacted_fixture() {
             timestamp: TS4.into(),
             cwd: "/tmp/golden".into(),
             version: "0.6.0".into(),
-            message: json!({"role":"user","content":"continue"}),
+            message: json!({"role":"user","content":"This session is being continued from a previous conversation. Summary:\nS"}),
             is_sidechain: false,
             user_type: Some("external".into()),
             git_branch: None,
@@ -365,7 +381,7 @@ async fn writer_output_equals_compacted_fixture() {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: Map::new(),
+            extra: summary_extra,
         },
     ];
 
@@ -392,12 +408,28 @@ async fn reader_round_trips_compacted_fixture() {
         msgs[2].extra.get("subtype").and_then(|v| v.as_str()),
         Some("compact_boundary")
     );
+    // Chain reset: parentUuid null, real parent in logicalParentUuid.
+    assert_eq!(msgs[2].parent_uuid, None);
+    assert_eq!(msgs[2].logical_parent_uuid.as_deref(), Some(UUID2));
+    assert_eq!(
+        msgs[2].extra.get("content").and_then(|v| v.as_str()),
+        Some("Conversation compacted")
+    );
     assert_eq!(
         msgs[2]
             .extra
             .get("compactMetadata")
-            .and_then(|v| v.get("compactedMessageCount"))
+            .and_then(|v| v.get("preTokens"))
             .and_then(serde_json::Value::as_i64),
         Some(50)
+    );
+    // The summary line's flags round-trip as outer `extra` fields.
+    assert_eq!(
+        msgs[3].extra.get("isCompactSummary"),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        msgs[3].extra.get("isVisibleInTranscriptOnly"),
+        Some(&Value::Bool(true))
     );
 }

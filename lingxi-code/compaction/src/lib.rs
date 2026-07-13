@@ -30,8 +30,8 @@ pub use autocompact::{Autocompactor, CompactionError, CompactionResult};
 pub use boundary::{
     create_compact_boundary, create_compact_boundary_with_preserved_tail,
     find_last_compact_boundary_index, get_messages_after_compact_boundary, is_compact_boundary,
-    preserved_segment_for_tail, CompactBoundaryMetadata, CompactTrigger, PreservedSegment,
-    BOUNDARY_CONTENT,
+    preserved_messages_for_tail, preserved_segment_for_tail, CompactBoundaryMetadata,
+    CompactTrigger, PreservedMessages, PreservedSegment, BOUNDARY_CONTENT,
 };
 pub use context_window::{
     context_window_for_model, max_output_tokens_for_model, max_thinking_tokens_for_model,

@@ -567,3 +567,302 @@ async fn loads_single_user_message() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].uuid, m1.to_string());
 }
+
+// ---------- P1-05: compact-boundary chain reset + preserved-tail re-splice ----------
+
+/// A claude-2.1.207-shaped `subtype:"compact_boundary"` system line:
+/// `parentUuid: null` (chain reset), the real parent in `logicalParentUuid`,
+/// flattened `content`/`level` envelope, and the given `compactMetadata`.
+fn boundary_line(
+    uuid: &str,
+    logical_parent: &str,
+    session: &str,
+    ts: &str,
+    compact_metadata: serde_json::Value,
+) -> String {
+    let mut v = serde_json::Map::new();
+    v.insert("parentUuid".into(), json!(null));
+    v.insert("logicalParentUuid".into(), json!(logical_parent));
+    v.insert("isSidechain".into(), json!(false));
+    v.insert("type".into(), json!("system"));
+    v.insert("subtype".into(), json!("compact_boundary"));
+    v.insert("content".into(), json!("Conversation compacted"));
+    v.insert("level".into(), json!("info"));
+    v.insert("compactMetadata".into(), compact_metadata);
+    v.insert("uuid".into(), json!(uuid));
+    v.insert("timestamp".into(), json!(ts));
+    v.insert("sessionId".into(), json!(session));
+    v.insert("cwd".into(), json!("/proj"));
+    v.insert("version".into(), json!("0.6.0"));
+    format!("{}\n", serde_json::to_string(&v).unwrap())
+}
+
+/// An assistant line carrying an inner `message.id` (the per-block shared id).
+fn assistant_line_with_inner_id(
+    uuid: &str,
+    parent: Option<&str>,
+    session: &str,
+    ts: &str,
+    inner_id: &str,
+) -> String {
+    let mut v = serde_json::Map::new();
+    v.insert("type".into(), json!("assistant"));
+    v.insert("uuid".into(), json!(uuid));
+    v.insert(
+        "parentUuid".into(),
+        parent.map_or(json!(null), |p| json!(p)),
+    );
+    v.insert("sessionId".into(), json!(session));
+    v.insert("timestamp".into(), json!(ts));
+    v.insert("cwd".into(), json!("/proj"));
+    v.insert("version".into(), json!("0.6.0"));
+    v.insert("isSidechain".into(), json!(false));
+    v.insert(
+        "message".into(),
+        json!({"id": inner_id, "role": "assistant", "content": [{"type":"text","text":"block"}]}),
+    );
+    format!("{}\n", serde_json::to_string(&v).unwrap())
+}
+
+/// Boundary without preserved metadata: the tip→root walk stops at the
+/// boundary's `parentUuid: null`, so the summarized pre-compact prefix never
+/// re-enters the chain (claude's fast-path chain reset).
+#[tokio::test]
+async fn chain_stops_at_compact_boundary_parent_null() {
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
+    let sid = Uuid::new_v4().to_string();
+    let (u1, a2, b3, s4, a5) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let mut body = msg_line("user", &u1, None, &sid, "2026-07-13T10:00:00.000Z");
+    body.push_str(&msg_line(
+        "assistant",
+        &a2,
+        Some(&u1),
+        &sid,
+        "2026-07-13T10:00:01.000Z",
+    ));
+    body.push_str(&boundary_line(
+        &b3,
+        &a2,
+        &sid,
+        "2026-07-13T10:00:02.000Z",
+        json!({"trigger":"auto","preTokens":100}),
+    ));
+    body.push_str(&msg_line(
+        "user",
+        &s4,
+        Some(&b3),
+        &sid,
+        "2026-07-13T10:00:03.000Z",
+    ));
+    body.push_str(&msg_line(
+        "assistant",
+        &a5,
+        Some(&s4),
+        &sid,
+        "2026-07-13T10:00:04.000Z",
+    ));
+    let sid_uuid = Uuid::parse_str(&sid).unwrap();
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+
+    let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
+        .await
+        .expect("ok");
+    let uuids: Vec<&str> = messages.iter().map(|m| m.uuid.as_str()).collect();
+    assert_eq!(
+        uuids,
+        vec![b3.as_str(), s4.as_str(), a5.as_str()],
+        "walk must stop at the boundary's parentUuid:null; pre-compact prefix dropped"
+    );
+}
+
+/// Boundary WITH `compactMetadata.preservedMessages`: the `E$_` re-parent pass
+/// splices the verbatim kept tail back in AFTER the summary, so the chain is
+/// [boundary, summary, ...tail, ...post-compact] and the summarized prefix is
+/// dropped — even though the post-compact lines physically parent off the
+/// tail's last on-disk line.
+#[tokio::test]
+async fn compact_boundary_preserved_tail_resplices_after_summary() {
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
+    let sid = Uuid::new_v4().to_string();
+    let (u1, a2, u3, a4, b5, s6, a7) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let mut body = msg_line("user", &u1, None, &sid, "2026-07-13T10:00:00.000Z");
+    body.push_str(&msg_line(
+        "assistant",
+        &a2,
+        Some(&u1),
+        &sid,
+        "2026-07-13T10:00:01.000Z",
+    ));
+    // Preserved tail (already on disk, parenting into the pre-compact chain).
+    body.push_str(&msg_line(
+        "user",
+        &u3,
+        Some(&a2),
+        &sid,
+        "2026-07-13T10:00:02.000Z",
+    ));
+    body.push_str(&msg_line(
+        "assistant",
+        &a4,
+        Some(&u3),
+        &sid,
+        "2026-07-13T10:00:03.000Z",
+    ));
+    body.push_str(&boundary_line(
+        &b5,
+        &a4,
+        &sid,
+        "2026-07-13T10:00:04.000Z",
+        json!({
+            "trigger": "auto",
+            "preTokens": 100,
+            "preservedSegment": {"headUuid": u3, "anchorUuid": s6, "tailUuid": a4},
+            "preservedMessages": {"anchorUuid": s6, "uuids": [u3, a4], "allUuids": [u3, a4]},
+        }),
+    ));
+    body.push_str(&msg_line(
+        "user",
+        &s6,
+        Some(&b5),
+        &sid,
+        "2026-07-13T10:00:05.000Z",
+    ));
+    // Post-compact line chains off the tail's LAST on-disk line (claude shape).
+    body.push_str(&msg_line(
+        "assistant",
+        &a7,
+        Some(&a4),
+        &sid,
+        "2026-07-13T10:00:06.000Z",
+    ));
+    let sid_uuid = Uuid::parse_str(&sid).unwrap();
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+
+    let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
+        .await
+        .expect("ok");
+    let uuids: Vec<&str> = messages.iter().map(|m| m.uuid.as_str()).collect();
+    assert_eq!(
+        uuids,
+        vec![b5.as_str(), s6.as_str(), u3.as_str(), a4.as_str(), a7.as_str()],
+        "preserved tail must re-splice after the summary; summarized prefix dropped"
+    );
+    // The spliced tail head's parentUuid is patched onto the anchor (summary).
+    let tail_head = messages.iter().find(|m| m.uuid == u3).unwrap();
+    assert_eq!(tail_head.parent_uuid.as_deref(), Some(s6.as_str()));
+}
+
+/// A preserved id that matches no outer line uuid resolves to the per-block
+/// assistant lines sharing that inner `message.id` (this engine's write-side
+/// split), in file order.
+#[tokio::test]
+async fn preserved_tail_assistant_blocks_resolved_by_inner_message_id() {
+    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
+    let sid = Uuid::new_v4().to_string();
+    let inner_id = Uuid::new_v4().to_string(); // in-memory assistant id
+    let (u1, a2, u3, a4a, a4b, b5, s6, a7) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let mut body = msg_line("user", &u1, None, &sid, "2026-07-13T10:00:00.000Z");
+    body.push_str(&msg_line(
+        "assistant",
+        &a2,
+        Some(&u1),
+        &sid,
+        "2026-07-13T10:00:01.000Z",
+    ));
+    body.push_str(&msg_line(
+        "user",
+        &u3,
+        Some(&a2),
+        &sid,
+        "2026-07-13T10:00:02.000Z",
+    ));
+    // The preserved assistant turn was persisted per-block: two lines with
+    // fresh outer uuids sharing the inner `message.id`.
+    body.push_str(&assistant_line_with_inner_id(
+        &a4a,
+        Some(&u3),
+        &sid,
+        "2026-07-13T10:00:03.000Z",
+        &inner_id,
+    ));
+    body.push_str(&assistant_line_with_inner_id(
+        &a4b,
+        Some(&a4a),
+        &sid,
+        "2026-07-13T10:00:04.000Z",
+        &inner_id,
+    ));
+    body.push_str(&boundary_line(
+        &b5,
+        &a4b,
+        &sid,
+        "2026-07-13T10:00:05.000Z",
+        json!({
+            "trigger": "auto",
+            "preTokens": 100,
+            "preservedMessages": {"anchorUuid": s6, "uuids": [u3, inner_id], "allUuids": [u3, inner_id]},
+        }),
+    ));
+    body.push_str(&msg_line(
+        "user",
+        &s6,
+        Some(&b5),
+        &sid,
+        "2026-07-13T10:00:06.000Z",
+    ));
+    body.push_str(&msg_line(
+        "assistant",
+        &a7,
+        Some(&a4b),
+        &sid,
+        "2026-07-13T10:00:07.000Z",
+    ));
+    let sid_uuid = Uuid::parse_str(&sid).unwrap();
+    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+        .await
+        .unwrap();
+
+    let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
+        .await
+        .expect("ok");
+    let uuids: Vec<&str> = messages.iter().map(|m| m.uuid.as_str()).collect();
+    assert_eq!(
+        uuids,
+        vec![
+            b5.as_str(),
+            s6.as_str(),
+            u3.as_str(),
+            a4a.as_str(),
+            a4b.as_str(),
+            a7.as_str()
+        ],
+        "per-block assistant tail lines must resolve via inner message.id"
+    );
+}

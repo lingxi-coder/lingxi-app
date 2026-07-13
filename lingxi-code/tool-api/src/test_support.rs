@@ -344,6 +344,13 @@ struct MockWtInner {
     scripted_create_error: Option<WorktreeError>,
     scripted_remove_error: Option<WorktreeError>,
     scripted_enter_existing_error: Option<WorktreeError>,
+    /// When set, `enter_existing` returns this EXACT handle (branch name
+    /// verbatim, not derived from the path's final component) instead of the
+    /// default synthesized one. Lets tests reproduce cases the derivation
+    /// can't — e.g. a detached-HEAD worktree, whose `branch_name` is the
+    /// literal `"HEAD"` (no `worktree-` prefix). Drained (`.take()`), like the
+    /// scripted errors above.
+    scripted_enter_existing_handle: Option<WorktreeHandle>,
     /// Deterministic dirty-state to return from `worktree_change_summary`.
     /// `None` (the default) → the trait default behavior (`Ok(None)`,
     /// fail-closed "unknown"). `Some(Some(..))` → that summary; `Some(None)`
@@ -386,6 +393,14 @@ impl MockWorktreeManager {
     #[allow(dead_code)]
     pub fn script_enter_existing_error(&self, err: WorktreeError) {
         self.inner.lock().unwrap().scripted_enter_existing_error = Some(err);
+    }
+
+    /// Force the next `enter_existing` call to return `handle` verbatim
+    /// (bypassing the default filename-derived branch name). Use this to
+    /// reproduce a detached-HEAD worktree (`branch_name: "HEAD".into()`).
+    #[allow(dead_code)]
+    pub fn script_enter_existing_handle(&self, handle: WorktreeHandle) {
+        self.inner.lock().unwrap().scripted_enter_existing_handle = Some(handle);
     }
 
     /// Script the dirty-state `worktree_change_summary` returns. Pass
@@ -506,6 +521,15 @@ impl WorktreeManager for MockWorktreeManager {
             .unwrap()
             .entered_existing
             .push(path.to_path_buf());
+        if let Some(handle) = self
+            .inner
+            .lock()
+            .unwrap()
+            .scripted_enter_existing_handle
+            .take()
+        {
+            return Ok(handle);
+        }
         // Deterministic handle: derive a stable branch name from the final
         // path component so tests can assert on it without depending on git.
         let branch_name = format!(

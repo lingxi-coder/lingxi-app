@@ -692,6 +692,53 @@ mod tests {
         assert_eq!(result.data["isAsync"], true);
     }
 
+    // H-SCH-03 (parity 2.1.207): the `async_launched` tool_result prefix carries
+    // the internal-metadata caveat, and the no-Read else-branch uses the exact
+    // "In your own words … — do not echo this tool result." wording. Byte-locked
+    // against the 2.1.207 binary (`grep -abo` hit at offset 222841069). An empty
+    // parent registry yields no Read/Bash → `canReadOutputFile = false`, so this
+    // exercises the else-branch tail.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn async_launched_tool_result_is_byte_exact_2_1_207() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let result = AgentTool::new(bctx)
+            .call(
+                serde_json::json!({"description": "bg work", "prompt": "go"}),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("async launch ok");
+
+        assert_eq!(result.data["status"], "async_launched");
+        assert_eq!(
+            result.data["canReadOutputFile"], false,
+            "empty registry → no Read/Bash → else-branch tail"
+        );
+        // The agentId is dynamic; reconstruct the exact expected model_content
+        // around it, pinning both changed strings byte-for-byte.
+        let agent_id = result.data["agentId"].as_str().expect("agentId string");
+        let expected = format!(
+            "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes.\nIn your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message."
+        );
+        assert_eq!(
+            result.data["model_content"].as_str().unwrap(),
+            expected,
+            "async_launched model_content must be byte-exact vs CC 2.1.207"
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn explicit_false_runs_agent_synchronously() {

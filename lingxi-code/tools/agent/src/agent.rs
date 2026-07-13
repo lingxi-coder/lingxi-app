@@ -950,7 +950,7 @@ Reach for this when the task matches an available agent type, when you have inde
                 // `canReadOutputFile`-branched instruction tail, joined by `\n`.
                 let output_file = &launch.output_file;
                 let prefix = format!(
-                    "Async agent launched successfully.\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes."
+                    "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: {agent_id_str} (internal ID - do not mention to user. Use SendMessage with to: '{agent_id_str}', summary: '<5-10 word recap>' to continue this agent.)\nThe agent is working in the background. You will be notified automatically when it completes."
                 );
                 let instructions = if can_read_output_file {
                     // claude `canReadOutputFile` branch (AgentTool.tsx, v2.1.193):
@@ -961,7 +961,7 @@ Reach for this when the task matches an available agent type, when you have inde
                         "Do not duplicate this agent's work — avoid working with the same files or topics it is using.\noutput_file: {output_file}\nDo NOT Read or tail this file via the shell tool — it is the full subagent JSONL transcript and reading it will overflow your context. If the user asks for progress, say the agent is still running; you'll get a completion notification."
                     )
                 } else {
-                    "Briefly tell the user what you launched. Agent results will arrive in a subsequent message.".to_string()
+                    "In your own words, briefly tell the user what you launched — do not echo this tool result. Agent results will arrive in a subsequent message.".to_string()
                 };
                 let model_content = format!("{prefix}\n{instructions}");
                 Ok(ToolCallResult {

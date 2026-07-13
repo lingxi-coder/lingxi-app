@@ -146,11 +146,15 @@ pub fn compose_rate_limit(
     info: &RateLimitInfo,
     sub: &SubscriptionSnapshot,
 ) -> Option<ComposedRateLimit> {
-    // TS `formatLimitReachedText` branches on `process.env.USER_TYPE ===
-    // 'ant'` (rateLimitMessages.ts:339); `extraUsage.isEnabled()`
-    // (commands/extra-usage/index.ts:6-17) reads
-    // `DISABLE_EXTRA_USAGE_COMMAND` through `isEnvTruthy`. Both env reads
-    // happen here so the core stays injectable for tests.
+    // 2.1.206 `lhe` (the compiled `formatLimitReachedText`) no longer
+    // branches on `process.env.USER_TYPE === 'ant'` — that #briarpatch-cc
+    // arm was removed (see `format_limit_reached_text`'s doc comment below).
+    // The `USER_TYPE` env read and the `is_ant` parameter it feeds are kept
+    // threaded through regardless: they're now inert (no branch reads
+    // `is_ant`), but re-wiring the signature to drop them is deliberately
+    // deferred. `extraUsage.isEnabled()` (commands/extra-usage/index.ts:6-17)
+    // reads `DISABLE_EXTRA_USAGE_COMMAND` through `isEnvTruthy`. Both env
+    // reads happen here so the core stays injectable for tests.
     let disable_extra_usage =
         is_env_truthy(std::env::var("DISABLE_EXTRA_USAGE_COMMAND").ok().as_deref());
     compose_with(
@@ -717,8 +721,9 @@ fn format_limit_reached_text(limit: &str, reset_message: &str, _is_ant: bool) ->
     format!("You've hit your {limit}{reset_message}")
 }
 
-/// Warning-upsell copy (2.1.206 binary `Wcg` @213249305 area — straight
-/// ASCII, byte-verified against the real binary). `USAGE_CREDITS_ASK_ADMIN`
+/// Warning-upsell copy (2.1.206 binary `Wcg`, string literals at
+/// @87701824 / @217906477 — straight ASCII, byte-verified against the real
+/// binary). `USAGE_CREDITS_ASK_ADMIN`
 /// is shared by both team/enterprise branches below (the `!hasBillingAccess`
 /// arm of each).
 const USAGE_CREDITS_TURN_ON: &str = "Run /usage-credits to turn on extra usage for your org";

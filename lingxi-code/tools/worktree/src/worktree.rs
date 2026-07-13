@@ -1730,6 +1730,11 @@ mod tests {
             )
         );
         assert_eq!(mock.removed().len(), 0);
+        // Refused BEFORE the cwd restore/removal — still in the worktree
+        // (the swap did not happen), and the shared session record is still
+        // present (not cleared).
+        assert_eq!(tool.ctx.cwd(), worktree_path);
+        assert!(tool.ctx.worktree_session.lock().unwrap().is_some());
     }
 
     #[tokio::test]
@@ -1764,6 +1769,11 @@ mod tests {
             )
         );
         assert_eq!(mock.removed().len(), 0);
+        // Refused BEFORE the cwd restore/removal — still in the worktree
+        // (the swap did not happen), and the shared session record is still
+        // present (not cleared).
+        assert_eq!(tool.ctx.cwd(), worktree_path);
+        assert!(tool.ctx.worktree_session.lock().unwrap().is_some());
     }
 
     #[tokio::test]

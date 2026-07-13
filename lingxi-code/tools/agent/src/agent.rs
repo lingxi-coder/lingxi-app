@@ -203,7 +203,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "run_in_background": {
                 "type": "boolean",
-                "description": "Set to true to run this agent in the background. You will be notified when it completes."
+                "description": "Agents run in the background by default; you will be notified when one completes. Set to false to run this agent synchronously when you need its result before continuing."
             },
             "name": {
                 "type": "string",
@@ -533,7 +533,7 @@ impl AgentTool {
         // default): `## When to use` + four terse bullets. NO `## When not to
         // use`, NO `## Usage notes`, NO `<example>`s (those are the FULL form).
         // Em-dashes are U+2014. The `run_in_background` bullet is the
-        // background-enabled default (the binary's `h`; the
+        // background-enabled 2.1.206 default (the binary's `h`; the
         // `LINGXI_DISABLE_BACKGROUND_TASKS` / teammate suppressions are not
         // modeled here).
         //
@@ -575,7 +575,7 @@ Reach for this when the task matches an available agent type, when you have inde
 - The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.\n\
 {send_message_bullet}\n\
 - `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).\n\
-- `run_in_background: true` runs the agent asynchronously; you'll be notified when it completes."
+- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing."
         )
     }
 
@@ -1463,9 +1463,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
         let selected = spawner
             .resolve_selection(&effective_type, parsed.model.as_deref())
             .await;
-        // claude `is_async = (run_in_background === true || selectedAgent.background
-        // === true) && !isBackgroundTasksDisabled` (AgentTool.tsx:426; the binary
-        // `K = …&& !dqt` where `dqt = LINGXI_DISABLE_BACKGROUND_TASKS`). The
+        // Claude Code 2.1.206 defaults a local subagent to background execution:
+        // `run_in_background !== false`, with an agent definition's
+        // `background: true` also forcing the async path. The binary then gates
+        // the local group on background tasks being enabled. The
         // agent definition's `background` frontmatter flag is surfaced on
         // `SelectedAgentMeta.background`, so a `background: true` agent dispatches
         // async even when the caller omits `run_in_background`. The env kill-switch
@@ -1479,7 +1480,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 .ok()
                 .as_deref(),
         );
-        let run_in_background = (parsed.run_in_background.unwrap_or(false) || selected.background)
+        let run_in_background = (parsed.run_in_background.unwrap_or(true) || selected.background)
             && !background_tasks_disabled;
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(

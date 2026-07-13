@@ -148,6 +148,7 @@ mod tests {
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,
+            file_history: None,
         }
     }
 
@@ -434,6 +435,10 @@ mod tests {
             AGENT_INPUT_SCHEMA["properties"]["description"]["description"],
             json!("A short (3-5 word) description of the task")
         );
+        assert_eq!(
+            AGENT_INPUT_SCHEMA["properties"]["run_in_background"]["description"],
+            json!("Agents run in the background by default; you will be notified when one completes. Set to false to run this agent synchronously when you need its result before continuing.")
+        );
     }
 
     // claude advertises `yJp().omit({cwd:!0})` — the MODEL-facing schema (what
@@ -657,6 +662,66 @@ mod tests {
         );
     }
 
+    // Claude Code 2.1.206 defaults local subagents to background execution.
+    // Omitting the field is therefore equivalent to `run_in_background: true`;
+    // callers opt into the blocking path with an explicit `false`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn omitted_run_in_background_defaults_to_async() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let result = AgentTool::new(bctx)
+            .call(
+                serde_json::json!({"description": "background default", "prompt": "go"}),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("default async launch");
+
+        assert_eq!(result.data["status"], "async_launched");
+        assert_eq!(result.data["isAsync"], true);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn explicit_false_runs_agent_synchronously() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let result = AgentTool::new(bctx)
+            .call(
+                serde_json::json!({
+                    "description": "foreground override",
+                    "prompt": "go",
+                    "run_in_background": false
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("explicit foreground launch");
+
+        assert_eq!(result.data["status"], "completed");
+    }
+
     // `LINGXI_DISABLE_BACKGROUND_TASKS` forces a `run_in_background:true`
     // agent to run SYNCHRONOUSLY (claude `K = … && !dqt`) — the result is a sync
     // completion, NOT `async_launched`.
@@ -807,7 +872,11 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             vec![parent_assistant_with_tool_use()],
         );
-        let input = serde_json::json!({ "description": "fork it", "prompt": "Do the subtask" });
+        let input = serde_json::json!({
+            "description": "fork it",
+            "prompt": "Do the subtask",
+            "run_in_background": false
+        });
         tool.call(input, ctx, fresh_tx())
             .await
             .expect("fork spawns");
@@ -878,7 +947,11 @@ mod tests {
             vec![parent_assistant_with_tool_use()],
         );
         ctx.fork_parent_system_prompt = Some(parent_bytes.to_string());
-        let input = serde_json::json!({ "description": "fork it", "prompt": "Do the subtask" });
+        let input = serde_json::json!({
+            "description": "fork it",
+            "prompt": "Do the subtask",
+            "run_in_background": false
+        });
         tool.call(input, ctx, fresh_tx())
             .await
             .expect("fork spawns");
@@ -1221,7 +1294,9 @@ mod tests {
         // subagent_type sentence.
         assert!(p_pro.contains("conversation.\n\n**Do not spawn agents unless the user asks.**"));
         // The four bullets are NOT gated on the plan.
-        assert!(p_pro.contains("- `run_in_background: true` runs the agent asynchronously"));
+        assert!(p_pro.contains(
+            "- Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing."
+        ));
     }
 
     // A non-pro tier (e.g. max) does NOT trip the pro gate.
@@ -1386,7 +1461,9 @@ mod tests {
         assert!(p.contains("Launch a new agent to handle complex, multi-step tasks"));
         assert!(p.contains("## When to use"));
         assert!(p.contains("relay what matters"));
-        assert!(p.contains("`run_in_background: true` runs the agent asynchronously"));
+        assert!(p.contains(
+            "Subagents run in the background by default; you'll be notified when one completes."
+        ));
     }
 
     // ── #4 meta props (AgentTool.tsx:229, 1264-1266, 1273-1275) + G8 ──
@@ -1482,7 +1559,8 @@ mod tests {
         let input = json!({
             "description": "d",
             "subagent_type": "general-purpose",
-            "prompt": "do it"
+            "prompt": "do it",
+            "run_in_background": false
         });
         let result = tool.call(input, ctx, fresh_tx()).await.unwrap();
         let data = &result.data;
@@ -1568,7 +1646,8 @@ mod tests {
         let input = json!({
             "description": "d",
             "subagent_type": "Explore",
-            "prompt": "look"
+            "prompt": "look",
+            "run_in_background": false
         });
         let result = tool.call(input, ctx, fresh_tx()).await.unwrap();
         let mc = result.data["model_content"].as_str().unwrap();
@@ -1610,7 +1689,8 @@ mod tests {
         let input = json!({
             "description": "d",
             "subagent_type": "general-purpose",
-            "prompt": "do it"
+            "prompt": "do it",
+            "run_in_background": false
         });
         let result = tool.call(input, ctx, fresh_tx()).await.unwrap();
         let data = &result.data;
@@ -1810,7 +1890,12 @@ mod tests {
         let tool = AgentTool::new(bctx);
         let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
         tool.call(
-            json!({ "description": "d", "subagent_type": "Explore", "prompt": "go" }),
+            json!({
+                "description": "d",
+                "subagent_type": "Explore",
+                "prompt": "go",
+                "run_in_background": false
+            }),
             ctx,
             fresh_tx(),
         )

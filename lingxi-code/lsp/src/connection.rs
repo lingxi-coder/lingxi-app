@@ -40,13 +40,21 @@ pub enum LspConnectionState {
         /// OS-level process id.
         pid: u32,
     },
-    /// Start-up or runtime failed; the registry will not route to this
-    /// server until it is restarted.
+    /// Start-up or runtime failed; the registry retries the next request
+    /// from this state until the crash-recovery cap (claude-code's
+    /// `ensureServerStarted` retries from `error` until
+    /// `restartCount > maxRestarts ?? 3`).
     Failed {
         /// Configuration registered for this server.
         config: LspServerConfig,
-        /// Human-readable failure description.
+        /// Human-readable failure description (claude-code `lastError`).
         error: String,
+        /// Failed start attempts so far (claude-code `restartCount`).
+        restarts: u32,
+        /// Whether the exceeded-max-crash-recovery error has already been
+        /// logged + recorded (claude-code reports it exactly once, then keeps
+        /// rethrowing the recorded error).
+        max_recovery_reported: bool,
     },
     /// Server was shut down cleanly.
     Stopped {

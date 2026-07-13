@@ -355,6 +355,44 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         ok_response(200, r#"{"can_fetch":true}"#)
     }
 
+    /// Parity 2.1.207 H-BIN-03: WebFetch's `prompt()` surfaces the
+    /// `claude.ai/code/artifact/{uuid}` fetch-exception ONLY when the Artifact
+    /// tool's `dY()` gate is on (CC `t = await OEd(tools, null)`). With the two
+    /// Statsig gates flipped on, both the SHORT and LONG variants gain the
+    /// byte-exact exception wording; with them off (the default) they do not.
+    #[tokio::test]
+    async fn prompt_artifact_exception_gated_on_dY() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        telemetry::test_clear_flag("tengu_cobalt_plinth");
+        telemetry::test_clear_flag("allow_cobalt_plinth");
+
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+        let long_opts = PromptOptions::default();
+        let short_opts = PromptOptions {
+            include_examples: false,
+            model: Some("claude-opus-4-8".into()),
+            model_profile: None,
+        };
+
+        // Gate OFF (default): no exception in either variant.
+        let long_off = tool.prompt(&long_opts).await;
+        let short_off = tool.prompt(&short_opts).await;
+        assert!(!long_off.contains("claude.ai/code/artifact/{uuid}"));
+        assert!(!short_off.contains("claude.ai/code/artifact/{uuid}"));
+
+        // Gate ON: both variants carry the byte-exact exception.
+        telemetry::test_set_flag("tengu_cobalt_plinth", true);
+        telemetry::test_set_flag("allow_cobalt_plinth", true);
+        let long_on = tool.prompt(&long_opts).await;
+        let short_on = tool.prompt(&short_opts).await;
+        assert!(long_on.contains("authenticated access.\n- Exception: claude.ai/code/artifact/{uuid} URLs (including preview.claude.ai) ARE fetchable \u{2014} WebFetch uses your claude.ai login. Use WebFetch for these, not curl or a headless browser (those return the SPA shell or a Cloudflare 403, not the content).\n\n- Fetches content from a specified URL"));
+        assert!(short_on.contains("use an authenticated MCP tool or `gh` for those instead. Exception: claude.ai/code/artifact/{uuid} URLs ARE fetchable via your claude.ai login \u{2014} use WebFetch, not curl (curl gets the SPA shell or a Cloudflare 403).\n- HTTP is upgraded to HTTPS."));
+
+        telemetry::test_clear_flag("tengu_cobalt_plinth");
+        telemetry::test_clear_flag("allow_cobalt_plinth");
+    }
+
     #[tokio::test]
     async fn prompt_gates_short_vs_long_with_auth_prefix() {
         // 1:1 with claude-code `CMi(model)`: a current-gen model gets the SHORT

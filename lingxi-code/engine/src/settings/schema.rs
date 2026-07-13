@@ -192,6 +192,28 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_web_fetch_preflight: Option<bool>,
 
+    /// Scalar field (later source wins). `disableArtifact`: opt out of the
+    /// `Artifact` tool (parity 2.1.207 H-BIN-03). CC 2.1.207 settings zod
+    /// (verbatim): `disableArtifact:E.boolean().optional().describe("Disable the
+    /// Artifact tool (also via CLAUDE_CODE_DISABLE_ARTIFACT).")`. The env half
+    /// (`CLAUDE_CODE_DISABLE_ARTIFACT`) is wired in `tool_api::artifact_gate`
+    /// (binary `R9i()`); threading this settings value into that gate lands with
+    /// the Stage-2 publish pipeline. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_artifact: Option<bool>,
+
+    /// Scalar field (later source wins). `enableArtifact`: explicitly enable /
+    /// disable the `Artifact` tool for this user (parity 2.1.207 H-BIN-03). CC
+    /// 2.1.207 settings zod (verbatim): `enableArtifact:E.boolean().optional()
+    /// .describe("Enable or disable the Artifact tool for this user. Unset
+    /// defaults to enabled once the feature is available.")`. Read by the tool
+    /// gate's `P7t() ?? L7t()` tail (binary): when set it wins over the default,
+    /// when unset the tool is enabled once the `tengu_cobalt_plinth` gate is
+    /// available. Schema-only today (the gate's live settings read is Stage-2);
+    /// the key round-trips so it is ACCESSIBLE. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_artifact: Option<bool>,
+
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

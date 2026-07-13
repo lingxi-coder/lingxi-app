@@ -769,18 +769,35 @@ Usage notes:\n\
             .into()
     }
     async fn prompt(&self, opts: &PromptOptions) -> String {
-        // 1:1 with claude-code `CMi(model)` (binary @196852876) — WebFetch DOES
-        // have a model-gated `prompt()` (the prior "no separate prompt()" note was
-        // STALE vs v2.1.185). `Dh(model)` (the shared `dh_simple_system_prompt`
-        // gate, identical to WebSearch) selects the SHORT variant; otherwise the
-        // LONG = an `IMPORTANT: WebFetch WILL FAIL…` auth-warning prefix (ending
-        // in `\n`) followed by the DESCRIPTION (which itself begins with `\n`, so
-        // the join is `access.\n\n- Fetches…`, matching the `…access.\n${GSd}`
-        // template, od-verified). The `t` (hasArtifactTool) artifact-exception
-        // branch is omitted — LingXi exposes no claude.ai/code/artifact tool, so
-        // `t` is always false.
+        // 1:1 with claude-code `CXc(model, hasArtifactTool)` (binary @280151) —
+        // WebFetch DOES have a model-gated `prompt()` (the prior "no separate
+        // prompt()" note was STALE vs v2.1.185). `Dh(model)` (the shared
+        // `dh_simple_system_prompt` gate, identical to WebSearch) selects the
+        // SHORT variant; otherwise the LONG = an `IMPORTANT: WebFetch WILL FAIL…`
+        // auth-warning prefix (ending in `\n`) followed by the DESCRIPTION (which
+        // itself begins with `\n`, so the join is `access.\n\n- Fetches…`,
+        // matching the `…access.\n${GSd}` template, od-verified).
+        //
+        // The `t` (hasArtifactTool) artifact-exception branch (parity 2.1.207
+        // H-BIN-03) now READS THE GATE instead of hard-coding false: CC computes
+        // it as `await OEd(tools, null)` = "the Artifact tool is registered AND
+        // `dY()`-enabled". We consult the same `dY()` gate
+        // (`tool_api::artifact_gate::is_enabled`), which returns `false` with no
+        // Statsig backend — so the branch is byte-identical to the pre-flip
+        // no-exception output today, but flips to the exception wording the moment
+        // the `tengu_cobalt_plinth` gate turns the Artifact tool on. (CC's second
+        // `OEd` clause — the read-only artifact surface `isArtifactReadEnabled()`
+        // — is a separate Statsig-gated feature, also off, and is Stage-2.)
+        let has_artifact_tool = tool_api::artifact_gate::is_enabled();
         if tool_api::dh_simple_system_prompt(opts.model.as_deref()) {
-            "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.\n\n- Fails on authenticated/private URLs \u{2014} use an authenticated MCP tool or `gh` for those instead.\n- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.\n- Responses are cached for 15 minutes per URL.".to_string()
+            let artifact_exception = if has_artifact_tool {
+                " Exception: claude.ai/code/artifact/{uuid} URLs ARE fetchable via your claude.ai login \u{2014} use WebFetch, not curl (curl gets the SPA shell or a Cloudflare 403)."
+            } else {
+                ""
+            };
+            format!(
+                "Fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model.\n\n- Fails on authenticated/private URLs \u{2014} use an authenticated MCP tool or `gh` for those instead.{artifact_exception}\n- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.\n- Responses are cached for 15 minutes per URL."
+            )
         } else {
             let description = self
                 .description(
@@ -790,8 +807,16 @@ Usage notes:\n\
                     },
                 )
                 .await;
+            // CC LONG: `…access.\n${t?bullet+"\n":""}${GSd}` — the bullet slots
+            // between the auth-warning line and the description (which begins with
+            // `\n`). Empty when the gate is off ⇒ `access.\n\n- Fetches…` verbatim.
+            let artifact_bullet = if has_artifact_tool {
+                "- Exception: claude.ai/code/artifact/{uuid} URLs (including preview.claude.ai) ARE fetchable \u{2014} WebFetch uses your claude.ai login. Use WebFetch for these, not curl or a headless browser (those return the SPA shell or a Cloudflare 403, not the content).\n"
+            } else {
+                ""
+            };
             format!(
-                "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, look for a specialized MCP tool that provides authenticated access.\n{description}"
+                "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, look for a specialized MCP tool that provides authenticated access.\n{artifact_bullet}{description}"
             )
         }
     }

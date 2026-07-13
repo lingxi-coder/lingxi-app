@@ -1249,6 +1249,15 @@ pub fn register_desktop_tools(
     } else {
         tool_ui::register_all(reg, ctx.clone());
     }
+    // PARITY (2.1.207 H-BIN-03): the `Artifact` tool (binary `eIs`, name `dw`).
+    // Registered always on desktop; its `is_enabled` replicates CC's `dY()` gate
+    // — the Statsig gate `tengu_cobalt_plinth` (code-default FALSE with no flag
+    // backend) AND `allow_cobalt_plinth` AND first-party auth AND subscription
+    // tier — so with no Statsig backend the tool registers DISABLED (invisible
+    // to the model), byte-identical to the shipped binary on a host without the
+    // `cobalt_plinth` gate. The publish/list claude.ai pipeline + the
+    // `artifact-design`/`artifact-capabilities` bundled skills are Stage-2.
+    reg.register_builtin(Arc::new(tool_ui::ArtifactTool::new(ctx.clone())));
     // SKILLEXEC.2: when a `SkillLoader` is supplied (real sessions wire the
     // `CommandRegistry`-backed loader), register the `Skill` tool with it so a
     // model-invoked skill resolves to a real slash command and expands. The

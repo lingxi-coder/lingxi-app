@@ -45,6 +45,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         skip_web_fetch_preflight: next
             .skip_web_fetch_preflight
             .or(prev.skip_web_fetch_preflight),
+        // Scalar Override (later source wins) — `disableArtifact`/`enableArtifact`
+        // (parity 2.1.207 H-BIN-03), same as `skipWebFetchPreflight`.
+        disable_artifact: next.disable_artifact.or(prev.disable_artifact),
+        enable_artifact: next.enable_artifact.or(prev.enable_artifact),
         // Scalar Override — `askUserQuestionTimeout` (enum 60s|5m|10m|never).
         ask_user_question_timeout: next
             .ask_user_question_timeout

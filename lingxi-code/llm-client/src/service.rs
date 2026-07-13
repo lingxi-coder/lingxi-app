@@ -1050,6 +1050,122 @@ impl ApiService {
         }
     }
 
+    /// Port of claude-code's `B0t` (2.1.207): parse `CLAUDE_CODE_EXTRA_BODY` into a
+    /// JSON object to be spread into the outgoing Anthropic-family request body.
+    ///
+    /// * Non-object env value → the object is ignored and an error is logged with
+    ///   the byte-exact claude-code string
+    ///   `CLAUDE_CODE_EXTRA_BODY env var must be a JSON object, but was given {t}`.
+    /// * A parse failure logs `Error parsing CLAUDE_CODE_EXTRA_BODY: {err}`.
+    /// * `betas` (claude-code's `ol` arg — the bedrock/body beta list, empty on the
+    ///   first-party path where betas ride the `anthropic-beta` header) is folded
+    ///   into `anthropic_beta`: append-dedupe when the extra body already carries
+    ///   that array, else set it.
+    ///
+    /// Kept under the original `CLAUDE_CODE_` env name (like the sibling
+    /// `CLAUDE_CODE_EXTRA_METADATA` at [`ApiService::build_api_metadata_user_id`])
+    /// — these are wire-parity vars preserved verbatim through the `LINGXI_` rename.
+    fn parse_extra_body(betas: &[String]) -> serde_json::Map<String, serde_json::Value> {
+        let mut r = serde_json::Map::new();
+        // claude-code enters the parse branch only when the env var is truthy; an
+        // empty string is falsy in JS, so an empty value is a silent no-op.
+        if let Ok(t) = std::env::var("CLAUDE_CODE_EXTRA_BODY") {
+            if !t.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&t) {
+                    Ok(serde_json::Value::Object(map)) => r = map,
+                    Ok(_) => tracing::error!(
+                        "CLAUDE_CODE_EXTRA_BODY env var must be a JSON object, but was given {t}"
+                    ),
+                    Err(err) => {
+                        tracing::error!("Error parsing CLAUDE_CODE_EXTRA_BODY: {err}");
+                    }
+                }
+            }
+        }
+        if !betas.is_empty() {
+            match r.get_mut("anthropic_beta") {
+                // Extra body already carries the array → append only the missing
+                // entries, preserving the extra body's order (claude-code's
+                // `[...o, ...n.filter((s)=>!o.includes(s))]`).
+                Some(serde_json::Value::Array(existing)) => {
+                    for b in betas {
+                        if !existing.iter().any(|v| v.as_str() == Some(b.as_str())) {
+                            existing.push(serde_json::Value::String(b.clone()));
+                        }
+                    }
+                }
+                _ => {
+                    r.insert(
+                        "anthropic_beta".to_string(),
+                        serde_json::Value::Array(
+                            betas
+                                .iter()
+                                .cloned()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
+                }
+            }
+        }
+        r
+    }
+
+    /// Merge `CLAUDE_CODE_EXTRA_BODY` into a prepared Anthropic-family request body
+    /// (claude-code `B0t` spread — 2.1.207). No-op for non-Anthropic routes and
+    /// when the env var is unset/empty, so those bodies stay byte-identical.
+    ///
+    /// `output_config` is peeled from the extra body and the computed
+    /// `output_config` is layered on top so computed keys win (claude-code
+    /// `Ii={...extra.output_config}; <compute mutates Ii>`); the merged object is
+    /// emitted only when non-empty. Remaining keys follow JS object-spread
+    /// collision semantics — a colliding key keeps its position but takes the
+    /// extra value, a new key appends at the tail (`serde_json` `preserve_order`).
+    ///
+    /// Runs after the beta/User-Agent header injectors so a user-supplied
+    /// `speed`/`output_config` in the extra body never leaks into the computed
+    /// `anthropic-beta` header ([`ApiService::beta_context`] reads the pre-merge
+    /// body).
+    fn merge_extra_body(prepared: &mut crate::PreparedLlmCall) {
+        if !Self::is_anthropic_family_protocol(&prepared.route.protocol) {
+            return;
+        }
+        // claude-code's `ol` beta arg is empty on the first-party path (betas ride
+        // the `anthropic-beta` header, not the body); the bedrock body-beta list is
+        // a separable, currently-dormant path.
+        let mut extra = Self::parse_extra_body(&[]);
+        if extra.is_empty() {
+            return;
+        }
+        let Some(body) = prepared.provider_request.body_json.as_object_mut() else {
+            return;
+        };
+        // Peel the extra body's output_config (claude-code `delete _i.output_config`).
+        let extra_output_config = extra.remove("output_config");
+        // Spread the remaining keys first (claude-code `...va, ..._i`).
+        for (k, v) in extra {
+            body.insert(k, v);
+        }
+        // Then merge/emit output_config last (claude-code `...{output_config:Ii}`):
+        // start from the extra body's copy, overlay the computed one (computed wins).
+        if let Some(serde_json::Value::Object(extra_oc)) = extra_output_config {
+            let mut merged = extra_oc;
+            if let Some(serde_json::Value::Object(computed)) = body.get("output_config") {
+                for (k, v) in computed {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            if merged.is_empty() {
+                body.remove("output_config");
+            } else {
+                body.insert(
+                    "output_config".to_string(),
+                    serde_json::Value::Object(merged),
+                );
+            }
+        }
+    }
+
     fn inject_headers(&self, prepared: &mut crate::PreparedLlmCall, request_id: &str) {
         // Anthropic beta headers are protocol-specific. OpenAI/Gemini/Vertex/
         // Bedrock/Azure routes must not receive Anthropic beta headers.
@@ -1073,6 +1189,9 @@ impl ApiService {
             .provider_request
             .headers
             .insert("x-request-id".to_string(), request_id.to_string());
+        // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
+        // pre-merge body (claude-code `B0t` spread; 2.1.207).
+        Self::merge_extra_body(prepared);
     }
 
     /// Same as [`inject_headers`] but for the streaming endpoint.
@@ -1095,6 +1214,9 @@ impl ApiService {
             .provider_request
             .headers
             .insert("x-request-id".to_string(), request_id.to_string());
+        // CLAUDE_CODE_EXTRA_BODY merge — after the beta header is computed from the
+        // pre-merge body (claude-code `B0t` spread; 2.1.207).
+        Self::merge_extra_body(prepared);
     }
 
     // ── 429 retry-after resolution (reset ladder) ─────────────────────────────

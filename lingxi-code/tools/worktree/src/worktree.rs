@@ -194,6 +194,17 @@ const ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE: &str = "EnterWorktree cannot create a
 /// is U+2014.
 const EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE: &str = "ExitWorktree cannot be called from a subagent with a cwd override (isolation: \"worktree\" or explicit cwd) \u{2014} it would mutate the parent session's process-wide working directory. This agent is already isolated; use Bash with `cd` for directory changes within it.";
 
+/// ExitWorktree "not the owner" remove-refusal — byte-faithful to 206's
+/// `validateInput` `action==="remove" && t.enteredExisting` branch (errorCode 4).
+/// The literal `EnterWorktree({path})` `{path}` is text, not interpolated. Two
+/// em-dashes are U+2014. `Claude Code` → `LingXi` (CLI-brand rebrand, matching
+/// the `<env>` worktree-stash notice's "other LingXi sessions").
+fn exit_not_owner_message(worktree_path: &str, original_cwd: &str) -> String {
+    format!(
+        "This session is not the owner of the worktree at {worktree_path} \u{2014} it either entered a pre-existing worktree via EnterWorktree({{path}}) or resumed into a checkout whose liveness lock another running LingXi session still holds \u{2014} so this tool will not remove it. Use action: \"keep\" to return to {original_cwd}. If no other session is using it, remove it yourself with `git worktree remove`; while a live session's lock is present, git will refuse and name the owner."
+    )
+}
+
 /// 206 `yCd()` tool-use prompt (byte-exact, extracted via `grep -abo` /
 /// latin-1 slicing from the 2.1.206 binary at `function yCd(){return\`...\`}`),
 /// with two LingXi rebrands applied to the extracted text:
@@ -417,13 +428,16 @@ impl EnterWorktreeTool {
     /// matching this tool's own prompt ("the previous worktree is left on
     /// disk, untouched, and only the new one is tracked for exit-time
     /// cleanup").
-    fn record_worktree_session(&self, handle: &WorktreeHandle) {
+    fn record_worktree_session(&self, handle: &WorktreeHandle, entered_existing: bool) {
         let original_cwd = self.ctx.cwd();
         *self.ctx.worktree_session.lock().unwrap() = Some(tool_api::WorktreeSession {
             original_cwd,
             worktree_path: handle.path.clone(),
             branch_name: handle.branch_name.clone(),
             base_commit: handle.base_commit.clone(),
+            // `true` for the `path` (enter-existing) branch, `false` for create —
+            // gates `ExitWorktree`'s errorCode:4 "not the owner" remove guard.
+            entered_existing,
             // No worktree-attached tmux wiring in the port yet — see
             // `ExitWorktreeTool`'s module doc for the residual note.
             tmux_session_name: None,
@@ -450,8 +464,9 @@ impl EnterWorktreeTool {
                 // Capture the WorktreeSession substrate (Task 8) BEFORE the
                 // swap below, while `ctx.cwd()` still reads the PRE-swap
                 // (original) directory — this is what `ExitWorktree` later
-                // restores.
-                self.record_worktree_session(&handle);
+                // restores. `entered_existing: true` — this session entered a
+                // pre-existing worktree via `path`, so it is NOT its owner.
+                self.record_worktree_session(&handle, true);
                 // Switch the session into the worktree — every FS tool reads
                 // through `ctx.cwd()`/`ctx.trusted_dirs()` (Task 2), so this
                 // single swap is what makes subsequent tool calls observe the
@@ -541,7 +556,9 @@ impl EnterWorktreeTool {
                 );
                 // Capture the WorktreeSession substrate (Task 8) BEFORE the
                 // swap below — see `record_worktree_session`'s doc.
-                self.record_worktree_session(&handle);
+                // `entered_existing: false` — this session CREATED the worktree,
+                // so `ExitWorktree` may remove it.
+                self.record_worktree_session(&handle, false);
                 self.ctx
                     .session_cwd
                     .swap(handle.path.clone(), vec![handle.path.clone()]);
@@ -981,6 +998,23 @@ impl Tool for ExitWorktreeTool {
                 EXIT_NO_ACTIVE_SESSION_MESSAGE.to_string(),
             ));
         };
+
+        // 4. `remove` on an ENTERED (not owned) worktree ⇒ refuse (206
+        // `validateInput` `action==="remove" && t.enteredExisting`, errorCode:4).
+        // Fires before `emit_started` — a validateInput-level rejection like the
+        // no-op / subagent guards above. `keep` on an entered worktree is fine.
+        if matches!(parsed.action, ExitAction::Remove) && session.entered_existing {
+            self.emit_failed(
+                &invocation_id,
+                "not_owner",
+                started_at.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(exit_not_owner_message(
+                &session.worktree_path.to_string_lossy(),
+                &session.original_cwd.to_string_lossy(),
+            )));
+        }
 
         self.emit_started(&invocation_id, &session.branch_name).await;
 
@@ -1668,6 +1702,10 @@ mod tests {
             worktree_path: worktree_path.to_path_buf(),
             branch_name: branch_name.to_string(),
             base_commit,
+            // Default to a CREATED (owned) worktree so the existing keep/remove
+            // tests exercise the removable path; the errorCode:4 test overrides
+            // `entered_existing` to `true` inline.
+            entered_existing: false,
             tmux_session_name: None,
         });
         // Mirror what EnterWorktree would have done: the session is now
@@ -1731,6 +1769,69 @@ mod tests {
             tool.ctx.worktree_session.lock().unwrap().is_some(),
             "guard must not clear the active session"
         );
+    }
+
+    #[tokio::test]
+    async fn exit_remove_on_entered_worktree_refuses_not_owner() {
+        // 206 errorCode:4: `remove` on a worktree this session ENTERED (via `path`,
+        // not created) is refused — this session is not the owner.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-entered"));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let wt = PathBuf::from("/tmp/repo-entered/.lingxi/worktrees/wt");
+        let original = PathBuf::from("/tmp/repo-entered");
+        *bctx.worktree_session.lock().unwrap() = Some(tool_api::WorktreeSession {
+            original_cwd: original.clone(),
+            worktree_path: wt.clone(),
+            branch_name: "worktree-wt".into(),
+            base_commit: None,
+            entered_existing: true,
+            tmux_session_name: None,
+        });
+        bctx.session_cwd.swap(wt.clone(), vec![wt.clone()]);
+        let tool = ExitWorktreeTool::new(bctx);
+        let err = tool
+            .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("remove on an entered worktree must refuse");
+        assert_eq!(
+            format!("{err}"),
+            format!(
+                "invalid input: {}",
+                exit_not_owner_message(&wt.to_string_lossy(), &original.to_string_lossy())
+            )
+        );
+        assert_eq!(mock.removed().len(), 0, "no removal");
+        assert!(
+            tool.ctx.worktree_session.lock().unwrap().is_some(),
+            "guard must not clear the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_keep_on_entered_worktree_is_allowed() {
+        // errorCode:4 only blocks `remove`; `keep` on an entered worktree works.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-entkeep"));
+        let (bctx, _sink) = make_bctx(mock.clone());
+        let wt = PathBuf::from("/tmp/repo-entkeep/.lingxi/worktrees/wt");
+        let original = PathBuf::from("/tmp/repo-entkeep");
+        *bctx.worktree_session.lock().unwrap() = Some(tool_api::WorktreeSession {
+            original_cwd: original.clone(),
+            worktree_path: wt.clone(),
+            branch_name: "worktree-wt".into(),
+            base_commit: None,
+            entered_existing: true,
+            tmux_session_name: None,
+        });
+        bctx.session_cwd.swap(wt.clone(), vec![wt]);
+        let tool = ExitWorktreeTool::new(bctx);
+        let _ = tool
+            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("keep on an entered worktree is allowed");
+        assert_eq!(tool.ctx.cwd(), original, "cwd restored");
+        assert!(tool.ctx.worktree_session.lock().unwrap().is_none(), "session cleared");
+        assert_eq!(mock.removed().len(), 0);
     }
 
     #[tokio::test]

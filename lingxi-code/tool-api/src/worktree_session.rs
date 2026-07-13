@@ -49,6 +49,11 @@ pub struct WorktreeSession {
     /// count then falls to "unknown", matching
     /// `WorktreeManager::worktree_change_summary`'s fail-closed contract.
     pub base_commit: Option<String>,
+    /// `true` when `EnterWorktree` ENTERED a pre-existing worktree (`path`
+    /// branch), `false` when it CREATED one. 206's `ExitWorktree` refuses a
+    /// `remove` on an entered (not owned) worktree (`t.enteredExisting`,
+    /// errorCode 4) — this session is not its owner.
+    pub entered_existing: bool,
     /// Name of a tmux session attached to this worktree, if any. The port has
     /// no worktree-attached tmux wiring today — `EnterWorktreeTool` always
     /// writes `None` here — so this field is a substrate placeholder for a
@@ -94,6 +99,7 @@ mod tests {
             worktree_path: PathBuf::from("/repo/.lingxi/worktrees/feat"),
             branch_name: "worktree-feat".to_string(),
             base_commit: Some("deadbeef".to_string()),
+            entered_existing: false,
             tmux_session_name: None,
         });
         assert!(cell.lock().unwrap().is_some());
@@ -114,6 +120,7 @@ mod tests {
             worktree_path: PathBuf::from("/repo/.lingxi/worktrees/feat"),
             branch_name: "worktree-feat".to_string(),
             base_commit: None,
+            entered_existing: false,
             tmux_session_name: None,
         });
 

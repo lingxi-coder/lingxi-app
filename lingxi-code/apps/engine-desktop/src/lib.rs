@@ -4884,6 +4884,13 @@ pub async fn build(
     let sandbox_desc_auto_allow = sandbox_runtime_cfg.auto_allow_bash_if_sandboxed;
     let sandbox_desc_fallback = sandbox_runtime_cfg.are_unsandboxed_commands_allowed();
     let sandbox_desc_deps_ok = sandbox_deps.errors.is_empty();
+    // Bound (not inlined) so the SAME `Arc<SessionCwd>` can also be handed to
+    // the orchestrator below via `.with_session_cwd(...)` — Task 5 (worktree
+    // 206 session-cwd plumbing): the system prompt's `Primary working
+    // directory:` line and the conditional-rules memory cache must see the
+    // SAME cwd cell the FS/Bash tools swap on `EnterWorktree`/`ExitWorktree`,
+    // not an independent, never-swapped cell.
+    let session_cwd = SessionCwd::new(cwd.clone(), vec![cwd.clone()]);
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -4945,7 +4952,7 @@ pub async fn build(
             )
         }),
         sandbox_available,
-        session_cwd: SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
+        session_cwd: session_cwd.clone(),
         platform: sandbox_platform,
         http: http.clone(),
         provider: tool_provider,
@@ -5382,6 +5389,12 @@ pub async fn build(
     // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
     // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
     .with_current_cwd(current_cwd_cell)
+    // Task 5 (worktree 206 session-cwd plumbing): share the SAME
+    // `Arc<SessionCwd>` the tool context swaps on `EnterWorktree`/
+    // `ExitWorktree`, so the system prompt's `Primary working directory:`
+    // line and the conditional-rules memory cache re-derive from the
+    // post-swap worktree cwd instead of the frozen boot cwd.
+    .with_session_cwd(session_cwd)
     // FIX A/B/C: adopt the boot-canonical session id so the orchestrator's LIVE
     // session matches the id baked into the leaf firers' `transcript_path` and the
     // subagent spawner's subagents dir — one consistent session id end-to-end.

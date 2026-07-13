@@ -876,6 +876,13 @@ pub async fn build_mobile_inner(
     //     device capabilities (camera / voice / share) come from `platform`;
     //     desktop-only seams (subagent / mcp / lsp / team / worktree-tool) are
     //     absent because `engine-mobile` does not link those tool crates.
+    // Bound (not inlined) so the SAME `Arc<SessionCwd>` can also be handed to
+    // the orchestrator below via `.with_session_cwd(...)` (Task 5 — worktree
+    // 206 session-cwd plumbing). Mobile never registers the worktree tool
+    // (see above), so this cell never actually swaps today; wiring it keeps
+    // the orchestrator's cwd source consistent with desktop and future-proofs
+    // a mobile worktree tool without a second staleness bug to fix later.
+    let session_cwd = SessionCwd::new(cwd.clone(), vec![cwd.clone()]);
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map (see engine-desktop note).
         read_file_state: tool_api::read_file_state::new_read_file_state_map(),
@@ -913,7 +920,7 @@ pub async fn build_mobile_inner(
             .clone()
             .expect("boot permission policy is built unconditionally above"),
         sandbox_available: false,
-        session_cwd: SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
+        session_cwd: session_cwd.clone(),
         platform: if cfg!(target_os = "macos") {
             SandboxPlatform::Mac
         } else {
@@ -1093,7 +1100,14 @@ pub async fn build_mobile_inner(
     .with_cache_safe_slot(cache_safe_slot)
     // Audit fix (#13): per-turn V2 `<task-reminder>` over the file-backed
     // TodoStore (tool_task IS registered on mobile) — mirror of desktop.
-    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()));
+    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+    // Task 5 (worktree 206 session-cwd plumbing): share the SAME
+    // `Arc<SessionCwd>` the tool context reads, so the system prompt's env
+    // block and the conditional-rules memory cache stay consistent with the
+    // tool-facing cwd source (mobile mirror of desktop's
+    // `.with_session_cwd(session_cwd)`; inert today — see the binding note
+    // above).
+    .with_session_cwd(session_cwd);
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);

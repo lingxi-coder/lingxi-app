@@ -719,6 +719,20 @@ pub struct ConversationOrchestrator {
     /// Defaults to a private `Arc` over `cwd` (no firer wired ⇒ never moves ⇒
     /// hooks read the static cwd exactly as before).
     pub(crate) current_cwd: Arc<std::sync::Mutex<std::path::PathBuf>>,
+    /// Task 5 (worktree 206 session-cwd plumbing): the SAME switchable cwd
+    /// cell the tool layer swaps on `EnterWorktree`/`ExitWorktree`
+    /// ([`tool_api::SessionCwd`], Task 1). The system prompt's `# Environment`
+    /// `Primary working directory:` line, its trailing gitStatus block, and the
+    /// per-turn `additional_context_message`/memory-prefetch cwd all read
+    /// THIS (via [`Self::build_prompt_context`] et al.), so they re-derive from
+    /// the post-swap worktree instead of the frozen boot `cwd` above.
+    ///
+    /// Defaults to a private, never-swapped `SessionCwd` over the constructor's
+    /// `cwd` (see [`ConversationOrchestrator::new_with_streaming`]), so a caller
+    /// that never wires [`Self::with_session_cwd`] behaves exactly as before —
+    /// the INERT INVARIANT this plan depends on. Wired at the desktop/mobile
+    /// composition roots to the SAME `Arc` handed to `BuiltinToolContext`.
+    pub(crate) session_cwd: Arc<tool_api::SessionCwd>,
     /// Resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the claude-home root).
     /// Used by [`Self::computed_transcript_path`] to deterministically derive the
     /// session's transcript path (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`,
@@ -1034,12 +1048,25 @@ pub struct ConversationOrchestrator {
     pub(crate) todo_reminder_tasks:
         Option<Arc<dyn crate::prompt::todo_reminder::TodoReminderTaskProvider>>,
     /// §F: cache of the CONDITIONAL (`paths:`-gated) memory rules, populated the
-    /// first time [`Self::conditional_rules_reminder_message`] runs (a `OnceCell`
-    /// fill via the same `memory.load(&cwd)` the system prompt uses, then
-    /// re-filtered to `globs.is_some()`). Avoids re-walking disk every turn while
-    /// still letting lazy activation re-test the cached rules against the latest
-    /// `read_file_state`. Empty when the hierarchy has no conditional rules.
-    pub(crate) conditional_rules_cache: tokio::sync::OnceCell<Vec<crate::prompt::MemoryFile>>,
+    /// first time [`Self::conditional_rules_reminder_message`] runs (filled via
+    /// the same `memory.load(&cwd)` the system prompt uses, then re-filtered to
+    /// `globs.is_some()`). Avoids re-walking disk every turn while still
+    /// letting lazy activation re-test the cached rules against the latest
+    /// `read_file_state`. `None` = not yet filled OR invalidated; an empty
+    /// `Vec` (once filled) means the hierarchy has no conditional rules.
+    ///
+    /// Task 5 (worktree 206 session-cwd plumbing): this is CWD-DEPENDENT
+    /// cached state — the one genuine cache this port keeps keyed by cwd (the
+    /// env block / gitStatus / `additional_context_message` all re-derive
+    /// fresh every turn instead, so they need no invalidation, only a live cwd
+    /// source — see [`Self::session_cwd`]). A plain `std::sync::Mutex` (not
+    /// the prior `tokio::sync::OnceCell`) so [`Self::with_session_cwd`] can
+    /// register a synchronous [`tool_api::SessionCwd::set_on_swap`] callback
+    /// that clears it (`*cache.lock() = None`) on every `EnterWorktree`/
+    /// `ExitWorktree` swap, forcing the next turn to re-walk disk under the
+    /// new cwd instead of replaying the pre-swap directory's rules forever.
+    pub(crate) conditional_rules_cache:
+        Arc<std::sync::Mutex<Option<Vec<crate::prompt::MemoryFile>>>>,
     /// §F sent-tracking ("delta"): the paths of conditional rules already
     /// injected this session, so each rule is rendered ONCE when first activated
     /// and never re-injected on later turns. 1:1 with TS `loadedNestedMemoryPaths`
@@ -1237,6 +1264,7 @@ impl ConversationOrchestrator {
             session: Arc::new(Mutex::new(session)),
             memory,
             current_cwd: Arc::new(std::sync::Mutex::new(cwd.clone())),
+            session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
             cwd,
             config_home: None,
             jsonl_writer: None,
@@ -1278,7 +1306,7 @@ impl ConversationOrchestrator {
             mid_turn_input: std::sync::OnceLock::new(),
             cancel_reason: std::sync::OnceLock::new(),
             todo_reminder_tasks: None,
-            conditional_rules_cache: tokio::sync::OnceCell::new(),
+            conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
             sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
             sent_agent_names: Mutex::new(std::collections::HashSet::new()),
@@ -1338,6 +1366,36 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_current_cwd(mut self, cell: Arc<std::sync::Mutex<std::path::PathBuf>>) -> Self {
         self.current_cwd = cell;
+        self
+    }
+
+    /// Share the composition root's switchable [`tool_api::SessionCwd`] — the
+    /// SAME `Arc` handed to `BuiltinToolContext`, which `EnterWorktree`/
+    /// `ExitWorktree` (Task 6-8 of the worktree-206 plan) swap. Builder-style;
+    /// wired at the desktop/mobile composition roots.
+    ///
+    /// Registers a synchronous `set_on_swap` callback (Task 5) that clears
+    /// [`Self::conditional_rules_cache`] — the one genuine CWD-keyed cache this
+    /// port keeps — on every swap, so the next turn re-walks the memory
+    /// hierarchy under the new cwd instead of replaying the pre-swap
+    /// directory's conditional rules for the rest of the session. Every other
+    /// per-turn cwd-dependent section (env block, gitStatus,
+    /// `additional_context_message`) is recomputed from scratch each turn, so
+    /// switching them onto this live cell (done in [`Self::build_prompt_context`]
+    /// and friends) is enough on its own — no cache to clear there.
+    ///
+    /// Without this call the default private `SessionCwd` (over the
+    /// constructor's static `cwd`, never swapped) stands, so every cwd-derived
+    /// section reads the boot cwd exactly as before — the INERT INVARIANT.
+    #[must_use]
+    pub fn with_session_cwd(mut self, session_cwd: Arc<tool_api::SessionCwd>) -> Self {
+        let cache = Arc::clone(&self.conditional_rules_cache);
+        session_cwd.set_on_swap(Box::new(move |_new_cwd| {
+            if let Ok(mut guard) = cache.lock() {
+                *guard = None;
+            }
+        }));
+        self.session_cwd = session_cwd;
         self
     }
 
@@ -7044,7 +7102,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     async fn build_prompt_context(&self) -> crate::prompt::SystemPromptContext {
         use crate::prompt::{file_tree, git_status, SystemPromptContext};
 
-        let cwd = self.cwd.clone();
+        // Task 5 (worktree 206 session-cwd plumbing): read the LIVE
+        // `self.session_cwd` — the SAME cell `EnterWorktree`/`ExitWorktree`
+        // swap on the tool side — not the frozen `self.cwd`. The env block's
+        // `Primary working directory:` line, the file tree, the git-status
+        // probe, and the memory hierarchy below all derive from `cwd`, so this
+        // one substitution re-derives the ENTIRE prompt context from the
+        // post-swap worktree every turn. `self.session_cwd` defaults to a
+        // private, never-swapped cell equal to `self.cwd` when
+        // `with_session_cwd` was never called, so this is byte-identical to
+        // before for every caller that doesn't wire it (INERT INVARIANT).
+        let cwd = self.session_cwd.cwd();
         // The `<env>` model-identity line ("You are powered by the model named
         // …") must reflect the CURRENT model, not the launch model. `/model`
         // switches update `session.model` (see `OrchestratorHandle::switch_model`
@@ -7200,7 +7268,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // prevents. (claude drops gitStatus entirely; it is NOT re-emitted in the
         // user message.)
         if !self.config.exclude_dynamic_system_prompt_sections {
-            if let Some(block) = git_status::render_git_status_block(&self.cwd) {
+            // Task 5 (worktree 206 session-cwd plumbing): read `ctx.cwd` (the
+            // SAME live cwd `build_prompt_context` already resolved through
+            // `self.session_cwd`), not the frozen `self.cwd` — otherwise this
+            // trailing gitStatus block would report the boot directory's git
+            // status while the env block above it already shows the swapped
+            // worktree, an inconsistent prompt.
+            if let Some(block) = git_status::render_git_status_block(&ctx.cwd) {
                 prompt.push_str("\n\n");
                 prompt.push_str(&block);
             }
@@ -7243,7 +7317,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     pub(crate) async fn additional_context_message(&self) -> Option<ConversationMessage> {
         // `claudeMd` value = the assembled memory block (preamble + `Contents
         // of …:` blocks). Empty when no LINGXI.md files are loaded.
-        let memory_files = self.memory.load(&self.cwd).await;
+        //
+        // Task 5 (worktree 206 session-cwd plumbing): read the LIVE
+        // `self.session_cwd.cwd()`, not the frozen `self.cwd` — this reminder
+        // is already recomputed fresh every turn (no cache), but reading the
+        // frozen field would still show the pre-swap directory's LINGXI.md
+        // files after `EnterWorktree`.
+        let memory_files = self.memory.load(&self.session_cwd.cwd()).await;
         let lingxi_md = crate::prompt::memory_block::format(&memory_files);
 
         // Build the entries in claude-code insertion order; each is `# key\nvalue`.
@@ -7809,19 +7889,30 @@ As you answer the user's questions, you can use the following context:\n\
     }
 
     pub(crate) async fn conditional_rules_reminder_message(&self) -> Option<ConversationMessage> {
-        // (1) CACHE — fill once from the same memory load the system prompt uses.
-        let cwd = self.cwd.clone();
-        let rules = self
-            .conditional_rules_cache
-            .get_or_init(|| async {
-                self.memory
+        // (1) CACHE — fill once from the same memory load the system prompt
+        // uses. Task 5 (worktree 206 session-cwd plumbing): `cwd` is the LIVE
+        // `self.session_cwd` (not the frozen `self.cwd`), and
+        // `conditional_rules_cache` is reset to `None` by the `set_on_swap`
+        // callback [`Self::with_session_cwd`] registers, so a worktree swap
+        // forces this to re-walk disk under the NEW cwd instead of replaying
+        // the pre-swap directory's rule set for the rest of the session.
+        let cwd = self.session_cwd.cwd();
+        let cached: Option<Vec<crate::prompt::MemoryFile>> =
+            self.conditional_rules_cache.lock().unwrap().clone();
+        let rules: Vec<crate::prompt::MemoryFile> = match cached {
+            Some(rules) => rules,
+            None => {
+                let loaded = self
+                    .memory
                     .load(&cwd)
                     .await
                     .into_iter()
                     .filter(|f| f.globs.is_some())
-                    .collect::<Vec<_>>()
-            })
-            .await;
+                    .collect::<Vec<_>>();
+                *self.conditional_rules_cache.lock().unwrap() = Some(loaded.clone());
+                loaded
+            }
+        };
         if rules.is_empty() {
             return None;
         }
@@ -7836,7 +7927,7 @@ As you answer the user's questions, you can use the following context:\n\
         let mut newly_active: Vec<&crate::prompt::MemoryFile> = Vec::new();
         {
             let mut sent = self.sent_conditional_rules.lock().await;
-            for rule in rules {
+            for rule in &rules {
                 if sent.contains(&rule.path) {
                     continue; // already injected this session
                 }
@@ -7894,7 +7985,11 @@ As you answer the user's questions, you can use the following context:\n\
                 .map(ConversationMessage::text_content)
                 .unwrap_or_default()
         };
-        let pending = prefetch.start(query, self.cwd.clone()).await;
+        // Task 5 (worktree 206 session-cwd plumbing): the live cwd, so a future
+        // non-stub prefetch derives the memdir from the post-swap worktree, not
+        // the frozen boot cwd. Currently inert (the stub prefetch ignores its
+        // cwd argument), so this is a no-behavior-change correctness fix.
+        let pending = prefetch.start(query, self.session_cwd.cwd()).await;
         *self.pending_memory_prefetch.lock().await = Some(pending);
     }
 
@@ -9092,6 +9187,84 @@ mod turn_recovery_tests {
         assert!(
             !sp.contains("claude-fable-5"),
             "no Claude catalog contamination for a non-Claude model: {sp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_prompt_reflects_session_cwd_swap() {
+        // Task 5 (worktree 206 session-cwd plumbing): `EnterWorktree`/
+        // `ExitWorktree` swap the shared `tool_api::SessionCwd` cell the tool
+        // layer resolves relative paths through. The NEXT system-prompt
+        // render must show the SWAPPED directory's env-block
+        // `Primary working directory:` line (and the trailing gitStatus block,
+        // which shares the same live cwd) — not the frozen boot cwd.
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-boot-fixture");
+        let session_cwd = tool_api::SessionCwd::new(boot_cwd.clone(), vec![boot_cwd.clone()]);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            boot_cwd.clone(),
+        )
+        .with_session_cwd(session_cwd.clone());
+
+        let before = orch.build_system_prompt().await;
+        assert!(
+            before.contains(&format!(
+                "Primary working directory: {}",
+                boot_cwd.display()
+            )),
+            "boot cwd present before any swap: {before}"
+        );
+
+        let worktree_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-worktree-fixture");
+        session_cwd.swap(worktree_cwd.clone(), vec![worktree_cwd.clone()]);
+
+        let after = orch.build_system_prompt().await;
+        assert!(
+            after.contains(&format!(
+                "Primary working directory: {}",
+                worktree_cwd.display()
+            )),
+            "system prompt must reflect the swapped worktree cwd: {after}"
+        );
+        assert!(
+            !after.contains(&format!(
+                "Primary working directory: {}",
+                boot_cwd.display()
+            )),
+            "the stale boot-cwd line must be gone after the swap: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_prompt_cwd_stays_at_boot_cwd_when_never_swapped() {
+        // INERT INVARIANT: a caller that never calls `.with_session_cwd(...)`
+        // gets byte-identical behavior to before Task 5 — the prompt always
+        // shows the boot cwd handed to the constructor.
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-session-cwd-inert-fixture");
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            boot_cwd.clone(),
+        );
+
+        let sp = orch.build_system_prompt().await;
+        assert!(
+            sp.contains(&format!(
+                "Primary working directory: {}",
+                boot_cwd.display()
+            )),
+            "no swap ⇒ boot cwd, exactly as before: {sp}"
         );
     }
 

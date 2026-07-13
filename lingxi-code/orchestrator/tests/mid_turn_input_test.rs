@@ -21,7 +21,7 @@ use orchestrator::test_support::{
 };
 use orchestrator::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    text_delta, MockStreamingApiClient,
+    input_json_delta, text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
 use protocol::{ContentBlock, ConversationMessage, ToolUseId};
@@ -151,6 +151,13 @@ async fn history_has_interrupt(orch: &ConversationOrchestrator) -> bool {
 }
 
 fn build_orch(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
+    build_orch_with_config(api, OrchestratorConfig::default())
+}
+
+fn build_orch_with_config(
+    api: Arc<MockStreamingApiClient>,
+    config: OrchestratorConfig,
+) -> ConversationOrchestrator {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let tools = Arc::new(ToolRegistry::new());
@@ -158,7 +165,7 @@ fn build_orch(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
     ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
+        config,
         batched,
         api,
         tools,
@@ -185,6 +192,33 @@ impl ScriptedSource {
 impl MidTurnInputSource for ScriptedSource {
     async fn take_mid_turn_input(&self) -> Option<String> {
         self.0.lock().unwrap().pop_front()
+    }
+}
+
+/// A source that appears empty on the first loop poll, then yields its one
+/// queued message. This models a message arriving while the first model/tool
+/// step is in flight, just before the loop would attempt its next turn.
+struct DelayedOnceSource(std::sync::Mutex<(usize, Option<String>)>);
+
+impl DelayedOnceSource {
+    fn after_empty_polls(empty_polls: usize, text: &str) -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new((
+            empty_polls,
+            Some(text.to_string()),
+        ))))
+    }
+}
+
+#[async_trait]
+impl MidTurnInputSource for DelayedOnceSource {
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        let mut state = self.0.lock().unwrap();
+        if state.0 != 0 {
+            state.0 -= 1;
+            None
+        } else {
+            state.1.take()
+        }
     }
 }
 
@@ -283,6 +317,63 @@ async fn no_source_is_noop_only_seed_prompt_reaches_model() {
     assert!(
         !all.contains("queued"),
         "no source ⇒ nothing injected: {texts:?}"
+    );
+}
+
+/// A message that arrives during a streaming tool step must be persisted before
+/// the `--max-turns` terminal exits the loop. Claude Code 2.1.205 fixed the
+/// previous loss of this message at the turn cap; this locks that behavior.
+#[tokio::test]
+async fn mid_turn_input_is_preserved_when_max_turns_ends_streaming_loop() {
+    let tool_use_id = ToolUseId::new();
+    let stream = scripted![
+        message_start("m1", "claude-opus-4-7"),
+        orchestrator::test_support_stream::content_block_start_tool_use(
+            0,
+            tool_use_id,
+            "UnknownTool",
+        ),
+        input_json_delta(0, "{}"),
+        content_block_stop(0),
+        message_delta_stop("tool_use"),
+        message_stop(),
+    ];
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
+    let orch = build_orch_with_config(
+        api.clone(),
+        OrchestratorConfig {
+            max_turns: 1,
+            ..OrchestratorConfig::default()
+        },
+    );
+    // The first top-of-loop drain sees nothing. The source then yields once at
+    // the second loop boundary, exactly where the max-turns guard used to return
+    // before consuming it.
+    orch.set_mid_turn_input(DelayedOnceSource::after_empty_polls(
+        1,
+        "please preserve this message",
+    ));
+
+    let outcome = orch
+        .run_turn_streaming_with_cancel("seed", CancellationToken::new())
+        .await
+        .expect("the one-turn cap must end the stream cleanly");
+    assert_eq!(outcome, TurnOutcome::MaxTurns);
+    assert_eq!(api.captured_calls().await.len(), 1, "no second model call");
+
+    let session = orch.session();
+    let s = session.lock().await;
+    assert!(
+        s.history.iter().any(|message| matches!(
+            message,
+            ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.contains("please preserve this message")
+                ))
+        )),
+        "the queued mid-turn message must remain in history when max_turns ends the loop"
     );
 }
 

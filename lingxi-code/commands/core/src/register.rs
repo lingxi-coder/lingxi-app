@@ -5,7 +5,7 @@
 use command_api::CommandRegistry;
 use std::sync::Arc;
 
-/// Register all 101 built-in slash commands into `reg`.
+/// Register all 106 built-in slash commands into `reg`.
 ///
 /// The non-core names point at per-name instances of
 /// [`command_api::builtin_support::UnimplementedCommandHandler`] that return the locked
@@ -25,7 +25,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         core_description, UnimplementedCommandHandler, BUILTIN_COMMAND_NAMES,
     };
 
-    // Pass 1: register all 101 with per-name unimplemented handler instances.
+    // Pass 1: register all 106 with per-name unimplemented handler instances.
     //
     // Each name needs its own handler **instance** because the handler
     // carries its own `name` field used to substitute the locked literal.
@@ -373,10 +373,19 @@ pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
 
     for name in [
         "add-dir",
+        // H-BIN-11 (cc2.1.207): five `local-jsx` commands whose real surface is
+        // interactive/renderer-bound (cwd swap + confirm dialog for `/cd`, live
+        // bg-daemon detach for `/background`, the fullscreen renderer for
+        // `/focus`+`/tui`, the credit-purchase UI for `/usage-credits`). The
+        // headless fallback keeps them resolvable so the rate-limit messages
+        // that point users at `/usage-credits` no longer dangle.
+        "background",
         "branch",
+        "cd",
         "color",
         "copy",
         "diff",
+        "focus",
         "plan",
         "plugin",
         "privacy-settings",
@@ -385,13 +394,20 @@ pub fn register_interactive_only_commands(reg: &mut CommandRegistry) {
         "tasks",
         "terminal-setup",
         "theme",
+        "tui",
         "usage",
+        "usage-credits",
     ] {
         reg.register_builtin_handler(Arc::new(InteractiveOnlyHandler::new(
             name,
             core_description(name),
         )));
     }
+
+    // H-BIN-11 (cc2.1.207): `/background` carries the `bg` alias
+    // (`name:"background",aliases:["bg"]`). Resolution-only alias, no separate
+    // palette row — like `continue→resume`.
+    reg.register_alias("bg".to_string(), "background".to_string());
 
     // claude-code parity (#61): resolution aliases for the interactive-only
     // commands whose target stub is registered above (byte-verified alias sets).
@@ -429,16 +445,30 @@ mod registry_tests {
     use command_api::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_101_names() {
+    fn register_all_registers_exactly_106_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(name).is_some(),
                 "expected command /{name} registered"
             );
         }
+    }
+
+    /// H-BIN-11 (cc2.1.207): the five newly-registered commands resolve, and
+    /// `/bg` resolves to the `/background` command.
+    #[test]
+    fn h_bin_11_commands_and_bg_alias_resolve() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        for name in ["background", "cd", "focus", "tui", "usage-credits"] {
+            assert!(reg.resolve(name).is_some(), "/{name} missing");
+            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+        }
+        let cmd = reg.resolve("bg").expect("/bg alias must resolve");
+        assert_eq!(cmd.name, "background", "/bg should resolve to /background");
     }
 
     /// claude-code parity (#61/#66): `/cost` and `/stats` resolve to `/usage`,

@@ -2,9 +2,11 @@ Commands:
   /add-dir              Add a new working directory
   /agents               (removed) Ask Claude to create/manage subagents, or edit .claude/agents/
   /autocompact          Configure the auto-compact window size
+  /background           Send this session to the background and free the terminal
   /branch               Create a branch of the current conversation at this point
   /bridge               Connect this terminal for remote-control sessions
   /btw                  Ask a quick side question without interrupting the main conversation
+  /cd                   Move this session to a new working directory
   /chrome               Claude in Chrome (Beta) settings
   /clear                Start a new session with empty context; previous session stays on disk (resumable with /resume)
   /color                Set the prompt bar color for this session
@@ -23,6 +25,7 @@ Commands:
   /fast                 Toggle fast mode
   /feedback             Submit feedback about LingXi
   /files                List all files currently in context
+  /focus                Toggle focus view: just your prompt, summary, and response
   /fork                 Spawn a background agent that inherits the full conversation
   /goal                 Set a goal — keep working until the condition is met
   /help                 Show help and available commands
@@ -68,6 +71,7 @@ Commands:
   /tasks                List and manage background tasks
   /terminal-setup       Install Shift+Enter key binding for newlines
   /theme                Change the theme
+  /tui                  Set the terminal UI renderer (default | fullscreen)
   /ultraplan            LingXi on the web drafts an advanced plan you can edit and approve
   /upgrade              Upgrade to Max for higher rate limits and more Opus
   /usage                Show session cost, plan usage, and what's contributing to your limits

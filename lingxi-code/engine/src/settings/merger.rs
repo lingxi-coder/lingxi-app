@@ -49,6 +49,8 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         ask_user_question_timeout: next
             .ask_user_question_timeout
             .or(prev.ask_user_question_timeout),
+        // Scalar Override — `viewMode` (enum default|verbose|focus), H-BIN-11.
+        view_mode: next.view_mode.or(prev.view_mode),
         model: next.model.or(prev.model),
         // 2.1.198 AWS/GCP auth-refresh script keys — plain strings, scalar
         // Override (later source wins), same as `model`/`outputStyle`.

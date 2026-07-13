@@ -26,15 +26,33 @@
 //! (`powerup`, `scroll-speed` = interactive-only net-new; `install`,
 //! `sandbox-toggle` = interactive/host-bound already-in-surface stubs; `btw` =
 //! host-bound deferred) were kept as stubs / not added, so only the total moved.
+//!
+//! The 2026-07-14 slash-parity pass (H-BIN-11 vs claude-code v2.1.207) added
+//! FIVE `local-jsx` builtin command objects that had been missed by the
+//! name-lock lineage — they exist byte-identically as far back as the local
+//! 2.1.205 binary, so they are pre-existing misses, not post-lock drift:
+//! `cd` (`Move this session to a new working directory`, ungated),
+//! `background`/alias `bg` (`Send this session to the background and free the
+//! terminal`, `isEnabled:()=>!0`), `focus` (`Toggle focus view: just your
+//! prompt, summary, and response`, `requires:{ink}`), `tui` (`Set the terminal
+//! UI renderer (default | fullscreen)`, ungated), and `usage-credits`
+//! (`Configure usage credits to keep working when you hit a limit`, two objects
+//! gated by `bnr()` = `!DISABLE_EXTRA_USAGE_COMMAND && (rateLimitStatus!==null
+//! || isOverageProvisioningAllowed())`, split interactive/non-interactive on
+//! `isNonInteractiveSession()`). This re-locks the total from 101 to **106**.
+//! `usage-credits` is hidden from the default palette / `/help` because `bnr()`
+//! resolves `false` in a fresh session with no subscription or rate-limit
+//! status (see [`is_palette_hidden`] + [`USAGE_CREDITS_BNR_GATED`]); the other
+//! four are visible.
 
 /// Every built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **101** for v0.6.0.
+/// ASCII-sorted. Locked at length **106** for v0.6.0.
 ///
 /// Changing the count or membership requires bumping the parity fixture
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
-/// reflect the 94/47/18 lock per the 2026-06-20 slash-parity pass).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 101] = &[
+/// reflect the 106/47/18 lock per the 2026-07-14 H-BIN-11 slash-parity pass).
+pub const BUILTIN_COMMAND_NAMES: &[&str; 106] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -42,12 +60,14 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 101] = &[
     "autocompact",
     "autofix-pr",
     "backfill-sessions",
+    "background",
     "branch",
     "break-cache",
     "bridge",
     "brief",
     "btw",
     "bughunter",
+    "cd",
     "chrome",
     "clear",
     "color",
@@ -70,6 +90,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 101] = &[
     "fast",
     "feedback",
     "files",
+    "focus",
     "fork",
     "goal",
     "good-claude",
@@ -130,9 +151,11 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 101] = &[
     "theme",
     "thinkback",
     "thinkback-play",
+    "tui",
     "ultraplan",
     "upgrade",
     "usage",
+    "usage-credits",
     "version",
     "voice",
     "x402",
@@ -421,12 +444,32 @@ pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
 /// so any `isHidden:!0` command is dropped from both surfaces.
 pub const HIDDEN_PALETTE_COMMANDS: &[&str] = &["extra-usage", "heapdump", "rate-limit-options"];
 
+/// **`bnr()`-gated, hidden-by-default named commands** — real, conditionally
+/// enabled builtin command objects whose `isEnabled` resolves to `false` in a
+/// fresh session with no subscription and no rate-limit status, so they are
+/// dropped from the default palette / `/help` even though they remain
+/// dispatchable when typed in full.
+///
+/// H-BIN-11 (cc2.1.207): `/usage-credits` ships two objects, both gated by
+/// `isEnabled:()=>bnr()&&…` where
+/// `bnr()=!DISABLE_EXTRA_USAGE_COMMAND && (rateLimitStatus!==null ||
+/// isOverageProvisioningAllowed())`. Because a default port session carries no
+/// subscription snapshot and no live rate-limit status, `bnr()` is `false`, so
+/// the command is `$te(c)`-filtered out of the default surface — matching a
+/// fresh claude-code session. The DYNAMIC un-hide (when a subscription /
+/// rate-limit status arrives) is applied by the palette builder via
+/// `traits::subscription::SubscriptionSnapshot::is_usage_credits_command_enabled`;
+/// only the default (off) state is modeled statically here.
+pub const USAGE_CREDITS_BNR_GATED: &[&str] = &["usage-credits"];
+
 /// `(command, aliases)` for the builtins that ship an `aliases:` array in
 /// claude-code (cp-03). The slash palette folds these into the fuzzy candidate
 /// set (so typing `/cost` finds `/usage`) and, when a row matched via a typed
 /// alias, shows ` (<alias>)` after the name (`createCommandSuggestionItem`).
 /// Ported from each `commands/<name>/index.ts` `aliases` literal.
 pub const COMMAND_ALIASES: &[(&str, &[&str])] = &[
+    // H-BIN-11 cc2.1.207: `name:"background",aliases:["bg"]`.
+    ("background", &["bg"]),
     ("clear", &["reset", "new"]),
     ("config", &["settings"]),
     ("desktop", &["app"]),
@@ -465,17 +508,21 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 ///   statsig / remote gate is OFF by default, which also resolves `isHidden`
 ///   true and `isEnabled()` false); and
 /// - [`HIDDEN_PALETTE_COMMANDS`] — the 3 enabled-but-`isHidden:!0` named
-///   commands (`extra-usage`, `heapdump`, `rate-limit-options`).
+///   commands (`extra-usage`, `heapdump`, `rate-limit-options`); and
+/// - [`USAGE_CREDITS_BNR_GATED`] — the 1 `bnr()`-gated command
+///   (`usage-credits`), off-by-default in a fresh no-subscription session.
 ///
-/// Total = 26 filtered names. The [`HOST_BOUND_DEFERRED_GAPS`] trio
+/// Total = 27 filtered names. The [`HOST_BOUND_DEFERRED_GAPS`] trio
 /// (`btw`, `x402`, `reload-plugins`) is deliberately EXCLUDED: claude-code
 /// implements those with no `isHidden`/`isEnabled` gate, so they remain
 /// visible. Likewise `install-slack-app`, `mobile`, and `desktop` carry no
 /// default-off hidden gate (`desktop`'s `Dsl()` returns `true`) and stay
-/// visible.
+/// visible; and `background`, `cd`, `focus`, `tui` (the other four H-BIN-11
+/// additions) are ungated and stay visible.
 #[must_use]
 pub fn is_palette_hidden(name: &str) -> bool {
     HIDDEN_PALETTE_COMMANDS.contains(&name)
+        || USAGE_CREDITS_BNR_GATED.contains(&name)
         || CORRECT_BY_DESIGN_STUBS.iter().any(|(n, _)| *n == name)
 }
 
@@ -569,8 +616,12 @@ pub fn core_description(name: &str) -> &'static str {
         // `command_core::autocompact`). Verbatim from the 2.1.198 binary's
         // headless `type:"local"` autocompact command object.
         "autocompact" => "Configure the auto-compact window size",
+        // (H-BIN-11 cc2.1.207) `local-jsx` command objects, descriptions
+        // verbatim from the 2.1.207 binary.
+        "background" => "Send this session to the background and free the terminal",
         "branch" => "Create a branch of the current conversation at this point",
         "bridge" => "Connect this terminal for remote-control sessions",
+        "cd" => "Move this session to a new working directory",
         "btw" => "Ask a quick side question without interrupting the main conversation",
         "chrome" => "Claude in Chrome (Beta) settings",
         "color" => "Set the prompt bar color for this session",
@@ -585,6 +636,7 @@ pub fn core_description(name: &str) -> &'static str {
         "fast" => "Toggle fast mode",
         "feedback" => "Submit feedback about LingXi",
         "files" => "List all files currently in context",
+        "focus" => "Toggle focus view: just your prompt, summary, and response",
         "ide" => "Manage IDE integrations and show status",
         "init-verifiers" => "Create verifier skill(s) for automated verification of code changes",
         "insights" => "Generate a report analyzing your LingXi sessions",
@@ -614,8 +666,13 @@ pub fn core_description(name: &str) -> &'static str {
         "tasks" => "List and manage background tasks",
         "terminal-setup" => "Install Shift+Enter key binding for newlines",
         "theme" => "Change the theme",
+        "tui" => "Set the terminal UI renderer (default | fullscreen)",
         "ultraplan" => "LingXi on the web drafts an advanced plan you can edit and approve",
         "upgrade" => "Upgrade to Max for higher rate limits and more Opus",
+        "usage-credits" => "Configure usage credits to keep working when you hit a limit",
+        // Deprecated hidden alias of `/usage-credits`
+        // (`name:"extra-usage",description:"Renamed to /usage-credits",isHidden:!0`).
+        "extra-usage" => "Renamed to /usage-credits",
         "voice" => "Toggle voice mode",
         "x402" => "Configure x402 crypto payments (USDC on Base)",
         // Batch-8 implemented commands (real handlers in `command-core`); their
@@ -646,8 +703,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_101() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
+    fn total_count_locked_at_106() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
+    }
+
+    #[test]
+    fn h_bin_11_names_present_and_gated() {
+        // H-BIN-11 (cc2.1.207): five newly-registered names.
+        for n in ["background", "cd", "focus", "tui", "usage-credits"] {
+            assert!(
+                BUILTIN_COMMAND_NAMES.contains(&n),
+                "H-BIN-11 name '{n}' missing"
+            );
+        }
+        // `/background` carries the `bg` alias.
+        assert_eq!(command_aliases("background"), &["bg"]);
+        // Four are visible; `/usage-credits` is bnr()-gated hidden-by-default.
+        for visible in ["background", "cd", "focus", "tui"] {
+            assert!(
+                !is_palette_hidden(visible),
+                "/{visible} must be visible in the default palette"
+            );
+        }
+        assert!(
+            is_palette_hidden("usage-credits"),
+            "/usage-credits is bnr()-gated and hidden by default"
+        );
+        // Descriptions are the verbatim 2.1.207 command-object strings.
+        assert_eq!(
+            core_description("cd"),
+            "Move this session to a new working directory"
+        );
+        assert_eq!(
+            core_description("background"),
+            "Send this session to the background and free the terminal"
+        );
+        assert_eq!(
+            core_description("focus"),
+            "Toggle focus view: just your prompt, summary, and response"
+        );
+        assert_eq!(
+            core_description("tui"),
+            "Set the terminal UI renderer (default | fullscreen)"
+        );
+        assert_eq!(
+            core_description("usage-credits"),
+            "Configure usage credits to keep working when you hit a limit"
+        );
     }
 
     // ── #63 DISABLE_*_COMMAND env gates ──────────────────────────────────────
@@ -922,7 +1024,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     }
 
     // ========================================================================
@@ -1027,7 +1129,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "23 + 3 == 26"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     }
 
     #[test]

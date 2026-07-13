@@ -62,9 +62,9 @@ async fn help_dispatch() {
             assert!(display.contains(
                 "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/"
             ));
-            // 76 newlines (header + 75 visible lines); the 26 hidden/disabled
+            // 80 newlines (header + 79 visible lines); the 27 hidden/disabled
             // commands are filtered out to match claude-code's /help.
-            assert_eq!(display.matches('\n').count(), 76);
+            assert_eq!(display.matches('\n').count(), 80);
         }
         other => panic!("{other:?}"),
     }

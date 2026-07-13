@@ -1,11 +1,11 @@
-//! Parity: lock the 101 builtin slash-command names plus the per-command
+//! Parity: lock the 106 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total name count = 101
+//! - Total name count = 106
 //! - Core name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
@@ -135,7 +135,9 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "add-dir",
     "agents",
     "autocompact",
+    "background",
     "branch",
+    "cd",
     "clear",
     "color",
     "commit",
@@ -150,6 +152,7 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "exit",
     "export",
     "files",
+    "focus",
     "fork",
     "goal",
     "help",
@@ -184,7 +187,9 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "tasks",
     "terminal-setup",
     "theme",
+    "tui",
     "usage",
+    "usage-credits",
     "version",
 ];
 
@@ -202,9 +207,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 101);
-    assert_eq!(f.commands.len(), 101);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 101);
+    assert_eq!(f.meta.total_count_lock, 106);
+    assert_eq!(f.commands.len(), 106);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 106);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 

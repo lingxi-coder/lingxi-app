@@ -27,6 +27,9 @@ lsp = { path = "../lsp" }
 # `command-api`'s dispatcher (and the skill/TUI paths) inject. Acyclic:
 # `command-api` depends only on protocol/traits/hooks — never on `tool-api`.
 command-api = { path = "../command-api" }
+# SessionCwd (worktree 206 parity): lock-free-read switchable cwd/trusted-dirs
+# cell. Not yet pinned at the workspace level — no other crate uses it.
+arc-swap = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

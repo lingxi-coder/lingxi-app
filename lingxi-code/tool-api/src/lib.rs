@@ -26,6 +26,7 @@ pub mod prompt_shell;
 pub mod read_file_state;
 pub mod registry;
 pub mod sandbox_runner;
+pub mod session_cwd;
 pub mod tool_invoker_impl;
 pub mod tool_trait;
 pub mod util;
@@ -47,5 +48,6 @@ pub use prompt_shell::{build_prompt_shell_provider, PromptShellExpansionProvider
 pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;
 pub use sandbox_runner::{default_sandbox_runner, LegacyWrapRunner, SandboxRunner};
+pub use session_cwd::SessionCwd;
 pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_trait::*;

@@ -1375,9 +1375,11 @@ pub struct DesktopConfig {
     /// Overrides the 'agent' setting."). `build()` resolves it against the
     /// final catalog with the `dts` lookup (exact `agentType`, else FQN
     /// `…:{name}` suffix) and logs the binary's `Warning: agent "X" not
-    /// found …` line when absent. RESIDUAL seam: lingxi has no main-thread
-    /// agent runtime (`xz` → `mainThreadAgentType` re-skins the MAIN session's
-    /// system prompt/tools), so a resolved agent is not yet applied.
+    /// found …` line when absent. (P2-02 cc2.1.207) On a HIT it APPLIES the
+    /// agent to the MAIN thread (`bde`/`mainThreadAgentDefinition`): agentType,
+    /// system prompt (`nre`), `tools:`/`disallowedTools` pool filter (`HJ`), and
+    /// `model` override (`jb(Zo(model))`, unless `--model` was given). RESIDUAL:
+    /// frontmatter `hooks`/`mcpServers` swap + resume restoration (`rVe`).
     pub cli_agent: Option<String>,
     /// (M4 cc2.1.198) CLI `--plugin-dir <path>` entries ("Load a plugin from a
     /// directory or .zip for this session only", repeatable). Each entry feeds
@@ -5746,23 +5748,30 @@ pub async fn build(
     // behavior.` and the session proceeds with default behavior.
     //
     // (P2-02 cc2.1.207) On a HIT the binary APPLIES the agent to the MAIN loop
-    // via `bde(h?.agentType)` + `mainThreadAgentDefinition`. We adopt the two
-    // most model-visible pieces here: the agent's `agentType` (rides every
-    // main-thread lifecycle hook payload, claude `wf`/`MVe` `?? MB()`) and its
-    // system prompt (becomes the main-loop system prompt on every query via
-    // `nre`, `--system-prompt` still winning). This runs BEFORE the
-    // `SessionStart` firing below so that hook carries the `agentType`.
-    // RESIDUAL seam (follow-up, same `mainThreadAgentType`): agent `tools`
-    // filtering (`HJ`→resolvedTools), `model` override (`jb(Zo(model))` when the
-    // user gave no model), frontmatter `hooks` registration (`Rft`→
-    // `mainThreadAgentHooks`), frontmatter `mcpServers` (scope `"agent"`), and
-    // resume restoration (`rVe`). (Built-in agent defs live in the subagent
-    // spawner, not this catalog, so their names are absent from the miss
-    // warning's "Available agents" list — residual.)
+    // via `bde(h?.agentType)` + `mainThreadAgentDefinition`. We adopt the
+    // model-visible pieces here:
+    //   • `agentType` — rides every main-thread lifecycle hook payload (claude
+    //     `wf`/`MVe` `?? MB()`);
+    //   • system prompt — becomes the main-loop system prompt on every query via
+    //     `nre` (`--system-prompt` still winning);
+    //   • `tools:` + `disallowedTools` frontmatter — narrows the advertised tool
+    //     pool (claude `HJ(us,to,!1,!0).resolvedTools`, `n=true` ⇒ NO subagent
+    //     always-disallowed strip);
+    //   • `model` — replaces the main-loop model (claude `jb(Zo(y.model))`),
+    //     gated exactly like the binary: only when the user did NOT pass
+    //     `--model` (`!cfg.default_model_explicit` ≙ `!userSpecifiedModel`) AND
+    //     the agent declares an explicit model (`AgentModel != Inherit`).
+    // This runs BEFORE the `SessionStart` firing below so that hook carries the
+    // `agentType`, and AFTER the default-model seed above so the override wins.
+    // RESIDUAL seam (follow-up, same `mainThreadAgentType`): frontmatter `hooks`
+    // registration (`Rft`→`mainThreadAgentHooks`), frontmatter `mcpServers`
+    // (scope `"agent"`), and resume restoration (`rVe`). (Built-in agent defs
+    // live in the subagent spawner, not this catalog, so their names are absent
+    // from the miss warning's "Available agents" list — residual.)
     if let Some(wanted) = cfg.cli_agent.as_deref() {
         // Resolve against the FINAL catalog, extracting what the main thread
-        // applies (agentType + system prompt) so the catalog read lock is
-        // released before we mutate the orchestrator seam.
+        // applies (agentType + system prompt + tool policy + model) so the
+        // catalog read lock is released before we mutate the orchestrator seam.
         let applied = {
             let cat = plugin_agent_catalog.read().await;
             let hit = cat
@@ -5773,7 +5782,29 @@ pub async fn build(
                     cat.iter().find(|a| a.agent_type.ends_with(&suffix))
                 });
             match hit {
-                Some(a) => Some((a.agent_type.clone(), a.system_prompt.clone())),
+                Some(a) => {
+                    // claude `if(!userSpecifiedModel&&y.model&&y.model!=="inherit")
+                    // {jb(Zo(y.model))}`. `Zo` = `resolve_user_specified_model`
+                    // (alias→wire id). Frontmatter never yields `Explicit`, but
+                    // handle both alias/explicit arms for completeness.
+                    let model_override = if cfg.default_model_explicit {
+                        None
+                    } else {
+                        match &a.model {
+                            agent::AgentModel::Alias(spec) | agent::AgentModel::Explicit(spec) => {
+                                Some(agent::model_resolution::resolve_user_specified_model(spec))
+                            }
+                            agent::AgentModel::Inherit => None,
+                        }
+                    };
+                    Some((
+                        a.agent_type.clone(),
+                        a.system_prompt.clone(),
+                        a.tools.clone(),
+                        a.disallowed_tools.clone(),
+                        model_override,
+                    ))
+                }
                 None => {
                     tracing::warn!(
                         "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
@@ -5786,9 +5817,16 @@ pub async fn build(
                 }
             }
         };
-        if let Some((agent_type, system_prompt)) = applied {
+        if let Some((agent_type, system_prompt, tools, disallowed_tools, model_override)) = applied {
             tracing::debug!(agent = %agent_type, "--agent applied to main thread");
-            orch.set_main_thread_agent(agent_type, system_prompt).await;
+            orch.set_main_thread_agent(
+                agent_type,
+                system_prompt,
+                tools,
+                disallowed_tools,
+                model_override,
+            )
+            .await;
         }
     }
 

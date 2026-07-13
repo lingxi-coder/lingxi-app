@@ -690,6 +690,16 @@ pub(crate) struct MainThreadAgentState {
     /// `--system-prompt` (`overrideSystemPrompt`) is set. `None` for an agent
     /// that declares no prompt (the assembled default prompt is then used).
     pub(crate) system_prompt: Option<String>,
+    /// The agent's `tools:` frontmatter policy (claude-code `agentDef.tools`).
+    /// Filters the advertised main-loop tool pool via [`Self::build_wire_tools`]
+    /// — the `HJ(agentDef,to,!1,!0)` port with `n=true`, which keeps everything
+    /// on [`AgentToolPolicy::All`] (no `tools:` field) and narrows to the named
+    /// tools on [`AgentToolPolicy::Explicit`].
+    pub(crate) tool_policy: agent::AgentToolPolicy,
+    /// The agent's per-definition `disallowedTools` (claude-code
+    /// `agentDef.disallowedTools`) — subtracted from the advertised pool BEFORE
+    /// the `tool_policy` projection (base tool name, `(rule)` stripped).
+    pub(crate) disallowed_tools: Vec<String>,
 }
 
 pub struct ConversationOrchestrator {
@@ -847,8 +857,12 @@ pub struct ConversationOrchestrator {
     /// FINAL catalog (dir + `--agents` + plugin agents) once the orchestrator is
     /// already `Arc`-wrapped. Consumed by [`Self::effective_system_prompt`] (the
     /// agent's prompt becomes the main-loop system prompt, `--system-prompt`
-    /// still winning) and [`Self::lifecycle_hook_ctx`] (its `agentType` rides
-    /// every main-thread lifecycle hook payload, claude-code `wf`/`MVe` `?? MB()`).
+    /// still winning), [`Self::build_wire_tools`] (its `tools:` / `disallowedTools`
+    /// frontmatter narrows the advertised tool pool, claude `HJ(agentDef,to,!1,!0)`),
+    /// and [`Self::lifecycle_hook_ctx`] (its `agentType` rides every main-thread
+    /// lifecycle hook payload, claude-code `wf`/`MVe` `?? MB()`). The agent's
+    /// `model` is applied eagerly to the session by [`Self::set_main_thread_agent`],
+    /// not stored here.
     pub(crate) main_thread_agent: tokio::sync::RwLock<Option<MainThreadAgentState>>,
     /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
     /// not configured — `force_compact` then falls back to the legacy
@@ -7488,13 +7502,36 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Called ONCE at startup by the composition root when `--agent` resolves to
     /// a catalog hit — the resolution runs against the FINAL agent catalog after
     /// this orchestrator is already `Arc`-wrapped, so the seam is interior-mutable.
-    /// After this, `agent_type` rides every main-thread lifecycle hook payload
-    /// and `system_prompt` (when `Some`) becomes the main-loop system prompt on
-    /// every query — `--system-prompt` (`system_prompt_override`) still winning.
-    pub async fn set_main_thread_agent(&self, agent_type: String, system_prompt: Option<String>) {
+    /// After this, `agent_type` rides every main-thread lifecycle hook payload,
+    /// `system_prompt` (when `Some`) becomes the main-loop system prompt on every
+    /// query — `--system-prompt` (`system_prompt_override`) still winning — and
+    /// `tool_policy` / `disallowed_tools` narrow the advertised tool pool (claude
+    /// `HJ(agentDef,to,!1,!0)`).
+    ///
+    /// `model_override` is the agent's frontmatter `model` ALREADY resolved to a
+    /// concrete wire id and gated by the caller (claude-code
+    /// `if(!userSpecifiedModel&&y.model&&y.model!=="inherit"){jb(Zo(y.model))}` —
+    /// the `!userSpecifiedModel` / `!=="inherit"` checks live at the composition
+    /// root, which owns `--model`). When `Some`, it replaces the session model
+    /// (profile cleared: agent frontmatter carries a bare id, no provider profile).
+    pub async fn set_main_thread_agent(
+        &self,
+        agent_type: String,
+        system_prompt: Option<String>,
+        tool_policy: agent::AgentToolPolicy,
+        disallowed_tools: Vec<String>,
+        model_override: Option<String>,
+    ) {
+        if let Some(model) = model_override {
+            let mut s = self.session.lock().await;
+            s.model = model;
+            s.model_profile = None;
+        }
         *self.main_thread_agent.write().await = Some(MainThreadAgentState {
             agent_type,
             system_prompt,
+            tool_policy,
+            disallowed_tools,
         });
     }
 
@@ -8615,6 +8652,40 @@ As you answer the user's questions, you can use the following context:\n\
                     .iter()
                     .any(|d| permission::tool_wide_name_matches(d, t.name()))
             });
+        }
+        // (P2-02 cc2.1.207) Main-thread `--agent` tool restriction. When `--agent`
+        // adopted an agent, the binary filters the advertised tool pool through
+        // its frontmatter: `_o=MB();…let us=yn.find(a=>a.agentType===_o);if(us){to=
+        // HJ(us,to,!1,!0).resolvedTools}`. `HJ`'s 4th arg (`n=true`) makes it
+        // SKIP the subagent always-disallowed strip (`_Ty`) — the main thread
+        // keeps ExitPlanMode / AskUserQuestion / … — so only two drops apply:
+        //   (1) the per-definition `disallowedTools` filter, then
+        //   (2) the `tools:` policy projection (`s===undefined` ⇒ keep all;
+        //       an explicit list ⇒ allow-list).
+        // Runs AFTER the tool-wide deny (claude `PNt` precedes `HJ`) and BEFORE
+        // wire serialization, on the SAME assembled pool. A strict no-op unless
+        // `--agent` was applied (guard `main_thread_agent.is_some()`).
+        {
+            let guard = self.main_thread_agent.read().await;
+            if let Some(a) = guard.as_ref() {
+                if !a.disallowed_tools.is_empty() {
+                    let def_denied: std::collections::HashSet<&str> = a
+                        .disallowed_tools
+                        .iter()
+                        .map(|spec| spec.split('(').next().unwrap_or(spec).trim())
+                        .collect();
+                    tools.retain(|t| !def_denied.contains(t.name()));
+                }
+                match &a.tool_policy {
+                    agent::AgentToolPolicy::All { .. } => {}
+                    agent::AgentToolPolicy::Explicit(names) => {
+                        tools.retain(|t| names.iter().any(|n| n == t.name()));
+                    }
+                    agent::AgentToolPolicy::Except(names) => {
+                        tools.retain(|t| !names.iter().any(|n| n == t.name()));
+                    }
+                }
+            }
         }
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
@@ -14336,9 +14407,25 @@ mod main_thread_agent_tests {
         StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
     use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    /// The "no `tools:` frontmatter" policy (claude `s===undefined`) — keeps the
+    /// whole tool pool. Used as the default in the system-prompt-focused tests.
+    fn keep_all_tools() -> agent::AgentToolPolicy {
+        agent::AgentToolPolicy::All {
+            use_exact_tools: false,
+        }
+    }
 
     fn orch_with_config(config: OrchestratorConfig) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
@@ -14353,6 +14440,111 @@ mod main_thread_agent_tests {
         )
     }
 
+    /// A minimal builtin tool exposing a fixed `name()` — enough for the wire
+    /// serializer (`build_wire_tools`) to advertise it and for the main-thread
+    /// agent filter to inspect its name.
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| json!({ "type": "object", "properties": {} }))
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            self.0.into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({ "content": "ok" }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Build an orchestrator whose registry advertises the named builtin tools.
+    fn orch_with_tools(names: &[&'static str]) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        for n in names {
+            registry.register_builtin(Arc::new(NamedTool(n)) as Arc<dyn Tool>);
+        }
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    /// The set of `name` fields the wire tool array advertises.
+    async fn wire_tool_names(orch: &ConversationOrchestrator) -> Vec<String> {
+        orch.build_wire_tools()
+            .await
+            .into_iter()
+            .filter_map(|t| {
+                t.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
     /// A resolved `--agent` with a prompt REPLACES the assembled default system
     /// prompt on every query (claude-code `nre` uses `agentDef.getSystemPrompt()`
     /// as the whole system prompt, exactly like `--system-prompt`).
@@ -14363,6 +14555,9 @@ mod main_thread_agent_tests {
         orch.set_main_thread_agent(
             "code-reviewer".to_string(),
             Some("You are a meticulous code reviewer.".to_string()),
+            keep_all_tools(),
+            Vec::new(),
+            None,
         )
         .await;
         let after = orch.assemble_system_prompt_preview().await;
@@ -14384,6 +14579,9 @@ mod main_thread_agent_tests {
         orch.set_main_thread_agent(
             "code-reviewer".to_string(),
             Some("agent prompt should be ignored".to_string()),
+            keep_all_tools(),
+            Vec::new(),
+            None,
         )
         .await;
         assert_eq!(
@@ -14398,8 +14596,14 @@ mod main_thread_agent_tests {
     async fn main_thread_agent_without_prompt_uses_default() {
         let orch = orch_with_config(OrchestratorConfig::default());
         let default = orch.assemble_system_prompt_preview().await;
-        orch.set_main_thread_agent("promptless".to_string(), None)
-            .await;
+        orch.set_main_thread_agent(
+            "promptless".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
         assert_eq!(orch.assemble_system_prompt_preview().await, default);
     }
 
@@ -14411,11 +14615,115 @@ mod main_thread_agent_tests {
     async fn lifecycle_hook_ctx_carries_main_thread_agent_type() {
         let orch = orch_with_config(OrchestratorConfig::default());
         assert_eq!(orch.expansion_hook_context().await.agent_type, None);
-        orch.set_main_thread_agent("code-reviewer".to_string(), None)
-            .await;
+        orch.set_main_thread_agent(
+            "code-reviewer".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
         assert_eq!(
             orch.expansion_hook_context().await.agent_type,
             Some("code-reviewer".to_string())
         );
+    }
+
+    /// An adopted agent with a `tools:` allow-list narrows the advertised main-
+    /// loop tool pool to the named tools (claude `HJ(agentDef,to,!1,!0)` with an
+    /// explicit `s`: only listed tools survive). Tools not in the list are
+    /// dropped; a listed name that does not exist is simply absent.
+    #[tokio::test]
+    async fn main_thread_agent_explicit_tools_narrow_the_pool() {
+        let orch = orch_with_tools(&["Read", "Write", "Bash", "Grep"]);
+        // No agent yet ⇒ every registered tool is advertised.
+        let before = wire_tool_names(&orch).await;
+        assert_eq!(before, vec!["Bash", "Grep", "Read", "Write"]);
+
+        orch.set_main_thread_agent(
+            "reviewer".to_string(),
+            None,
+            agent::AgentToolPolicy::Explicit(vec!["Read".to_string(), "Grep".to_string()]),
+            Vec::new(),
+            None,
+        )
+        .await;
+        let after = wire_tool_names(&orch).await;
+        assert_eq!(after, vec!["Grep", "Read"]);
+    }
+
+    /// `AgentToolPolicy::All` (no `tools:` frontmatter, claude `s===undefined`)
+    /// keeps the WHOLE pool — including tools the SUBAGENT filter would strip as
+    /// "always-disallowed" (ExitPlanMode / AskUserQuestion). The main-thread
+    /// filter runs `HJ` with `n=true`, which bypasses that strip. Regression
+    /// guard against accidentally reusing the subagent resolver here.
+    #[tokio::test]
+    async fn main_thread_agent_all_policy_keeps_always_disallowed_tools() {
+        let orch = orch_with_tools(&["Read", "ExitPlanMode", "AskUserQuestion"]);
+        orch.set_main_thread_agent(
+            "planner".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
+        let after = wire_tool_names(&orch).await;
+        assert_eq!(after, vec!["AskUserQuestion", "ExitPlanMode", "Read"]);
+    }
+
+    /// The agent's per-definition `disallowedTools` subtracts from the pool
+    /// (base tool name; a trailing `(rule)` is stripped) BEFORE the `tools:`
+    /// projection — claude `HJ` `g=u.filter(P=>!isToolDisallowed(P))`.
+    #[tokio::test]
+    async fn main_thread_agent_disallowed_tools_subtract() {
+        let orch = orch_with_tools(&["Read", "Write", "Bash"]);
+        orch.set_main_thread_agent(
+            "safe".to_string(),
+            None,
+            keep_all_tools(),
+            vec!["Write".to_string(), "Bash(rm -rf)".to_string()],
+            None,
+        )
+        .await;
+        let after = wire_tool_names(&orch).await;
+        assert_eq!(after, vec!["Read"]);
+    }
+
+    /// A resolved `--agent` model (`Some(resolved_id)`) replaces the session
+    /// model (claude `jb(Zo(y.model))`); the caller has already gated it on
+    /// `!userSpecifiedModel` and resolved the alias to a wire id. The profile is
+    /// cleared (agent frontmatter carries a bare id).
+    #[tokio::test]
+    async fn main_thread_agent_model_override_replaces_session_model() {
+        let mut config = OrchestratorConfig::default();
+        config.model = "base-model".to_string();
+        let orch = orch_with_config(config);
+        assert_eq!(orch.session().lock().await.model, "base-model");
+
+        orch.set_main_thread_agent(
+            "fast".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            Some("claude-agent-model".to_string()),
+        )
+        .await;
+        let session = orch.session();
+        let s = session.lock().await;
+        assert_eq!(s.model, "claude-agent-model");
+        assert_eq!(s.model_profile, None);
+    }
+
+    /// `model_override == None` (agent `model: inherit`, or the user passed
+    /// `--model` so the caller gated it out) leaves the session model untouched.
+    #[tokio::test]
+    async fn main_thread_agent_no_model_override_leaves_session_model() {
+        let mut config = OrchestratorConfig::default();
+        config.model = "base-model".to_string();
+        let orch = orch_with_config(config);
+        orch.set_main_thread_agent("inheritor".to_string(), None, keep_all_tools(), Vec::new(), None)
+            .await;
+        assert_eq!(orch.session().lock().await.model, "base-model");
     }
 }

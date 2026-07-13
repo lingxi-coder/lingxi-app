@@ -53,6 +53,9 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // #40 terminalSequence: None — Block mock emits no terminal
                 // escape sequence.
                 terminal_sequence: None,
+                // P2-10 watchPaths: None — this PreToolUse Block mock is not a
+                // FileChanged/CwdChanged hook, so it adds no watch paths.
+                watch_paths: None,
             }),
         }
     }

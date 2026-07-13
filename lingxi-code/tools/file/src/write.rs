@@ -23,7 +23,9 @@ use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
-use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
+use tool_api::util::path_validation::{
+    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd,
+};
 use tool_api::BuiltinToolContext;
 
 /// Tool name byte-lock — matches claude-code tool registry.
@@ -213,7 +215,12 @@ impl Tool for FileWriteTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("content is required".into()))?;
 
-        let path = PathBuf::from(file_path);
+        // Worktree parity plan (Task 3): a RELATIVE `file_path` resolves
+        // against the CURRENT session cwd (`ctx.cwd()`, switchable by
+        // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
+        // `std::fs::canonicalize` would otherwise consult below. An absolute
+        // `file_path` (the documented/expected case) is unaffected.
+        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
@@ -1027,6 +1034,70 @@ mod tests {
         assert!(
             schema["properties"].get("mkdir").is_none(),
             "schema must NOT expose `mkdir`"
+        );
+    }
+
+    /// Worktree parity plan (Task 3): a RELATIVE `file_path` must resolve
+    /// against the CURRENT `session_cwd` — so after `EnterWorktree` swaps the
+    /// cwd into a worktree, a relative-path `Write` lands under the
+    /// worktree, NOT the boot cwd (which is what `std::fs::canonicalize`
+    /// would otherwise resolve a relative path against, since it consults
+    /// the frozen OS process cwd, not the switchable session cwd).
+    #[tokio::test]
+    async fn relative_path_write_follows_session_cwd_swap_into_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+
+        // Swap the session cwd into the worktree subdir (trusting it too),
+        // the way `EnterWorktree` does.
+        ctx.session_cwd.swap(wt.clone(), vec![wt.clone()]);
+        assert_eq!(ctx.cwd(), wt);
+
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": "relative.txt", "content": "hello" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("relative.txt")).unwrap(),
+            "hello",
+            "relative file_path must resolve under the SWAPPED worktree cwd"
+        );
+        assert!(
+            !tmp.path().join("relative.txt").exists(),
+            "must NOT have landed under the boot cwd"
+        );
+    }
+
+    /// INERT INVARIANT companion: with no `session_cwd.swap(..)` call, a
+    /// relative `file_path` resolves under the boot cwd exactly as it did
+    /// before this task's fix.
+    #[tokio::test]
+    async fn relative_path_write_resolves_under_boot_cwd_without_swap() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        assert_eq!(ctx.cwd(), tmp.path(), "no swap happened in this test");
+
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": "relative.txt", "content": "hello" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("relative.txt")).unwrap(),
+            "hello"
         );
     }
 }

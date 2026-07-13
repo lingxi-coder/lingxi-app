@@ -1540,4 +1540,77 @@ that bypasses Perforce tracking."
         assert!(p.contains("Strip the Read line prefix (line number + tab) before matching."));
         assert!(p.ends_with("- `replace_all: true` replaces every occurrence instead."));
     }
+
+    /// Worktree parity plan (Task 3): a RELATIVE `file_path` must resolve
+    /// against the CURRENT `session_cwd` — so after `EnterWorktree` swaps the
+    /// cwd into a worktree, a relative-path `Edit` lands under the worktree,
+    /// NOT the boot cwd (which is what `std::fs::canonicalize` would resolve
+    /// a relative path against if the tool passed it through unmodified).
+    #[tokio::test]
+    async fn relative_path_edit_follows_session_cwd_swap_into_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let target = wt.join("rel.txt");
+        std::fs::write(&target, "hello world").unwrap();
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        // Swap the session cwd into the worktree subdir (trusting it too), the
+        // way `EnterWorktree` does.
+        ctx.session_cwd.swap(wt.clone(), vec![wt.clone()]);
+        assert_eq!(ctx.cwd(), wt);
+
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": "rel.txt",
+                "old_string": "world",
+                "new_string": "worktree"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "hello worktree",
+            "relative file_path must resolve under the SWAPPED worktree cwd"
+        );
+        assert!(
+            !tmp.path().join("rel.txt").exists(),
+            "must NOT have landed under the boot cwd"
+        );
+    }
+
+    /// INERT INVARIANT companion: with no `session_cwd.swap(..)` call, a
+    /// relative `file_path` resolves under the boot cwd exactly as it did
+    /// before this task's fix.
+    #[tokio::test]
+    async fn relative_path_edit_resolves_under_boot_cwd_without_swap() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("rel.txt");
+        std::fs::write(&target, "hello world").unwrap();
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        assert_eq!(ctx.cwd(), tmp.path(), "no swap happened in this test");
+
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": "rel.txt",
+                "old_string": "world",
+                "new_string": "boot"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello boot");
+    }
 }

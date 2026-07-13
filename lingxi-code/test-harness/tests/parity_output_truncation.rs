@@ -6,16 +6,16 @@
 //! Two assertions:
 //!   1. Constant lock — the two literals are exactly the spec values.
 //!   2. Source-level lock — every per-tool source file either references
-//!      `MAX_TOOL_OUTPUT_LENGTH` / `truncate` / `truncate_default`, or
-//!      carries an explicit `// no-truncation: <reason>` opt-out for tools
-//!      whose return is bounded by construction (e.g. `{ ok: bool }`).
+//!      `MAX_TOOL_OUTPUT_LENGTH` / `truncate_shell_output` / a tool-specific
+//!      truncator, or carries an explicit `// no-truncation: <reason>` opt-out
+//!      for tools whose return is bounded by construction (e.g. `{ ok: bool }`).
 
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use tool_api::util::output_truncation::{MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX};
+use tool_api::util::output_truncation::{MAX_TOOL_OUTPUT_LENGTH, SHELL_TRUNCATION_SUFFIX_TEMPLATE};
 
 /// Each entry MUST carry a one-line justification.
 fn exempt_tools() -> HashSet<&'static str> {
@@ -123,10 +123,10 @@ fn tool_files() -> Vec<&'static str> {
 
 #[test]
 fn output_truncation_constants_locked() {
-    assert_eq!(MAX_TOOL_OUTPUT_LENGTH, 30_000, "spec §7: 30_000 chars");
+    assert_eq!(MAX_TOOL_OUTPUT_LENGTH, 30_000, "BASH_MAX_OUTPUT_LENGTH default: 30_000 chars");
     assert_eq!(
-        TRUNCATION_SUFFIX, "\n\n[Output truncated due to length]",
-        "spec §7 locked suffix"
+        SHELL_TRUNCATION_SUFFIX_TEMPLATE, "\n\n... [{N} lines truncated] ...",
+        "claude-code Qyu()/BashTool utils.ts:156-158 shell truncation suffix"
     );
 }
 
@@ -145,8 +145,8 @@ fn truncation_lib_source_contains_literals() {
         lib_src.display()
     );
     assert!(
-        body.contains("[Output truncated due to length]"),
-        "TRUNCATION_SUFFIX literal missing from {}",
+        body.contains("... [{N} lines truncated] ..."),
+        "SHELL_TRUNCATION_SUFFIX_TEMPLATE literal missing from {}",
         lib_src.display()
     );
 }
@@ -167,7 +167,7 @@ fn every_tool_with_output_calls_truncate_or_opts_out() {
         let has_call = body.contains("MAX_TOOL_OUTPUT_LENGTH")
             || body.contains("output_truncation::truncate")
             || body.contains("shared::truncate")
-            || body.contains("truncate_default")
+            || body.contains("truncate_shell_output")
             || body.contains("OutputTruncated");
         // Files in the exempt set are allowed without a call (their tools
         // return bounded outputs). Their stem (without `.rs`) appears in

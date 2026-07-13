@@ -147,11 +147,11 @@ fn file_tools_fixture_matches_production_constants() {
     assert_eq!(fx.output_truncation.max_length, 30_000);
     assert_eq!(
         fx.output_truncation.suffix,
-        tool_api::util::output_truncation::TRUNCATION_SUFFIX
+        tool_api::util::output_truncation::SHELL_TRUNCATION_SUFFIX_TEMPLATE
     );
     assert_eq!(
         fx.output_truncation.suffix,
-        "\n\n[Output truncated due to length]"
+        "\n\n... [{N} lines truncated] ..."
     );
 
     assert_eq!(fx.glob_cap.value, tool_file::glob::MAX_GLOB_MATCHES);

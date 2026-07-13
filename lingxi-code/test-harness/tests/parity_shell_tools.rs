@@ -192,7 +192,7 @@ fn shell_tools_parity() {
     );
     assert_eq!(
         f.output_truncation.suffix,
-        tool_api::util::output_truncation::TRUNCATION_SUFFIX,
+        tool_api::util::output_truncation::SHELL_TRUNCATION_SUFFIX_TEMPLATE,
     );
 
     // Sandbox refusal literal — sourced from M2-04 lock at

@@ -39,7 +39,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
+use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
 // ===== Locked constants =====================================================
@@ -422,27 +422,9 @@ fn is_within_allowed(cwd: &std::path::Path, dir: &std::path::Path) -> bool {
     e.starts_with(&t_with_sep)
 }
 
-/// Truncate Bash output the way claude-code `BashTool/utils.ts` `formatOutput`
-/// does (`:156-158`): keep the first `max` chars, then append
-/// `\n\n... [N lines truncated] ...` where `N` is the number of `\n` characters
-/// in the truncated tail (`countCharInString(content, '\n', max)`) plus one.
-///
-/// Returns `(out, did_truncate)`. When `content` fits within `max`, it is
-/// returned verbatim with `did_truncate == false`. Char-based slicing keeps
-/// multibyte UTF-8 codepoints intact; newlines are ASCII so the tail line count
-/// is identical to the TS UTF-16 `indexOf` walk.
-#[must_use]
-fn truncate_bash_output(content: String, max: usize) -> (String, bool) {
-    if content.chars().count() <= max {
-        return (content, false);
-    }
-    let head: String = content.chars().take(max).collect();
-    // `remainingLines = countCharInString(content, '\n', max) + 1`: count the
-    // newlines in everything after the kept head (the truncated tail).
-    let remaining_lines = content.chars().skip(max).filter(|&c| c == '\n').count() + 1;
-    let truncated = format!("{head}\n\n... [{remaining_lines} lines truncated] ...");
-    (truncated, true)
-}
+// Bash output truncation is the shared shell-command form (claude-code `Qyu()`
+// / `BashTool/utils.ts:156-158`): see [`tool_api::util::output_truncation::truncate_shell_output`].
+// REPL and PowerShell route through the same helper.
 
 /// The interrupt/abort marker appended to stderr (`BashTool.tsx:602-604`).
 const ABORT_MARKER: &str = "<error>Command was aborted before completion</error>";
@@ -609,7 +591,8 @@ fn build_interrupted_result(
     let normalized =
         crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(&stdout_clean));
     // `truncated` is telemetry-only, not part of the result data — discard it.
-    let (stdout_final, _truncated_out) = truncate_bash_output(normalized, bash_max_output_length());
+    let (stdout_final, _truncated_out) =
+        truncate_shell_output(normalized, bash_max_output_length());
 
     // claude-code appends the abort marker to stderr, preceded by EOL when
     // stderr is non-empty (`BashTool.tsx:602-604`).
@@ -1581,7 +1564,7 @@ impl Tool for BashTool {
                 // model-facing stdout is a base64 `data:image/…;base64,…` URI
                 // (matplotlib/screenshot helpers), return it as an IMAGE rather
                 // than truncating it as text. Detection runs on `normalized`
-                // (= TS `stripEmptyLines(stdout)`), BEFORE `truncate_bash_output`
+                // (= TS `stripEmptyLines(stdout)`), BEFORE `truncate_shell_output`
                 // — truncated base64 would decode to a corrupt image. The image
                 // rides on `new_messages` via the Rust image contract (mirrors
                 // FileRead `read.rs:718-759`); `data` carries `isImage: true` +
@@ -1670,7 +1653,7 @@ impl Tool for BashTool {
                 // truncation message matches claude-code `formatOutput`
                 // (`BashTool/utils.ts:156-158`): `... [N lines truncated] ...`.
                 let (stdout_final, truncated_out) =
-                    truncate_bash_output(normalized, bash_max_output_length());
+                    truncate_shell_output(normalized, bash_max_output_length());
                 // Exit-code reinterpretation (claude-code interpretCommandResult):
                 // e.g. `grep` no-match (exit 1) is NOT an error.
                 let interp =

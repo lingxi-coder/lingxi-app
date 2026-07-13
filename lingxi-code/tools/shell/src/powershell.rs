@@ -22,7 +22,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
 /// Windows PowerShell executable.
@@ -356,7 +356,8 @@ impl Tool for PowerShellTool {
             Ok(out) => {
                 let (stdout_clean, _ansi_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, _ansi_err) = strip_ansi_count(&out.stderr);
-                let (stdout_final, truncated) = truncate_default(stdout_clean);
+                let (stdout_final, truncated) =
+                    truncate_shell_output(stdout_clean, MAX_TOOL_OUTPUT_LENGTH);
                 let data = powershell_result_data(
                     &cmd_str,
                     out.exit_code,

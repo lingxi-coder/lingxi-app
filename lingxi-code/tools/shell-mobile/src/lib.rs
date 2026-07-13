@@ -32,7 +32,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::output_truncation::{truncate, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::util::output_truncation::{truncate_shell_output, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
 use traits::process::ProcessError;
@@ -318,8 +318,8 @@ impl Tool for ShellMobileTool {
             )));
         }
         let limit = self.max_result_size_chars();
-        let (stdout, truncated_out) = truncate(out.stdout, limit);
-        let (stderr, truncated_err) = truncate(out.stderr, limit);
+        let (stdout, truncated_out) = truncate_shell_output(out.stdout, limit);
+        let (stderr, truncated_err) = truncate_shell_output(out.stderr, limit);
 
         Ok(ToolCallResult {
             data: json!({

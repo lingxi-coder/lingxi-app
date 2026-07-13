@@ -179,6 +179,21 @@ struct EnterInput {
 /// worktree. Byte-exact, extracted from the 2.1.206 binary.
 const ALREADY_IN_WORKTREE_MESSAGE: &str = "Already in a worktree session. Pass `path` to switch into another existing worktree, or use ExitWorktree to leave this one before creating a new worktree.";
 
+/// EnterWorktree "create from an isolated subagent" guard — byte-faithful to
+/// 206's `validateInput` `Tze() && !e.path` refusal. The port swaps the SHARED
+/// `session_cwd`, so a subagent with a cwd override (`ctx.cwd.is_some()`)
+/// creating a worktree would mutate the parent session's directory. Static head
+/// is byte-exact; the tail is 206's brand-free ELSE branch (the port lacks the
+/// `Yf` managed-root detection to pick the `.claude/worktrees` first branch, and
+/// the else tail is itself a complete 206 string). Em-dash is U+2014. Entering
+/// an EXISTING worktree via `path` is still allowed (206 `Tze() && e.path`).
+const ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE: &str = "EnterWorktree cannot create a worktree from a subagent with a cwd override (isolation: \"worktree\" or explicit cwd) \u{2014} it would mutate the parent session's process-wide working directory. To work in a different directory (including a worktree), spawn an Agent with `cwd` set to it.";
+
+/// ExitWorktree "called from an isolated subagent" guard — byte-exact port of
+/// 206's `validateInput` `Tze()` refusal (errorCode 5), unconditional. Em-dash
+/// is U+2014.
+const EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE: &str = "ExitWorktree cannot be called from a subagent with a cwd override (isolation: \"worktree\" or explicit cwd) \u{2014} it would mutate the parent session's process-wide working directory. This agent is already isolated; use Bash with `cd` for directory changes within it.";
+
 /// 206 `yCd()` tool-use prompt (byte-exact, extracted via `grep -abo` /
 /// latin-1 slicing from the 2.1.206 binary at `function yCd(){return\`...\`}`),
 /// with two LingXi rebrands applied to the extracted text:
@@ -380,11 +395,15 @@ impl EnterWorktreeTool {
 
     /// Fire the 206 byte-exact single success event (`tengu_worktree_created`
     /// / `tengu_worktree_entered_existing`) IN ADDITION to the port's own
-    /// started/completed/failed lifecycle triad above.
-    async fn emit_worktree_event(&self, event_name: &str, branch_name: &str) {
+    /// started/completed/failed lifecycle triad above. Payload mirrors 206's
+    /// `N(...)` call: `{mid_session:true}` for create (@222207339), and
+    /// `{mid_session:true, cwd_override:true}` for enter-existing (@222206244).
+    async fn emit_worktree_event(&self, event_name: &str) {
         let mut md: LogEventMetadata = HashMap::new();
-        md.insert("tool_name".into(), verified(ENTER_TOOL_NAME));
-        md.insert("_PROTO_branch_name".into(), pii_tagged(branch_name));
+        md.insert("mid_session".into(), AnalyticsValue::Bool(true));
+        if event_name == WORKTREE_ENTERED_EXISTING {
+            md.insert("cwd_override".into(), AnalyticsValue::Bool(true));
+        }
         self.ctx.bus.log_event(event_name, md).await;
     }
 
@@ -443,7 +462,7 @@ impl EnterWorktreeTool {
                     .swap(handle.path.clone(), vec![handle.path.clone()]);
                 self.emit_completed(invocation_id, &handle.branch_name, duration_ms)
                     .await;
-                self.emit_worktree_event(WORKTREE_ENTERED_EXISTING, &handle.branch_name)
+                self.emit_worktree_event(WORKTREE_ENTERED_EXISTING)
                     .await;
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
@@ -528,7 +547,7 @@ impl EnterWorktreeTool {
                     .swap(handle.path.clone(), vec![handle.path.clone()]);
                 self.emit_completed(invocation_id, &handle.branch_name, duration_ms)
                     .await;
-                self.emit_worktree_event(WORKTREE_CREATED, &handle.branch_name)
+                self.emit_worktree_event(WORKTREE_CREATED)
                     .await;
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
@@ -668,7 +687,7 @@ impl Tool for EnterWorktreeTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = fresh_invocation_id();
@@ -696,6 +715,18 @@ impl Tool for EnterWorktreeTool {
             self.call_enter_existing(&invocation_id, started_at, path)
                 .await
         } else {
+            // 206 `validateInput`: `Tze() && !e.path` — a subagent isolated with a
+            // cwd override (`ctx.cwd.is_some()`) may NOT CREATE a worktree, since
+            // the port's `session_cwd.swap` mutates the SHARED parent cwd. (Entering
+            // an existing worktree via `path` above is still allowed, per 206.)
+            if ctx.cwd.is_some() {
+                let duration_ms = started_at.elapsed().as_millis() as u64;
+                self.emit_failed(&invocation_id, "subagent_cwd_override", duration_ms)
+                    .await;
+                return Err(ToolError::InvalidInput(
+                    ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE.to_string(),
+                ));
+            }
             self.call_create(&invocation_id, started_at, parsed.name)
                 .await
         }
@@ -899,7 +930,7 @@ impl Tool for ExitWorktreeTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = fresh_invocation_id();
@@ -919,6 +950,20 @@ impl Tool for ExitWorktreeTool {
                 )));
             }
         };
+
+        // 0. Subagent-cwd-override guard — 206 `validateInput`'s `Tze()` branch
+        // (errorCode:5), unconditional and FIRST (before the no-op session check).
+        // A subagent isolated with a cwd override (`ctx.cwd.is_some()`) must not
+        // call ExitWorktree: the port's `session_cwd.swap` would mutate the SHARED
+        // parent cwd.
+        if ctx.cwd.is_some() {
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+            self.emit_failed(&invocation_id, "subagent_cwd_override", duration_ms)
+                .await;
+            return Err(ToolError::InvalidInput(
+                EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE.to_string(),
+            ));
+        }
 
         // 1. No active `EnterWorktree` session ⇒ byte-exact no-op (206
         // `validateInput`'s `!ky()` branch, errorCode:1). Mirrors
@@ -1436,6 +1481,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_from_isolated_subagent_is_refused() {
+        // 206 `validateInput` `Tze() && !e.path`: a subagent isolated with a cwd
+        // override (`ctx.cwd.is_some()`) may NOT create a worktree — the port's
+        // `session_cwd.swap` would mutate the SHARED parent cwd.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-sub"));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let boot_cwd = bctx.cwd();
+        let tool = EnterWorktreeTool::new(bctx);
+        let mut sub = fresh_ctx();
+        sub.cwd = Some(PathBuf::from("/tmp/isolated/agent-wt"));
+        let err = tool
+            .call(json!({}), sub, fresh_tx())
+            .await
+            .expect_err("create from an isolated subagent must refuse");
+        assert_eq!(
+            format!("{err}"),
+            format!("invalid input: {ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE}")
+        );
+        assert_eq!(mock.created().len(), 0, "no worktree created");
+        assert_eq!(tool.ctx.cwd(), boot_cwd, "guard must not swap the shared cwd");
+    }
+
+    #[tokio::test]
+    async fn enter_existing_from_isolated_subagent_is_allowed() {
+        // 206 `Tze() && e.path` is allowed — the create-only guard must NOT block
+        // switching into an existing worktree via `path`.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-sub2"));
+        let (bctx, _sink) = make_bctx(mock);
+        let tool = EnterWorktreeTool::new(bctx);
+        let mut sub = fresh_ctx();
+        sub.cwd = Some(PathBuf::from("/tmp/isolated/agent-wt"));
+        let target = "/tmp/repo-sub2/.lingxi/worktrees/existing";
+        let res = tool
+            .call(json!({ "path": target }), sub, fresh_tx())
+            .await
+            .expect("enter-existing via path is allowed from an isolated subagent");
+        assert_eq!(res.data["path"], target);
+    }
+
+    #[tokio::test]
+    async fn worktree_created_event_carries_mid_session_payload() {
+        // 206 `N("tengu_worktree_created",{mid_session:true})` — NOT the old
+        // {tool_name,_PROTO_branch_name}.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-tel"));
+        let (bctx, sink) = make_bctx(mock);
+        bctx.bus.attach_sink(sink.clone()).await;
+        let tool = EnterWorktreeTool::new(bctx);
+        let _ = tool
+            .call(json!({ "name": "teltest" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("create");
+        let ev = sink
+            .events()
+            .await
+            .into_iter()
+            .find(|e| e.name == WORKTREE_CREATED)
+            .expect("created event fired");
+        assert!(ev.metadata.contains_key("mid_session"), "has mid_session");
+        assert!(!ev.metadata.contains_key("cwd_override"), "create: no cwd_override");
+        assert!(!ev.metadata.contains_key("tool_name"), "old tool_name dropped");
+        assert!(
+            !ev.metadata.contains_key("_PROTO_branch_name"),
+            "old branch field dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_entered_existing_event_carries_cwd_override_payload() {
+        // 206 `N("tengu_worktree_entered_existing",{mid_session:true,cwd_override:true})`.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-tel2"));
+        let (bctx, sink) = make_bctx(mock);
+        bctx.bus.attach_sink(sink.clone()).await;
+        let tool = EnterWorktreeTool::new(bctx);
+        let _ = tool
+            .call(
+                json!({ "path": "/tmp/repo-tel2/.lingxi/worktrees/x" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("enter");
+        let ev = sink
+            .events()
+            .await
+            .into_iter()
+            .find(|e| e.name == WORKTREE_ENTERED_EXISTING)
+            .expect("entered_existing event fired");
+        assert!(ev.metadata.contains_key("mid_session"), "has mid_session");
+        assert!(ev.metadata.contains_key("cwd_override"), "enter: has cwd_override");
+    }
+
+    #[tokio::test]
     async fn successful_create_swaps_session_cwd_to_worktree_path() {
         let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-swap"));
         let (bctx, _sink) = make_bctx(mock);
@@ -1562,6 +1700,37 @@ mod tests {
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_WORKTREE_FAILED.to_string()));
         assert!(!names.contains(&EXIT_WORKTREE_STARTED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn exit_from_isolated_subagent_is_refused() {
+        // 206 `validateInput` `Tze()` (errorCode:5): unconditional and BEFORE the
+        // no-op/session logic. An isolated subagent's ExitWorktree would mutate the
+        // SHARED parent cwd, so it is refused even with an active session.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-exsub"));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let wt = PathBuf::from("/tmp/repo-exsub/.lingxi/worktrees/wt");
+        populate_session(&bctx, &PathBuf::from("/tmp/repo-exsub"), &wt, "worktree-wt", None);
+        let session_cwd = bctx.cwd();
+        let tool = ExitWorktreeTool::new(bctx);
+        let mut sub = fresh_ctx();
+        sub.cwd = Some(PathBuf::from("/tmp/isolated/agent-wt"));
+        let err = tool
+            .call(json!({ "action": "remove" }), sub, fresh_tx())
+            .await
+            .expect_err("ExitWorktree from an isolated subagent must refuse");
+        assert_eq!(
+            format!("{err}"),
+            format!("invalid input: {EXIT_SUBAGENT_CWD_OVERRIDE_MESSAGE}")
+        );
+        // Guard fired first: no removal, no swap, session record intact.
+        assert_eq!(mock.removed().len(), 0, "no removal");
+        assert_eq!(tool.ctx.cwd(), session_cwd, "guard must not swap");
+        assert!(
+            tool.ctx.worktree_session.lock().unwrap().is_some(),
+            "guard must not clear the active session"
+        );
     }
 
     #[tokio::test]

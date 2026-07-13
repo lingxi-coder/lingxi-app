@@ -1780,4 +1780,66 @@ mod tests {
             "displayContent ignored for non-MessageDisplay"
         );
     }
+
+    // ---- P2-10 hookSpecificOutput.watchPaths (FileChanged / CwdChanged) ----
+
+    #[test]
+    fn parse_response_file_changed_extracts_watch_paths() {
+        // A `FileChanged` hook adds paths to the watch set; the array of strings
+        // is captured verbatim (claude-code `"watchPaths" in hsOut && …`).
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"FileChanged","watchPaths":[".env",".envrc","/etc/abs.conf"]}}"#,
+            "FileChanged",
+        )
+        .unwrap();
+        assert_eq!(
+            r.watch_paths,
+            Some(vec![
+                ".env".to_string(),
+                ".envrc".to_string(),
+                "/etc/abs.conf".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_response_cwd_changed_extracts_watch_paths() {
+        // The CwdChanged re-resolution flow (`E3r`) also carries `watchPaths`.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"CwdChanged","watchPaths":["a/b"]}}"#,
+            "CwdChanged",
+        )
+        .unwrap();
+        assert_eq!(r.watch_paths, Some(vec!["a/b".to_string()]));
+    }
+
+    #[test]
+    fn parse_response_present_empty_watch_paths_is_some_empty() {
+        // Present-key capture: JS arrays are always truthy, so a present-but-empty
+        // `[]` is kept as `Some(vec![])` (distinct from an absent key → `None`).
+        let present = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"FileChanged","watchPaths":[]}}"#,
+            "FileChanged",
+        )
+        .unwrap();
+        assert_eq!(present.watch_paths, Some(vec![]));
+
+        let absent = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"FileChanged"}}"#,
+            "FileChanged",
+        )
+        .unwrap();
+        assert!(absent.watch_paths.is_none(), "absent key → None");
+    }
+
+    #[test]
+    fn parse_response_non_array_watch_paths_is_ignored() {
+        // A non-array value has no `Vec<String>` representation → ignored (None).
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"FileChanged","watchPaths":".env"}}"#,
+            "FileChanged",
+        )
+        .unwrap();
+        assert!(r.watch_paths.is_none());
+    }
 }

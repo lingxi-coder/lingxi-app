@@ -1312,6 +1312,26 @@ pub fn parse_response(
                 resp.display_content = Some(dc.to_string());
             }
         }
+
+        // `hookSpecificOutput.watchPaths` (claude-code `parseHookJSONOutput`:
+        // `"watchPaths" in e.hookSpecificOutput && e.hookSpecificOutput.watchPaths`
+        // — captured on both the exec and MCP hook-result paths). A `FileChanged`
+        // / `CwdChanged` hook may add paths to the file-changed watch set. The
+        // binary's parse is NOT gated on `hookEventName` (unlike `sessionTitle` /
+        // `displayContent`) — the `"watchPaths" in hsOut` test stands alone — so we
+        // capture it for ANY event; only the file-changed watcher's FileChanged /
+        // CwdChanged flows consume it, leaving other events behavior-neutral.
+        // Present-key capture: a PRESENT array (even empty) becomes
+        // `Some(vec![...])` — JS arrays are always truthy, so `&& hsOut.watchPaths`
+        // keeps an empty `[]` — distinguishing it from an absent key (`None`); a
+        // non-array value has no `Vec<String>` representation and is ignored.
+        if let Some(arr) = hs.get("watchPaths").and_then(Value::as_array) {
+            resp.watch_paths = Some(
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+            );
+        }
     }
 
     Ok(resp)

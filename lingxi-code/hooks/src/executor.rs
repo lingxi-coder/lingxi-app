@@ -1267,6 +1267,14 @@ impl HookExecutorImpl {
             if let Some(dc) = &resp.display_content {
                 agg.display_content = Some(dc.clone());
             }
+            // `watchPaths` (FileChanged / CwdChanged output): accumulate every
+            // hook's entries in execution order — claude-code's `v3r` / `E3r`
+            // return `{ ..., watchPaths }` as the concatenation of each fired
+            // hook's `hookSpecificOutput.watchPaths`. The file-changed watcher
+            // restarts over the union when the folded set is non-empty.
+            if let Some(paths) = &resp.watch_paths {
+                agg.watch_paths.extend(paths.iter().cloned());
+            }
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));

@@ -173,13 +173,15 @@ impl SkillLoader for EmptySkillLoader {
 }
 
 // SKILLEXEC.6: the embedded-`!command` host runner + permission gate for skill
-// bodies were RELOCATED to `tool_api::prompt_shell` (the former
-// `SkillShellRunner` → `tool_api::PromptShellRunner`) so the dispatcher, the
+// bodies live in this crate's `crate::prompt_shell` module (the former
+// `SkillShellRunner` → `crate::PromptShellRunner`) so the dispatcher, the
 // TUI, and this `Skill` tool share ONE real runner + one policy-backed gate.
+// (It bridges `tool_api::BuiltinToolContext` with `command_api`'s shell traits,
+// so it cannot live in the impl-free `tool-api` API crate — §8.1.)
 // The gate is no longer allow-all: it is now the faithful port of
 // `hasPermissionsToUseTool(BashTool, {command})` (see `PolicyShellPermissionGate`),
 // with the skill's own frontmatter `allowedTools` injected per expansion. This
-// tool builds it via `tool_api::build_prompt_shell_provider(&self.ctx)` at the
+// tool builds it via `crate::build_prompt_shell_provider(&self.ctx)` at the
 // expansion site below.
 
 /// `SkillTool` — resolves + validates a slash-command skill.
@@ -618,14 +620,14 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
             expanded_prompt
         } else {
             // Build the shared per-command expansion context: the real host
-            // runner (`tool_api::PromptShellRunner`) + the policy-backed gate
+            // runner (`crate::PromptShellRunner`) + the policy-backed gate
             // (`PolicyShellPermissionGate`), with THIS skill's frontmatter
             // `allowed_tools` injected on top of the base policy — 1:1 with
             // claude-code building a fresh `toolPermissionContext` before
             // `executeShellCommandsInPrompt`. The `shell` selector drives both the
             // gate's tool-name choice and the runner's routing.
             let shell_ctx =
-                tool_api::build_prompt_shell_provider(&self.ctx).build(&desc.allowed_tools, desc.shell);
+                crate::build_prompt_shell_provider(&self.ctx).build(&desc.allowed_tools, desc.shell);
             match command_api::execute_shell_commands_in_prompt(
                 &expanded_prompt,
                 &shell_ctx,

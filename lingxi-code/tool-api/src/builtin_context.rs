@@ -81,7 +81,7 @@ pub struct BuiltinToolContext {
     /// The live boot permission policy (rules + mode + roots + working-dirs +
     /// sandbox-auto-allow config). Shared behind an `Arc` with the orchestrator's
     /// `PolicyPermissionGate`. The prompt shell-expansion provider
-    /// ([`crate::prompt_shell`]) reads it as the BASE policy for embedded
+    /// (`tool_skill::prompt_shell`) reads it as the BASE policy for embedded
     /// `!`cmd`` bodies: it builds a FRESH per-command effective policy = these
     /// base rules + that command's declared `allowed_tools` (claude-code's
     /// `alwaysAllowRules.command` injection) before calling

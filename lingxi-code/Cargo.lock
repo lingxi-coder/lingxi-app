@@ -5326,7 +5326,6 @@ name = "tool-api"
 version = "0.12.0"
 dependencies = [
  "async-trait",
- "command-api",
  "engine",
  "futures",
  "lsp",

@@ -15,7 +15,17 @@
     clippy::manual_let_else
 )]
 pub mod model_override;
+// Shared prompt `!`cmd`` shell-expansion provider (host runner + policy-backed
+// gate). Relocated here from `tool-api` (parity 2.1.207 §8.1): it bridges
+// `tool_api::BuiltinToolContext` with `command_api`'s shell-expansion traits, so
+// it must live in a non-API crate that may depend on BOTH — `tool-skill`
+// already does, and is the original home of the runner. The dispatcher / TUI /
+// skill all inject the provider built here.
+pub mod prompt_shell;
 pub mod skill;
+pub use prompt_shell::{
+    build_prompt_shell_provider, resolve_shell_path, PromptShellExpansionProvider, PromptShellRunner,
+};
 pub use skill::SkillTool;
 /// Register the skill-management tool against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {

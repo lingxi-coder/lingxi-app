@@ -5313,7 +5313,7 @@ pub async fn build(
     // `Arc<dyn ShellExpansionProvider>` is chained onto the dispatcher (so
     // `/commit` … expand their embedded `!`git …`` bodies) AND stashed on
     // `DesktopRuntime.shell_expansion` for the ratatui TUI's `run_core_command`.
-    let shell_expansion_provider = tool_api::build_prompt_shell_provider(&tool_ctx);
+    let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
     let mut tools_inner = ToolRegistry::new();
     // `RemoteTrigger`'s in-process OAuth resolver, backed by the credential
     // store built at (3). Reads tokens at call-time so the refresh driver wired

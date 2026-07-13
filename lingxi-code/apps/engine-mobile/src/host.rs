@@ -1019,7 +1019,7 @@ pub async fn build_mobile_inner(
     // bodies identically to desktop. Mobile reports `sandbox_available:false`, so
     // `should_use_sandbox` short-circuits to `NoSandbox` and the expansion runs
     // via the plain `ProcessRunner` — consistent with mobile's own Bash tool.
-    let shell_expansion_provider = tool_api::build_prompt_shell_provider(&tool_ctx);
+    let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
     let tools = Arc::new(mobile_tool_registry_with_skill_loader(
         tool_ctx,
         skill_loader,

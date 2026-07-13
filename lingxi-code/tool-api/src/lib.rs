@@ -23,7 +23,6 @@ pub mod context;
 pub mod defer;
 pub mod model_prompt_gate;
 pub mod progress;
-pub mod prompt_shell;
 pub mod read_file_state;
 pub mod registry;
 pub mod sandbox_runner;
@@ -51,7 +50,6 @@ pub use tool_search_view::{
 };
 pub use model_prompt_gate::dh_simple_system_prompt;
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
-pub use prompt_shell::{build_prompt_shell_provider, PromptShellExpansionProvider, PromptShellRunner};
 pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;
 pub use sandbox_runner::{default_sandbox_runner, LegacyWrapRunner, SandboxRunner};

@@ -36,7 +36,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::builtin_context::BuiltinToolContext;
 use command_api::{
     FrontmatterShell, ShellExpansionCtx, ShellExpansionProvider, ShellOut, ShellPermissionDecision,
     ShellPermissionGate, ShellRunError, ShellRunner,
@@ -45,6 +44,7 @@ use permission::{
     PermissionBehavior, PermissionMode, PermissionPolicy, PermissionResult, PermissionRule,
     PermissionRuleSource, PermissionRuleValue,
 };
+use tool_api::builtin_context::BuiltinToolContext;
 
 /// The real host runner for an embedded prompt `!command`.
 ///
@@ -83,7 +83,7 @@ pub struct PromptShellRunner {
     /// embedded `!command` expansion wraps through the same runner the Bash tool
     /// uses (default `LegacyWrapRunner` = byte-identical to the previous direct
     /// `wrap_with_sandbox` call).
-    sandbox_runner: Arc<dyn crate::SandboxRunner>,
+    sandbox_runner: Arc<dyn tool_api::SandboxRunner>,
 }
 
 /// Resolve the login shell exactly like `bash.rs::resolve_shell_path`
@@ -397,7 +397,7 @@ pub fn build_prompt_shell_provider(ctx: &BuiltinToolContext) -> Arc<dyn ShellExp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ctx_for_file_tools, make_dummy_fs};
+    use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
     use permission::filesystem::FsRoots;
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;

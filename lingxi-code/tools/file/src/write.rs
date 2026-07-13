@@ -217,6 +217,11 @@ impl Tool for FileWriteTool {
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
+        // One snapshot of trusted_dirs for both containment checks below (the
+        // parent-ancestor probe and the final target check), so they can't
+        // straddle a swap between the two calls.
+        let trusted_dirs = self.ctx.trusted_dirs();
+
         // Parents are created UNCONDITIONALLY before the write — 1:1 with
         // claude-code `FileWriteTool.ts:254` (`mkdir(dir, recursive)`), which
         // runs for every write regardless of a flag. There is no `mkdir` input.
@@ -237,7 +242,7 @@ impl Tool for FileWriteTool {
                             None => break,
                         }
                     }
-                    if canonicalize_and_validate(&probe, &self.ctx.trusted_dirs).is_err() {
+                    if canonicalize_and_validate(&probe, &trusted_dirs).is_err() {
                         emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
                         self.emit_failed(&invocation_id, "path_blocked").await;
                         return Err(ToolError::PathBlocked { path });
@@ -250,7 +255,7 @@ impl Tool for FileWriteTool {
             }
         }
 
-        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
+        let canon = match canonicalize_and_validate(&path, &trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -534,6 +539,37 @@ mod tests {
             write_result_message("./a/../b.txt", true),
             "File created successfully at: ./a/../b.txt (file state is current in your context — no need to Read it back)"
         );
+    }
+
+    /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
+    /// now carries `session_cwd: Arc<SessionCwd>` instead of frozen
+    /// `workspace`/`trusted_dirs` fields, and `Write`'s two
+    /// `canonicalize_and_validate` sites (the parent-ancestor probe + the
+    /// final target check) share a single `self.ctx.trusted_dirs()` snapshot.
+    /// With nothing ever calling `session_cwd.swap(..)`, `ctx.cwd()` must
+    /// equal the boot cwd, and a write must succeed exactly as it did before
+    /// the migration.
+    #[tokio::test]
+    async fn no_swap_is_identical() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("out.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+
+        // No `session_cwd.swap(..)` call anywhere in this test.
+        assert_eq!(ctx.cwd(), tmp.path());
+        assert_eq!(ctx.trusted_dirs(), vec![tmp.path().to_path_buf()]);
+
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "hello" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
     }
 
     #[tokio::test]

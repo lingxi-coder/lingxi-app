@@ -177,7 +177,7 @@ impl Tool for GlobTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_search_directory(path, &self.ctx.workspace)?;
+            crate::dir_validate::validate_search_directory(path, &self.ctx.cwd())?;
         }
         Ok(())
     }
@@ -215,6 +215,12 @@ impl Tool for GlobTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // Single snapshot of cwd + trusted_dirs for this whole call — both are
+        // read below (base fallback, canonicalize, relativize), so one
+        // `cwd_and_trusted()` load guarantees they come from the same
+        // swap generation instead of two independent accessor reads.
+        let (cwd, trusted) = self.ctx.cwd_and_trusted();
+
         let pattern = input
             .get("pattern")
             .and_then(Value::as_str)
@@ -224,7 +230,7 @@ impl Tool for GlobTool {
             .get("path")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .or_else(|| self.ctx.trusted_dirs.first().cloned())
+            .or_else(|| trusted.first().cloned())
             .ok_or_else(|| {
                 ToolError::InvalidInput("no path supplied and no trusted_dirs configured".into())
             })?;
@@ -247,7 +253,7 @@ impl Tool for GlobTool {
         };
         let pattern = pattern.as_str();
 
-        let canon_base = match canonicalize_and_validate(&base, &self.ctx.trusted_dirs) {
+        let canon_base = match canonicalize_and_validate(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
@@ -357,8 +363,7 @@ impl Tool for GlobTool {
         // `files.map(toRelativePath)`, `GlobTool.ts:166`). The walk yields
         // canonicalized paths, so the cwd must be canonicalized too for
         // `strip_prefix` to match — same rule GrepTool uses.
-        let cwd_for_rel = std::fs::canonicalize(&self.ctx.workspace)
-            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        let cwd_for_rel = std::fs::canonicalize(&cwd).unwrap_or(cwd);
         let matches: Vec<String> = hits
             .iter()
             .map(|(p, _)| to_relative_path(p, &cwd_for_rel))
@@ -526,6 +531,41 @@ mod tests {
         assert_eq!(result.data["countIsComplete"], true);
         // `durationMs` is always present (a non-negative integer).
         assert!(result.data["durationMs"].is_u64());
+    }
+
+    /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
+    /// now carries `session_cwd: Arc<SessionCwd>` instead of frozen
+    /// `workspace`/`trusted_dirs` fields. With nothing ever calling
+    /// `session_cwd.swap(..)` (no `EnterWorktree` in this test), `ctx.cwd()`
+    /// must equal the boot cwd it was constructed with, and `Glob` must
+    /// return the SAME result it did before the migration — proving the
+    /// accessor indirection is byte-identical when inert.
+    #[tokio::test]
+    async fn no_swap_is_identical() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("c.txt"), "x").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+
+        // No `session_cwd.swap(..)` call anywhere in this test — `cwd()` must
+        // still read back exactly the boot value `make_ctx` constructed.
+        assert_eq!(ctx.cwd(), tmp.path());
+        assert_eq!(ctx.trusted_dirs(), vec![tmp.path().to_path_buf()]);
+
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        // Byte-identical to `matches_rs_files` above (pre-migration behavior).
+        let matches = result.data["filenames"].as_array().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(result.data["numFiles"], 2);
+        assert_eq!(result.data["truncated"], false);
+        assert_eq!(result.data["totalMatches"], 2);
+        assert_eq!(result.data["countIsComplete"], true);
     }
 
     /// Read(deny) exclude globs (`glob.ts` `lLa()`): a populated

@@ -477,7 +477,7 @@ impl Tool for GrepTool {
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         if let Some(path) = input.get("path").and_then(Value::as_str) {
-            crate::dir_validate::validate_search_directory(path, &self.ctx.workspace)?;
+            crate::dir_validate::validate_search_directory(path, &self.ctx.cwd())?;
         }
         Ok(())
     }
@@ -516,6 +516,12 @@ impl Tool for GrepTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // Single snapshot of cwd + trusted_dirs for this whole call — both are
+        // read below (base fallback, canonicalize, relativize), so one
+        // `cwd_and_trusted()` load guarantees they come from the same
+        // swap generation instead of two independent accessor reads.
+        let (cwd, trusted) = self.ctx.cwd_and_trusted();
+
         // --- Arg parsing (GrepTool.ts:310-326) ---
         let pattern = input
             .get("pattern")
@@ -525,7 +531,7 @@ impl Tool for GrepTool {
             .get("path")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .or_else(|| self.ctx.trusted_dirs.first().cloned())
+            .or_else(|| trusted.first().cloned())
             .ok_or_else(|| {
                 ToolError::InvalidInput("no path and no trusted_dirs configured".into())
             })?;
@@ -559,7 +565,7 @@ impl Tool for GrepTool {
 
         let started = Instant::now();
 
-        let canon_base = match canonicalize_and_validate(&base, &self.ctx.trusted_dirs) {
+        let canon_base = match canonicalize_and_validate(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
@@ -570,8 +576,7 @@ impl Tool for GrepTool {
         // Relativize against the (canonicalized) workspace — mirrors TS
         // `toRelativePath(_, getCwd())`. The walk yields canonicalized paths, so
         // the cwd must be canonicalized too for `strip_prefix` to match.
-        let cwd_for_rel = std::fs::canonicalize(&self.ctx.workspace)
-            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        let cwd_for_rel = std::fs::canonicalize(&cwd).unwrap_or(cwd);
 
         // --- Build regex matcher (multiline → -U --multiline-dotall) ---
         let matcher = match RegexMatcherBuilder::new()
@@ -1007,6 +1012,36 @@ mod tests {
         assert!(short.contains("\"function\\s+\\w+\""));
         assert!(short.contains("escape literal braces (`interface\\{\\}`)."));
         assert!(short.ends_with("- `multiline: true` for patterns that span lines."));
+    }
+
+    /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
+    /// now carries `session_cwd: Arc<SessionCwd>` instead of frozen
+    /// `workspace`/`trusted_dirs` fields. With nothing ever calling
+    /// `session_cwd.swap(..)` (no `EnterWorktree` in this test), `ctx.cwd()`
+    /// must equal the boot cwd it was constructed with, and `Grep` must
+    /// return the SAME result it did before the migration.
+    #[tokio::test]
+    async fn no_swap_is_identical() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn foo() {}\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+
+        // No `session_cwd.swap(..)` call anywhere in this test — `cwd()` must
+        // still read back exactly the boot value `make_ctx` constructed.
+        assert_eq!(ctx.cwd(), tmp.path());
+        assert_eq!(ctx.trusted_dirs(), vec![tmp.path().to_path_buf()]);
+
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "fn", "output_mode": "count" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["numMatches"], 1);
+        assert_eq!(result.data["numFiles"], 1);
     }
 
     /// Count mode must report the TRUE per-file + total count, with NO per-file

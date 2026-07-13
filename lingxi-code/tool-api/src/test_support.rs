@@ -535,7 +535,6 @@ pub fn ctx_for_file_tools(
     super::BuiltinToolContext {
         fs,
         bus,
-        trusted_dirs,
         process: make_stub_process(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -550,7 +549,7 @@ pub fn ctx_for_file_tools(
         permission_mode: PermissionMode::Default,
         permission_policy: Arc::new(permission::PermissionPolicy::new(PermissionMode::Default)),
         sandbox_available: false,
-        workspace,
+        session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted_dirs),
         platform: if cfg!(target_os = "macos") {
             Platform::Mac
         } else {
@@ -601,7 +600,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     super::BuiltinToolContext {
         fs: make_dummy_fs(),
         bus: Arc::new(AnalyticsBus::new()),
-        trusted_dirs: vec![PathBuf::from("/tmp")],
         process: make_stub_process(out),
         sandbox: make_bypass_sandbox(),
         clock: make_stub_clock(),
@@ -611,7 +609,10 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         permission_mode: PermissionMode::Default,
         permission_policy: Arc::new(permission::PermissionPolicy::new(PermissionMode::Default)),
         sandbox_available: false,
-        workspace: PathBuf::from("/tmp"),
+        session_cwd: crate::session_cwd::SessionCwd::new(
+            PathBuf::from("/tmp"),
+            vec![PathBuf::from("/tmp")],
+        ),
         platform: if cfg!(target_os = "macos") {
             Platform::Mac
         } else {
@@ -660,8 +661,10 @@ pub fn shell_test_ctx_in(
     out: ProcessOutput,
     workspace: std::path::PathBuf,
 ) -> super::BuiltinToolContext {
+    let ctx = shell_test_ctx(out);
+    let trusted = ctx.trusted_dirs();
     super::BuiltinToolContext {
-        workspace,
-        ..shell_test_ctx(out)
+        session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted),
+        ..ctx
     }
 }

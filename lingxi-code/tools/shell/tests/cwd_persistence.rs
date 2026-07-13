@@ -146,7 +146,8 @@ fn tool_with(workspace: &std::path::Path, runner: Arc<RecordingRunner>) -> BashT
         exit_code: 0,
         timed_out: false,
     });
-    ctx.workspace = workspace.to_path_buf();
+    ctx.session_cwd
+        .swap(workspace.to_path_buf(), ctx.trusted_dirs());
     ctx.process = runner;
     BashTool::new(ctx)
 }
@@ -386,7 +387,8 @@ fn tool_with_firer(
         exit_code: 0,
         timed_out: false,
     });
-    ctx.workspace = workspace.to_path_buf();
+    ctx.session_cwd
+        .swap(workspace.to_path_buf(), ctx.trusted_dirs());
     ctx.process = runner;
     BashTool::new(ctx).with_cwd_changed_firer(firer)
 }
@@ -588,7 +590,8 @@ async fn cd_outside_workspace_preserves_existing_stderr() {
         exit_code: 0,
         timed_out: false,
     });
-    ctx.workspace = workspace_canon.clone();
+    ctx.session_cwd
+        .swap(workspace_canon.clone(), ctx.trusted_dirs());
     ctx.process = runner.clone();
     let tool = BashTool::new(ctx);
 

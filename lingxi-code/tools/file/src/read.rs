@@ -1078,8 +1078,8 @@ impl FileReadTool {
         self.emit_failed(invocation_id, "io_metadata").await;
         // `getCwd()` analog: the project workspace, realpath-resolved (matching
         // TS's already-resolved cwd) with a fallback to the unresolved path.
-        let cwd = std::fs::canonicalize(&self.ctx.workspace)
-            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        let workspace_cwd = self.ctx.cwd();
+        let cwd = std::fs::canonicalize(&workspace_cwd).unwrap_or(workspace_cwd);
         // Base message: `File does not exist. ${FILE_NOT_FOUND_CWD_NOTE} ${cwd}.`.
         let mut message = format!(
             "File does not exist. {FILE_NOT_FOUND_CWD_NOTE} {}.",
@@ -1541,7 +1541,12 @@ impl Tool for FileReadTool {
         // branch; the event NAME is still registered). `None` => never fires.
         self.emit_file_read_limits_override(None).await;
 
-        let mut canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
+        // One snapshot of trusted_dirs for both containment checks below (the
+        // primary path and the macOS screenshot alt-path retry), so they
+        // can't straddle a swap between the two calls.
+        let trusted_dirs = self.ctx.trusted_dirs();
+
+        let mut canon = match canonicalize_and_validate(&path, &trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -1567,9 +1572,7 @@ impl Tool for FileReadTool {
                     // normal read — equivalent to TS retrying `callInner(altPath)`,
                     // since existence was the only thing that failed.
                     if let Some(alt) = get_alternate_screenshot_path(&canon) {
-                        if let Ok(alt_canon) =
-                            canonicalize_and_validate(&alt, &self.ctx.trusted_dirs)
-                        {
+                        if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
                             if let Ok(m) = tokio::fs::metadata(&alt_canon).await {
                                 canon = alt_canon;
                                 m
@@ -3958,12 +3961,14 @@ mod tests {
         // at base/repo.
         let fs = make_dummy_fs();
         let bus = Arc::new(AnalyticsBus::new());
-        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+        let ctx = tool_api::test_support::ctx_for_file_tools(
             fs,
             bus,
             vec![base.path().to_path_buf(), repo.clone()],
         );
-        ctx.workspace = repo.clone();
+        // Point the cwd (the `getCwd` analog) at base/repo, keeping BOTH
+        // base and base/repo trusted (so the request under base validates).
+        ctx.session_cwd.swap(repo.clone(), ctx.trusted_dirs());
         let tool = FileReadTool::new(ctx);
 
         let err = tool

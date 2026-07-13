@@ -63,6 +63,22 @@ impl SessionCwd {
         self.state.load().trusted_dirs.clone()
     }
 
+    /// Current `(cwd, trusted_dirs)` pair from a SINGLE `load()` of the shared
+    /// state cell — the same generation for both fields.
+    ///
+    /// Prefer this over calling [`Self::cwd`] and [`Self::trusted_dirs`] back
+    /// to back at any call site that needs BOTH: two separate accessor calls
+    /// each do their own `load()`, so a concurrent `swap()` in between them
+    /// could hand back a cwd from one generation paired with trusted_dirs from
+    /// the next (or previous) generation. `snapshot()` loads the `CwdState`
+    /// once and reads both fields off that single `Arc`, so it can never
+    /// straddle a swap.
+    #[must_use]
+    pub fn snapshot(&self) -> (PathBuf, Vec<PathBuf>) {
+        let state = self.state.load();
+        (state.cwd.clone(), state.trusted_dirs.clone())
+    }
+
     /// Atomically publish a new cwd + trusted-directory set as a single
     /// pair, then invoke the on-swap callback (if one has been registered)
     /// with the new cwd.
@@ -162,6 +178,22 @@ mod tests {
         let new_cwd = PathBuf::from("/worktree/foo");
         sc.swap(new_cwd.clone(), vec![new_cwd.clone()]);
         assert_eq!(sc.cwd(), new_cwd);
+    }
+
+    #[test]
+    fn snapshot_returns_boot_pair_before_any_swap() {
+        let trusted = vec![boot(), PathBuf::from("/other")];
+        let sc = SessionCwd::new(boot(), trusted.clone());
+        assert_eq!(sc.snapshot(), (boot(), trusted));
+    }
+
+    #[test]
+    fn snapshot_reflects_swap_as_one_matched_pair() {
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let new_cwd = PathBuf::from("/worktree/foo");
+        let new_trusted = vec![new_cwd.clone(), PathBuf::from("/worktree/bar")];
+        sc.swap(new_cwd.clone(), new_trusted.clone());
+        assert_eq!(sc.snapshot(), (new_cwd, new_trusted));
     }
 
     #[test]

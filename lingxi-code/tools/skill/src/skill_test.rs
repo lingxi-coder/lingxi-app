@@ -937,7 +937,8 @@ mod tests {
         // Force the Sandbox branch: a non-empty, non-excluded command runs
         // through the wrap whenever the host has a working sandbox backend.
         ctx.sandbox_available = true;
-        ctx.workspace = std::path::PathBuf::from("/tmp");
+        ctx.session_cwd
+            .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
         ctx.sandbox_runner = runner.clone();
 
         let desc = SkillDescriptor {

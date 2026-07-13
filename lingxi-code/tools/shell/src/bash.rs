@@ -935,7 +935,7 @@ impl BashTool {
     /// and every other `BashTool::new(ctx)` caller keep compiling untouched.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        let shell_cwd = std::sync::Arc::new(std::sync::Mutex::new(ctx.workspace.clone()));
+        let shell_cwd = std::sync::Arc::new(std::sync::Mutex::new(ctx.cwd()));
         Self {
             ctx,
             shell_cwd,
@@ -1181,13 +1181,19 @@ impl Tool for BashTool {
         // `cfg.enabled`); the excluded-commands / allow-unsandboxed values are
         // unchanged, so they stay consistent with the frozen config.
         let sandbox_runtime = self.ctx.effective_sandbox_runtime();
+        // Resolve the session cwd ONCE for this command (worktree parity
+        // plan, Task 2): every `workspace`/cwd read below in this call reuses
+        // this single snapshot instead of re-reading `self.ctx.cwd()`, so a
+        // concurrent swap mid-call can't produce an inconsistent mix of old
+        // and new cwd within one command's sandbox-decision/spawn/reset logic.
+        let workspace = self.ctx.cwd();
         let decision = should_use_sandbox(
             &cmd_str,
             self.ctx.sandbox_available,
             dangerously_disable_sandbox,
             sandbox_runtime.are_unsandboxed_commands_allowed(),
             &sandbox_runtime,
-            self.ctx.workspace.clone(),
+            workspace.clone(),
         );
 
         let shell = resolve_shell_path().to_string();
@@ -1227,7 +1233,7 @@ impl Tool for BashTool {
                         &sandbox_runtime,
                         self.ctx.platform,
                         Some(&shell),
-                        Some(self.ctx.workspace.as_path()),
+                        Some(workspace.as_path()),
                     )
                     .await
                 {
@@ -1261,7 +1267,7 @@ impl Tool for BashTool {
                 // after `-c`, matching `bashProvider.ts:201-205` with the
                 // snapshot path deferred.
                 args: vec!["-c".into(), "-l".into(), inner_cmd],
-                cwd: Some(self.ctx.workspace.clone()),
+                cwd: Some(workspace.clone()),
                 env: HashMap::new(),
                 timeout: Some(Duration::from_millis(timeout_ms)),
                 stdin: None,
@@ -1323,21 +1329,18 @@ impl Tool for BashTool {
         // fail with the byte-locked message.
         let cwd = if std::fs::canonicalize(&cwd).is_ok() {
             cwd
-        } else {
-            let workspace = self.ctx.workspace.clone();
-            if std::fs::canonicalize(&workspace).is_ok() {
-                // Only the main loop persists the recovered cwd to the shared
-                // shell; a subagent's cwd is per-call.
-                if agent_cwd.is_none() {
-                    self.shell_cwd.lock().unwrap().clone_from(&workspace);
-                }
-                workspace
-            } else {
-                return Err(ToolError::Internal(format!(
-                    "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
-                    cwd.display()
-                )));
+        } else if std::fs::canonicalize(&workspace).is_ok() {
+            // Only the main loop persists the recovered cwd to the shared
+            // shell; a subagent's cwd is per-call.
+            if agent_cwd.is_none() {
+                self.shell_cwd.lock().unwrap().clone_from(&workspace);
             }
+            workspace.clone()
+        } else {
+            return Err(ToolError::Internal(format!(
+                "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
+                cwd.display()
+            )));
         };
 
         // Internal cwd-tracking temp file (not model-facing): the shell writes
@@ -1458,7 +1461,7 @@ impl Tool for BashTool {
                                     // no-additional-dirs case is faithful).
                                     let force = tfo_maintain_cwd();
                                     let should_reset =
-                                        force || !is_within_allowed(&canon, &self.ctx.workspace);
+                                        force || !is_within_allowed(&canon, &workspace);
                                     if should_reset {
                                         // RESET (J2n fires): chdir back to original.
                                         // We do NOT advance `shell_cwd` to `canon`;
@@ -1469,12 +1472,12 @@ impl Tool for BashTool {
                                         // persistent shell) — never mutate it.
                                         if agent_cwd.is_none() {
                                             (*self.shell_cwd.lock().unwrap())
-                                                .clone_from(&self.ctx.workspace);
+                                                .clone_from(&workspace);
                                         }
                                         // `Y2n` appends `\nShell cwd was reset to
                                         // {Pt()}` where `Pt()` is the cwd AFTER the
                                         // chdir-back == the workspace.
-                                        cwd_reset_warning = Some(self.ctx.workspace.clone());
+                                        cwd_reset_warning = Some(workspace.clone());
                                         // `j("tengu_bash_tool_reset_to_original_dir")`
                                         // fires ONLY on the non-TFo branch
                                         // (`if(!r)`). It is NOT a registered
@@ -2019,6 +2022,37 @@ mod tests {
         assert!(res.data.get("timed_out").is_none());
         // exit 0 → no semantic interpretation → field omitted (binary `p?.message`).
         assert!(res.data.get("returnCodeInterpretation").is_none());
+    }
+
+    /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
+    /// now carries `session_cwd: Arc<SessionCwd>` instead of frozen
+    /// `workspace`/`trusted_dirs` fields; `BashTool::new` seeds `shell_cwd`
+    /// from `ctx.cwd()` and the sandbox-decision/spawn/reset logic all read a
+    /// single per-call `self.ctx.cwd()` snapshot. With nothing ever calling
+    /// `session_cwd.swap(..)`, `ctx.cwd()` must equal the boot cwd
+    /// `shell_test_ctx` constructed, and a command must run exactly as it did
+    /// before the migration.
+    #[tokio::test]
+    async fn no_swap_is_identical() {
+        let out = ProcessOutput {
+            stdout: "hello\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let ctx = shell_test_ctx(out);
+
+        // No `session_cwd.swap(..)` call anywhere in this test.
+        assert_eq!(ctx.cwd(), std::path::PathBuf::from("/tmp"));
+        assert_eq!(ctx.trusted_dirs(), vec![std::path::PathBuf::from("/tmp")]);
+
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(json!({"command": "echo hello"}), use_ctx(), fresh_tx())
+            .await
+            .expect("call should succeed");
+        assert_eq!(res.data["stdout"], "hello");
+        assert_eq!(res.data["interrupted"], false);
     }
 
     /// PHASE-2: when `ctx.cancel` is a token that is already fired, the
@@ -2850,7 +2884,8 @@ mod tests {
         // Force the Sandbox branch: available sandbox + no excluded commands.
         ctx.sandbox_available = true;
         ctx.sandbox_runtime.excluded_commands = vec![];
-        ctx.workspace = std::path::PathBuf::from("/tmp");
+        ctx.session_cwd
+            .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
         ctx.sandbox_runner = runner.clone();
         ctx.process = Arc::new(CapturingRunner {
             out: ok_output(),

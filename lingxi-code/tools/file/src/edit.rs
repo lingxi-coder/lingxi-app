@@ -472,7 +472,7 @@ impl Tool for FileEditTool {
 
         // `canonicalize_and_validate` tolerates a nonexistent target (it
         // canonicalizes the parent) so an empty `old_string` can create a file.
-        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
+        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs()) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;

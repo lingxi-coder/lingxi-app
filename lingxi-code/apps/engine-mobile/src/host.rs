@@ -68,6 +68,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::BuiltinToolContext;
+use tool_api::SessionCwd;
 use traits::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
@@ -884,7 +885,6 @@ pub async fn build_mobile_inner(
         read_deny_exclude_globs,
         fs,
         bus: analytics_bus.clone(),
-        trusted_dirs: vec![cwd.clone()],
         process,
         sandbox,
         clock: clock.clone(),
@@ -913,7 +913,7 @@ pub async fn build_mobile_inner(
             .clone()
             .expect("boot permission policy is built unconditionally above"),
         sandbox_available: false,
-        workspace: cwd.clone(),
+        session_cwd: SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
         platform: if cfg!(target_os = "macos") {
             SandboxPlatform::Mac
         } else {

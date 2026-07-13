@@ -158,7 +158,7 @@ impl Tool for CronDeleteTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ValidationError("CronDelete: missing or non-string id".into()))?;
 
-        if !job_exists(&self.ctx.workspace, id).await {
+        if !job_exists(&self.ctx.cwd(), id).await {
             return Err(ValidationError(format!("No scheduled job with id '{id}'")));
         }
         // PARITY-GAP: TS validateInput also rejects deleting a cron owned by a
@@ -194,7 +194,7 @@ impl Tool for CronDeleteTool {
         // Read-modify-write the single `{ "tasks": [...] }` file: drop the task
         // with the matching id and write the rest back. A missing file / missing
         // id surfaces the byte-exact "No scheduled job with id '<id>'" error.
-        let path = cron_file_path(&self.ctx.workspace);
+        let path = cron_file_path(&self.ctx.cwd());
         let body = match tokio::fs::read_to_string(&path).await {
             Ok(b) => b,
             Err(_) => {

@@ -63,6 +63,7 @@ use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tool_api::AnthropicRequestBuilder;
+use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
@@ -4893,7 +4894,6 @@ pub async fn build(
         read_deny_exclude_globs,
         fs: Arc::new(PosixFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
-        trusted_dirs: vec![cwd.clone()],
         process: Arc::new(PosixProcess::new()),
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),
@@ -4945,7 +4945,7 @@ pub async fn build(
             )
         }),
         sandbox_available,
-        workspace: cwd.clone(),
+        session_cwd: SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
         platform: sandbox_platform,
         http: http.clone(),
         provider: tool_provider,

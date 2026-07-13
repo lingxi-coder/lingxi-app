@@ -722,7 +722,7 @@ impl Tool for CronCreateTool {
         }
 
         // Too many scheduled jobs already (counted in the single project file).
-        if count_existing_jobs(&self.ctx.workspace) >= MAX_JOBS {
+        if count_existing_jobs(&self.ctx.cwd()) >= MAX_JOBS {
             return Err(ValidationError(format!(
                 "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
             )));
@@ -803,7 +803,7 @@ impl Tool for CronCreateTool {
         // "Session-only (not written to disk …)" promise.
         let mut bytes_written: usize = 0;
         if durable {
-            let path = cron_file_path(&self.ctx.workspace);
+            let path = cron_file_path(&self.ctx.cwd());
             if let Some(dir) = path.parent() {
                 if let Err(e) = tokio::fs::create_dir_all(dir).await {
                     emit_failed(&bus, "io_create_dir", started.elapsed().as_millis() as u64).await;

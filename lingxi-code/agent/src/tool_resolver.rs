@@ -102,7 +102,7 @@ impl AgentToolResolver {
 
     /// `true` when `USER_TYPE == "ant"` (claude `process.env.USER_TYPE ===
     /// 'ant'`, EXACT match — not the truthy allowlist). Matches the existing
-    /// repo convention (`tools/task/src/task.rs`, `tools/meta/src/repl_gate.rs`).
+    /// repo convention (`tools/task/src/task.rs`).
     fn is_user_ant() -> bool {
         std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
     }

@@ -67,5 +67,9 @@ pub fn register_all_with_cwd_firer(
     };
     reg.register_builtin(Arc::new(bash));
     reg.register_builtin(Arc::new(PowerShellTool::new(ctx.clone())));
-    reg.register_builtin(Arc::new(REPLTool::new(ctx)));
+    // REPL is experimental and default-OFF (claude-code 2.1.206 `kO()`): only
+    // register it when enabled by `LINGXI_REPL` / the `tengu_slate_harbor` flag.
+    if repl::is_repl_enabled() {
+        reg.register_builtin(Arc::new(REPLTool::new(ctx)));
+    }
 }

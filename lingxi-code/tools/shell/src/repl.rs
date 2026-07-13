@@ -31,6 +31,50 @@ pub const REPL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "REPL";
 
+/// Whether the REPL tool is available — 1:1 port of claude-code 2.1.206 `kO()`.
+///
+/// The REPL tool is **default-OFF** (experimental). It is registered only when:
+/// - `LINGXI_REPL` (claude-code `CLAUDE_CODE_REPL`) is truthy (`1`/`true`/…) — and
+///   an explicitly-falsy value (`0`/`false`/`no`/`off`) force-disables it; else
+/// - the entrypoint is `cli` or `remote` AND the `tengu_slate_harbor` statsig flag
+///   is on (default `false`).
+///
+/// `kO()`'s leading `mQ()` guard is `return true` in 2.1.206, so it is omitted.
+#[must_use]
+pub fn is_repl_enabled() -> bool {
+    is_repl_enabled_from(
+        std::env::var("LINGXI_REPL").ok().as_deref(),
+        std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref(),
+        telemetry::flag_bool("tengu_slate_harbor", false),
+    )
+}
+
+/// Pure core of [`is_repl_enabled`] (`kO()` with its inputs injected, so it is
+/// testable without mutating process-global env).
+fn is_repl_enabled_from(repl_env: Option<&str>, entrypoint: Option<&str>, slate_harbor: bool) -> bool {
+    // `su(CLAUDE_CODE_REPL)`: a defined, explicitly-falsy value disables.
+    if is_env_defined_falsy(repl_env) {
+        return false;
+    }
+    // `ut(CLAUDE_CODE_REPL)`: a truthy value enables.
+    if traits::env::is_env_truthy(repl_env) {
+        return true;
+    }
+    // Entrypoint `cli`/`remote` → the `tengu_slate_harbor` flag (default `false`).
+    matches!(entrypoint, Some("cli" | "remote")) && slate_harbor
+}
+
+/// Port of claude-code `isEnvDefinedFalsy` (`envUtils.ts`): a defined, non-empty
+/// value that normalizes (lowercase + trim) to `0`/`false`/`no`/`off`. `None` or
+/// an empty string is NOT falsy.
+fn is_env_defined_falsy(env_var: Option<&str>) -> bool {
+    match env_var {
+        None => false,
+        Some(v) if v.is_empty() => false,
+        Some(v) => matches!(v.to_lowercase().trim(), "0" | "false" | "no" | "off"),
+    }
+}
+
 /// `(executable, args, stdin?)` for the given language. Returns `None` for unsupported.
 #[must_use]
 pub fn lang_exec(lang: &str, code: &str) -> Option<(&'static str, Vec<String>, Option<String>)> {
@@ -261,6 +305,45 @@ mod tests {
     fn locked_constants_unchanged() {
         assert_eq!(REPL_DEFAULT_TIMEOUT_MS, 120_000);
         assert_eq!(TOOL_NAME, "REPL");
+    }
+
+    #[test]
+    fn is_env_defined_falsy_semantics() {
+        assert!(!is_env_defined_falsy(None));
+        assert!(!is_env_defined_falsy(Some("")));
+        for v in ["0", "false", "no", "off", "OFF", " False "] {
+            assert!(is_env_defined_falsy(Some(v)), "{v} should be falsy");
+        }
+        for v in ["1", "true", "yes", "on", "anything"] {
+            assert!(!is_env_defined_falsy(Some(v)), "{v} should NOT be falsy");
+        }
+    }
+
+    #[test]
+    fn repl_gate_default_off() {
+        // No LINGXI_REPL + no cli/remote entrypoint + flag off → disabled (default).
+        assert!(!is_repl_enabled_from(None, None, false));
+        // cli/remote entrypoint but `tengu_slate_harbor` flag off → still off.
+        assert!(!is_repl_enabled_from(None, Some("cli"), false));
+        assert!(!is_repl_enabled_from(None, Some("remote"), false));
+        // A non-cli/remote entrypoint never enables via the flag.
+        assert!(!is_repl_enabled_from(None, Some("sdk-ts"), true));
+    }
+
+    #[test]
+    fn repl_gate_flag_enables_in_cli_remote() {
+        assert!(is_repl_enabled_from(None, Some("cli"), true));
+        assert!(is_repl_enabled_from(None, Some("remote"), true));
+    }
+
+    #[test]
+    fn repl_gate_env_truthy_enables_falsy_disables() {
+        // Truthy LINGXI_REPL enables regardless of entrypoint/flag.
+        assert!(is_repl_enabled_from(Some("1"), None, false));
+        assert!(is_repl_enabled_from(Some("true"), None, false));
+        // Explicitly-falsy LINGXI_REPL disables, even in cli with the flag on.
+        assert!(!is_repl_enabled_from(Some("0"), Some("cli"), true));
+        assert!(!is_repl_enabled_from(Some("off"), Some("remote"), true));
     }
 
     #[tokio::test]

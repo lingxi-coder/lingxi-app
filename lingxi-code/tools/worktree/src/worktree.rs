@@ -143,21 +143,6 @@ fn branch_suffix(branch_name: &str) -> String {
 }
 
 /// Detect whether `cwd` is already inside a `.lingxi/worktrees/<slug>`
-/// directory — the port's stand-in for claude's `ky()` "already in a
-/// worktree session" flag. `SessionCwd` (Task 2) tracks only the current
-/// cwd, not a dedicated boolean, so this walks the path components looking
-/// for the adjacent `.lingxi`, `worktrees` pair ([`WORKTREE_PATH_SEGMENT`]
-/// split on `/`).
-#[must_use]
-fn cwd_is_in_worktree(cwd: &std::path::Path) -> bool {
-    let segment: Vec<&str> = WORKTREE_PATH_SEGMENT.split('/').collect();
-    let comps: Vec<&str> = cwd
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-    comps.windows(segment.len()).any(|w| w == segment.as_slice())
-}
-
 /// Generate a random worktree name when the caller supplies neither `name`
 /// nor `path`. claude-code's `S1e()` picks a word-pair name checked against a
 /// collision set; the port has no such word list wired, so this derives a
@@ -489,7 +474,13 @@ impl EnterWorktreeTool {
         started_at: Instant,
         name: Option<String>,
     ) -> Result<ToolCallResult, ToolError> {
-        if cwd_is_in_worktree(&self.ctx.cwd()) {
+        // Faithful port of claude's `ky()` "already in a worktree session" flag:
+        // the shared `WorktreeSession` record is `Some` exactly while a session is
+        // active (written on enter, cleared on exit), regardless of where the
+        // worktree lives on disk — so this also blocks a create after entering a
+        // worktree via a `path` OUTSIDE `.lingxi/worktrees/` (the case the old
+        // path-substring heuristic false-negatived).
+        if self.ctx.worktree_session.lock().unwrap().is_some() {
             let duration_ms = started_at.elapsed().as_millis() as u64;
             self.emit_failed(invocation_id, "already_in_worktree", duration_ms)
                 .await;
@@ -1391,11 +1382,19 @@ mod tests {
         let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-guard"));
         let (bctx, sink) = make_bctx(mock.clone());
         bctx.bus.attach_sink(sink.clone()).await;
-        // Pin the session cwd INSIDE a `.lingxi/worktrees/<slug>` directory —
-        // the port's stand-in for "already in a worktree session".
-        let worktree_cwd = PathBuf::from("/tmp/repo-guard/.lingxi/worktrees/already-here");
-        bctx.session_cwd
-            .swap(worktree_cwd.clone(), vec![worktree_cwd.clone()]);
+        // An active worktree session — the port's `ky()` == `worktree_session`
+        // is `Some`. Deliberately use a worktree path OUTSIDE `.lingxi/worktrees/`
+        // (an existing worktree entered via `path`): the OLD path-substring
+        // heuristic would have false-negatived here and wrongly ALLOWED the
+        // create; the session-record guard correctly rejects it.
+        let external_wt = PathBuf::from("/tmp/external-checkout/feature-wt");
+        populate_session(
+            &bctx,
+            &PathBuf::from("/tmp/repo-guard"),
+            &external_wt,
+            "feature-wt",
+            None,
+        );
         let tool = EnterWorktreeTool::new(bctx);
         let err = tool
             .call(json!({}), fresh_ctx(), fresh_tx())
@@ -1405,9 +1404,14 @@ mod tests {
             format!("{err}"),
             format!("invalid input: {ALREADY_IN_WORKTREE_MESSAGE}")
         );
-        // No worktree was created and the cwd was NOT swapped again.
+        // No worktree was created; the cwd was NOT swapped again; and the active
+        // session record is left intact by the rejected create.
         assert_eq!(mock.created().len(), 0);
-        assert_eq!(tool.ctx.cwd(), worktree_cwd, "guard must not swap cwd");
+        assert_eq!(tool.ctx.cwd(), external_wt, "guard must not swap cwd");
+        assert!(
+            tool.ctx.worktree_session.lock().unwrap().is_some(),
+            "guard must not clear the active session"
+        );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_WORKTREE_FAILED.to_string()));
         assert!(!names.contains(&WORKTREE_CREATED.to_string()));

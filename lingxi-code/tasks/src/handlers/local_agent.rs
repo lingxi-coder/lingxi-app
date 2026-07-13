@@ -205,14 +205,22 @@ impl LocalAgentHandler {
     /// future for real. This is the async counterpart of the synchronous
     /// cleanup closure: the registry/cleanup-registry calls it on agent
     /// teardown so a subagent outliving its parent is aborted (claude-code
-    /// `killTask`-on-cleanup parity). Status is flipped to `Killed` regardless.
+    /// `killTask`-on-cleanup parity). Status is flipped to `Killed` UNLESS the
+    /// task already reached a terminal status (a raced pending-kill record must
+    /// not clobber a real Completed/Failed with `Killed`).
     pub async fn drain_pending_kills(&self) {
         let pending: Vec<(String, WorkerCancel)> = self.pending_kill.lock().await.drain().collect();
         for (task_id, rec) in pending {
             let _ = rec.runtime.cancel(&rec.handle).await;
-            self.status_sink
-                .set_status(&task_id, TaskStatus::Killed)
-                .await;
+            // Don't overwrite an already-reported terminal status: a subagent
+            // that finished on its own before this (possibly raced) record was
+            // drained keeps its real terminal status rather than being flipped
+            // to Killed.
+            if !self.status_sink.is_terminal(&task_id).await {
+                self.status_sink
+                    .set_status(&task_id, TaskStatus::Killed)
+                    .await;
+            }
         }
     }
 }
@@ -508,6 +516,15 @@ impl Task for LocalAgentHandler {
                 })
             };
 
+        // Hold the `workers` lock ACROSS spawn + insert. The worker's self-remove
+        // (`workers.lock().await.remove`) contends the same lock, so a
+        // fast-completing worker cannot run its remove BEFORE we insert — which
+        // would otherwise leave a stale record the cleanup closure moves to
+        // `pending_kill`, letting `drain_pending_kills` flip an
+        // already-Completed task to Killed. `RuntimeSpawner::spawn` only
+        // schedules the worker (it does not await its completion), so holding
+        // the lock here cannot deadlock.
+        let mut workers = self.workers.lock().await;
         let bg_handle = ctx
             .runtime
             .spawn(&format!("{HANDLER_NAME}:{task_id}"), worker)
@@ -516,13 +533,14 @@ impl Task for LocalAgentHandler {
 
         // Record the worker-cancel handle (+ the runtime that minted it) so
         // kill / drain can cancel the in-flight worker without a fresh ctx.
-        self.workers.lock().await.insert(
+        workers.insert(
             task_id.clone(),
             WorkerCancel {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
             },
         );
+        drop(workers);
 
         // 6. Build the synchronous cleanup seam (claude-code `registerCleanup`
         //    parity). The closure cannot await, so it moves any live cancel
@@ -957,6 +975,15 @@ mod tests {
         ) {
             *self.rest_count.lock().unwrap() += 1;
             *self.last_rest.lock().unwrap() = Some((result, usage));
+        }
+        async fn is_terminal(&self, task_id: &str) -> bool {
+            self.statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(id, _)| id == task_id)
+                .is_some_and(|(_, s)| s.is_terminal())
         }
     }
     impl RecordingSink {
@@ -1583,6 +1610,84 @@ mod tests {
         // Drain performs the real async cancel + flips status.
         handler.drain_pending_kills().await;
         assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+    }
+
+    /// A fast-completing agent leaves NO stale worker record (the `workers` lock
+    /// is held across spawn+insert so the worker's self-remove is serialized
+    /// after the insert), so a later cleanup + drain finds nothing to kill and
+    /// the reported terminal status stays `Completed` — never clobbered to
+    /// `Killed` by a raced pending-kill record.
+    #[tokio::test]
+    async fn completed_agent_leaves_no_worker_record_and_survives_cleanup() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        let handle = handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        // The worker removed its OWN record; no stale insert remains.
+        await_workers_drained(&workers).await;
+
+        // Cleanup finds no live record ⇒ nothing queued; drain is a no-op.
+        (handle.cleanup.as_ref().unwrap())();
+        handler.drain_pending_kills().await;
+
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Completed),
+            "a completed agent's terminal status is never flipped to Killed"
+        );
+    }
+
+    /// `drain_pending_kills` MUST NOT flip an already-terminal task to `Killed`:
+    /// if a still-live record is moved to `pending_kill` by cleanup AFTER the
+    /// worker reported a terminal status, draining it keeps the real terminal
+    /// status (the guard on `TaskStatusSink::is_terminal`).
+    #[tokio::test]
+    async fn drain_pending_kills_preserves_terminal_status() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        // Pending: the worker parks, so a live record persists in `workers`.
+        let spawner = MockSpawner::new(CannedResult::Pending);
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+
+        let handler = make_handler(spawner, mgr, sink.clone());
+        let workers = handler.workers_map();
+
+        let handle = handler
+            .spawn(local_agent_input("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        // Wait for the live worker-cancel record.
+        for _ in 0..50 {
+            if !workers.lock().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Model the worker having reported a terminal status just before the
+        // teardown races in (the record is still live in `workers`).
+        sink.set_status(&handle.task_id, TaskStatus::Completed).await;
+
+        // Cleanup moves the live record to pending_kill; drain then runs.
+        (handle.cleanup.as_ref().unwrap())();
+        handler.drain_pending_kills().await;
+
+        assert_eq!(
+            sink.last_status(),
+            Some(TaskStatus::Completed),
+            "drain must not overwrite an already-terminal Completed with Killed"
+        );
     }
 
     #[tokio::test]

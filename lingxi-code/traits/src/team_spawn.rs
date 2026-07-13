@@ -84,6 +84,25 @@ pub trait TeamSpawnSeam: Send + Sync {
             "TeamSpawnSeam::send_message not supported by this implementation".to_string(),
         ))
     }
+
+    /// Report whether the teammate task `task_id` is still alive — i.e. running
+    /// or resting (non-terminal) and thus still able to receive messages.
+    ///
+    /// The mailbox→runner pump polls this on each park timeout so it can EXIT —
+    /// and let its mailbox be unregistered — once the teammate reaches a
+    /// terminal state, EVEN WHEN no message ever arrives to surface the
+    /// [`TeamSpawnError::Terminated`] via [`Self::send_message`]. Without it a
+    /// terminated background agent leaks a task that re-parks on the timeout
+    /// forever while a stale route silently blackholes later `SendMessage`s into
+    /// an undrained inbox.
+    ///
+    /// Default: `true` (conservatively assume alive) so existing fakes/impls
+    /// that don't track task lifecycle keep pumping unchanged. The production
+    /// `TaskRegistry` overrides this to consult its terminal-status state.
+    async fn is_alive(&self, task_id: &str) -> bool {
+        let _ = task_id;
+        true
+    }
 }
 
 #[cfg(test)]

@@ -387,9 +387,30 @@ fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
 ///   unparseable `tool_use` input).
 /// - [`LlmError::StreamInterrupted`] if the stream ends before `message_stop`
 ///   or `completed`.
+// Test-only thin wrapper over the salvaging variant — drops the partial content
+// the salvage carries so the accumulator's own unit tests keep asserting the
+// `Result<_, LlmError>` shape. Production drives `accumulate_stream_salvaging`
+// directly (the runner needs the salvaged partial), so this is `cfg(test)`.
+#[cfg(test)]
 pub(crate) async fn accumulate_stream(
-    mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+    stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
 ) -> Result<LlmResponse, LlmError> {
+    accumulate_stream_salvaging(stream)
+        .await
+        .map_err(|(_partial, e)| e)
+}
+
+/// Like [`accumulate_stream`], but on ANY mid-stream error returns the content
+/// blocks completed BEFORE the error alongside the error, so the subagent runner
+/// can SALVAGE the partial output (CC 2.1.207 `api_error_partial` recovery — the
+/// query-loop finalizes the partial into the transcript, and the sync-agent
+/// caller recovers it with an incomplete-response notice rather than failing
+/// the whole tool call). Only blocks whose `content_block_stop` was already
+/// seen are salvaged — an in-flight (unstopped) block is dropped exactly as CC's
+/// `blocks_yielded` counts only completed blocks.
+pub(crate) async fn accumulate_stream_salvaging(
+    mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
+) -> Result<LlmResponse, (Vec<ContentBlock>, LlmError)> {
     let mut acc = BlockAccumulator::new();
     let mut content: Vec<ContentBlock> = Vec::new();
     let mut id = String::new();
@@ -399,9 +420,20 @@ pub(crate) async fn accumulate_stream(
     let mut cost = None;
     let mut provider_metadata = Value::Null;
 
+    // Surface `$result`'s error paired with the blocks completed so far; the
+    // `content` move only happens on the diverging error branch.
+    macro_rules! salvage {
+        ($result:expr) => {
+            match $result {
+                Ok(v) => v,
+                Err(err) => return Err((content, err)),
+            }
+        };
+    }
+
     while let Some(item) = stream.next().await {
-        // Transport-level error: surface verbatim.
-        let event = item?;
+        // Transport-level error: salvage the completed blocks + surface it.
+        let event = salvage!(item);
         match event {
             LlmEvent::MessageStart { response } => {
                 // Capture id/model + the usage seed from the start snapshot.
@@ -418,19 +450,21 @@ pub(crate) async fn accumulate_stream(
                 acc.start_block(index, block_kind_of(&content_block));
             }
             LlmEvent::ContentBlockDelta { index, delta } => match delta {
-                ContentDelta::TextDelta { text } => acc.append_text(index, &text)?,
+                ContentDelta::TextDelta { text } => salvage!(acc.append_text(index, &text)),
                 ContentDelta::InputJsonDelta { partial_json } => {
-                    acc.append_json(index, &partial_json)?;
+                    salvage!(acc.append_json(index, &partial_json));
                 }
-                ContentDelta::ThinkingDelta { thinking } => acc.append_text(index, &thinking)?,
+                ContentDelta::ThinkingDelta { thinking } => {
+                    salvage!(acc.append_text(index, &thinking));
+                }
                 ContentDelta::SignatureDelta { signature } => {
-                    acc.set_signature(index, &signature)?;
+                    salvage!(acc.set_signature(index, &signature));
                 }
                 // Dropped at the `translate_response_blocks` boundary.
                 ContentDelta::CitationsDelta { .. } | ContentDelta::ConnectorTextDelta { .. } => {}
             },
             LlmEvent::ContentBlockStop { index } => {
-                if let Some(block) = acc.stop_block(index)?.into_content_block() {
+                if let Some(block) = salvage!(acc.stop_block(index)).into_content_block() {
                     content.push(block);
                 }
             }
@@ -467,9 +501,12 @@ pub(crate) async fn accumulate_stream(
         }
     }
     // Stream ended without a `message_stop` or `completed` event.
-    Err(LlmError::StreamInterrupted {
-        message: "stream ended without message_stop or completed event".to_string(),
-    })
+    Err((
+        content,
+        LlmError::StreamInterrupted {
+            message: "stream ended without message_stop or completed event".to_string(),
+        },
+    ))
 }
 
 /// Synthesize a [`LlmEvent`] sequence that reconstructs `resp` exactly when

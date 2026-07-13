@@ -394,6 +394,82 @@ fn build_completed_result(
     })
 }
 
+/// CC 2.1.207 subagent api-error classification (`CTy` / `zho`
+/// `AgentApiErrorTerminationError`). Maps an [`llm_client::LlmError`] surfaced by
+/// a mid-stream round-trip to `(errorKind, api_error_text)` when it is an API
+/// TERMINATION whose kind is in `CTy = {rate_limit, overloaded, server_error}` —
+/// the only kinds CC recovers as `api_error_partial` (every other kind rethrows
+/// → `Failed`). The `api_error_text` is the model-visible `API Error: …` string
+/// the query-loop finalize embeds into `zho.message`
+/// (`yield tu({content:…,error:"server_error"})`); the finalize always tags the
+/// synthesized message `server_error`, so the connection-close / stall variants
+/// still qualify. The exact request-level rate-limit copy is NOT reproduced
+/// here (it lives in the orchestrator's `errors.ts` port, which the agent crate
+/// cannot depend on); a mid-stream 429 is surfaced with the server-error text,
+/// which is what the finalize path yields.
+fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &'static str)> {
+    use llm_client::LlmError;
+    match e {
+        LlmError::Overloaded { .. } => Some((
+            "overloaded",
+            "API Error: Server error mid-response. The response above may be incomplete.",
+        )),
+        LlmError::RateLimited { .. } => Some((
+            "rate_limit",
+            "API Error: Server error mid-response. The response above may be incomplete.",
+        )),
+        LlmError::ProviderInternal => Some((
+            "server_error",
+            "API Error: Server error mid-response. The response above may be incomplete.",
+        )),
+        LlmError::Transport { .. } => Some((
+            "server_error",
+            "API Error: Connection closed mid-response. The response above may be incomplete.",
+        )),
+        LlmError::StreamInterrupted { .. } => Some((
+            "server_error",
+            "API Error: Response stalled mid-stream. The response above may be incomplete.",
+        )),
+        // Auth / permission / invalid-request / quota / context / TLS / cost /
+        // unsupported-capability / model-unavailable are terminal — CC rethrows
+        // (errorKind not in CTy), so they surface as `Failed`.
+        _ => None,
+    }
+}
+
+/// Build the CC 2.1.207 subagent `api_error_partial` result: the normal
+/// completed result (final text blocks via the backward scan) with `cutoff_note`
+/// prepended as the FIRST text block — claude's sync-agent recovery
+/// (`On.content=[{type:"text",text:Dn},...On.content]`, status `"completed"`).
+fn build_recovered_result(
+    history: &[protocol::ConversationMessage],
+    final_assistant_blocks: &[protocol::ContentBlock],
+    cutoff_note: &str,
+) -> serde_json::Value {
+    let mut blocks = final_text_blocks(history, final_assistant_blocks);
+    blocks.insert(0, cutoff_note.to_string());
+    let content: Vec<serde_json::Value> = blocks
+        .iter()
+        .map(|t| serde_json::json!({ "type": "text", "text": t }))
+        .collect();
+    serde_json::json!({
+        "content": content,
+        "text": blocks.join("\n"),
+        "stop_reason": serde_json::Value::Null,
+    })
+}
+
+/// Assemble the CC 2.1.207 `cutoffNote` (`wTy`): the
+/// `AgentApiErrorTerminationError` message (`Agent terminated early due to an
+/// API error: {api_error_text}`) followed by the byte-locked incomplete-output
+/// notice, joined by a single newline.
+fn build_cutoff_note(api_error_text: &str) -> String {
+    format!(
+        "Agent terminated early due to an API error: {api_error_text}\n\
+Everything below is PARTIAL output recovered from the agent before it was cut off. The agent did NOT finish its task \u{2014} treat these results as incomplete."
+    )
+}
+
 /// Byte-locked `formatSkillLoadingMetadata(skillName)` port
 /// (claude `processSlashCommand.tsx:786`): the leading text block of a preloaded
 /// skill's meta user message. claude ignores the `progressMessage` arg
@@ -844,6 +920,12 @@ async fn run_subagent_loop(
                     // ⇒ default/unscoped resolution (legacy). The `_in` variants
                     // default to the profile-less methods, so a client that only
                     // implements the legacy seam is unaffected.
+                    //
+                    // The error carries the partial content blocks completed
+                    // before the failure so the arm below can SALVAGE them (CC
+                    // 2.1.207 `api_error_partial`). A connect-phase error yields no
+                    // partial (empty vec); a mid-stream error yields whatever
+                    // blocks were finalized.
                     let profile = ctx.model_profile.as_deref();
                     let stream = if let Some(forced) = force_structured_tool {
                         api_client
@@ -856,7 +938,8 @@ async fn run_subagent_loop(
                                 Some(forced),
                                 effort_wire.clone(),
                             )
-                            .await?
+                            .await
+                            .map_err(|e| (Vec::new(), e))?
                     } else {
                         api_client
                             .messages_create_stream_in(
@@ -867,9 +950,10 @@ async fn run_subagent_loop(
                                 tool_schemas.clone(),
                                 effort_wire.clone(),
                             )
-                            .await?
+                            .await
+                            .map_err(|e| (Vec::new(), e))?
                     };
-                    crate::accumulator::accumulate_stream(stream).await
+                    crate::accumulator::accumulate_stream_salvaging(stream).await
                 };
                 if !event_channel_open {
                     break api_call.await;
@@ -911,14 +995,49 @@ async fn run_subagent_loop(
 
             let response = match response {
                 Ok(r) => r,
-                Err(e) => {
-                    let _ = out_tx
-                        .send(SubagentEvent::Failed {
-                            agent_id,
-                            error: format!("subagent api error: {e}"),
-                        })
-                        .await;
-                    return;
+                Err((partial_blocks, e)) => {
+                    // CC 2.1.207 subagent `api_error_partial` recovery
+                    // (`Wyd`/`wTy`): when the round-trip is cut off by an API
+                    // TERMINATION whose kind is in `CTy`
+                    // ({rate_limit,overloaded,server_error}) AND the agent has
+                    // already produced content (a prior completed turn OR blocks
+                    // salvaged from THIS turn before the cutoff), return the
+                    // partial work as a `completed` result with the incomplete-
+                    // output `cutoffNote` prepended — instead of failing the
+                    // whole tool call and discarding everything the child did.
+                    // Every other kind (auth/invalid/quota/…) or an empty
+                    // transcript rethrows as `Failed`, exactly as CC does.
+                    let salvaged = translate_response_blocks(&partial_blocks);
+                    match classify_api_termination(&e) {
+                        Some((_error_kind, api_error_text))
+                            if !final_text_blocks(&history, &salvaged).is_empty() =>
+                        {
+                            let cutoff_note = build_cutoff_note(api_error_text);
+                            let result =
+                                build_recovered_result(&history, &salvaged, &cutoff_note);
+                            let _ = out_tx
+                                .send(SubagentEvent::Completed {
+                                    agent_id,
+                                    result,
+                                    usage: last_usage.clone(),
+                                    total_tool_use_count,
+                                    total_duration_ms: elapsed_ms(run_start),
+                                    assistant_message_count,
+                                    last_request_id: last_request_id.clone(),
+                                })
+                                .await;
+                            return;
+                        }
+                        _ => {
+                            let _ = out_tx
+                                .send(SubagentEvent::Failed {
+                                    agent_id,
+                                    error: format!("subagent api error: {e}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
                 }
             };
 

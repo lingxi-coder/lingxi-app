@@ -1707,8 +1707,13 @@ mod max_output_tokens_recovery_tests {
         let h = history(&orch).await;
         let last = h.last().expect("nudge appended");
         match last {
-            ConversationMessage::User { content, .. } => {
+            ConversationMessage::User {
+                content, is_meta, ..
+            } => {
                 assert_eq!(content.len(), 1, "single text block");
+                // (parity 2.1.207 P2-05) the recovery nudge is a META user
+                // message (`createUserMessage({…, isMeta:!0})`).
+                assert!(*is_meta, "max-output-tokens recovery nudge must be is_meta");
                 match &content[0] {
                     // (Test plan 4) the nudge is a User message with exact bytes.
                     ContentBlock::Text { text } => {
@@ -1719,6 +1724,56 @@ mod max_output_tokens_recovery_tests {
             }
             other => panic!("expected User nudge message, got {other:?}"),
         }
+    }
+
+    /// (parity 2.1.207 P2-05) End-to-end persist: driving a real `max_tokens`
+    /// recovery turn through the orchestrator with a wired JSONL writer stamps the
+    /// injected recovery nudge with the top-level `isMeta:true` envelope flag, so
+    /// title / first-prompt / fork-name / visible-count extraction skips it.
+    #[tokio::test]
+    async fn max_tokens_recovery_nudge_persists_with_top_level_is_meta() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            session_path.clone(),
+            fs,
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![max_tokens_response()])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_jsonl_writer(writer);
+
+        let mut state = RecoveryState::default();
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("turn step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+
+        let contents = tokio::fs::read_to_string(&session_path)
+            .await
+            .expect("jsonl written");
+        let nudge_line = contents
+            .lines()
+            .find(|l| l.contains(MAX_OUTPUT_TOKENS_RECOVERY_NUDGE))
+            .expect("recovery nudge line persisted to JSONL");
+        let v: serde_json::Value =
+            serde_json::from_str(nudge_line).expect("nudge line is valid JSON");
+        assert_eq!(v["type"], "user", "nudge persists as a user line");
+        assert_eq!(
+            v["isMeta"],
+            serde_json::Value::Bool(true),
+            "recovery nudge must carry top-level isMeta:true: {nudge_line}"
+        );
     }
 
     /// (Test plan 1) `max_tokens` at counts 1 and 2 → Continue, counter
@@ -2127,6 +2182,15 @@ mod malformed_and_thinking_only_tests {
         }
     }
 
+    /// `is_meta` flag of the last history entry when it is a User message.
+    /// (parity 2.1.207 P2-05: recovery/continuation nudges are `isMeta:!0`.)
+    fn last_user_is_meta(h: &[ConversationMessage]) -> Option<bool> {
+        match h.last()? {
+            ConversationMessage::User { is_meta, .. } => Some(*is_meta),
+            _ => None,
+        }
+    }
+
     // ---- byte-exact strings ------------------------------------------------
 
     #[test]
@@ -2178,6 +2242,11 @@ mod malformed_and_thinking_only_tests {
         assert_eq!(
             last_user_text(&h).as_deref(),
             Some(MALFORMED_TOOL_USE_RETRY_NUDGE)
+        );
+        assert_eq!(
+            last_user_is_meta(&h),
+            Some(true),
+            "malformed-tool retry nudge must be a META user message (isMeta:!0)"
         );
     }
 
@@ -2395,6 +2464,11 @@ mod malformed_and_thinking_only_tests {
         assert!(state.thinking_only_nudged, "guard armed");
         let h = history(&orch).await;
         assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+        assert_eq!(
+            last_user_is_meta(&h),
+            Some(true),
+            "thinking-only nudge must be a META user message (isMeta:!0)"
+        );
     }
 
     /// A `stop_sequence` thinking-only response also triggers the nudge.
@@ -2410,6 +2484,11 @@ mod malformed_and_thinking_only_tests {
         assert!(state.thinking_only_nudged);
         let h = history(&orch).await;
         assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+        assert_eq!(
+            last_user_is_meta(&h),
+            Some(true),
+            "thinking-only nudge must be a META user message (isMeta:!0)"
+        );
     }
 
     /// Once nudged, a still-thinking-only `end_turn` ends the turn normally

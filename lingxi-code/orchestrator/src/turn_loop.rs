@@ -183,9 +183,8 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
 /// claude-code `toolExecution.ts:1096`. DORMANT in the external build — the
 /// retry path is double-gated (see [`PERMISSION_DENIED_RETRY_MESSAGE`]'s only
 /// emit site in the deny arm), so this string is never produced on the normal
-/// deny path. LingXi has no protocol `isMeta` flag (cf. the
-/// max-output-tokens nudge above), so the meta message is a plain user text
-/// message carrying these exact bytes.
+/// deny path. When it does fire it is built as a META user message
+/// ([`ConversationMessage::user_meta`]), matching CC's `isMeta:!0`.
 pub(crate) const PERMISSION_DENIED_RETRY_MESSAGE: &str =
     "The PermissionDenied hook indicated you may retry this tool call.";
 
@@ -207,8 +206,8 @@ pub(crate) use crate::model::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE;
 /// string is this non-clean-retry variant. (The clean-retry variant would be
 /// "The previous response failed to produce a valid tool call. Please retry the
 /// tool call now." — gated behind the flag, not emitted in the default build.)
-/// `LingXi` has no protocol `isMeta` flag (cf. the max-output-tokens nudge), so
-/// the meta message is a plain user text message carrying these exact bytes.
+/// Injected as a META user message ([`ConversationMessage::user_meta`]), matching
+/// CC's `createUserMessage({…, isMeta:!0})` — it persists with `isMeta:true`.
 pub(crate) const MALFORMED_TOOL_USE_RETRY_NUDGE: &str =
     "Your tool call was malformed and could not be parsed. Please retry.";
 
@@ -222,8 +221,9 @@ pub(crate) const MALFORMED_TOOL_USE_RETRY_FAILED: &str =
 /// Byte-exact meta nudge injected when the model returns an `end_turn` /
 /// `stop_sequence` response with NO visible text (thinking-only output) and it
 /// has not yet been nudged this turn. 1:1 with claude-code v2.1.183
-/// (`bin/claude.exe` offset ~202947000). `LingXi` has no protocol `isMeta`
-/// flag, so it is a plain user text message carrying these exact bytes.
+/// (`bin/claude.exe` offset ~202947000). Injected as a META user message
+/// ([`ConversationMessage::user_meta`]), matching CC's `isMeta:!0` — it persists
+/// with top-level `isMeta:true` and is skipped by title/first-prompt extraction.
 pub(crate) const THINKING_ONLY_NUDGE: &str =
     "[Your previous response had no visible output. Please continue and produce a user-visible response.]";
 
@@ -1816,11 +1816,11 @@ async fn handle_max_output_tokens(
     }
 
     if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
-        // Inject the meta "resume directly" nudge as a fresh user message.
-        // The protocol has no `isMeta` flag; the nudge is a plain user text
-        // message carrying the byte-exact string (spec: "assert it's a User
-        // message with the exact bytes").
-        let nudge_msg = ConversationMessage::user(
+        // Inject the "resume directly" nudge as a META user message. CC 2.1.207
+        // builds it via `createUserMessage({…, isMeta:!0})`, so it persists with
+        // top-level `isMeta:true` and is skipped by title / first-prompt /
+        // visible-count extraction.
+        let nudge_msg = ConversationMessage::user_meta(
             MessageId::new(),
             MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string(),
         );
@@ -1951,7 +1951,7 @@ async fn handle_malformed_tool_use(
         });
     }
     let nudge_msg =
-        ConversationMessage::user(MessageId::new(), MALFORMED_TOOL_USE_RETRY_NUDGE.to_string());
+        ConversationMessage::user_meta(MessageId::new(), MALFORMED_TOOL_USE_RETRY_NUDGE.to_string());
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -1970,7 +1970,8 @@ async fn handle_thinking_only(
     orch: &ConversationOrchestrator,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
-    let nudge_msg = ConversationMessage::user(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
+    let nudge_msg =
+        ConversationMessage::user_meta(MessageId::new(), THINKING_ONLY_NUDGE.to_string());
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
@@ -2908,11 +2909,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // `TRANSCRIPT_CLASSIFIER` feature is on AND a classifier-source deny
                 // ran a `PermissionDenied` hook that returned `{retry: true}`), so it
                 // is DORMANT on the normal deny path — `deny_hook_says_retry` is
-                // `false` there and this is a strict no-op. LingXi has no protocol
-                // `isMeta` flag, so the meta message is a plain user text message
-                // carrying the exact bytes (cf. the max-output-tokens nudge).
+                // `false` there and this is a strict no-op. Built as a META user
+                // message (CC `createUserMessage({…, isMeta:!0})`), so when it does
+                // fire it persists with top-level `isMeta:true`.
                 if deny_hook_says_retry {
-                    let retry_msg = ConversationMessage::user(
+                    let retry_msg = ConversationMessage::user_meta(
                         MessageId::new(),
                         PERMISSION_DENIED_RETRY_MESSAGE.to_string(),
                     );

@@ -973,8 +973,10 @@ async fn exec_with_retry_hook() -> Arc<HookExecutorImpl> {
 
 fn retry_meta_present(history: &[ConversationMessage]) -> bool {
     let verbatim = "The PermissionDenied hook indicated you may retry this tool call.";
+    // (parity 2.1.207 P2-05) the retry message MUST be a META user message
+    // (`createUserMessage({…, isMeta:!0})`), so require `is_meta: true` here.
     history.iter().any(|m| {
-        matches!(m, ConversationMessage::User { content, .. }
+        matches!(m, ConversationMessage::User { content, is_meta: true, .. }
             if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == verbatim)))
     })
 }

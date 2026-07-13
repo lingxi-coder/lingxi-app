@@ -1707,8 +1707,10 @@ impl ConversationOrchestrator {
     }
 
     /// Mid-turn drain step: pull any queued main-thread, non-slash input from the
-    /// wired source and inject it as a META user message so the next sampling
-    /// sees it. A strict no-op when no source is wired (the default) or the queue
+    /// wired source and inject it as a plain (non-meta) user message so the next
+    /// sampling sees it — CC 2.1.207's `queued_command` guard leaves plain human
+    /// input non-meta (`r!==void 0&&!Ree(r)||e.isMeta` → `{}`). A strict no-op
+    /// when no source is wired (the default) or the queue
     /// is empty. Returns `true` if anything was injected (for the caller's
     /// observability — the loop continues regardless). Mirrors claude-code's
     /// `joinPromptValues` + meta-prompt injection at query.ts ~1570-1580.
@@ -1730,7 +1732,7 @@ impl ConversationOrchestrator {
             match source.take_mid_turn_input().await {
                 Some(text) => {
                     let wrapped = Self::wrap_mid_turn_user_message(&text);
-                    self.inject_meta_user_message(&wrapped).await;
+                    self.inject_user_message(&wrapped).await;
                     injected = true;
                 }
                 None => break,
@@ -3135,13 +3137,12 @@ impl ConversationOrchestrator {
     /// drives [`check_token_budget`], and on `continue` appends a meta user
     /// message carrying the byte-exact `getBudgetContinuationMessage` nudge.
     /// The completion telemetry is emitted as a `tracing` event on stop.
-    /// Inject a meta nudge as a plain user text message into both the live
-    /// session history and the JSONL persistence stream. The protocol carries
-    /// no `isMeta` flag (cf. the max-output-tokens / token-budget nudges), so a
-    /// meta message is a plain user text message carrying the byte-exact bytes.
-    /// Shared by the malformed-tool-use retry (#77) and thinking-only (#78)
-    /// continuations, which mirror the same injection pattern as the
-    /// max-output-tokens recovery nudge.
+    /// The continuation nudge is injected as a META user message
+    /// ([`Self::inject_meta_user_message`] / [`ConversationMessage::user_meta`])
+    /// into both the live session history and the JSONL persistence stream,
+    /// where it persists with top-level `isMeta:true`. The same META injection
+    /// pattern is shared by the malformed-tool-use retry (#77), thinking-only
+    /// (#78), and max-output-tokens recovery nudges.
     /// Finding #80: refusal → fallback-model swap (claude-code `bin/claude.exe`
     /// offset ~205871579, `vr === "refusal" && rc !== void 0`). When the active
     /// turn's response has `stop_reason == "refusal"`, a
@@ -3214,8 +3215,32 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         true
     }
 
+    /// Inject an engine META user message (`isMeta:true`) into both the live
+    /// session history and the JSONL persistence stream — the recovery /
+    /// continuation nudges (thinking-only, malformed-tool retry) that claude-code
+    /// creates via `createUserMessage({ …, isMeta: true })`. Persisting stamps the
+    /// top-level `isMeta:true` envelope flag (see `to_jsonl_message`), so these
+    /// lines are skipped by title / first-prompt / fork-name / visible-count
+    /// extraction, exactly as in CC 2.1.207.
     async fn inject_meta_user_message(&self, text: &str) {
-        let msg = ConversationMessage::user(MessageId::new(), text.to_string());
+        self.inject_user_text(text, true).await;
+    }
+
+    /// Inject a PLAIN (non-meta) user text message. Used for interrupt markers
+    /// (`[Request interrupted by user]`) and mid-turn drained HUMAN input, which
+    /// CC 2.1.207 persists WITHOUT `isMeta` — interrupt lines are built with no
+    /// `isMeta` field, and queued human input is non-meta per the `queued_command`
+    /// guard (`r!==void 0&&!Ree(r)||e.isMeta` → `{}` for plain human input).
+    async fn inject_user_message(&self, text: &str) {
+        self.inject_user_text(text, false).await;
+    }
+
+    async fn inject_user_text(&self, text: &str, is_meta: bool) {
+        let msg = if is_meta {
+            ConversationMessage::user_meta(MessageId::new(), text.to_string())
+        } else {
+            ConversationMessage::user(MessageId::new(), text.to_string())
+        };
         {
             let mut s = self.session.lock().await;
             s.history.push(msg.clone());
@@ -3254,10 +3279,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     budget,
                     "token budget continuation #{continuation_count}: {pct}% ({turn_tokens} / {budget})"
                 );
-                // Inject the continuation nudge as a meta user message. The
-                // protocol carries no `isMeta` flag, so it is a plain user text
-                // message with the byte-exact nudge string.
-                let nudge_msg = ConversationMessage::user(MessageId::new(), nudge_message);
+                // Inject the continuation nudge as a META user message
+                // (`createUserMessage({content: nudgeMessage, isMeta: true})`,
+                // query.ts:1327). It persists with top-level `isMeta:true` and is
+                // skipped by title / first-prompt / visible-count extraction.
+                let nudge_msg = ConversationMessage::user_meta(MessageId::new(), nudge_message);
                 {
                     let mut s = self.session.lock().await;
                     s.history.push(nudge_msg.clone());
@@ -5490,7 +5516,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                    self.inject_user_message(INTERRUPT_MESSAGE).await;
                 }
                 final_message_id = last_message_id;
                 break;
@@ -6654,7 +6680,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_meta_user_message(interrupt_message).await;
+                    self.inject_user_message(interrupt_message).await;
                 }
                 final_message_id = assistant_id;
                 break;
@@ -6851,9 +6877,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     if recovery.max_output_tokens_recovery_count
                         < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT =>
                 {
-                    // The nudge is a plain user text message carrying the
-                    // byte-exact string (the protocol has no `isMeta` flag).
-                    let nudge_msg = ConversationMessage::user(
+                    // The nudge is a META user message carrying the byte-exact
+                    // string — CC 2.1.207 builds it via `createUserMessage({…,
+                    // isMeta:!0})`, so it persists with top-level `isMeta:true`.
+                    let nudge_msg = ConversationMessage::user_meta(
                         MessageId::new(),
                         MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string(),
                     );
@@ -7115,7 +7142,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                    self.inject_user_message(INTERRUPT_MESSAGE).await;
                 }
                 return Ok(TurnOutcome::Cancelled);
             }
@@ -7147,7 +7174,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     if self.cancel_reason_now()
                         != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                     {
-                        self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                        self.inject_user_message(INTERRUPT_MESSAGE).await;
                     }
                     return Ok(TurnOutcome::Cancelled);
                 }
@@ -7712,12 +7739,11 @@ As you answer the user's questions, you can use the following context:\n\
     /// the system-prompt section above), so the styleless path stays
     /// byte-identical and the locked turn-loop + streaming fixtures stay green.
     ///
-    /// The protocol has no `isMeta` flag, so — exactly like the A1 "resume
-    /// directly" nudge ([`crate::turn_loop::MAX_OUTPUT_TOKENS_RECOVERY_NUDGE`]) —
-    /// the reminder is a plain user-text [`ConversationMessage`] carrying the
+    /// The reminder is a plain user-text [`ConversationMessage`] carrying the
     /// byte-exact string. The fresh [`MessageId`] is irrelevant: callers append
     /// this ONLY to the per-turn outgoing message snapshot, never to
-    /// `session.history` nor JSONL, so it is TRANSIENT and never accumulates
+    /// `session.history` nor JSONL, so it is TRANSIENT and never accumulates —
+    /// its `isMeta` state is therefore immaterial (nothing persists it)
     /// (TS recomputes the attachment each turn — see `query.ts` mid-turn
     /// `getAttachmentMessages`). Position mirrors TS: the caller appends it as a
     /// trailing meta user message after the user prompt / tool-results

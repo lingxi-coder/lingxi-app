@@ -58,11 +58,15 @@ fn build_orch(
     (api, output, orch)
 }
 
-/// Count how many of a captured history snapshot are the meta nudge.
+/// Count how many of a captured history snapshot are the meta nudge. The nudge
+/// MUST be an `is_meta` user message (parity 2.1.207 P2-05: CC builds the
+/// max-output-tokens recovery nudge via `createUserMessage({…, isMeta:!0})`), so
+/// this filter doubles as the streaming-driver regression guard — before the
+/// flip the injected nudge was non-meta and this would count 0.
 fn count_nudges(msgs: &[ConversationMessage]) -> usize {
     msgs.iter()
         .filter(|m| {
-            matches!(m, ConversationMessage::User { content, .. }
+            matches!(m, ConversationMessage::User { content, is_meta: true, .. }
                 if matches!(content.first(), Some(ContentBlock::Text { text }) if text == NUDGE))
         })
         .count()

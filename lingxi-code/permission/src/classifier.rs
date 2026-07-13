@@ -139,6 +139,12 @@ fn classify_shell(input: &Value) -> AutoModeClassifierVerdict {
     if read_only_command::command_is_read_only(command) {
         return allow("Read-Only Operations");
     }
+    // Reads already returned above (oracle: reading transcripts is routine); any
+    // non-read-only command that writes a session transcript through the shell
+    // (touch/sed -i/tee/redirect/mv/rm on the `.jsonl`) is transcript tampering.
+    if command_touches_session_transcript(&lower) {
+        return deny_soft("Session Transcript Tampering");
+    }
     if local_shell_allow(&lower) {
         return AutoModeClassifierVerdict::Allow {
             score: LOCAL_ALLOW_SCORE,
@@ -168,6 +174,12 @@ fn classify_file_mutation(input: &Value) -> AutoModeClassifierVerdict {
     }
     if looks_like_secret_path(&lower) {
         return deny_soft("Credential Leakage");
+    }
+    // Session Transcript Tampering must be checked BEFORE the local-scope Pass
+    // branch: an absolute transcript path (`/…/.lingxi/projects/p/s.jsonl`) has
+    // to DENY, not fall through to the normal prompt.
+    if is_session_transcript_path(&lower) {
+        return deny_soft("Session Transcript Tampering");
     }
     if lower.starts_with('/') || lower.contains("../") || lower == ".." {
         return AutoModeClassifierVerdict::Pass {
@@ -346,6 +358,24 @@ fn looks_like_secret_path(lower: &str) -> bool {
         || lower.contains("id_rsa")
 }
 
+/// Does a mutated path point at a Claude Code session transcript
+/// (`~/.lingxi/projects/<project>/<uuid>.jsonl`, or the equivalent configured
+/// config dir)? CC's auto-mode "Session Transcript Tampering" BLOCK rule fires
+/// on WRITES to these harness-owned history files. Anchored on the config-dir
+/// shape so a plain `.jsonl` data file elsewhere is not swept in.
+fn is_session_transcript_path(lower: &str) -> bool {
+    lower.ends_with(".jsonl")
+        && (lower.contains("/.lingxi/projects/") || lower.starts_with(".lingxi/projects/"))
+}
+
+/// Does a (non-read-only) shell command reference a session transcript file?
+/// Substring scan over the command line, matching the offline-heuristic style of
+/// the rest of this classifier; callers gate this behind the read-only check so
+/// reads (`cat`/`grep` of a transcript) stay routine per the oracle.
+fn command_touches_session_transcript(lower: &str) -> bool {
+    lower.contains(".lingxi/projects/") && lower.contains(".jsonl")
+}
+
 fn allow(reason: &str) -> AutoModeClassifierVerdict {
     AutoModeClassifierVerdict::Allow {
         score: RULE_MATCH_SCORE,
@@ -421,6 +451,69 @@ mod tests {
         assert!(matches!(
             classify_tool_call("Edit", &json!({ "file_path": ".lingxi/settings.json" })),
             AutoModeClassifierVerdict::Deny { reason, .. } if reason == "Self-Modification"
+        ));
+    }
+
+    #[test]
+    fn session_transcript_edit_is_denied() {
+        // Absolute transcript path must DENY (not Pass to the prompt).
+        assert!(matches!(
+            classify_tool_call(
+                "Edit",
+                &json!({ "file_path": "/Users/x/.lingxi/projects/p/s.jsonl" })
+            ),
+            AutoModeClassifierVerdict::Deny { reason, hard: false, .. }
+                if reason == "Session Transcript Tampering"
+        ));
+        // Relative transcript path (cwd=$HOME) was the silent auto-allow hole.
+        assert!(matches!(
+            classify_tool_call("Write", &json!({ "file_path": ".lingxi/projects/p/s.jsonl" })),
+            AutoModeClassifierVerdict::Deny { reason, .. }
+                if reason == "Session Transcript Tampering"
+        ));
+    }
+
+    #[test]
+    fn session_transcript_shell_write_is_denied() {
+        for command in [
+            "sed -i 's/a/b/' ~/.lingxi/projects/p/s.jsonl",
+            "echo x >> ~/.lingxi/projects/p/s.jsonl",
+            "touch ~/.lingxi/projects/p/s.jsonl",
+        ] {
+            assert!(
+                matches!(
+                    classify_tool_call("Bash", &json!({ "command": command })),
+                    AutoModeClassifierVerdict::Deny { reason, hard: false, .. }
+                        if reason == "Session Transcript Tampering"
+                ),
+                "expected transcript-tamper deny for: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn reading_a_session_transcript_stays_routine() {
+        // Oracle: "Reading transcripts is routine and not this rule."
+        assert!(matches!(
+            classify_tool_call("Read", &json!({ "file_path": "~/.lingxi/projects/p/s.jsonl" })),
+            AutoModeClassifierVerdict::Allow { reason, .. } if reason == "Read-Only Operations"
+        ));
+        assert!(matches!(
+            classify_tool_call(
+                "Bash",
+                &json!({ "command": "cat ~/.lingxi/projects/p/s.jsonl" })
+            ),
+            AutoModeClassifierVerdict::Allow { reason, .. } if reason == "Read-Only Operations"
+        ));
+    }
+
+    #[test]
+    fn non_transcript_jsonl_edit_is_not_swept_in() {
+        // A `.jsonl` data file outside the config transcript dir stays a normal
+        // local allow — guards against over-matching.
+        assert!(matches!(
+            classify_tool_call("Edit", &json!({ "file_path": "data/foo.jsonl" })),
+            AutoModeClassifierVerdict::Allow { reason, .. } if reason == "Local Operations"
         ));
     }
 

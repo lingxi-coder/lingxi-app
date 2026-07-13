@@ -880,6 +880,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_mode_session_transcript_deny_feeds_denial_tracking() {
+        // A transcript-tamper edit denies with the CC "Session Transcript
+        // Tampering" category and increments the denial breaker exactly like any
+        // other auto-mode BLOCK category (record_auto_deny).
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy.clone(), RecordingInner::new(PermissionDecision::Allow));
+
+        match gate
+            .resolve_detailed(
+                "Edit",
+                &serde_json::json!({ "file_path": "/Users/x/.lingxi/projects/p/s.jsonl" }),
+            )
+            .await
+        {
+            PermissionResolution::Deny { source, reason, .. } => {
+                assert_eq!(source, PermissionDecisionSource::Classifier);
+                assert!(
+                    reason.contains("Session Transcript Tampering"),
+                    "reason names the CC category: {reason}"
+                );
+            }
+            other => panic!("expected transcript-tamper deny, got {other:?}"),
+        }
+
+        let tracking = policy.denial_tracking.lock().unwrap();
+        assert_eq!(tracking.total_denials, 1, "deny must feed denial tracking");
+        assert_eq!(tracking.consecutive_denials, 1);
+    }
+
+    #[tokio::test]
     async fn auto_mode_explicit_ask_rule_still_prompts() {
         let policy = policy_with(
             r#"{ "permissions": { "ask": ["Bash"] } }"#,

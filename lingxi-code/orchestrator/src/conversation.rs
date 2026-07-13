@@ -676,6 +676,22 @@ const INTERRUPT_MESSAGE_FOR_TOOL_USE: &str = "[Request interrupted by user for t
 ///
 /// Construction is via `new(...)` (batched-only) or `new_with_streaming(...)`
 /// (both paths). Driven via `run_turn(prompt)` or `run_turn_streaming(prompt)`.
+/// Snapshot of the `--agent`-adopted main-thread agent (claude-code
+/// `mainThreadAgentDefinition` reduced to the fields LingXi applies on the MAIN
+/// conversation loop). Set once at startup by the composition root; see
+/// [`ConversationOrchestrator::main_thread_agent`].
+#[derive(Debug, Clone)]
+pub(crate) struct MainThreadAgentState {
+    /// The agent's stable `agentType` (claude-code `mainThreadAgentType` /
+    /// `MB()`), threaded into every main-thread lifecycle hook payload.
+    pub(crate) agent_type: String,
+    /// The agent's system-prompt body (claude-code `agentDef.getSystemPrompt()`)
+    /// — becomes the main-loop system prompt on every query unless
+    /// `--system-prompt` (`overrideSystemPrompt`) is set. `None` for an agent
+    /// that declares no prompt (the assembled default prompt is then used).
+    pub(crate) system_prompt: Option<String>,
+}
+
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
@@ -822,6 +838,18 @@ pub struct ConversationOrchestrator {
     /// then returns `vec![]`. The CLI binary populates from
     /// `~/.lingxi/agents/` + project `.lingxi/agents/`.
     pub(crate) agent_catalog: Option<Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>>,
+    /// Main-thread agent adopted via `--agent` (claude-code
+    /// `Pt.mainThreadAgentType` / `mainThreadAgentDefinition`, read per query
+    /// through `MB()`). `Some` once the composition root resolves `--agent` to a
+    /// catalog hit and calls [`Self::set_main_thread_agent`]; `None` otherwise.
+    /// Interior-mutable because the binary applies the agent to live session
+    /// state AFTER the REPL is constructed — the flag is resolved against the
+    /// FINAL catalog (dir + `--agents` + plugin agents) once the orchestrator is
+    /// already `Arc`-wrapped. Consumed by [`Self::effective_system_prompt`] (the
+    /// agent's prompt becomes the main-loop system prompt, `--system-prompt`
+    /// still winning) and [`Self::lifecycle_hook_ctx`] (its `agentType` rides
+    /// every main-thread lifecycle hook payload, claude-code `wf`/`MVe` `?? MB()`).
+    pub(crate) main_thread_agent: tokio::sync::RwLock<Option<MainThreadAgentState>>,
     /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
     /// not configured — `force_compact` then falls back to the legacy
     /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
@@ -1258,6 +1286,7 @@ impl ConversationOrchestrator {
             mcp_registry: None,
             hook_registry: None,
             agent_catalog: None,
+            main_thread_agent: tokio::sync::RwLock::new(None),
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
@@ -4429,12 +4458,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .as_ref()
             .map(|w| w.path().to_path_buf())
             .unwrap_or_else(|| self.computed_transcript_path(&session_id));
+        // Main-thread lifecycle hooks (SessionStart / UserPromptSubmit / Stop /
+        // expansion) carry the adopted `--agent`'s `agentType` — claude-code's
+        // base hook-input builder `wf` uses `r?.agentType ?? MB()`, and these
+        // firings have no tool-use context `r`, so they fall through to `MB()`
+        // (the main-thread agent type). `None` when no `--agent` was applied.
+        let agent_type = self.main_thread_agent_type().await;
         HookContext {
             session_id,
             cwd: self.current_cwd(),
             transcript_path,
             permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
             stop_hook_active,
+            agent_type,
             ..Default::default()
         }
     }
@@ -5218,11 +5254,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     async fn try_run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
-        // 0. Build the system prompt for THIS turn. Override always wins.
-        let system_prompt: Option<String> = match &self.config.system_prompt_override {
-            Some(custom) => Some(custom.clone()),
-            None => Some(self.build_system_prompt().await),
-        };
+        // 0. Build the system prompt for THIS turn.
+        // claude-code `nre` precedence: `--system-prompt` (override) wins; else
+        // the `--agent`-adopted main-thread agent's prompt; else the default.
+        let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
         // 1. Append the user prompt to session history.
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
@@ -5423,11 +5458,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // finish before it can open its own stream.
         self.abort_startup_responses_websocket_prewarm();
 
-        // 0. Build the system prompt for THIS turn. Override always wins.
-        let system_prompt: Option<String> = match &self.config.system_prompt_override {
-            Some(custom) => Some(custom.clone()),
-            None => Some(self.build_system_prompt().await),
-        };
+        // 0. Build the system prompt for THIS turn.
+        // claude-code `nre` precedence: `--system-prompt` (override) wins; else
+        // the `--agent`-adopted main-thread agent's prompt; else the default.
+        let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
         // 1. Append the user prompt (+ any pasted images) to session history.
         // `images` arrives already decoded (path-based callers ran `load_images`
@@ -7127,10 +7161,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         // 0. Build the system prompt (same as non-cancelable path).
-        let system_prompt: Option<String> = match &self.config.system_prompt_override {
-            Some(custom) => Some(custom.clone()),
-            None => Some(self.build_system_prompt().await),
-        };
+        // claude-code `nre` precedence: `--system-prompt` (override) wins; else the
+        // `--agent` main-thread agent's prompt; else the default (`build_system_prompt`).
+        let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
         // 1. Append the user prompt to session history.
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
@@ -7447,10 +7480,52 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `real_provider()`) actually reaches the system prompt, without a live
     /// model round-trip.
     pub async fn assemble_system_prompt_preview(&self) -> String {
-        match &self.config.system_prompt_override {
-            Some(p) => p.clone(),
-            None => self.build_system_prompt().await,
+        self.effective_system_prompt().await
+    }
+
+    /// Adopt a `--agent`-resolved definition for the MAIN conversation loop
+    /// (claude-code `bde(agentDef.agentType)` + `mainThreadAgentDefinition`).
+    /// Called ONCE at startup by the composition root when `--agent` resolves to
+    /// a catalog hit — the resolution runs against the FINAL agent catalog after
+    /// this orchestrator is already `Arc`-wrapped, so the seam is interior-mutable.
+    /// After this, `agent_type` rides every main-thread lifecycle hook payload
+    /// and `system_prompt` (when `Some`) becomes the main-loop system prompt on
+    /// every query — `--system-prompt` (`system_prompt_override`) still winning.
+    pub async fn set_main_thread_agent(&self, agent_type: String, system_prompt: Option<String>) {
+        *self.main_thread_agent.write().await = Some(MainThreadAgentState {
+            agent_type,
+            system_prompt,
+        });
+    }
+
+    /// The adopted main-thread agent's `agentType` (claude-code `MB()`), or
+    /// `None` when no `--agent` was applied. Threaded into main-thread lifecycle
+    /// hook payloads.
+    pub(crate) async fn main_thread_agent_type(&self) -> Option<String> {
+        self.main_thread_agent
+            .read()
+            .await
+            .as_ref()
+            .map(|a| a.agent_type.clone())
+    }
+
+    /// The system prompt for the next query, applying claude-code `nre`
+    /// precedence: `overrideSystemPrompt` (`--system-prompt`) wins; else the
+    /// adopted main-thread agent's prompt (`mainThreadAgentDefinition`
+    /// `.getSystemPrompt()`); else the freshly assembled default.
+    pub(crate) async fn effective_system_prompt(&self) -> String {
+        if let Some(custom) = &self.config.system_prompt_override {
+            return custom.clone();
         }
+        {
+            let guard = self.main_thread_agent.read().await;
+            if let Some(agent) = guard.as_ref() {
+                if let Some(prompt) = &agent.system_prompt {
+                    return prompt.clone();
+                }
+            }
+        }
+        self.build_system_prompt().await
     }
 
     /// Read-only introspection seam for the leading additional-context
@@ -8574,6 +8649,12 @@ As you answer the user's questions, you can use the following context:\n\
                 }
             }
         }
+        // Tool Search (2.1.207): stamp `defer_loading: true` onto tools the
+        // shared `DeferralState` defers this turn (claude-code's deferred-tool
+        // wire form). Disabled by default ⇒ no-op ⇒ wire bytes unchanged. The
+        // `DeferralState` is owned by the registry, shared with `ToolSearch`, so
+        // a tool loaded via a prior `ToolSearch` call is no longer deferred here.
+        tool_api::wire::apply_defer_loading(&mut wire, &tools, self.tools.deferral());
         wire
     }
 
@@ -14240,5 +14321,101 @@ mod post_compact_file_restore_tests {
         let restored = orch.restore_post_compact_attachments().await;
         assert!(restored.is_empty());
         assert!(restore_names(&sink.events().await).is_empty());
+    }
+}
+
+/// P2-02 (cc2.1.207): `--agent` adopts a main-thread agent — its system prompt
+/// becomes the main-loop system prompt (claude-code `nre`, `--system-prompt`
+/// still winning) and its `agentType` rides every main-thread lifecycle hook
+/// payload (`bde`/`MB()`, base builder `wf` `?? MB()`).
+#[cfg(test)]
+mod main_thread_agent_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    fn orch_with_config(config: OrchestratorConfig) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            config,
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    /// A resolved `--agent` with a prompt REPLACES the assembled default system
+    /// prompt on every query (claude-code `nre` uses `agentDef.getSystemPrompt()`
+    /// as the whole system prompt, exactly like `--system-prompt`).
+    #[tokio::test]
+    async fn main_thread_agent_prompt_replaces_default() {
+        let orch = orch_with_config(OrchestratorConfig::default());
+        let default = orch.assemble_system_prompt_preview().await;
+        orch.set_main_thread_agent(
+            "code-reviewer".to_string(),
+            Some("You are a meticulous code reviewer.".to_string()),
+        )
+        .await;
+        let after = orch.assemble_system_prompt_preview().await;
+        assert_eq!(after, "You are a meticulous code reviewer.");
+        assert_ne!(
+            after, default,
+            "the agent prompt must replace the assembled default"
+        );
+    }
+
+    /// `--system-prompt` (`system_prompt_override` / claude `overrideSystemPrompt`)
+    /// beats the main-thread agent's prompt — `nre` returns `Zu([overrideSystemPrompt])`
+    /// before ever consulting the agent definition.
+    #[tokio::test]
+    async fn system_prompt_override_beats_main_thread_agent() {
+        let mut config = OrchestratorConfig::default();
+        config.system_prompt_override = Some("EXPLICIT --system-prompt wins".to_string());
+        let orch = orch_with_config(config);
+        orch.set_main_thread_agent(
+            "code-reviewer".to_string(),
+            Some("agent prompt should be ignored".to_string()),
+        )
+        .await;
+        assert_eq!(
+            orch.assemble_system_prompt_preview().await,
+            "EXPLICIT --system-prompt wins"
+        );
+    }
+
+    /// An adopted agent that declares NO prompt falls through to the assembled
+    /// default (claude `getSystemPrompt()` -> undefined -> default path).
+    #[tokio::test]
+    async fn main_thread_agent_without_prompt_uses_default() {
+        let orch = orch_with_config(OrchestratorConfig::default());
+        let default = orch.assemble_system_prompt_preview().await;
+        orch.set_main_thread_agent("promptless".to_string(), None)
+            .await;
+        assert_eq!(orch.assemble_system_prompt_preview().await, default);
+    }
+
+    /// The adopted agent's `agentType` rides main-thread lifecycle hook payloads
+    /// (`expansion_hook_context` shares the `lifecycle_hook_ctx` builder that
+    /// `SessionStart` / `UserPromptSubmit` / `Stop` use). `None` before any
+    /// `--agent` is applied.
+    #[tokio::test]
+    async fn lifecycle_hook_ctx_carries_main_thread_agent_type() {
+        let orch = orch_with_config(OrchestratorConfig::default());
+        assert_eq!(orch.expansion_hook_context().await.agent_type, None);
+        orch.set_main_thread_agent("code-reviewer".to_string(), None)
+            .await;
+        assert_eq!(
+            orch.expansion_hook_context().await.agent_type,
+            Some("code-reviewer".to_string())
+        );
     }
 }

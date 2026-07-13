@@ -29,6 +29,7 @@
 //! slice that is not already partition-sorted — e.g. a hand-built test set —
 //! is sorted here by [`locale_cmp`] as a faithful fallback.)
 
+use crate::defer::DeferralState;
 use crate::tool_trait::{PromptOptions, Tool};
 use serde_json::{json, Value};
 use std::cmp::Ordering;
@@ -158,6 +159,71 @@ pub async fn tools_to_wire(tools: &[Arc<dyn Tool>], opts: &PromptOptions) -> Vec
         out.push(tool_to_wire(tool.as_ref(), opts).await);
     }
     out
+}
+
+/// Serialize one tool to its wire definition, adding `defer_loading: true` when
+/// `defer` is set — claude-code's deferred-tool wire form
+/// (`{name, description, input_schema, defer_loading: true}`). When `defer` is
+/// `false` the output is the byte-identical base triple.
+pub async fn tool_to_wire_deferred(tool: &dyn Tool, opts: &PromptOptions, defer: bool) -> Value {
+    let mut v = tool_to_wire(tool, opts).await;
+    if defer {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("defer_loading".to_string(), Value::Bool(true));
+        }
+    }
+    v
+}
+
+/// Stamp `defer_loading: true` onto every already-serialized wire entry whose
+/// tool the [`DeferralState`] defers this turn (claude-code's deferred-tool wire
+/// form). Entries are matched to `tools` by name, so the caller may pass the
+/// same (deny-filtered, order-preserved) slice it serialized.
+///
+/// Two invariants from claude-code are honored:
+/// - When the state is DISABLED this is a no-op and the wire bytes are
+///   byte-identical to the pre-pipeline build (the common, default path).
+/// - At least one tool stays non-deferred: if EVERY wire entry would be
+///   deferred, the first one is left loaded (claude-code keeps ≥1 non-deferred
+///   tool so deferred loading stays active — normally the always-loaded
+///   `ToolSearch` / `Read` satisfy this, so the guard is a safety net).
+pub fn apply_defer_loading(wire: &mut [Value], tools: &[Arc<dyn Tool>], defer: &DeferralState) {
+    if !defer.is_enabled() {
+        return;
+    }
+    let deferred: std::collections::HashSet<&str> = tools
+        .iter()
+        .filter(|t| defer.should_defer_tool(t.as_ref()))
+        .map(|t| t.name())
+        .collect();
+    if deferred.is_empty() {
+        return;
+    }
+    let will_defer = wire
+        .iter()
+        .filter(|w| {
+            w.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| deferred.contains(n))
+        })
+        .count();
+    // ≥1 non-deferred invariant: only skip if literally every entry would defer.
+    let mut skip_one = !wire.is_empty() && will_defer >= wire.len();
+    for w in wire.iter_mut() {
+        let Some(name) = w.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if !deferred.contains(name) {
+            continue;
+        }
+        if skip_one {
+            skip_one = false;
+            continue;
+        }
+        if let Some(obj) = w.as_object_mut() {
+            obj.insert("defer_loading".to_string(), Value::Bool(true));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -358,5 +424,173 @@ mod tests {
     async fn empty_set_serializes_to_empty_vec() {
         let wire = tools_to_wire(&[], &opts()).await;
         assert!(wire.is_empty());
+    }
+
+    // ---- deferred-tool wire form (Tool Search) -------------------------------
+
+    use crate::defer::{DeferralState, ToolSearchMode};
+
+    /// Stub tool with a configurable `should_defer` flag.
+    struct DeferStub {
+        name: &'static str,
+        defer: bool,
+    }
+
+    #[async_trait]
+    impl Tool for DeferStub {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn input_schema(&self) -> &Value {
+            static SCHEMA: once_cell::sync::Lazy<Value> =
+                once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn should_defer(&self) -> bool {
+            self.defer
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &Value) -> bool {
+            true
+        }
+        async fn check_permissions(
+            &self,
+            _input: &Value,
+            _ctx: &ToolUseContext,
+        ) -> PermissionResult {
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            }
+        }
+        async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+            self.name.into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            self.name.into()
+        }
+        async fn call(
+            &self,
+            _input: Value,
+            _ctx: ToolUseContext,
+            _tx: crate::progress::ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({"ok": true}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_to_wire_deferred_adds_flag_only_when_deferred() {
+        let tool = DeferStub {
+            name: "Task",
+            defer: true,
+        };
+        let with = tool_to_wire_deferred(&tool, &opts(), true).await;
+        assert_eq!(with["defer_loading"], json!(true));
+        assert_eq!(with.as_object().unwrap().len(), 4);
+        let without = tool_to_wire_deferred(&tool, &opts(), false).await;
+        assert!(without.get("defer_loading").is_none());
+        assert_eq!(without.as_object().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn apply_defer_loading_disabled_is_byte_identical() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DeferStub {
+                name: "Task",
+                defer: true,
+            }),
+            Arc::new(DeferStub {
+                name: "Read",
+                defer: false,
+            }),
+        ];
+        let baseline = tools_to_wire(&tools, &opts()).await;
+        let mut wire = baseline.clone();
+        apply_defer_loading(&mut wire, &tools, &DeferralState::disabled());
+        assert_eq!(wire, baseline, "disabled must leave the wire unchanged");
+    }
+
+    #[tokio::test]
+    async fn apply_defer_loading_enabled_marks_only_should_defer_tools() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DeferStub {
+                name: "Task",
+                defer: true,
+            }),
+            Arc::new(DeferStub {
+                name: "Read",
+                defer: false,
+            }),
+        ];
+        let mut wire = tools_to_wire(&tools, &opts()).await;
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+        apply_defer_loading(&mut wire, &tools, &d);
+        let by_name = |n: &str| wire.iter().find(|w| w["name"] == json!(n)).unwrap();
+        assert_eq!(by_name("Task")["defer_loading"], json!(true));
+        assert!(by_name("Read").get("defer_loading").is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_defer_loading_keeps_at_least_one_non_deferred() {
+        // Every tool wants to defer → the first entry is left loaded.
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DeferStub {
+                name: "Task",
+                defer: true,
+            }),
+            Arc::new(DeferStub {
+                name: "TaskUpdate",
+                defer: true,
+            }),
+        ];
+        let mut wire = tools_to_wire(&tools, &opts()).await;
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+        apply_defer_loading(&mut wire, &tools, &d);
+        let deferred = wire
+            .iter()
+            .filter(|w| w.get("defer_loading") == Some(&json!(true)))
+            .count();
+        assert_eq!(deferred, 1, "exactly one stays loaded when all would defer");
+    }
+
+    #[tokio::test]
+    async fn apply_defer_loading_skips_already_loaded_tool() {
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(DeferStub {
+                name: "Task",
+                defer: true,
+            }),
+            Arc::new(DeferStub {
+                name: "Read",
+                defer: false,
+            }),
+        ];
+        let mut wire = tools_to_wire(&tools, &opts()).await;
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+        d.mark_loaded(["Task".to_string()]);
+        apply_defer_loading(&mut wire, &tools, &d);
+        // Task was loaded via ToolSearch, so it is no longer deferred.
+        let task = wire.iter().find(|w| w["name"] == json!("Task")).unwrap();
+        assert!(task.get("defer_loading").is_none());
     }
 }

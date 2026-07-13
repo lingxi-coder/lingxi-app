@@ -20,6 +20,7 @@ pub mod anthropic_request;
 pub mod builtin_context;
 pub mod content_replacement;
 pub mod context;
+pub mod defer;
 pub mod model_prompt_gate;
 pub mod progress;
 pub mod prompt_shell;
@@ -27,6 +28,7 @@ pub mod read_file_state;
 pub mod registry;
 pub mod sandbox_runner;
 pub mod tool_invoker_impl;
+pub mod tool_search_view;
 pub mod tool_trait;
 pub mod util;
 pub mod wire;
@@ -41,6 +43,12 @@ pub use builtin_context::{
 };
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};
+pub use defer::{
+    mode_from_env, mode_from_values, DeferralState, ToolSearchMode, ENTER_WORKTREE_TOOL_NAME,
+};
+pub use tool_search_view::{
+    SharedToolSearchView, StaticRegistryView, ToolRegistryView, ToolSearchEntry,
+};
 pub use model_prompt_gate::dh_simple_system_prompt;
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use prompt_shell::{build_prompt_shell_provider, PromptShellExpansionProvider, PromptShellRunner};

@@ -17,6 +17,8 @@
 //! MCP / plugin partitions are stored insertion-ordered (`Vec` of keyed
 //! entries, not `HashMap`) so that order is deterministic before the sort.
 
+use crate::defer::DeferralState;
+use crate::tool_search_view::{SharedToolSearchView, ToolSearchEntry};
 use crate::tool_trait::{Tool, ToolStaticContext};
 use crate::wire::locale_cmp;
 use protocol::{McpConnectionId, PluginId};
@@ -34,6 +36,15 @@ pub struct ToolRegistry {
     mcp_tools: Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>,
     lsp_tools: Vec<Arc<dyn Tool>>,
     plugin_tools: Vec<(PluginId, Vec<Arc<dyn Tool>>)>,
+    /// Shared Tool Search deferral state (mode + loaded-set). Disabled by
+    /// default; wired to the env-derived mode by `tool_meta::register_all`.
+    /// Shared with the `ToolSearchTool` and read by the orchestrator's wire
+    /// assembly ([`crate::wire::apply_defer_loading`]) so both ends agree.
+    deferral: Arc<DeferralState>,
+    /// Live searchable view of the DEFERRED tool set, fed to `ToolSearchTool` at
+    /// registration and refreshed by [`Self::refresh_tool_search_view`] once the
+    /// registry (including MCP tools) is fully assembled.
+    tool_search_view: Arc<SharedToolSearchView>,
 }
 
 impl ToolRegistry {
@@ -45,7 +56,53 @@ impl ToolRegistry {
             mcp_tools: Vec::new(),
             lsp_tools: Vec::new(),
             plugin_tools: Vec::new(),
+            deferral: Arc::new(DeferralState::disabled()),
+            tool_search_view: Arc::new(SharedToolSearchView::new()),
         }
+    }
+
+    /// The shared Tool Search deferral state.
+    #[must_use]
+    pub fn deferral(&self) -> &Arc<DeferralState> {
+        &self.deferral
+    }
+
+    /// Install the session's deferral state (called by `tool_meta::register_all`
+    /// with the env-derived mode). The same `Arc` is handed to the
+    /// `ToolSearchTool`, so both the wire serializer and the search consumer
+    /// observe one shared loaded-set.
+    pub fn set_deferral(&mut self, deferral: Arc<DeferralState>) {
+        self.deferral = deferral;
+    }
+
+    /// The shared live view cell fed to the `ToolSearchTool`.
+    #[must_use]
+    pub fn tool_search_view(&self) -> Arc<SharedToolSearchView> {
+        self.tool_search_view.clone()
+    }
+
+    /// Recompute the searchable view from the registry's DEFERRED tool set and
+    /// publish it to the shared cell. Call once after the registry (including MCP
+    /// tools) is fully assembled. When the deferral state is disabled the
+    /// deferred set is empty, so the view is emptied — the correct behavior for a
+    /// non-tool-search session.
+    ///
+    /// The entry `description` is left empty (the tool's long-form prompt is
+    /// async); `ToolSearch`'s select / exact-name / `mcp__` prefix paths need
+    /// only the name, and keyword scoring still ranks on name-parts + searchHint.
+    pub fn refresh_tool_search_view(&self) {
+        let ctx = ToolStaticContext::default();
+        let entries: Vec<ToolSearchEntry> = self
+            .available_tools(&ctx)
+            .iter()
+            .filter(|t| self.deferral.should_defer_tool(t.as_ref()))
+            .map(|t| ToolSearchEntry {
+                name: t.name().to_string(),
+                description: String::new(),
+                search_hint: t.search_hint().map(str::to_string),
+            })
+            .collect();
+        self.tool_search_view.set_entries(entries);
     }
 
     /// Register a builtin tool. Insertion order is preserved.
@@ -179,6 +236,7 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_search_view::ToolRegistryView;
     use crate::tool_trait::{
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     };
@@ -392,6 +450,182 @@ mod tests {
             .collect();
         // Builtin prefix (locale-sorted), then MCP (locale-sorted); no dup Bash.
         assert_eq!(names, vec!["Bash", "Write", "mcp__a", "mcp__b"]);
+    }
+
+    /// A stub tool with a configurable name + `should_defer` + `search_hint`,
+    /// for the Tool Search deferred-view tests.
+    struct DeferNamedTool {
+        name: &'static str,
+        defer: bool,
+        hint: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl Tool for DeferNamedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn search_hint(&self) -> Option<&str> {
+            self.hint
+        }
+        fn should_defer(&self) -> bool {
+            self.defer
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> PermissionResult {
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            self.name.into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: crate::progress::ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({"ok": true}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Default (disabled) deferral ⇒ `refresh_tool_search_view` yields an EMPTY
+    /// view even when a `should_defer` tool is registered — the correct behavior
+    /// for a non-tool-search session, and byte-identical to the empty static view.
+    #[test]
+    fn tool_search_view_empty_when_deferral_disabled() {
+        let mut r = ToolRegistry::new();
+        r.register_builtin(Arc::new(DeferNamedTool {
+            name: "Task",
+            defer: true,
+            hint: None,
+        }));
+        r.refresh_tool_search_view();
+        assert!(r.tool_search_view().is_empty());
+    }
+
+    /// The empty-view REGRESSION: with tool search enabled, the refreshed view is
+    /// the DEFERRED set (should_defer tools only) — not empty, and not the
+    /// non-deferred tools. Kills the former "always returns no results" behavior.
+    #[test]
+    fn tool_search_view_is_deferred_set_when_enabled() {
+        let mut r = ToolRegistry::new();
+        r.register_builtin(Arc::new(DeferNamedTool {
+            name: "Read",
+            defer: false,
+            hint: None,
+        }));
+        r.register_builtin(Arc::new(DeferNamedTool {
+            name: "Task",
+            defer: true,
+            hint: Some("run a subagent"),
+        }));
+        r.set_deferral(Arc::new(crate::defer::DeferralState::new(
+            crate::defer::ToolSearchMode::Enabled,
+            false,
+        )));
+        r.refresh_tool_search_view();
+        let names: Vec<String> = r
+            .tool_search_view()
+            .entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["Task".to_string()], "only should_defer tools");
+        // The searchHint is carried through for scoring.
+        let entry = r.tool_search_view().entries().into_iter().next().unwrap();
+        assert_eq!(entry.search_hint.as_deref(), Some("run a subagent"));
+    }
+
+    /// An MCP tool registered after boot (before the refresh) appears in the
+    /// deferred view — the static-snapshot fix must include MCP tools, per the
+    /// dossier's composition-root requirement.
+    #[test]
+    fn tool_search_view_includes_deferred_mcp_tool() {
+        let mut r = ToolRegistry::new();
+        r.set_deferral(Arc::new(crate::defer::DeferralState::new(
+            crate::defer::ToolSearchMode::Enabled,
+            false,
+        )));
+        let conn = McpConnectionId::new();
+        r.register_mcp_tools(
+            conn,
+            vec![Arc::new(DeferNamedTool {
+                name: "mcp__srv__do",
+                defer: true,
+                hint: None,
+            }) as Arc<dyn Tool>],
+        );
+        r.refresh_tool_search_view();
+        let names: Vec<String> = r
+            .tool_search_view()
+            .entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["mcp__srv__do".to_string()]);
+    }
+
+    /// A tool loaded via `ToolSearch` drops out of the deferred view on refresh.
+    #[test]
+    fn tool_search_view_excludes_loaded_tool() {
+        let mut r = ToolRegistry::new();
+        r.register_builtin(Arc::new(DeferNamedTool {
+            name: "Task",
+            defer: true,
+            hint: None,
+        }));
+        let defer = Arc::new(crate::defer::DeferralState::new(
+            crate::defer::ToolSearchMode::Enabled,
+            false,
+        ));
+        r.set_deferral(defer.clone());
+        r.refresh_tool_search_view();
+        assert_eq!(r.tool_search_view().len(), 1);
+        // Simulate a ToolSearch load, then refresh again.
+        defer.mark_loaded(["Task".to_string()]);
+        r.refresh_tool_search_view();
+        assert!(r.tool_search_view().is_empty());
     }
 
     /// Re-registering an MCP connection upserts in place; unregister drops it.

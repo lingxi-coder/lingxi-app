@@ -5209,6 +5209,13 @@ pub async fn build(
             slot
         });
 
+    // Tool Search (2.1.207): now that the registry is fully assembled (builtins
+    // + workflow + MCP + structured-output + end-conversation), publish the
+    // DEFERRED tool set to `ToolSearch`'s live view cell. When tool search is
+    // disabled (the default) the deferred set is empty, so this leaves the view
+    // empty — the correct behavior — and the wire stays byte-identical.
+    tools_inner.refresh_tool_search_view();
+
     let tools = Arc::new(tools_inner);
 
     // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
@@ -5737,34 +5744,51 @@ pub async fn build(
     // lookup: exact `agentType` match, else FQN `…:{name}` suffix; a miss logs
     // `Warning: agent "X" not found. Available agents: …. Using default
     // behavior.` and the session proceeds with default behavior.
-    // RESIDUAL seam: the binary then applies the hit via `xz(h?.agentType)` →
-    // `mainThreadAgentType` (the MAIN session adopts the agent's system
-    // prompt / tools / hooks). lingxi has no main-thread-agent runtime yet, so
-    // a successful resolution is logged but not applied — porting
-    // `mainThreadAgentType` consumption is the follow-up seam. (Built-in agent
-    // defs live in the subagent spawner, not this catalog, so their names are
-    // absent from the miss warning's "Available agents" list — residual.)
+    //
+    // (P2-02 cc2.1.207) On a HIT the binary APPLIES the agent to the MAIN loop
+    // via `bde(h?.agentType)` + `mainThreadAgentDefinition`. We adopt the two
+    // most model-visible pieces here: the agent's `agentType` (rides every
+    // main-thread lifecycle hook payload, claude `wf`/`MVe` `?? MB()`) and its
+    // system prompt (becomes the main-loop system prompt on every query via
+    // `nre`, `--system-prompt` still winning). This runs BEFORE the
+    // `SessionStart` firing below so that hook carries the `agentType`.
+    // RESIDUAL seam (follow-up, same `mainThreadAgentType`): agent `tools`
+    // filtering (`HJ`→resolvedTools), `model` override (`jb(Zo(model))` when the
+    // user gave no model), frontmatter `hooks` registration (`Rft`→
+    // `mainThreadAgentHooks`), frontmatter `mcpServers` (scope `"agent"`), and
+    // resume restoration (`rVe`). (Built-in agent defs live in the subagent
+    // spawner, not this catalog, so their names are absent from the miss
+    // warning's "Available agents" list — residual.)
     if let Some(wanted) = cfg.cli_agent.as_deref() {
-        let cat = plugin_agent_catalog.read().await;
-        let hit = cat
-            .iter()
-            .find(|a| a.agent_type == wanted)
-            .or_else(|| {
-                let suffix = format!(":{wanted}");
-                cat.iter().find(|a| a.agent_type.ends_with(&suffix))
-            });
-        match hit {
-            Some(a) => tracing::debug!(
-                agent = %a.agent_type,
-                "--agent resolved (main-thread agent application is a pending seam)"
-            ),
-            None => tracing::warn!(
-                "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
-                cat.iter()
-                    .map(|a| a.agent_type.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+        // Resolve against the FINAL catalog, extracting what the main thread
+        // applies (agentType + system prompt) so the catalog read lock is
+        // released before we mutate the orchestrator seam.
+        let applied = {
+            let cat = plugin_agent_catalog.read().await;
+            let hit = cat
+                .iter()
+                .find(|a| a.agent_type == wanted)
+                .or_else(|| {
+                    let suffix = format!(":{wanted}");
+                    cat.iter().find(|a| a.agent_type.ends_with(&suffix))
+                });
+            match hit {
+                Some(a) => Some((a.agent_type.clone(), a.system_prompt.clone())),
+                None => {
+                    tracing::warn!(
+                        "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
+                        cat.iter()
+                            .map(|a| a.agent_type.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    None
+                }
+            }
+        };
+        if let Some((agent_type, system_prompt)) = applied {
+            tracing::debug!(agent = %agent_type, "--agent applied to main thread");
+            orch.set_main_thread_agent(agent_type, system_prompt).await;
         }
     }
 

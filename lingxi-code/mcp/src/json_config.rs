@@ -85,6 +85,39 @@ struct McpJsonEntry {
     headers: McpHeaders,
     #[serde(default)]
     disabled: bool,
+    /// Per-server `tools/call` timeout in ms. claude-code zod schema
+    /// (all transports): `timeout: RKe().optional()` where `RKe =
+    /// E.number().int().positive()`. A present-but-invalid value (non-integer,
+    /// non-positive, wrong type) fails the entry's `safeParse` → the entry is
+    /// skipped (mirrored here: a non-`u64` value fails `serde` decode →
+    /// [`build_servers_from_map`] logs + skips the entry).
+    #[serde(default)]
+    timeout: Option<u64>,
+    /// sse/http-only alias for `timeout`. claude-code schema:
+    /// `request_timeout_ms: nil()` where `nil =
+    /// E.number().int().positive().optional().catch(void 0)` — the `.catch`
+    /// means an invalid value is coerced to `undefined` (NOT an entry failure).
+    /// Held as opaque JSON so a bad value never fails the whole entry; coerced
+    /// to a positive integer by [`as_positive_int_ms`] and folded into
+    /// `timeout` via the `RAn` transform below (sse/http only).
+    #[serde(default, rename = "request_timeout_ms")]
+    request_timeout_ms: Option<serde_json::Value>,
+    /// `alwaysLoad`: force all of this server's tools into the prompt (never
+    /// deferred behind tool search). claude-code schema (all transports):
+    /// `alwaysLoad: E.boolean().optional()`.
+    #[serde(default, rename = "alwaysLoad")]
+    always_load: Option<bool>,
+}
+
+/// Coerce a JSON value to a positive-integer millisecond count, mirroring the
+/// claude-code `request_timeout_ms` zod schema `E.number().int().positive()
+/// .optional().catch(void 0)`: a positive integer is kept; anything else
+/// (missing, non-number, non-integer, `<= 0`, or overflowing `u64`) becomes
+/// `None` (the `.catch(void 0)` leniency).
+fn as_positive_int_ms(v: Option<&serde_json::Value>) -> Option<u64> {
+    // `as_u64` already rejects negatives, fractional numbers, and non-numbers.
+    let n = v?.as_u64()?;
+    (n > 0).then_some(n)
 }
 
 /// Parse a `.mcp.json` payload (raw file contents) into a list of configs.
@@ -246,11 +279,28 @@ fn build_servers_from_map(
                 "mcp.json: unresolved ${{VAR}} references left literal"
             );
         }
+        // Resolve the per-server `tools/call` timeout. claude-code applies the
+        // `RAn` transform to the sse/http schemas ONLY:
+        //   RAn({request_timeout_ms:e, ...t}) =>
+        //     {...t, ...(t.timeout===void 0 && e!==void 0 && {timeout: min(e, 300_000)})}
+        // i.e. when `timeout` is unset and `request_timeout_ms` is set, fold the
+        // alias in capped at 300_000ms (LTm). The stdio / sdk-control / ide
+        // schemas carry no `request_timeout_ms` field (zod strips it), so the
+        // alias is honoured for remote HTTP-family transports only.
+        let timeout_ms = match &spec {
+            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => entry
+                .timeout
+                .or_else(|| as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))),
+            _ => entry.timeout,
+        };
+        let always_load = entry.always_load.unwrap_or(false);
         out.push(McpServerConfig {
             name,
             spec,
             scope,
             disabled: entry.disabled,
+            timeout_ms,
+            always_load,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -777,5 +827,102 @@ mod tests {
         assert_eq!(by_name["loc"], ConfigScope::Local);
         assert_eq!(by_name["prj"], ConfigScope::Project);
         assert_eq!(by_name["usr"], ConfigScope::User);
+    }
+
+    // ── Per-server `timeout` / `request_timeout_ms` / `alwaysLoad` (parity
+    //    2.1.207 P2-01): zod schemas `timeout: RKe().optional()` (all
+    //    transports), `request_timeout_ms: nil()` (sse/http only, folded by
+    //    `RAn`), `alwaysLoad: E.boolean().optional()`. ─────────────────────
+
+    #[test]
+    fn stdio_timeout_is_parsed() {
+        let raw = r#"{"mcpServers":{"s":{"command":"c","timeout":5000}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs[0].timeout_ms, Some(5000));
+        assert!(!cfgs[0].always_load);
+    }
+
+    #[test]
+    fn http_request_timeout_ms_folds_into_timeout_capped_at_300_000() {
+        // RAn: `timeout` unset + `request_timeout_ms` set → timeout =
+        // min(request_timeout_ms, 300_000). A huge alias is capped.
+        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":999999999}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs[0].timeout_ms, Some(300_000), "capped at LTm=300_000");
+
+        // Under the cap it is folded verbatim.
+        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":45000}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs[0].timeout_ms, Some(45000));
+    }
+
+    #[test]
+    fn http_timeout_wins_over_request_timeout_ms() {
+        // RAn only folds when `timeout` is UNSET; an explicit `timeout` wins and
+        // is NOT capped at 300_000.
+        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","timeout":600000,"request_timeout_ms":10}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs[0].timeout_ms, Some(600000));
+    }
+
+    #[test]
+    fn stdio_ignores_request_timeout_ms() {
+        // The stdio zod schema carries no `request_timeout_ms` field (zod strips
+        // it); the alias must NOT be folded for a stdio transport.
+        let raw = r#"{"mcpServers":{"s":{"command":"c","request_timeout_ms":45000}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs[0].timeout_ms, None);
+    }
+
+    #[test]
+    fn always_load_is_parsed() {
+        let raw = r#"{"mcpServers":{"s":{"command":"c","alwaysLoad":true}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert!(cfgs[0].always_load);
+    }
+
+    #[test]
+    fn invalid_request_timeout_ms_is_caught_not_fatal() {
+        // `nil()` has `.catch(void 0)`: a bad value becomes undefined rather than
+        // failing the entry. A string alias must NOT skip the server; it is just
+        // ignored (no fold).
+        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":"nope"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1, "invalid request_timeout_ms must not drop the server");
+        assert_eq!(cfgs[0].timeout_ms, None);
+
+        // Non-positive alias is also coerced away (.positive()).
+        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":0}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs[0].timeout_ms, None);
+    }
+
+    #[test]
+    fn invalid_timeout_type_skips_entry() {
+        // `timeout: RKe()` has NO `.catch`, so a non-integer value fails the
+        // entry's safeParse → the whole server is skipped (valid siblings kept).
+        let raw = r#"{"mcpServers":{"bad":{"command":"c","timeout":"soon"},"good":{"command":"g"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "good");
+    }
+
+    #[test]
+    fn new_fields_do_not_change_server_key_hash() {
+        // The per-server timeout/alwaysLoad live on McpServerConfig, NOT on the
+        // McpTransportSpec, so `oauth::server_key` (which hashes only the spec)
+        // is identical with or without them.
+        let bare = r#"{"mcpServers":{"ordered":{"url":"https://mcp.example.com/v1","type":"http","headers":{"Z-Header":"z","A-Header":"a"}}}}"#;
+        let with = r#"{"mcpServers":{"ordered":{"url":"https://mcp.example.com/v1","type":"http","headers":{"Z-Header":"z","A-Header":"a"},"timeout":12345,"alwaysLoad":true}}}"#;
+        let a = parse_mcp_json_string(bare, ConfigScope::Project).unwrap();
+        let b = parse_mcp_json_string(with, ConfigScope::Project).unwrap();
+        assert_eq!(
+            crate::oauth::server_key("ordered", &a[0].spec),
+            crate::oauth::server_key("ordered", &b[0].spec),
+            "timeout/alwaysLoad must not perturb the server-key config hash",
+        );
+        // ...and the fields were actually captured on the config.
+        assert_eq!(b[0].timeout_ms, Some(12345));
+        assert!(b[0].always_load);
     }
 }

@@ -300,6 +300,8 @@ mod tests {
             },
             scope: ConfigScope::Project,
             disabled: false,
+            timeout_ms: None,
+            always_load: false,
         };
 
         // Write a global config with a denylist entry for one server.
@@ -362,6 +364,8 @@ mod tests {
             },
             scope,
             disabled: false,
+            timeout_ms: None,
+            always_load: false,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -407,6 +411,8 @@ mod tests {
             },
             scope: ConfigScope::Project,
             disabled: false,
+            timeout_ms: None,
+            always_load: false,
         };
 
         let dir = tempfile::tempdir().unwrap();

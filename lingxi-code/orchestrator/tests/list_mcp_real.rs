@@ -82,6 +82,8 @@ fn stdio_cfg(name: &str) -> McpServerConfig {
         },
         scope: ConfigScope::Project,
         disabled: false,
+        timeout_ms: None,
+        always_load: false,
     }
 }
 

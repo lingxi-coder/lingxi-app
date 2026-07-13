@@ -359,6 +359,8 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         },
         scope: ConfigScope::Project,
         disabled: false,
+        timeout_ms: None,
+        always_load: false,
     }
 }
 
@@ -531,6 +533,8 @@ async fn static_token_server_spec_is_unchanged() {
         },
         scope: ConfigScope::Project,
         disabled: false,
+        timeout_ms: None,
+        always_load: false,
     };
 
     registry.connect(config.clone()).await.expect("connect ok");

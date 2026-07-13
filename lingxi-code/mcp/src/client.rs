@@ -235,6 +235,14 @@ pub struct McpClient {
     /// truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] chars on receipt
     /// (matches claude-code `client.ts:1163-1166`).
     server_instructions: RwLock<Option<String>>,
+    /// Per-server `tools/call` timeout (ms) from the resolved
+    /// [`crate::McpServerConfig::timeout_ms`]; fed to [`mcp_tool_timeout_for`]
+    /// (`BHs`). `None` = fall back to the `MCP_TOOL_TIMEOUT` env / default.
+    config_timeout_ms: Option<u64>,
+    /// Server-level `alwaysLoad` ([`crate::McpServerConfig::always_load`]): when
+    /// `true`, every tool this client lists is marked `always_load` so it is
+    /// never deferred behind tool search.
+    config_always_load: bool,
 }
 
 impl McpClient {
@@ -322,7 +330,23 @@ impl McpClient {
             connection,
             server_capabilities: RwLock::new(None),
             server_instructions: RwLock::new(None),
+            config_timeout_ms: None,
+            config_always_load: false,
         }
+    }
+
+    /// Builder that attaches the resolved per-server config options — the
+    /// [`crate::McpServerConfig::timeout_ms`] (folded `timeout`/
+    /// `request_timeout_ms`) and [`crate::McpServerConfig::always_load`]. The
+    /// timeout feeds the `BHs` per-call resolver ([`mcp_tool_timeout_for`]) and
+    /// the `always_load` flag is OR'd into every tool's `always_load` bit at
+    /// [`Self::list_tools`] time. Passing `(None, false)` is byte-identical to
+    /// not calling this at all.
+    #[must_use]
+    pub fn with_config_options(mut self, timeout_ms: Option<u64>, always_load: bool) -> Self {
+        self.config_timeout_ms = timeout_ms;
+        self.config_always_load = always_load;
+        self
     }
 
     /// Send `notifications/roots/list_changed` to the server, telling it the
@@ -469,9 +493,16 @@ impl McpClient {
                     tool_name: t.name,
                     // Forward `_meta.anthropic/searchHint` + `alwaysLoad`
                     // from the wire (client.ts:1777-1780). Both default
-                    // to `None` for servers that omit `_meta`.
+                    // to `None` for servers that omit `_meta`. A server-level
+                    // `alwaysLoad: true` config (parity 2.1.207 P2-01) forces
+                    // ALL of this server's tools always-loaded, overriding an
+                    // absent per-tool bit.
                     search_hint: t.meta.search_hint,
-                    always_load: t.meta.always_load,
+                    always_load: if self.config_always_load {
+                        Some(true)
+                    } else {
+                        t.meta.always_load
+                    },
                 }
             })
             .collect())
@@ -486,14 +517,15 @@ impl McpClient {
     }
 
     /// Invoke a tool by its `mcp__<server>__<tool>` full-name with the resolved
-    /// per-call timeout ([`mcp_tool_timeout`]: the `MCP_TOOL_TIMEOUT` env var,
-    /// else the ~27.8h default).
+    /// per-call timeout ([`mcp_tool_timeout_for`]: the per-server config
+    /// `timeout` when `>= 1000ms`, else the `MCP_TOOL_TIMEOUT` env var, else the
+    /// ~27.8h default; clamped to `[1000, i32::MAX]`ms).
     pub async fn call_tool(
         &self,
         full_name: &str,
         input: serde_json::Value,
     ) -> Result<McpToolResultDto, McpClientError> {
-        self.call_tool_with_timeout(full_name, input, mcp_tool_timeout())
+        self.call_tool_with_timeout(full_name, input, mcp_tool_timeout_for(self.config_timeout_ms))
             .await
     }
 
@@ -527,7 +559,7 @@ impl McpClient {
         self.call_tool_with_meta(
             full_name,
             input,
-            mcp_tool_timeout(),
+            mcp_tool_timeout_for(self.config_timeout_ms),
             tool_use_id,
             on_progress,
         )
@@ -951,27 +983,70 @@ fn persist_id_seed() -> (u128, String) {
 /// var; see [`mcp_tool_timeout`]. (The previous 60s value was a fidelity bug:
 /// it spuriously timed out legitimately long-running MCP tools that claude-code
 /// lets run.)
-pub const DEFAULT_CALL_TOOL_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(100_000_000);
+pub const DEFAULT_CALL_TOOL_TIMEOUT_MS: u64 = 100_000_000;
 
-/// Resolve the per-call `tools/call` timeout — mirrors `getMcpToolTimeoutMs`
-/// (`client.ts:220-229`): the `MCP_TOOL_TIMEOUT` env var, falling back to
-/// [`DEFAULT_CALL_TOOL_TIMEOUT`].
+/// [`DEFAULT_CALL_TOOL_TIMEOUT_MS`] as a [`std::time::Duration`].
+pub const DEFAULT_CALL_TOOL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(DEFAULT_CALL_TOOL_TIMEOUT_MS);
+
+/// Lower clamp for a resolved `tools/call` timeout — `Math.max(n, 1000)` in
+/// claude-code's `BHs`.
+const MCP_TOOL_TIMEOUT_MIN_MS: u64 = 1_000;
+/// Upper clamp for a resolved `tools/call` timeout — claude-code's `WLd`
+/// (`2_147_483_647`, i.e. `i32::MAX` ms, the largest value `setTimeout`
+/// accepts without truncation).
+const MCP_TOOL_TIMEOUT_MAX_MS: u64 = 2_147_483_647;
+
+/// Resolve the per-call `tools/call` timeout with NO per-server config value —
+/// equivalent to `mcp_tool_timeout_for(None)`. Used by call sites that lack a
+/// resolved server config (e.g. the low-level platform transport).
 #[must_use]
 pub fn mcp_tool_timeout() -> std::time::Duration {
-    resolve_tool_timeout(std::env::var("MCP_TOOL_TIMEOUT").ok().as_deref())
+    mcp_tool_timeout_for(None)
 }
 
-/// Pure core of [`mcp_tool_timeout`] (env value injected for testability).
-/// Mirrors the JS `parseInt(process.env.MCP_TOOL_TIMEOUT || '', 10) ||
-/// DEFAULT_MCP_TOOL_TIMEOUT_MS`: a value that parses to a positive integer (ms)
-/// is used; unset / unparseable / non-positive falls back to the default
-/// (matching JS where `0` and `NaN` are falsy).
+/// Resolve the per-call `tools/call` timeout, honouring an optional per-server
+/// config `timeout` — a 1:1 port of claude-code `BHs` (`client.ts`):
+///
+/// ```js
+/// function BHs(e){
+///   let t=parseInt(process.env.MCP_TOOL_TIMEOUT||"",10),
+///       n=(e?.timeout!==void 0 && e.timeout>=1000 ? e.timeout : void 0)
+///         ?? (t>0 ? t : void 0) ?? 1e8;
+///   return Math.min(Math.max(n,1000), 2147483647)
+/// }
+/// ```
+///
+/// Precedence: the config timeout wins **only when `>= 1000ms`**; otherwise the
+/// `MCP_TOOL_TIMEOUT` env var (when it parses `> 0`); otherwise the
+/// [`DEFAULT_CALL_TOOL_TIMEOUT_MS`] (`1e8`) default. The chosen value is then
+/// clamped to `[1000, 2_147_483_647]` ms.
+#[must_use]
+pub fn mcp_tool_timeout_for(config_timeout_ms: Option<u64>) -> std::time::Duration {
+    resolve_tool_timeout_bhs(
+        config_timeout_ms,
+        std::env::var("MCP_TOOL_TIMEOUT").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`mcp_tool_timeout_for`] (config + env injected for
+/// testability); see that function for the `BHs` reference.
+fn resolve_tool_timeout_bhs(
+    config_timeout_ms: Option<u64>,
+    env_value: Option<&str>,
+) -> std::time::Duration {
+    let n = config_timeout_ms
+        .filter(|&ms| ms >= MCP_TOOL_TIMEOUT_MIN_MS)
+        .or_else(|| env_value.and_then(parse_int_base10_prefix).filter(|&ms| ms > 0))
+        .unwrap_or(DEFAULT_CALL_TOOL_TIMEOUT_MS);
+    std::time::Duration::from_millis(n.clamp(MCP_TOOL_TIMEOUT_MIN_MS, MCP_TOOL_TIMEOUT_MAX_MS))
+}
+
+/// Env-only shim retained for the existing test surface: equivalent to
+/// `resolve_tool_timeout_bhs(None, env_value)`.
+#[cfg(test)]
 fn resolve_tool_timeout(env_value: Option<&str>) -> std::time::Duration {
-    env_value
-        .and_then(parse_int_base10_prefix)
-        .filter(|&ms| ms > 0)
-        .map_or(DEFAULT_CALL_TOOL_TIMEOUT, std::time::Duration::from_millis)
+    resolve_tool_timeout_bhs(None, env_value)
 }
 
 /// JS `parseInt(s, 10)` for the non-negative case: skip leading ASCII
@@ -1525,11 +1600,87 @@ mod constructor_tests {
             "callback must not fire for a non-matching progressToken",
         );
     }
+
+    // ── Server-level `alwaysLoad` config (parity 2.1.207 P2-01) ─────────────
+
+    /// Drive `tools/list` and return the client's decoded tools after
+    /// responding with `tools_json`. Shared by the alwaysLoad tests below.
+    async fn list_tools_with(
+        client: McpClient,
+        peer_tx: mpsc::Sender<Bytes>,
+        mut peer_rx: mpsc::Receiver<Bytes>,
+        tools_json: serde_json::Value,
+    ) -> Vec<McpToolDto> {
+        let handle = tokio::spawn(async move { client.list_tools().await });
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("tools/list request within timeout")
+            .expect("frame sent");
+        let req: serde_json::Value = serde_json::from_slice(&frame).expect("json request");
+        assert_eq!(req["method"], "tools/list");
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": req["id"].clone(),
+            "result": { "tools": tools_json },
+        });
+        let mut bytes = serde_json::to_vec(&resp).expect("encode response");
+        bytes.push(b'\n');
+        peer_tx.send(Bytes::from(bytes)).await.expect("send response");
+        handle.await.expect("join").expect("list_tools ok")
+    }
+
+    #[tokio::test]
+    async fn server_always_load_forces_every_tool_always_loaded() {
+        let (conn, peer_tx, peer_rx) = paired_connection();
+        // Server-level alwaysLoad=true → ALL tools marked Some(true), even the
+        // one that carries no per-tool `_meta` at all.
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn)
+            .await
+            .with_config_options(None, true);
+        let tools = list_tools_with(
+            client,
+            peer_tx,
+            peer_rx,
+            serde_json::json!([
+                { "name": "a", "description": "A", "inputSchema": {} },
+                { "name": "b", "description": "B", "inputSchema": {},
+                  "_meta": { "anthropic/searchHint": "shell" } },
+            ]),
+        )
+        .await;
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].always_load, Some(true));
+        assert_eq!(tools[1].always_load, Some(true));
+    }
+
+    #[tokio::test]
+    async fn without_server_always_load_per_tool_bit_is_preserved() {
+        let (conn, peer_tx, peer_rx) = paired_connection();
+        // config_always_load defaults to false → the per-tool `_meta` bit wins:
+        // tool `a` (no meta) stays None; tool `b` (alwaysLoad=true) stays true.
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn).await;
+        let tools = list_tools_with(
+            client,
+            peer_tx,
+            peer_rx,
+            serde_json::json!([
+                { "name": "a", "description": "A", "inputSchema": {} },
+                { "name": "b", "description": "B", "inputSchema": {},
+                  "_meta": { "anthropic/alwaysLoad": true } },
+            ]),
+        )
+        .await;
+        assert_eq!(tools[0].always_load, None);
+        assert_eq!(tools[1].always_load, Some(true));
+    }
 }
 
 #[cfg(test)]
 mod timeout_tests {
-    use super::{parse_int_base10_prefix, resolve_tool_timeout, DEFAULT_CALL_TOOL_TIMEOUT};
+    use super::{
+        parse_int_base10_prefix, resolve_tool_timeout, resolve_tool_timeout_bhs,
+        DEFAULT_CALL_TOOL_TIMEOUT,
+    };
     use std::time::Duration;
 
     #[test]
@@ -1560,14 +1711,64 @@ mod timeout_tests {
         assert_eq!(resolve_tool_timeout(Some("")), DEFAULT_CALL_TOOL_TIMEOUT);
         assert_eq!(resolve_tool_timeout(Some("abc")), DEFAULT_CALL_TOOL_TIMEOUT);
         assert_eq!(resolve_tool_timeout(Some("0")), DEFAULT_CALL_TOOL_TIMEOUT);
-        // a positive integer (ms) is honored.
+        // a positive integer (ms) above the 1000ms floor is honored verbatim.
         assert_eq!(
             resolve_tool_timeout(Some("30000")),
             Duration::from_millis(30_000)
         );
+        // BHs clamps the FINAL value to >= 1000ms (`Math.max(n, 1000)`): an env
+        // value below the floor is raised to 1000 (parity 2.1.207 P2-01 —
+        // previously this returned 250ms un-clamped).
         assert_eq!(
             resolve_tool_timeout(Some("250abc")),
-            Duration::from_millis(250)
+            Duration::from_millis(1000)
+        );
+    }
+
+    // ── BHs config-timeout precedence + clamp (parity 2.1.207 P2-01) ────────
+
+    #[test]
+    fn config_timeout_wins_over_env_when_at_least_1000() {
+        // config.timeout (>=1000) beats env MCP_TOOL_TIMEOUT.
+        assert_eq!(
+            resolve_tool_timeout_bhs(Some(45_000), Some("9000")),
+            Duration::from_millis(45_000)
+        );
+    }
+
+    #[test]
+    fn config_timeout_below_1000_is_ignored_falls_through_to_env() {
+        // BHs treats a config.timeout < 1000 as `void 0` → env is consulted next.
+        assert_eq!(
+            resolve_tool_timeout_bhs(Some(500), Some("9000")),
+            Duration::from_millis(9000)
+        );
+        // ...and with no usable env, the default.
+        assert_eq!(
+            resolve_tool_timeout_bhs(Some(999), None),
+            DEFAULT_CALL_TOOL_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn config_timeout_none_matches_env_only_path() {
+        assert_eq!(
+            resolve_tool_timeout_bhs(None, Some("30000")),
+            resolve_tool_timeout(Some("30000"))
+        );
+    }
+
+    #[test]
+    fn resolved_timeout_is_clamped_to_i32_max() {
+        // WLd = 2_147_483_647 (i32::MAX ms) is the upper clamp.
+        assert_eq!(
+            resolve_tool_timeout_bhs(Some(9_999_999_999), None),
+            Duration::from_millis(2_147_483_647)
+        );
+        // The 1e8 default is within range and passes through unclamped.
+        assert_eq!(
+            resolve_tool_timeout_bhs(None, None),
+            Duration::from_millis(100_000_000)
         );
     }
 }

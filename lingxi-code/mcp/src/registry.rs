@@ -480,6 +480,11 @@ impl McpRegistry {
 
         let connection_id = conn.connection_id;
         let server_name = config.name.clone();
+        // Capture the per-server config options before `config` is moved into
+        // the `Connected` state below — threaded into the `McpClient` further
+        // down (parity 2.1.207 P2-01).
+        let config_timeout_ms = config.timeout_ms;
+        let config_always_load = config.always_load;
         self.connections.write().await.insert(
             server_name.clone(),
             McpConnectionState::Connected {
@@ -521,7 +526,12 @@ impl McpRegistry {
                         connection,
                         self.hook_dispatcher.clone(),
                     )
-                    .await,
+                    .await
+                    // Carry the resolved per-server config `timeout` (folded
+                    // with `request_timeout_ms`) into the BHs per-call resolver,
+                    // and the server-level `alwaysLoad` flag into each listed
+                    // tool's `always_load` bit (parity 2.1.207 P2-01).
+                    .with_config_options(config_timeout_ms, config_always_load),
                 );
                 self.register_client(&server_name, client).await;
             }
@@ -1769,6 +1779,8 @@ mod tests {
             },
             scope: ConfigScope::Project,
             disabled: false,
+            timeout_ms: None,
+            always_load: false,
         }
     }
 
@@ -2021,6 +2033,8 @@ mod snapshot_tests {
             },
             scope: ConfigScope::Project,
             disabled: false,
+            timeout_ms: None,
+            always_load: false,
         }
     }
 

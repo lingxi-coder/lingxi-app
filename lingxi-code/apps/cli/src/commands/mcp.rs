@@ -1721,6 +1721,8 @@ mod pending_approval_tests {
             },
             scope,
             disabled: false,
+            timeout_ms: None,
+            always_load: false,
         }
     }
 

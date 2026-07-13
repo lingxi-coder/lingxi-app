@@ -4590,6 +4590,12 @@ pub async fn build(
     // handler is registered before the registry `Arc` exists, so this is bound
     // at (5.46f) below once `task_registry` is built.
     let local_agent_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    // ONE worktree manager shared by the AgentTool (which CREATES the isolation
+    // worktree + judges it on the SYNC path) and the LocalAgent handler (which
+    // judges it when a BACKGROUND agent reaches a terminal state — claude-code's
+    // `getWorktreeResult` closure handed to the detached lifecycle).
+    let worktree_manager: Arc<dyn traits::worktree::WorktreeManager> =
+        Arc::new(PosixWorktreeManager::new(cwd.clone()));
     task_registry_inner.register_handler(
         tasks::TaskType::LocalAgent,
         Arc::new(
@@ -4606,7 +4612,9 @@ pub async fn build(
             .with_streaming_spawner(subagent_streaming_spawner.clone())
             .with_status_sink(
                 local_agent_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
-            ),
+            )
+            // Terminal keep/cleanup of a background agent's isolation worktree.
+            .with_worktree_manager(worktree_manager.clone()),
         ),
     );
 
@@ -4954,7 +4962,9 @@ pub async fn build(
             lingxi_home: cfg.lingxi_home.clone(),
             credentials: credentials.clone(),
         })),
-        worktree: Arc::new(PosixWorktreeManager::new(cwd.clone())),
+        // The SAME manager the LocalAgent handler judges background-agent
+        // worktrees with (created above) — one creation/judgment surface.
+        worktree: worktree_manager.clone(),
         subagent_spawner: Some(subagent_spawner.clone()),
         task_registry: Some(
             task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>

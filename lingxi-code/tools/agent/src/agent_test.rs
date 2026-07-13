@@ -755,6 +755,233 @@ mod tests {
         assert_eq!(result.data["status"], "completed");
     }
 
+    // P1-01 (parity 2.1.207): claude creates the isolation worktree BEFORE the
+    // sync/async branch (`ye = await createAgentWorktree(...)` precedes the
+    // `run_in_background` split) and threads the effective cwd (`cwd ??
+    // worktreePath`) into BOTH. A default-async `isolation:"worktree"` spawn
+    // must create the worktree, run the background agent IN it (request.cwd),
+    // transfer the handle to the detached lifecycle (request.worktree), and NOT
+    // clean up at launch (claude hands `getWorktreeResult` to the task).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn async_isolation_worktree_created_and_cwd_threaded() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        bctx.worktree = wt.clone();
+        let tool = AgentTool::new(bctx);
+        let input = serde_json::json!({
+            "description": "bg iso",
+            // Explicit type: never forks, so a concurrent fork-gate test
+            // flipping LINGXI_FORK_SUBAGENT cannot reroute this spawn.
+            "subagent_type": "general-purpose",
+            "prompt": "go",
+            "isolation": "worktree"
+        });
+        let result = tool
+            .call(
+                input,
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("async launch ok");
+        assert_eq!(result.data["status"], "async_launched");
+
+        // Created exactly once, with claude's `agent-<invocation_id>` slug.
+        let created = wt.created();
+        assert_eq!(created.len(), 1, "worktree created once, before dispatch");
+        assert!(
+            created[0].0.starts_with("agent-"),
+            "slug is agent-<invocation_id>: {}",
+            created[0].0
+        );
+
+        // The async spawn request runs the agent IN the worktree and carries
+        // the handle for the detached lifecycle's keep/cleanup judgment.
+        let inv = spawner.invocations();
+        assert_eq!(inv.len(), 1);
+        let req = &inv[0].request;
+        let wt_path = created[0].1.path.to_string_lossy().into_owned();
+        assert_eq!(
+            req.cwd.as_deref(),
+            Some(wt_path.as_str()),
+            "effective cwd = the worktree path"
+        );
+        assert_eq!(req.isolation.as_deref(), Some("worktree"));
+        assert_eq!(
+            req.worktree.as_ref().map(|h| h.branch_name.as_str()),
+            Some(created[0].1.branch_name.as_str()),
+            "handle ownership transferred on the request"
+        );
+        // Ownership transfer: the launch return must NOT judge/remove.
+        assert!(wt.removed().is_empty(), "no cleanup at async launch");
+    }
+
+    // P1-01: a worktree-create failure on the (default) async path surfaces
+    // claude's `Cannot create agent worktree:` error BEFORE any spawn — same
+    // failure contract as the sync path (emit `worktree_create_failed`).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn async_worktree_create_failure_errors_before_spawn() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        wt.script_create_error(traits::worktree::WorktreeError::Git("boom".into()));
+        bctx.worktree = wt;
+        let tool = AgentTool::new(bctx);
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "bg iso",
+                    // Explicit type: never forks, so a concurrent fork-gate
+                    // test flipping LINGXI_FORK_SUBAGENT cannot reroute this.
+                    "subagent_type": "general-purpose",
+                    "prompt": "go",
+                    "isolation": "worktree"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("create failure must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Cannot create agent worktree:"),
+            "byte-locked error prefix, got: {msg}"
+        );
+        assert!(
+            spawner.invocations().is_empty(),
+            "no spawn (sync or async) after a create failure"
+        );
+    }
+
+    // P1-01: claude's effective cwd is `cwd ?? worktreePath` — an explicit
+    // `cwd` override wins over the isolation worktree's path (the worktree is
+    // still created and carried for the terminal judgment).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn explicit_cwd_wins_over_worktree_path() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        bctx.worktree = wt.clone();
+        let tool = AgentTool::new(bctx);
+        let result = tool
+            .call(
+                serde_json::json!({
+                    "description": "bg iso",
+                    // Explicit type: never forks, so a concurrent fork-gate
+                    // test flipping LINGXI_FORK_SUBAGENT cannot reroute this.
+                    "subagent_type": "general-purpose",
+                    "prompt": "go",
+                    "isolation": "worktree",
+                    "cwd": "/explicit/dir"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("async launch ok");
+        assert_eq!(result.data["status"], "async_launched");
+        let inv = spawner.invocations();
+        let req = &inv[0].request;
+        assert_eq!(
+            req.cwd.as_deref(),
+            Some("/explicit/dir"),
+            "explicit cwd wins (claude `cwd ?? worktreePath`)"
+        );
+        assert_eq!(wt.created().len(), 1, "worktree still created");
+        assert!(req.worktree.is_some(), "handle still carried");
+    }
+
+    // P1-01: the SYNC path still owns its keep/cleanup judgment (now via the
+    // shared `traits::worktree::agent_worktree_result` helper): a DIRTY
+    // worktree is KEPT (worktreePath/worktreeBranch spread into data), a CLEAN
+    // one is REMOVED (no worktree keys).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sync_worktree_kept_when_dirty_removed_when_clean() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        for (dirty, expect_kept) in [(true, true), (false, false)] {
+            let spawner = arc_mock_spawner();
+            let mut bctx = wired_ctx(
+                spawner,
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            );
+            let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+            wt.script_change_summary(Some(traits::worktree::WorktreeChangeSummary {
+                changed_files: usize::from(dirty),
+                commits: 0,
+            }));
+            bctx.worktree = wt.clone();
+            let tool = AgentTool::new(bctx);
+            let result = tool
+                .call(
+                    serde_json::json!({
+                        "description": "sync iso",
+                        // Explicit type: never forks, so a concurrent
+                        // fork-gate test cannot reroute this spawn.
+                        "subagent_type": "general-purpose",
+                        "prompt": "go",
+                        "isolation": "worktree",
+                        "run_in_background": false
+                    }),
+                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_tx(),
+                )
+                .await
+                .expect("sync completion ok");
+            assert_eq!(result.data["status"], "completed");
+            if expect_kept {
+                assert!(
+                    result.data["worktreePath"].is_string(),
+                    "dirty worktree KEPT → worktreePath in data"
+                );
+                assert!(result.data["worktreeBranch"].is_string());
+                assert!(wt.removed().is_empty(), "kept worktree not removed");
+            } else {
+                assert!(
+                    result.data.get("worktreePath").is_none(),
+                    "clean worktree removed → no worktreePath key"
+                );
+                assert_eq!(wt.removed().len(), 1, "clean worktree auto-removed");
+            }
+        }
+    }
+
     // #1 — a KNOWN explicit type (in the listing) spawns and threads through.
     #[tokio::test]
     async fn known_explicit_subagent_type_is_dispatched() {

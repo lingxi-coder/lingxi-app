@@ -161,11 +161,50 @@ impl WorktreeChangeSummary {
     }
 }
 
+/// Post-run keep/cleanup judgment for an agent's isolation worktree — the
+/// single source of truth for claude-code's `getWorktreeResult` closure: once
+/// the agent reached a terminal state, KEEP the worktree (returning its
+/// `(path, branch)`) if it left changes, else REMOVE it (auto-clean).
+///
+/// [`WorktreeManager::worktree_change_summary`]'s
+/// [`WorktreeChangeSummary::is_dirty`] is claude's full keep test — `dirty ||
+/// commitsAhead > 0` — where `dirty` is `git status --porcelain` non-empty and
+/// `commitsAhead` is `git rev-list --count <originalHeadCommit>..HEAD` (the
+/// handle's `base_commit`, captured at creation). So a clean working tree
+/// carrying commits ahead of base is correctly KEPT, not discarded. Runs for
+/// ANY terminal outcome so a worktree never leaks on a failed/killed agent;
+/// removal is best-effort (idempotent per the
+/// [`WorktreeManager::remove_worktree`] contract).
+///
+/// Shared by the SYNC AgentTool finalizer and the ASYNC (`run_in_background`)
+/// lifecycle owner — claude 2.1.207 hands the same `getWorktreeResult` closure
+/// to the detached background task, so both paths must judge identically.
+pub async fn agent_worktree_result(
+    manager: &dyn WorktreeManager,
+    handle: &WorktreeHandle,
+) -> Option<(String, String)> {
+    let dirty = manager
+        .worktree_change_summary(handle)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|s| s.is_dirty());
+    if dirty {
+        Some((
+            handle.path.to_string_lossy().into_owned(),
+            handle.branch_name.clone(),
+        ))
+    } else {
+        let _ = manager.remove_worktree(handle).await;
+        None
+    }
+}
+
 /// Stable handle to a worktree created by [`WorktreeManager::create_worktree`].
 ///
 /// The handle is serializable so it can be embedded in snapshots and survive
 /// process restarts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeHandle {
     /// Absolute filesystem path to the worktree root.
     pub path: PathBuf,
@@ -304,6 +343,112 @@ mod m2_01_tests {
             .commits_phrase("worktree-feat"),
             Some("4 commits on worktree-feat".to_string())
         );
+    }
+
+    /// Minimal in-crate manager for `agent_worktree_result`: scripted change
+    /// summary + a removal recorder (the tool-api `MockWorktreeManager` lives
+    /// downstream and cannot be used here without a dep cycle).
+    struct JudgmentMock {
+        summary: Option<WorktreeChangeSummary>,
+        removed: std::sync::Mutex<Vec<WorktreeHandle>>,
+    }
+    #[async_trait]
+    impl WorktreeManager for JudgmentMock {
+        async fn create_worktree(
+            &self,
+            _slug: &str,
+            _base_branch: Option<&str>,
+            _copy_includes: &[PathBuf],
+        ) -> Result<WorktreeHandle, WorktreeError> {
+            Err(WorktreeError::Unsupported)
+        }
+        async fn remove_worktree(&self, handle: &WorktreeHandle) -> Result<(), WorktreeError> {
+            self.removed.lock().unwrap().push(handle.clone());
+            Ok(())
+        }
+        async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+            Ok(Vec::new())
+        }
+        async fn cleanup_stale(&self, _max_age: Duration) -> Result<Vec<PathBuf>, WorktreeError> {
+            Ok(Vec::new())
+        }
+        fn is_supported(&self) -> bool {
+            true
+        }
+        async fn worktree_change_summary(
+            &self,
+            _handle: &WorktreeHandle,
+        ) -> Result<Option<WorktreeChangeSummary>, WorktreeError> {
+            Ok(self.summary)
+        }
+    }
+
+    fn judgment_handle() -> WorktreeHandle {
+        WorktreeHandle {
+            path: PathBuf::from("/repo/.lingxi/worktrees/agent-1"),
+            branch_name: "worktree-agent-1".into(),
+            base_commit: Some("abc123".into()),
+        }
+    }
+
+    /// Dirty (uncommitted files OR commits ahead) ⇒ KEEP: `(path, branch)`
+    /// returned, no removal (claude `dirty || commitsAhead > 0`).
+    #[tokio::test]
+    async fn agent_worktree_result_keeps_dirty_worktree() {
+        for summary in [
+            WorktreeChangeSummary {
+                changed_files: 1,
+                commits: 0,
+            },
+            WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 2,
+            },
+        ] {
+            let mock = JudgmentMock {
+                summary: Some(summary),
+                removed: std::sync::Mutex::new(Vec::new()),
+            };
+            let kept = agent_worktree_result(&mock, &judgment_handle()).await;
+            assert_eq!(
+                kept,
+                Some((
+                    "/repo/.lingxi/worktrees/agent-1".to_string(),
+                    "worktree-agent-1".to_string()
+                )),
+                "a worktree carrying work is KEPT"
+            );
+            assert!(
+                mock.removed.lock().unwrap().is_empty(),
+                "kept worktree must not be removed"
+            );
+        }
+    }
+
+    /// Clean (and unknown-state) ⇒ REMOVE + `None` — the auto-clean branch.
+    #[tokio::test]
+    async fn agent_worktree_result_removes_clean_worktree() {
+        for summary in [
+            Some(WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 0,
+            }),
+            // Unknown state falls to the not-dirty branch (matches the
+            // long-standing sync-path judgment in AgentTool).
+            None,
+        ] {
+            let mock = JudgmentMock {
+                summary,
+                removed: std::sync::Mutex::new(Vec::new()),
+            };
+            let kept = agent_worktree_result(&mock, &judgment_handle()).await;
+            assert_eq!(kept, None, "clean worktree is auto-cleaned");
+            assert_eq!(
+                mock.removed.lock().unwrap().len(),
+                1,
+                "clean worktree removed exactly once"
+            );
+        }
     }
 
     #[test]

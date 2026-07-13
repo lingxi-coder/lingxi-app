@@ -313,6 +313,7 @@ impl Task for DreamHandler {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             // Non-fork synchronous spawn.
             fork_context_messages: None,
             fork_parent_system_prompt: None,

@@ -217,6 +217,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         mode: None,
         isolation: None,
         cwd: None,
+        worktree: None,
         fork_context_messages: None,
         fork_parent_system_prompt: None,
         schema: None,

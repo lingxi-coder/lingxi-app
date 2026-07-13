@@ -168,6 +168,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: Some(fork_msgs),
             fork_parent_system_prompt: parent_sys,
             schema: None,

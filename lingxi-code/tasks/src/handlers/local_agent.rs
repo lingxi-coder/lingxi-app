@@ -119,6 +119,15 @@ pub struct LocalAgentHandler {
     /// [`TaskHandle::cleanup`] closure (which cannot await). Drained by
     /// [`LocalAgentHandler::drain_pending_kills`].
     pending_kill: Arc<Mutex<HashMap<String, WorkerCancel>>>,
+    /// Runs the terminal keep/cleanup judgment on a background agent's
+    /// isolation worktree (`SubagentSpawnRequest::worktree`) — claude-code
+    /// hands its `getWorktreeResult` closure to the detached async lifecycle,
+    /// so the worker here judges via
+    /// [`traits::worktree::agent_worktree_result`] when the agent reaches a
+    /// terminal state (keep when dirty/ahead, else auto-remove). `None`
+    /// (default) ⇒ no worktree handling: a carried worktree is left in place,
+    /// the conservative direction.
+    worktree_manager: Option<Arc<dyn traits::worktree::WorktreeManager>>,
 }
 
 impl LocalAgentHandler {
@@ -148,7 +157,23 @@ impl LocalAgentHandler {
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
+            worktree_manager: None,
         }
+    }
+
+    /// Wire the worktree manager so a BACKGROUND agent's `isolation:"worktree"`
+    /// worktree (resolved by `AgentTool` before dispatch and carried on
+    /// [`SubagentSpawnRequest::worktree`]) is auto-cleaned — kept when
+    /// dirty/ahead — when the agent reaches a terminal state. This is the
+    /// async-path owner of the same keep/cleanup judgment the sync path runs
+    /// inside `AgentTool` (claude-code's `getWorktreeResult` closure).
+    #[must_use]
+    pub fn with_worktree_manager(
+        mut self,
+        manager: Arc<dyn traits::worktree::WorktreeManager>,
+    ) -> Self {
+        self.worktree_manager = Some(manager);
+        self
     }
 
     /// Wire the persistent/resumable spawn seam (local_agent resume). When set,
@@ -258,6 +283,7 @@ impl Task for LocalAgentHandler {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -276,6 +302,16 @@ impl Task for LocalAgentHandler {
             tool_invoker: self.tool_invoker.clone(),
             budget: self.budget.clone(),
         });
+
+        // The isolation worktree `AgentTool` resolved for this agent (if any).
+        // The BACKGROUND lifecycle owns the terminal keep/cleanup judgment —
+        // claude-code hands `getWorktreeResult` to the detached task
+        // (`AgentTool` returns `async_launched` immediately and must NOT clean
+        // up at launch) — so the worker below runs it once the agent reaches a
+        // terminal state. Requires the injected manager; without it the
+        // worktree is left in place (conservative).
+        let agent_worktree = request.worktree.clone();
+        let worktree_manager = self.worktree_manager.clone();
 
         // 5. Drive the subagent to completion inside a runtime-spawned worker
         //    (engine code must not call tokio::spawn directly — D17). The worker
@@ -312,6 +348,17 @@ impl Task for LocalAgentHandler {
                                 status_sink
                                     .set_status(&worker_task_id, TaskStatus::Failed)
                                     .await;
+                                // Terminal (spawn never ran): judge the carried
+                                // isolation worktree so it never leaks.
+                                if let (Some(mgr), Some(handle)) =
+                                    (&worktree_manager, &agent_worktree)
+                                {
+                                    let _ = traits::worktree::agent_worktree_result(
+                                        mgr.as_ref(),
+                                        handle,
+                                    )
+                                    .await;
+                                }
                                 workers.lock().await.remove(&worker_task_id);
                                 return;
                             }
@@ -392,6 +439,13 @@ impl Task for LocalAgentHandler {
                             }
                         }
                     }
+                    // Terminal (Failed / Killed / channel-close — NOT a rest):
+                    // run the worktree keep/cleanup judgment (claude-code
+                    // `getWorktreeResult`): keep when dirty/ahead, else remove.
+                    if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
+                        let _ =
+                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                    }
                     agent_ids.lock().await.remove(&worker_task_id);
                     workers.lock().await.remove(&worker_task_id);
                 })
@@ -438,6 +492,15 @@ impl Task for LocalAgentHandler {
                     }
 
                     status_sink.set_status(&worker_task_id, status).await;
+
+                    // Terminal: run the worktree keep/cleanup judgment on the
+                    // carried isolation worktree (claude-code `getWorktreeResult`
+                    // — keep when dirty/ahead, else auto-remove). Runs for ANY
+                    // outcome so a worktree never leaks on a failed/killed agent.
+                    if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
+                        let _ =
+                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                    }
 
                     // The subagent has terminated; drop the cancel record so a late
                     // kill is a graceful no-op (claude-code `status !== 'running'`).
@@ -756,6 +819,117 @@ mod tests {
         }
         async fn snapshot_total_nano_usd(&self) -> u64 {
             0
+        }
+    }
+
+    // ---- Mock WorktreeManager (terminal keep/cleanup judgment) --------------
+
+    /// Judgment-only mock: scripted change summary + a removal recorder.
+    /// `create_worktree` is unreachable here — the handler never CREATES
+    /// worktrees (AgentTool does, before dispatch); it only judges the one
+    /// carried on `SubagentSpawnRequest::worktree`.
+    struct RecordingWorktree {
+        summary: Option<traits::worktree::WorktreeChangeSummary>,
+        removed: StdMutex<Vec<traits::worktree::WorktreeHandle>>,
+    }
+    impl RecordingWorktree {
+        fn new(summary: Option<traits::worktree::WorktreeChangeSummary>) -> Arc<Self> {
+            Arc::new(Self {
+                summary,
+                removed: StdMutex::new(Vec::new()),
+            })
+        }
+        fn removed_count(&self) -> usize {
+            self.removed.lock().unwrap().len()
+        }
+    }
+    #[async_trait]
+    impl traits::worktree::WorktreeManager for RecordingWorktree {
+        async fn create_worktree(
+            &self,
+            _slug: &str,
+            _base_branch: Option<&str>,
+            _copy_includes: &[PathBuf],
+        ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
+            Err(traits::worktree::WorktreeError::Unsupported)
+        }
+        async fn remove_worktree(
+            &self,
+            handle: &traits::worktree::WorktreeHandle,
+        ) -> Result<(), traits::worktree::WorktreeError> {
+            self.removed.lock().unwrap().push(handle.clone());
+            Ok(())
+        }
+        async fn list_worktrees(
+            &self,
+        ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
+            Ok(Vec::new())
+        }
+        async fn cleanup_stale(
+            &self,
+            _max_age: std::time::Duration,
+        ) -> Result<Vec<PathBuf>, traits::worktree::WorktreeError> {
+            Ok(Vec::new())
+        }
+        fn is_supported(&self) -> bool {
+            true
+        }
+        async fn worktree_change_summary(
+            &self,
+            _handle: &traits::worktree::WorktreeHandle,
+        ) -> Result<Option<traits::worktree::WorktreeChangeSummary>, traits::worktree::WorktreeError>
+        {
+            Ok(self.summary)
+        }
+    }
+
+    fn isolation_worktree_handle() -> traits::worktree::WorktreeHandle {
+        traits::worktree::WorktreeHandle {
+            path: PathBuf::from("/repo/.lingxi/worktrees/agent-1"),
+            branch_name: "worktree-agent-1".into(),
+            base_commit: None,
+        }
+    }
+
+    /// A background Agent request carrying the isolation worktree the tool
+    /// resolved before dispatch (the P1-01 ownership transfer).
+    fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
+        SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            prompt: prompt.into(),
+            context_paths: Vec::new(),
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: true,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: Some("worktree".into()),
+            cwd: Some("/repo/.lingxi/worktrees/agent-1".into()),
+            worktree: Some(isolation_worktree_handle()),
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 1,
+            parent_model_override: None,
+        }
+    }
+
+    fn input_with_worktree(prompt: &str) -> TaskSpawnInput {
+        TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::new(),
+            subagent_type: "general-purpose".into(),
+            prompt: prompt.into(),
+            is_backgrounded: true,
+            tool_use_id: None,
+            spawn_request: Some(request_with_worktree(prompt)),
+            inheritance: None,
         }
     }
 
@@ -1179,6 +1353,144 @@ mod tests {
         assert!(read.content.contains("pool full"), "spawn error spooled");
     }
 
+    /// Poll until the handler's live worker map is empty — the worker removes
+    /// its own record LAST (after the terminal status + worktree judgment), so
+    /// an empty map means the judgment definitely ran (or was skipped).
+    async fn await_workers_drained(workers: &Arc<TokioMutex<StdHashMap<String, WorkerCancel>>>) {
+        for _ in 0..400 {
+            if workers.lock().await.is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("worker never drained its cancel record");
+    }
+
+    /// P1-01 (parity 2.1.207): the BACKGROUND lifecycle owns the isolation
+    /// worktree's terminal keep/cleanup judgment (claude hands its
+    /// `getWorktreeResult` closure to the detached task). A CLEAN worktree is
+    /// auto-removed once the worker reaches a terminal state.
+    #[tokio::test]
+    async fn terminal_background_agent_removes_clean_worktree() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0,
+        }));
+        let handler = make_handler(spawner, mgr, sink.clone())
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+        assert_eq!(
+            wt.removed_count(),
+            1,
+            "clean worktree auto-removed at terminal"
+        );
+    }
+
+    /// P1-01: a DIRTY worktree (uncommitted files or commits ahead) is KEPT —
+    /// the terminal judgment must never discard work.
+    #[tokio::test]
+    async fn terminal_background_agent_keeps_dirty_worktree() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Failed("model refused".into()));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 2,
+            commits: 1,
+        }));
+        let handler = make_handler(spawner, mgr, sink.clone())
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        // Runs for ANY terminal outcome (here: Failed) — but a dirty worktree
+        // is kept, not removed.
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Failed);
+        await_workers_drained(&workers).await;
+        assert_eq!(wt.removed_count(), 0, "dirty worktree KEPT at terminal");
+    }
+
+    /// P1-01: on the PERSISTENT path the judgment runs ONLY at a terminal
+    /// state — a "comes to rest" turn-set completion must NOT remove the
+    /// worktree (the agent is still alive and resumable in it).
+    #[tokio::test]
+    async fn persistent_agent_worktree_judged_only_at_terminal() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let streaming = Arc::new(MockStreamingSpawner {
+            tx_slot: tx_slot.clone(),
+            resume_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0,
+        }));
+        let handler = make_handler(
+            MockSpawner::new(CannedResult::Pending),
+            mgr,
+            sink.clone(),
+        )
+        .with_streaming_spawner(streaming)
+        .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let workers = handler.workers_map();
+
+        handler
+            .spawn(input_with_worktree("p"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        // Wait for spawn_persistent to stash the event sender.
+        let tx = {
+            let mut got = None;
+            for _ in 0..200 {
+                if let Some(t) = tx_slot.lock().unwrap().clone() {
+                    got = Some(t);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            got.expect("spawn_persistent should have run")
+        };
+
+        // Turn-set completes → the agent comes to REST (not terminal): the
+        // worktree must survive (the resting agent still works in it).
+        tx.send(completed_event("rest")).await.unwrap();
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(wt.removed_count(), 0, "no judgment at a rest");
+
+        // Channel close ⇒ terminal ⇒ the clean worktree is auto-removed.
+        tx_slot.lock().unwrap().take();
+        drop(tx);
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        await_workers_drained(&workers).await;
+        assert_eq!(
+            wt.removed_count(),
+            1,
+            "clean worktree auto-removed at terminal"
+        );
+    }
+
     #[tokio::test]
     async fn kill_cancels_inflight_worker_and_flips_to_killed() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -1331,6 +1643,7 @@ mod tests {
             mode: Some("plan".into()),
             isolation: Some("worktree".into()),
             cwd: Some("/workspace/subdir".into()),
+            worktree: None,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: Some(r#"{\"type\":\"object\"}"#.into()),

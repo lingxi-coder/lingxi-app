@@ -828,6 +828,14 @@ Reach for this when the task matches an available agent type, when you have inde
     /// (the task forbids a silent wrong path). When the production spawner
     /// overrides `spawn_async`, this returns claude's `async_launched` JSON and
     /// registers `name → agentId` (G14, async-only, AgentTool.tsx:703-712).
+    ///
+    /// `resolved_cwd` / `agent_worktree` are the isolation products the caller
+    /// resolved BEFORE branching (claude 2.1.207 creates the worktree before
+    /// the sync/async split): the effective cwd (`cwd ?? worktreePath`) rides
+    /// `request.cwd` so the background agent's tools operate in the worktree,
+    /// and the handle rides `request.worktree` so the detached lifecycle owner
+    /// runs the terminal keep/cleanup judgment (claude's `getWorktreeResult`
+    /// closure) — NOT here at launch time.
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_async(
         &self,
@@ -842,6 +850,8 @@ Reach for this when the task matches an available agent type, when you have inde
         ctx: &ToolUseContext,
         budget: Arc<dyn traits::budget::BudgetEnforcerHandle>,
         parent_registry: Arc<tool_api::ToolRegistry>,
+        resolved_cwd: Option<String>,
+        agent_worktree: Option<traits::worktree::WorktreeHandle>,
     ) -> Result<ToolCallResult, ToolError> {
         let mut invoker_impl =
             tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry);
@@ -873,7 +883,13 @@ Reach for this when the task matches an available agent type, when you have inde
             } else {
                 parsed.isolation.clone()
             },
-            cwd: if is_fork { None } else { parsed.cwd.clone() },
+            // The RESOLVED cwd (explicit `cwd` override, else the isolation
+            // worktree's path — claude `cwd ?? worktreePath`); `None` on fork.
+            cwd: resolved_cwd,
+            // Ownership transfer of the isolation worktree (claude
+            // `getWorktreeResult` handed to the detached task): the local_agent
+            // handler runs the terminal keep/cleanup judgment.
+            worktree: agent_worktree,
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             // The Agent (Task) tool has no structured-output schema param.
@@ -1496,6 +1512,48 @@ Use /mcp to configure and authenticate the required MCP servers.",
         )
         .await;
 
+        // Worktree / cwd isolation — resolved BEFORE the sync/async branch,
+        // matching claude 2.1.207 (`ye=null; if(Y==="worktree") ye=await
+        // createAgentWorktree(agentWorktreeSlug(id))` precedes the
+        // `run_in_background` branch, and the effective cwd `ge = l ??
+        // ye?.worktreePath` is threaded into BOTH). When the caller requests
+        // `isolation:"worktree"` (non-fork) create a git worktree (slug
+        // `agent-<id>` → branch `worktree-agent-<id>` under `.lingxi/worktrees/`,
+        // matching claude's scheme) and run the agent in it; an explicit `cwd`
+        // takes precedence as the run dir (claude `cwd ?? worktreePath`).
+        // `remote` is deferred (run local). The handle is held for the
+        // post-completion keep/cleanup judgment: run HERE on the sync path, and
+        // by the detached background lifecycle on the async path (claude hands
+        // the `getWorktreeResult` closure to the task — see `dispatch_async`).
+        // (`def.isolation` frontmatter as a secondary source is not threaded to
+        // the tool layer yet — the model-facing `isolation` arg is the supported
+        // path.)
+        let mut agent_worktree: Option<traits::worktree::WorktreeHandle> = None;
+        let mut resolved_cwd: Option<String> = if is_fork { None } else { parsed.cwd.clone() };
+        if !is_fork && parsed.isolation.as_deref() == Some("worktree") {
+            let slug = format!("agent-{invocation_id}");
+            match self.ctx.worktree.create_worktree(&slug, None, &[]).await {
+                Ok(handle) => {
+                    if resolved_cwd.is_none() {
+                        resolved_cwd = Some(handle.path.to_string_lossy().into_owned());
+                    }
+                    agent_worktree = Some(handle);
+                }
+                Err(e) => {
+                    Self::emit_failed(
+                        &bus,
+                        &invocation_id,
+                        "worktree_create_failed",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::Internal(format!(
+                        "Cannot create agent worktree: {e}"
+                    )));
+                }
+            }
+        }
+
         // PLANNED #2/G13: async (`run_in_background`) spawn. claude returns an
         // `async_launched` payload immediately and drives the lifecycle detached
         // (AgentTool.tsx:686-764). The async seam (`spawn_async`) defaults to a
@@ -1517,6 +1575,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     &ctx,
                     budget.clone(),
                     parent_registry.clone(),
+                    resolved_cwd,
+                    agent_worktree,
                 )
                 .await;
         }
@@ -1579,38 +1639,6 @@ Use /mcp to configure and authenticate the required MCP servers.",
             None
         };
 
-        // Worktree / cwd isolation (claude `z = a ?? L.isolation`; `me = cwd ??
-        // worktreePath`). When the caller requests `isolation:"worktree"` (non-fork)
-        // create a git worktree (slug `agent-<id>` → branch `worktree-agent-<id>`
-        // under `.lingxi/worktrees/`, matching claude's scheme) and run the agent
-        // in it; an explicit `cwd` is honoured directly. `remote` is deferred (run
-        // local). The handle is held for the post-completion keep/cleanup below.
-        // (`def.isolation` frontmatter as a secondary source is not threaded to the
-        // tool layer yet — the model-facing `isolation` arg is the supported path.)
-        let mut agent_worktree: Option<traits::worktree::WorktreeHandle> = None;
-        let mut resolved_cwd: Option<String> = if is_fork { None } else { parsed.cwd.clone() };
-        if !is_fork && parsed.isolation.as_deref() == Some("worktree") {
-            let slug = format!("agent-{invocation_id}");
-            match self.ctx.worktree.create_worktree(&slug, None, &[]).await {
-                Ok(handle) => {
-                    resolved_cwd = Some(handle.path.to_string_lossy().into_owned());
-                    agent_worktree = Some(handle);
-                }
-                Err(e) => {
-                    Self::emit_failed(
-                        &bus,
-                        &invocation_id,
-                        "worktree_create_failed",
-                        started.elapsed().as_millis() as u64,
-                    )
-                    .await;
-                    return Err(ToolError::Internal(format!(
-                        "Cannot create agent worktree: {e}"
-                    )));
-                }
-            }
-        }
-
         let request = SubagentSpawnRequest {
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
             // general-purpose; explicit-validated otherwise), not the raw input.
@@ -1642,10 +1670,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
             } else {
                 parsed.isolation.clone()
             },
-            // The RESOLVED cwd (worktree path for `isolation:"worktree"`, or the
-            // explicit `cwd` override) — the spawner sets `SubagentContext.cwd`
-            // from this so the agent's tools operate there.
+            // The RESOLVED cwd (the explicit `cwd` override, else the worktree
+            // path for `isolation:"worktree"`) — the spawner sets
+            // `SubagentContext.cwd` from this so the agent's tools operate there.
             cwd: resolved_cwd.clone(),
+            // The resolved isolation worktree rides the request for shape
+            // consistency with the async path; the SYNC judgment below stays
+            // authoritative here (the spawner ignores the field).
+            worktree: agent_worktree.clone(),
             // Fork-subagent carriers (codex #5): the byte-exact forked prefix the
             // spawner replays as the cache prefix, and the parent's already-
             // rendered system prompt bytes (TS `forkContextMessages` /
@@ -1709,34 +1741,15 @@ Use /mcp to configure and authenticate the required MCP servers.",
         let _ = forwarder.await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
-        // Worktree lifecycle (claude `fe()`): once the agent finished, KEEP the
-        // worktree (return its path + branch) if it left changes, else REMOVE it
-        // (auto-clean). `worktree_change_summary().is_dirty()` is claude's full
-        // keep test — `dirty || commitsAhead > 0` — where `dirty` is `git status
-        // --porcelain` non-empty and `commitsAhead` is
-        // `git rev-list --count <originalHeadCommit>..HEAD` (the handle's
-        // `base_commit`, captured at creation). So a clean working tree carrying
-        // commits ahead of base is correctly KEPT, not discarded. Runs for ANY
+        // Worktree lifecycle (claude `fe()` / `getWorktreeResult`): once the
+        // agent finished, KEEP the worktree (return its path + branch) if it
+        // left changes, else REMOVE it (auto-clean). The judgment itself lives
+        // in `traits::worktree::agent_worktree_result` (shared with the ASYNC
+        // lifecycle owner in the local_agent task handler); it runs for ANY
         // outcome so a worktree never leaks on a failed/killed agent.
         let worktree_result: Option<(String, String)> = match &agent_worktree {
             Some(handle) => {
-                let dirty = self
-                    .ctx
-                    .worktree
-                    .worktree_change_summary(handle)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|s| s.is_dirty());
-                if dirty {
-                    Some((
-                        handle.path.to_string_lossy().into_owned(),
-                        handle.branch_name.clone(),
-                    ))
-                } else {
-                    let _ = self.ctx.worktree.remove_worktree(handle).await;
-                    None
-                }
+                traits::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle).await
             }
             None => None,
         };

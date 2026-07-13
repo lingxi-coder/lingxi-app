@@ -121,6 +121,7 @@ impl AgentExecutor {
             mode: None,
             isolation: None,
             cwd: None,
+            worktree: None,
             // Non-fork path: the hook executor never forks a parent
             // conversation, so the fork-subagent fields stay unset.
             fork_context_messages: None,

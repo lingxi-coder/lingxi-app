@@ -11,6 +11,10 @@ llm-client = { path = "../../llm-client" }
 http-client = { path = "../../http-client" }
 traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
+telemetry = { path = "../../telemetry" }
+# `.worktreeinclude` gitignore-style pattern matching (copyWorktreeIncludeFiles
+# port). Same crate + idiom the orchestrator uses for conditional-rule globs.
+ignore = "0.4"
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
@@ -27,6 +31,7 @@ http = "1"
 
 [dev-dependencies]
 axum = "0.7"
+tempfile = "3.13"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 futures-util = { workspace = true }
 serde_json = { workspace = true }

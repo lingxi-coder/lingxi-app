@@ -17,8 +17,10 @@ pub mod mcp_http;
 pub mod mcp_sse;
 pub mod mcp_stdio;
 pub mod mcp_ws;
+pub mod worktree_include;
 
 pub use http::ReqwestHttp;
+pub use worktree_include::copy_worktree_include_files;
 pub use llm_client::LlmTransportBridge;
 pub use llm_config::{
     apply_settings_providers, builtin_anthropic_config, parse_routing_overrides, RoutingOverrides,

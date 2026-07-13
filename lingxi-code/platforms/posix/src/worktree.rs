@@ -216,6 +216,16 @@ impl WorktreeManager for PosixWorktreeManager {
                 .map_err(|e| WorktreeError::Io(e.to_string()))?;
         }
 
+        // Post-create `.worktreeinclude` copy — claude-code 2.1.207's
+        // `copyWorktreeIncludeFiles` (fn `TZc`), the last step of the shared
+        // post-create setup `H6i` that runs for BOTH the agent-isolation
+        // worktree and the `--worktree` session flow. Copies the git-ignored
+        // files the repo's `.worktreeinclude` selects (e.g. `.env`, `secrets/`)
+        // into the fresh worktree. Best-effort/infallible, so it never fails a
+        // successful `git worktree add`; runs alongside the literal
+        // `copy_includes` above (which serves the EnterWorktree tool's input).
+        platform_common::copy_worktree_include_files(&self.repo_root, &worktree_path).await;
+
         // Capture the worktree's initial HEAD — claude-code's
         // `originalHeadCommit` (the commit `git worktree add` checked out).
         // `worktree_change_summary` counts ahead-commits as
@@ -565,6 +575,34 @@ mod create_tests {
         let copied = tokio::fs::read_to_string(handle.path.join(".env"))
             .await
             .unwrap();
+        assert_eq!(copied, "API_KEY=secret");
+    }
+
+    #[tokio::test]
+    async fn create_runs_worktreeinclude_copy() {
+        // End-to-end: a repo whose `.gitignore` ignores `.env` and whose
+        // `.worktreeinclude` names `.env` must ferry that untracked-ignored file
+        // into the new worktree via the post-create `copyWorktreeIncludeFiles`
+        // step wired into `create_worktree` (parity 2.1.207 P2-03).
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        tokio::fs::write(repo.join(".gitignore"), ".env\n")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join(".env"), "API_KEY=secret")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join(".worktreeinclude"), ".env\n")
+            .await
+            .unwrap();
+        let handle = PosixWorktreeManager::new(repo.clone())
+            .create_worktree("feat", None, &[])
+            .await
+            .unwrap();
+        let copied = tokio::fs::read_to_string(handle.path.join(".env"))
+            .await
+            .expect(".worktreeinclude entry copied into worktree");
         assert_eq!(copied, "API_KEY=secret");
     }
 

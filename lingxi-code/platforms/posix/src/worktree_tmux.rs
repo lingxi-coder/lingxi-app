@@ -13,13 +13,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use traits::{ProcessCommand, ProcessRunner, SandboxedCommand, SandboxedTag};
+use traits::{ProcessCommand, ProcessRunner, Sandbox};
 
 /// Audit reason stamped on the `tmux new-session` command handed to the
 /// [`ProcessRunner`]. This is an internal infra invocation (not a
-/// user/agent-issued Bash command), so it bypasses the normal sandbox
-/// pipeline the same way hook commands do (see
-/// `platforms/posix/src/process/runner.rs`'s `HOOK_COMMAND_AUDIT_REASON`).
+/// user/agent-issued Bash command), so it goes through
+/// [`Sandbox::bypass_with_audit`] the same way hook commands do (see
+/// `hooks/src/executor.rs`'s `"hook_command"` bypass), which both mints the
+/// `SandboxedCommand` and records the audit trail via the real `Sandbox`
+/// impl (e.g. `PosixSandbox::bypass_with_audit`'s `tracing::warn!`).
 const WORKTREE_TMUX_AUDIT_REASON: &str = "worktree_tmux_new_session";
 
 /// Build the argv (excluding the `tmux` program name itself) for creating a
@@ -42,8 +44,14 @@ pub fn build_worktree_tmux_argv(session_name: &str, worktree_path: &Path) -> Vec
 /// `Err(stderr)` (mirrors 206's `{created:false,error}`); a zero exit
 /// (or any output) maps to `Ok(())`. A runner-level [`traits::ProcessError`]
 /// is stringified into the `Err`.
+///
+/// `sandbox` mints the `SandboxedCommand` via [`Sandbox::bypass_with_audit`]
+/// (not the internal `SandboxedCommand::__new_sandboxed` constructor) so the
+/// audit hook the real `Sandbox` impl runs on every bypass actually fires
+/// for this infra-issued `tmux` invocation.
 pub async fn create_worktree_tmux_session(
     runner: &dyn ProcessRunner,
+    sandbox: &dyn Sandbox,
     session_name: &str,
     worktree_path: &Path,
 ) -> Result<(), String> {
@@ -55,12 +63,7 @@ pub async fn create_worktree_tmux_session(
         timeout: None,
         stdin: None,
     };
-    let sandboxed = SandboxedCommand::__new_sandboxed(
-        pcmd,
-        SandboxedTag::BypassAuditedWithReason {
-            reason: WORKTREE_TMUX_AUDIT_REASON.to_string(),
-        },
-    );
+    let sandboxed = sandbox.bypass_with_audit(pcmd, WORKTREE_TMUX_AUDIT_REASON);
     let output = runner
         .run(&sandboxed)
         .await
@@ -74,10 +77,11 @@ pub async fn create_worktree_tmux_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::PosixSandbox;
     use async_trait::async_trait;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use traits::{ProcessError, ProcessHandle, ProcessOutput};
+    use traits::{ProcessError, ProcessHandle, ProcessOutput, SandboxedCommand};
 
     #[test]
     fn build_worktree_tmux_argv_shape_is_exact() {
@@ -151,8 +155,9 @@ mod tests {
     #[tokio::test]
     async fn zero_exit_maps_to_ok_and_uses_the_argv() {
         let runner = MockRunner::new(0, "");
+        let sandbox = PosixSandbox::new();
         let path = PathBuf::from("/tmp/wt-x");
-        let result = create_worktree_tmux_session(&runner, "wt-x", &path).await;
+        let result = create_worktree_tmux_session(&runner, &sandbox, "wt-x", &path).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(
             *runner.recorded_command.lock().unwrap(),
@@ -167,8 +172,9 @@ mod tests {
     #[tokio::test]
     async fn nonzero_exit_maps_to_err_with_stderr() {
         let runner = MockRunner::new(1, "boom");
+        let sandbox = PosixSandbox::new();
         let path = PathBuf::from("/tmp/wt-y");
-        let result = create_worktree_tmux_session(&runner, "wt-y", &path).await;
+        let result = create_worktree_tmux_session(&runner, &sandbox, "wt-y", &path).await;
         assert_eq!(result, Err("boom".to_string()));
     }
 }

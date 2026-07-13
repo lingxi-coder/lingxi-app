@@ -243,6 +243,20 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcp_auth_refresh: Option<String>,
 
+    /// Scalar field (later source wins). `otelHeadersHelper`: path to (or shell
+    /// command for) a script whose stdout is a JSON object of OTLP export header
+    /// `k:v` strings — used to inject short-lived bearer tokens into the
+    /// OpenTelemetry monitoring exporters (parity 2.1.207 H-BIN-06). Read by the
+    /// binary `otelHeadersHelper` runner (`RRi()`/`wRi()`), which validates the
+    /// output ("must return a JSON object with string key-value pairs"), caches
+    /// it, and re-invokes at most once per
+    /// `CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS` window. The validation +
+    /// debounce state machine lives in `telemetry::otel::headers_helper`; wiring
+    /// this value into the live export path is the H-BIN-06 egress remainder.
+    /// The key round-trips so it is ACCESSIBLE. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel_headers_helper: Option<String>,
+
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
     /// `{ "type": "openai"|"openai-responses"|"anthropic"|"gemini"|"azure-openai"
@@ -521,6 +535,26 @@ mod tests {
                 "{key} must be scalar-override (later source wins)"
             );
         }
+    }
+
+    #[test]
+    fn otel_headers_helper_key_parses_and_roundtrips() {
+        // 2.1.207 Monitoring schema (H-BIN-06): otelHeadersHelper is a plain
+        // string key (script path / shell command). camelCase on the wire.
+        let json = r#"{ "otelHeadersHelper": "/opt/otel/get-headers.sh" }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            parsed.otel_headers_helper.as_deref(),
+            Some("/opt/otel/get-headers.sh")
+        );
+        // Round-trips under the exact camelCase wire key CC emits/reads.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(
+            back.contains("\"otelHeadersHelper\""),
+            "must serialize back to the byte-exact camelCase key"
+        );
+        // Scalar-override merge (later source wins; not in MERGE_STRATEGIES).
+        assert!(strategy_for("otelHeadersHelper").is_none());
     }
 
     #[test]

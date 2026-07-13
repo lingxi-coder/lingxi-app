@@ -798,9 +798,11 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
 
     // OTEL_LOG_ASSISTANT_RESPONSES (claude-code opt-in): default OFF, byte-no-op.
     // When enabled, log the assistant text with req-id/model/stop/usage so OTEL
-    // exporters capture response bodies. Gated env read keeps the locked turn
-    // fixtures unchanged (var unset).
-    if std::env::var_os("OTEL_LOG_ASSISTANT_RESPONSES").is_some_and(|v| v == "1" || v == "true") {
+    // exporters capture response bodies. The gate reads the single authoritative
+    // predicate in the OTEL monitoring module (H-BIN-06), which parses the var
+    // with the byte-faithful `ct` truthy semantics (1/true/yes/on, trimmed,
+    // case-insensitive). Default (var unset) keeps the locked turn fixtures OFF.
+    if telemetry::otel::logs::assistant_responses_enabled() {
         let text: String = assistant_blocks
             .iter()
             .filter_map(|b| match b {

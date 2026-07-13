@@ -14,6 +14,7 @@ pub mod bus;
 pub mod error;
 pub mod feature_flags;
 pub mod killswitch;
+pub mod otel;
 pub mod pii;
 pub mod sink;
 pub mod sinks;

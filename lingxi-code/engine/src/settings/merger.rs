@@ -59,6 +59,8 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         aws_auth_refresh: next.aws_auth_refresh.or(prev.aws_auth_refresh),
         aws_credential_export: next.aws_credential_export.or(prev.aws_credential_export),
         gcp_auth_refresh: next.gcp_auth_refresh.or(prev.gcp_auth_refresh),
+        // 2.1.207 `otelHeadersHelper` (H-BIN-06) — plain string, scalar Override.
+        otel_headers_helper: next.otel_headers_helper.or(prev.otel_headers_helper),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
     }

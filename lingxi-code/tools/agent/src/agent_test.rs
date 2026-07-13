@@ -441,6 +441,49 @@ mod tests {
         );
     }
 
+    // The `name` property carries the zod `.regex(uZc)` body as a wire JSON
+    // Schema `pattern` (zod-to-json-schema `addPattern`), on BOTH the full and
+    // the model-facing schema, byte-exact to `uZc`.
+    #[test]
+    fn agent_name_property_carries_regex_pattern() {
+        let expected = json!("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$");
+        assert_eq!(AGENT_INPUT_SCHEMA["properties"]["name"]["pattern"], expected);
+        assert_eq!(
+            AGENT_INPUT_SCHEMA_MODEL["properties"]["name"]["pattern"],
+            expected
+        );
+        // The const the schema interpolates matches the binary's `uZc` body.
+        assert_eq!(AGENT_NAME_PATTERN, "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$");
+    }
+
+    // `z.string().regex(uZc).refine(t=>t!==K9)` at the tool boundary: well-formed
+    // non-reserved names pass; the reserved "main" and pattern violations fail
+    // with the byte-exact zod messages (`.regex` message before `.refine`).
+    #[test]
+    fn validate_agent_name_matches_zod_chain() {
+        // Well-formed names pass.
+        for ok in ["a", "Agent1", "my-agent_2", "X", &"a".repeat(64)] {
+            assert_eq!(validate_agent_name(ok), Ok(()), "should accept {ok:?}");
+        }
+        // Reserved "main" — passes the pattern, rejected by `.refine`.
+        assert!(matches_agent_name_pattern("main"));
+        assert_eq!(
+            validate_agent_name("main"),
+            Err("\"main\" is reserved \u{2014} SendMessage routes it to the main conversation".to_string())
+        );
+        // Pattern violations → the regex message (checked before `.refine`).
+        for bad in ["", "-bad", "_lead", "has space", "a".repeat(65).as_str(), "e\u{0301}"] {
+            assert_eq!(
+                validate_agent_name(bad),
+                Err(
+                    "name must start with a letter or digit and contain only letters, digits, underscores, or hyphens (max 64 chars)"
+                        .to_string()
+                ),
+                "should reject {bad:?} with the regex message"
+            );
+        }
+    }
+
     // claude advertises `yJp().omit({cwd:!0})` — the MODEL-facing schema (what
     // `input_schema()` returns) omits `cwd` while keeping every other property;
     // the full `AGENT_INPUT_SCHEMA` still carries `cwd` for deserialization.

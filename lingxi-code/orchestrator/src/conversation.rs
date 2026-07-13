@@ -11743,6 +11743,9 @@ mod skill_listing_reminder_tests {
             error: None,
             result: None,
             usage: None,
+            killed_by: None,
+            worktree_path: None,
+            worktree_branch: None,
         };
         let orch = orch_with(reg, None).with_task_notifications(Arc::new(OnceTaskNotifications(
             std::sync::Mutex::new(vec![bash]),

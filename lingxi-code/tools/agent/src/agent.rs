@@ -180,6 +180,62 @@ fn is_pd_dash(c: char) -> bool {
     )
 }
 
+/// `uZc` (claude-code): the `name` regex body — first char a letter/digit, then
+/// up to 63 more of letter / digit / underscore / hyphen (max 64 chars total).
+/// Emitted verbatim as the wire `input_schema` `name.pattern` (zod-to-json-schema
+/// `case"regex"` → `addPattern`) AND enforced at the tool boundary by
+/// [`validate_agent_name`].
+const AGENT_NAME_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$";
+
+/// `K9` (claude-code): the reserved agent name. `SendMessage` routes it to the
+/// main conversation, so a spawned agent may not claim it.
+const RESERVED_AGENT_NAME: &str = "main";
+
+/// `.regex(uZc)` message — the byte-exact zod validation message for a name that
+/// violates [`AGENT_NAME_PATTERN`].
+const AGENT_NAME_REGEX_MESSAGE: &str = "name must start with a letter or digit and contain only letters, digits, underscores, or hyphens (max 64 chars)";
+
+/// `.refine(t=>t!==K9)` message — byte-exact (em-dash is U+2014); the literal
+/// `"main"` is [`RESERVED_AGENT_NAME`] interpolated as `${K9}`.
+fn reserved_agent_name_message() -> String {
+    format!(
+        "\"{RESERVED_AGENT_NAME}\" is reserved \u{2014} SendMessage routes it to the main conversation"
+    )
+}
+
+/// `uZc.test(name)` — hand-rolled `/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/` (no `regex`
+/// crate dep): a non-empty name of at most 64 chars whose first char is ASCII
+/// alnum and whose remainder is ASCII alnum / `_` / `-`. The char class is
+/// ASCII-only, so any non-ASCII byte fails the class (and the match); operating
+/// on bytes is therefore equivalent to JS's UTF-16 length counting.
+fn matches_agent_name_pattern(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    if !bytes[0].is_ascii_alphanumeric() {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Port of the `name` zod chain `z.string().regex(uZc).refine(t=>t!==K9)` (the
+/// binary's `exy` schema): validate a spawned-agent name at the tool boundary.
+/// Returns the byte-exact zod message on failure — the `.regex` message first
+/// (zod evaluates `.regex` before `.refine`), then the reserved-name message.
+/// `Ok(())` when the name is well-formed and not reserved.
+fn validate_agent_name(name: &str) -> Result<(), String> {
+    if !matches_agent_name_pattern(name) {
+        return Err(AGENT_NAME_REGEX_MESSAGE.to_string());
+    }
+    if name == RESERVED_AGENT_NAME {
+        return Err(reserved_agent_name_message());
+    }
+    Ok(())
+}
+
 static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
@@ -207,6 +263,13 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "name": {
                 "type": "string",
+                // `z.string().regex(uZc)` → zod-to-json-schema `addPattern`
+                // (`case"regex"`), so the wire input_schema carries the regex body
+                // verbatim (`uZc=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/`). The
+                // `.refine(t => t !== "main")` reserved-name check has NO JSON
+                // Schema equivalent and is enforced at the tool boundary in
+                // `call` (see `AGENT_NAME_PATTERN` / `validate_agent_name`).
+                "pattern": AGENT_NAME_PATTERN,
                 "description": "Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running."
             },
             "team_name": {
@@ -1176,6 +1239,26 @@ impl Tool for AgentTool {
         // the async-launch payload, the completed `data.description`) carries the
         // collapsed/trimmed value.
         parsed.description = normalize_description_ws(&parsed.description);
+
+        // `name` zod chain `z.string().regex(uZc).refine(t=>t!==K9)` (binary
+        // `exy`). The wire `pattern` (on the advertised `name` property) covers
+        // the regex at the turn-loop input gate, but `.refine()` (reserved
+        // "main") has NO JSON Schema form, so enforce the FULL chain here at the
+        // tool boundary with the byte-exact zod messages. A spawn naming its agent
+        // "main" would collide with SendMessage's main-conversation routing, so
+        // this is behavioral as well as byte parity.
+        if let Some(name) = parsed.name.as_deref() {
+            if let Err(msg) = validate_agent_name(name) {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "invalid_input",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(msg));
+            }
+        }
 
         // (G7) NO empty-prompt validation: claude-code has no such guard — a
         // `prompt: ""` spawn must succeed (AgentTool.call accepts any prompt).

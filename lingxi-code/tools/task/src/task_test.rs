@@ -2014,11 +2014,24 @@ mod tests {
             assert!(s["properties"].get("offset").is_none());
             assert!(s["properties"].get("limit").is_none());
             let t = &s["properties"]["timeout"];
-            assert_eq!(t["type"], "integer");
+            // `z.number().min(0).max(600000)` with NO `.int()` ⇒ `"number"`.
+            assert_eq!(t["type"], "number");
             assert_eq!(t["minimum"], 0);
             assert_eq!(t["maximum"], 600_000);
             assert_eq!(t["default"], 30_000);
             assert_eq!(s["properties"]["block"]["default"], true);
+        }
+
+        #[test]
+        fn task_output_prompt_has_blank_line_before_capability_bullets() {
+            // The binary's `prompt()` puts a literal blank line (`\n\n`) between
+            // the DEPRECATED advice bullets and the capability bullets — od-verified
+            // `(same as bash).\n\n- Retrieves output …`.
+            assert!(
+                TASK_OUTPUT_PROMPT
+                    .contains("(same as bash).\n\n- Retrieves output from a running or completed task"),
+                "prompt missing blank line before capability list; got: {TASK_OUTPUT_PROMPT:?}"
+            );
         }
 
         #[test]

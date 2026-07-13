@@ -39,7 +39,9 @@
 //! reading the exact installed version out of `installed_plugins.json`
 //! (`discover_enabled_plugins` probes the single-version case instead).
 
-use crate::manifest::{ComponentPath, PluginComponents, PluginManifest};
+use crate::manifest::{
+    ComponentPath, PluginComponents, PluginManifest, UserConfigField, UserConfigSchema,
+};
 use crate::source::PluginSource;
 use crate::trust::default_trust_for_source;
 
@@ -99,6 +101,12 @@ struct RawManifest {
     /// Explicit hook declarations. Binary: `hooks`.
     #[serde(default)]
     hooks: Option<serde_json::Value>,
+    /// User-configurable field declarations (`userConfig` in
+    /// `PluginManifestSchema`) — each key maps to a `{description, sensitive,
+    /// required, default, type}` object. Sensitive fields route through secure
+    /// storage; non-sensitive fields through settings `pluginConfigs`.
+    #[serde(rename = "userConfig", default)]
+    user_config: Option<HashMap<String, UserConfigField>>,
     /// Channel declarations. Binary: `channels`.
     #[serde(default)]
     channels: Option<Vec<serde_json::Value>>,
@@ -565,7 +573,9 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
         components,
         trust_level,
         depends_on: Vec::new(),
-        user_config: None,
+        user_config: parsed
+            .user_config
+            .map(|fields| UserConfigSchema { fields }),
         channels: Vec::new(),
         settings: HashMap::new(),
     };

@@ -41,6 +41,16 @@ pub enum SecretKind {
         /// Stable identifier for the third-party provider.
         provider: String,
     },
+    /// A sensitive plugin `userConfig` value, scoped by the owning `plugin`
+    /// identity and the field `key`. Mirrors claude-code's `pluginSecrets`
+    /// keychain entries (keyed `${plugin}/${key}`), which back a plugin's
+    /// `sensitive: true` userConfig fields (never persisted to settings.json).
+    PluginSecret {
+        /// Owning plugin identity (`name` or `name@marketplace`).
+        plugin: String,
+        /// userConfig field key.
+        key: String,
+    },
     /// Short-lived `OpenAI` / `ChatGPT` OAuth access token.
     OpenAiOAuthAccessToken,
     /// Long-lived `OpenAI` / `ChatGPT` OAuth refresh token.

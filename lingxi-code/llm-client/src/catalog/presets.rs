@@ -253,7 +253,7 @@ mod tests {
                 .map_or(0, |p| p.models.len())
         };
         // Exact counts guard against a truncated/partial re-vendor of a slice.
-        assert_eq!(count("openrouter"), 340);
+        assert_eq!(count("openrouter"), 341);
         assert_eq!(count("deepseek"), 4);
         assert_eq!(count("glm-coding"), 6);
         assert_eq!(count("zai"), 13);

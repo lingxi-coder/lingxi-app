@@ -912,6 +912,21 @@ pub struct BashTool {
     /// wired. Observable behavior is identical today since nothing else
     /// consumes a shared session-cwd yet.
     shell_cwd: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
+    /// The session cwd (`ctx.cwd()`) this `BashTool` last saw, used to detect
+    /// an `EnterWorktree`/`ExitWorktree` swap (worktree parity plan, Task 4).
+    ///
+    /// `shell_cwd` above and `ctx.cwd()` (the live `SessionCwd` cell) can
+    /// diverge for two completely different reasons that need OPPOSITE
+    /// handling: (a) the model ran `cd` inside the current session cwd — the
+    /// persistent shell legitimately moved and must NOT be clobbered back; or
+    /// (b) a worktree tool called `session_cwd.swap(..)` — claude-code's
+    /// `process.chdir(worktree)` moves the *entire process*, so the persistent
+    /// shell must follow. Comparing `shell_cwd` to `ctx.cwd()` directly can't
+    /// tell these apart (case (a) also makes them differ). So we track the
+    /// session cwd we last *observed* here; only when THAT has moved since the
+    /// previous call do we know a swap (not a `cd`) happened, and re-point
+    /// `shell_cwd` to match — see the call-site comment in `call()`.
+    synced_session_cwd: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
     /// Optional `CwdChanged` hook firer (default `None` => strict no-op).
     ///
     /// Closes the seam claude-code's `onCwdChangedForHooks(cwd, newCwd)`
@@ -935,10 +950,13 @@ impl BashTool {
     /// and every other `BashTool::new(ctx)` caller keep compiling untouched.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        let shell_cwd = std::sync::Arc::new(std::sync::Mutex::new(ctx.cwd()));
+        let boot_cwd = ctx.cwd();
+        let shell_cwd = std::sync::Arc::new(std::sync::Mutex::new(boot_cwd.clone()));
+        let synced_session_cwd = std::sync::Arc::new(std::sync::Mutex::new(boot_cwd));
         Self {
             ctx,
             shell_cwd,
+            synced_session_cwd,
             cwd_changed_firer: None,
         }
     }
@@ -1187,6 +1205,29 @@ impl Tool for BashTool {
         // concurrent swap mid-call can't produce an inconsistent mix of old
         // and new cwd within one command's sandbox-decision/spawn/reset logic.
         let workspace = self.ctx.cwd();
+        // ===== Worktree parity plan (Task 4): STATE.cwd re-point =====
+        // claude-code's persistent shell cwd moves for free on
+        // `EnterWorktree`/`ExitWorktree`, because both call `process.chdir`
+        // and `Shell.ts` reads the live process cwd. Our persistent shell cwd
+        // (`shell_cwd`, BASH.4 above) is a `BashTool`-local snapshot that does
+        // NOT automatically follow `SessionCwd::swap`, so without this a
+        // worktree swap would strand subsequent Bash calls in the stale
+        // directory. Detect a swap by comparing this call's fresh
+        // `ctx.cwd()` (`workspace`) against the session cwd we last observed
+        // (`synced_session_cwd`, distinct from `shell_cwd` — see its field
+        // doc): a change here can ONLY be a `session_cwd.swap(..)` (nothing
+        // else mutates the `SessionCwd` cell), never a model `cd`, so it is
+        // safe to re-point `shell_cwd` to the new session cwd. When nothing
+        // has swapped, `workspace` always equals `synced_session_cwd`, so this
+        // block is a no-op and `shell_cwd` behaves exactly as before
+        // (INERT INVARIANT).
+        {
+            let mut synced = self.synced_session_cwd.lock().unwrap();
+            if *synced != workspace {
+                *self.shell_cwd.lock().unwrap() = workspace.clone();
+                *synced = workspace.clone();
+            }
+        }
         let decision = should_use_sandbox(
             &cmd_str,
             self.ctx.sandbox_available,
@@ -2053,6 +2094,142 @@ mod tests {
             .expect("call should succeed");
         assert_eq!(res.data["stdout"], "hello");
         assert_eq!(res.data["interrupted"], false);
+    }
+
+    /// A `ProcessRunner` stub that records the `cwd` field of every spawned
+    /// [`ProcessCommand`](traits::sandbox::ProcessCommand), so a test can
+    /// assert which directory the (possibly sandbox-wrapped) foreground
+    /// command was actually spawned in.
+    struct CwdCapturingRunner {
+        out: ProcessOutput,
+        last_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    }
+    #[async_trait]
+    impl traits::process::ProcessRunner for CwdCapturingRunner {
+        async fn run(
+            &self,
+            cmd: &traits::sandbox::SandboxedCommand,
+        ) -> Result<ProcessOutput, traits::process::ProcessError> {
+            *self.last_cwd.lock().unwrap() = cmd.inner().cwd.clone();
+            Ok(self.out.clone())
+        }
+        async fn spawn_background(
+            &self,
+            _: &traits::sandbox::SandboxedCommand,
+        ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
+            unreachable!()
+        }
+        async fn kill(
+            &self,
+            _: &traits::process::ProcessHandle,
+        ) -> Result<(), traits::process::ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// Worktree parity plan (Task 4) — the persistent shell cwd (`STATE.cwd`)
+    /// must follow a `SessionCwd::swap` the way claude-code's `process.chdir`
+    /// moves its shell for free: `EnterWorktree` swaps `session_cwd` to the
+    /// worktree, and the NEXT Bash call must spawn there — not in the stale
+    /// pre-swap directory the `BashTool` was constructed with. Swapping back
+    /// (`ExitWorktree`) must restore the original.
+    #[tokio::test]
+    async fn bash_cwd_follows_session_cwd_swap() {
+        let origin = tempfile::TempDir::new().unwrap();
+        let worktree = tempfile::TempDir::new().unwrap();
+        let origin_path = origin.path().to_path_buf();
+        let worktree_path = worktree.path().to_path_buf();
+
+        let last_cwd = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.session_cwd = tool_api::session_cwd::SessionCwd::new(
+            origin_path.clone(),
+            vec![origin_path.clone()],
+        );
+        ctx.process = std::sync::Arc::new(CwdCapturingRunner {
+            out: ok_output(),
+            last_cwd: last_cwd.clone(),
+        });
+        let session_cwd = ctx.session_cwd.clone();
+        let tool = BashTool::new(ctx);
+
+        // Boot: no swap yet — the command spawns in the origin.
+        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+            .await
+            .expect("call should succeed");
+        assert_eq!(last_cwd.lock().unwrap().clone(), Some(origin_path.clone()));
+
+        // `EnterWorktree` swaps the session cwd — the persistent shell must
+        // follow on the very next call, with no intervening `cd`.
+        session_cwd.swap(worktree_path.clone(), vec![worktree_path.clone()]);
+        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+            .await
+            .expect("call should succeed");
+        assert_eq!(
+            last_cwd.lock().unwrap().clone(),
+            Some(worktree_path.clone()),
+            "shell cwd must re-point to the swapped-in worktree"
+        );
+
+        // `ExitWorktree` swaps back — the persistent shell must restore.
+        session_cwd.swap(origin_path.clone(), vec![origin_path.clone()]);
+        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+            .await
+            .expect("call should succeed");
+        assert_eq!(
+            last_cwd.lock().unwrap().clone(),
+            Some(origin_path),
+            "shell cwd must restore to the origin after swap-back"
+        );
+    }
+
+    /// Companion INERT check for Task 4 specifically (distinct from the
+    /// Task 2 `no_swap_is_identical` test above): with no `session_cwd.swap`
+    /// at all, a `cd` the model runs must still persist across calls exactly
+    /// as before the STATE.cwd re-point logic was added — the re-point check
+    /// must be a true no-op when `ctx.cwd()` never changes.
+    #[tokio::test]
+    async fn bash_cd_persists_across_calls_with_no_session_swap() {
+        let base = tempfile::TempDir::new().unwrap();
+        let sub = base.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+        let base_path = base.path().to_path_buf();
+
+        let last_cwd = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.session_cwd =
+            tool_api::session_cwd::SessionCwd::new(base_path.clone(), vec![base_path.clone()]);
+        ctx.process = std::sync::Arc::new(CwdCapturingRunner {
+            out: ok_output(),
+            last_cwd: last_cwd.clone(),
+        });
+        let tool = BashTool::new(ctx);
+
+        // First call spawns in the boot cwd.
+        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+            .await
+            .expect("call should succeed");
+        assert_eq!(last_cwd.lock().unwrap().clone(), Some(base_path.clone()));
+
+        // A `cd` moves the persistent shell cwd via the `pwd -P` readback
+        // (BASH.4); the stub runner doesn't actually create the tracking
+        // file, so simulate the readback directly by writing to the temp file
+        // the tool expects — this test only needs to prove the STATE.cwd
+        // re-point logic (Task 4) does not clobber a plain, unswapped `cd`.
+        // (No `session_cwd.swap` is called anywhere in this test.)
+        *tool.shell_cwd.lock().unwrap() = sub.clone();
+
+        tool.call(json!({"command": "pwd"}), use_ctx(), fresh_tx())
+            .await
+            .expect("call should succeed");
+        assert_eq!(
+            last_cwd.lock().unwrap().clone(),
+            Some(sub),
+            "an unswapped `cd` must persist untouched by the re-point check"
+        );
     }
 
     /// PHASE-2: when `ctx.cancel` is a token that is already fired, the

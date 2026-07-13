@@ -212,6 +212,11 @@ pub enum InitError {
     /// `isSandboxRequired()` startup refusal (sandbox-adapter.ts:479).
     #[error("sandbox required but unavailable: {0}")]
     SandboxUnavailable(String),
+    /// (worktree-tmux-launch plan, Task 3) `-w`/`--worktree` was passed but
+    /// the requested worktree could not be created — a hard boot failure
+    /// since the user explicitly asked for an isolated worktree.
+    #[error("--worktree launch failed: {0}")]
+    WorktreeLaunch(String),
 }
 
 impl From<engine_desktop::BuildError> for InitError {
@@ -221,6 +226,7 @@ impl From<engine_desktop::BuildError> for InitError {
             engine_desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
             engine_desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
             engine_desktop::BuildError::SandboxUnavailable(m) => Self::SandboxUnavailable(m),
+            engine_desktop::BuildError::WorktreeLaunch(m) => Self::WorktreeLaunch(m),
         }
     }
 }
@@ -683,6 +689,11 @@ pub(crate) fn resolve_desktop_config(
         // (`u4i` port; an invalid value already warned on stderr in `run_cli`
         // and normalizes to `None` here) → main-loop `output_config.effort`.
         initial_effort: argv.normalized_effort().0,
+        // (worktree-tmux-launch plan, Task 3) `-w`/`--worktree [name]`:
+        // `argv.worktree` is `None` when the flag is absent (inert boot),
+        // `Some("")` for a bare `-w` (`build()` mints a random slug), or
+        // `Some(name)` for an explicit name — threaded verbatim.
+        worktree_launch: argv.worktree.clone(),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It

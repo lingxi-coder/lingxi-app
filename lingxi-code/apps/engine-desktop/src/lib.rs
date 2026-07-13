@@ -1165,6 +1165,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cli_agent: None,
 ///     cli_plugin_dirs: Vec::new(),
 ///     initial_effort: None,
+///     // `None` ⟶ inert: no `-w`/`--worktree` boot launch.
+///     worktree_launch: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -1397,6 +1399,18 @@ pub struct DesktopConfig {
     /// `effort-2025-11-24` beta the service adds when the body has effort).
     /// `None` (the default) ⟶ requests unchanged (no effort field).
     pub initial_effort: Option<String>,
+    /// CLI `-w`/`--worktree [name]` (worktree-tmux-launch plan, Task 3):
+    /// create + enter a git worktree at boot. `None` (the default, and the
+    /// only value every host but `apps/cli` currently supplies) ⟶ INERT — no
+    /// worktree is created, `BuiltinToolContext.worktree_session` stays
+    /// `None`, and boot is byte-identical to before this field existed.
+    /// `Some("")` (a bare `-w`, `argv.worktree`'s empty-string sentinel) ⟶
+    /// `build()` mints a random slug via the same
+    /// [`tool_worktree::worktree::gen_random_slug`] helper `EnterWorktree`
+    /// uses for a name-less create. `Some(name)` ⟶ that name is the slug.
+    /// `--tmux` (`WorktreeSession.tmux_session_name`) is a separate,
+    /// not-yet-wired field (Task 4).
+    pub worktree_launch: Option<String>,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -1603,6 +1617,8 @@ impl Default for DesktopConfig {
             cli_agent: None,
             cli_plugin_dirs: Vec::new(),
             initial_effort: None,
+            // Default: no `-w`/`--worktree` flag ⟶ inert boot (no worktree).
+            worktree_launch: None,
         }
     }
 }
@@ -1961,6 +1977,14 @@ pub enum BuildError {
     /// (issue #34044).
     #[error("sandbox required but unavailable: {0}")]
     SandboxUnavailable(String),
+    /// `cfg.worktree_launch` was `Some` (the user passed `-w`/`--worktree`)
+    /// but the requested worktree could not be created (invalid slug, no git
+    /// repo, git failure, ...). A HARD boot failure — worktree-tmux-launch
+    /// plan Task 3: the user explicitly asked for an isolated worktree, so a
+    /// silent fall-through to the plain cwd would be a surprising, unrequested
+    /// downgrade rather than a recoverable default.
+    #[error("--worktree launch failed: {0}")]
+    WorktreeLaunch(String),
 }
 
 /// Build a fully-wired desktop [`DesktopRuntime`] from a deterministic
@@ -2739,6 +2763,68 @@ impl llm_client::RetryReporter for OutputRetryReporter {
                 .await;
         });
     }
+}
+
+/// (worktree-tmux-launch plan, Task 3) Apply `-w`/`--worktree [name]`'s boot
+/// launch onto an already-constructed `ctx`: create a git worktree and swap
+/// the session into it. Called exactly once, from [`build`] right after its
+/// `tool_ctx` literal is complete (so `ctx.session_cwd` /
+/// `ctx.worktree_session` / `ctx.worktree` are all wired) — extracted into its
+/// own function so this exact sequence is unit-testable against a
+/// `BuiltinToolContext` fixture without driving a full `build()`.
+///
+/// Mirrors `EnterWorktreeTool::call_create`'s create → swap → record sequence
+/// (`tools/worktree/src/worktree.rs`) exactly, reusing its random-slug helper
+/// (`gen_random_slug`, made `pub` for this) instead of duplicating it;
+/// `create_worktree` itself runs the same `validate_worktree_slug` pre-flight
+/// the tool path runs, so an invalid `--worktree <name>` surfaces the same
+/// `WorktreeError::InvalidSlug` message, wrapped in [`BuildError::WorktreeLaunch`].
+/// Unlike the tool (which can refuse "already in a worktree" / subagent-cwd-
+/// override calls), boot starts from a fresh session with no prior worktree
+/// and no subagent cwd override, so those tool-only guards do not apply here.
+///
+/// INERT INVARIANT: `worktree_launch == None` (the default, and every host
+/// but a CLI session with `-w`/`--worktree` set) is a complete no-op — no
+/// create, no swap, `ctx.worktree_session` untouched.
+///
+/// `--tmux` (`WorktreeSession.tmux_session_name`) is a separate, not-yet-wired
+/// concern (Task 4); this always records `tmux_session_name: None`.
+async fn apply_worktree_launch(
+    worktree_launch: &Option<String>,
+    ctx: &BuiltinToolContext,
+) -> Result<(), BuildError> {
+    let Some(name_or_empty) = worktree_launch else {
+        return Ok(());
+    };
+    let slug = if name_or_empty.is_empty() {
+        tool_worktree::worktree::gen_random_slug()
+    } else {
+        name_or_empty.clone()
+    };
+    // Captured BEFORE the swap below — the pre-launch boot cwd, which
+    // `ExitWorktree` later restores (same contract as
+    // `EnterWorktreeTool::record_worktree_session`).
+    let original_cwd = ctx.session_cwd.cwd();
+    let handle = ctx
+        .worktree
+        .create_worktree(&slug, None, &[])
+        .await
+        .map_err(|e| BuildError::WorktreeLaunch(e.to_string()))?;
+    ctx.session_cwd
+        .swap(handle.path.clone(), vec![handle.path.clone()]);
+    *ctx.worktree_session.lock().unwrap() = Some(tool_api::WorktreeSession {
+        original_cwd,
+        worktree_path: handle.path,
+        branch_name: handle.branch_name,
+        base_commit: handle.base_commit,
+        // This session CREATED the worktree (never entered a pre-existing
+        // one), so `ExitWorktree` may remove it — same as
+        // `EnterWorktreeTool::call_create`'s `entered_existing: false`.
+        entered_existing: false,
+        // `--tmux` wiring is Task 4; left unset here.
+        tmux_session_name: None,
+    });
+    Ok(())
 }
 
 pub async fn build(
@@ -5013,6 +5099,20 @@ pub async fn build(
             ),
         )),
     };
+    // (worktree-tmux-launch plan, Task 3) `-w`/`--worktree [name]` boot
+    // launch: create + enter a git worktree BEFORE anything downstream reads
+    // `tool_ctx.session_cwd`/`tool_ctx.worktree_session` (the orchestrator's
+    // `.with_session_cwd(session_cwd)` below shares the SAME `Arc`, and the
+    // system prompt / conditional-rules cache re-derive from it per-turn, so
+    // the exact position of this call relative to that wiring is immaterial
+    // — only that it happens before any tool call, which it trivially does
+    // here at boot). INERT INVARIANT: `cfg.worktree_launch == None` (every
+    // caller except a CLI session with `-w`/`--worktree` set) is a no-op — no
+    // create, no swap, `worktree_session` stays the fresh `None` set above —
+    // so boot is byte-identical to before this field existed. A `--worktree`
+    // that cannot be created is a HARD boot failure, not a silent degrade to
+    // the plain cwd — the user explicitly asked for an isolated worktree.
+    apply_worktree_launch(&cfg.worktree_launch, &tool_ctx).await?;
     // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
     //        coordinator session passes `Some(CoordinatorWiring { team, mode,
     //        spawn_seam })` so the coordinator `TeamCreate` / `TeamDelete` are
@@ -6577,8 +6677,206 @@ mod tests {
             cli_agent: None,
             cli_plugin_dirs: Vec::new(),
             initial_effort: None,
+            // No `-w`/`--worktree` flag by default; individual worktree-launch
+            // tests override this field via struct-update syntax.
+            worktree_launch: None,
         };
         (tmp, cfg)
+    }
+
+    // ── worktree-tmux-launch plan Task 3: `-w`/`--worktree [name]` boot ──────
+
+    /// Direct unit test of the extracted [`super::apply_worktree_launch`]:
+    /// `worktree_launch == None` (the field's default — see [`test_config`])
+    /// must be a complete no-op. INERT INVARIANT: no create, no cwd swap,
+    /// `worktree_session` stays `None` — boot with no `-w`/`--worktree` flag
+    /// is byte-identical to before this field existed.
+    #[tokio::test]
+    async fn apply_worktree_launch_is_inert_when_flag_absent() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/inert");
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+
+        super::apply_worktree_launch(&None, &ctx)
+            .await
+            .expect("None must never fail");
+
+        assert!(
+            ctx.worktree_session.lock().unwrap().is_none(),
+            "no --worktree flag must leave worktree_session None"
+        );
+        assert_eq!(
+            ctx.session_cwd.cwd(),
+            boot_cwd,
+            "no --worktree flag must never swap the session cwd"
+        );
+    }
+
+    /// Direct unit test of the extracted [`super::apply_worktree_launch`]:
+    /// `Some(name)` creates a worktree through the injected `WorktreeManager`
+    /// (a [`tool_api::test_support::MockWorktreeManager`] here — the function
+    /// only calls the `WorktreeManager` trait object, so it cannot tell a mock
+    /// from `PosixWorktreeManager`), swaps the session cwd into it, and
+    /// populates `worktree_session` — mirroring
+    /// `EnterWorktreeTool::call_create`'s own create → swap → record sequence
+    /// (`entered_existing: false` because boot CREATES, never enters an
+    /// existing worktree; `tmux_session_name: None` because `--tmux` wiring is
+    /// a separate, not-yet-implemented task).
+    #[tokio::test]
+    async fn apply_worktree_launch_creates_and_populates_session() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/create");
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+        let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+
+        super::apply_worktree_launch(&Some("feat".to_string()), &ctx)
+            .await
+            .expect("create must succeed against the injected WorktreeManager");
+
+        // The WorktreeManager recorded exactly one create, for the slug passed.
+        let created = mock.created();
+        assert_eq!(created.len(), 1, "exactly one create_worktree call");
+        assert_eq!(created[0].0, "feat");
+        let handle = created[0].1.clone();
+
+        assert_eq!(
+            ctx.session_cwd.cwd(),
+            handle.path,
+            "session cwd must be swapped into the created worktree"
+        );
+
+        let session = ctx
+            .worktree_session
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("worktree_session must be populated after a --worktree boot launch");
+        assert_eq!(session.original_cwd, boot_cwd, "captured PRE-swap cwd");
+        assert_eq!(session.worktree_path, handle.path);
+        assert_eq!(session.branch_name, handle.branch_name);
+        assert!(
+            !session.entered_existing,
+            "boot CREATES the worktree, never enters an existing one"
+        );
+        assert_eq!(
+            session.tmux_session_name, None,
+            "--tmux wiring is a separate task; boot launch always records None"
+        );
+    }
+
+    /// worktree-tmux-launch plan Task 3, boot-level integration test: driving
+    /// the FULL `build()` (a real git repo + the real `PosixWorktreeManager`
+    /// `build()` unconditionally wires) with `cfg.worktree_launch` set must
+    /// leave the LIVE session cwd inside the created worktree. There is no
+    /// direct `DesktopRuntime` accessor for `session_cwd`/`worktree_session`
+    /// (they are consumed into the orchestrator + tool registry), so this
+    /// observes the swap the same way the running system does: through
+    /// `ConversationOrchestrator::assemble_system_prompt_preview()`, whose
+    /// `Primary working directory:` line re-derives from the SAME
+    /// `Arc<SessionCwd>` every turn (see `build_prompt_context`'s doc comment).
+    /// The unit tests above already cover `worktree_session`'s exact shape.
+    #[tokio::test]
+    async fn worktree_launch_flag_creates_and_enters_worktree_at_boot() {
+        let (tmp, mut cfg) = test_config(true);
+        init_git_repo_for_worktree_launch_test(tmp.path()).await;
+        cfg.worktree_launch = Some("feat".to_string());
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("--worktree build must succeed in a real git repo");
+
+        let expected_path = tmp.path().join(".lingxi").join("worktrees").join("feat");
+        assert!(
+            expected_path.exists(),
+            "create_worktree must have materialized {expected_path:?} on disk"
+        );
+
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        assert!(
+            sys.contains(&format!(
+                "Primary working directory: {}",
+                expected_path.display()
+            )),
+            "the LIVE session cwd the system prompt re-derives every turn must be \
+             the boot-launched worktree: {sys}"
+        );
+    }
+
+    /// INERT INVARIANT companion to the above: with no `-w`/`--worktree` flag
+    /// (`cfg.worktree_launch == None`, `test_config`'s default), a full
+    /// `build()` must create no worktree and leave the plain boot cwd as the
+    /// live session cwd — boot stays byte-identical to before this field
+    /// existed.
+    #[tokio::test]
+    async fn no_worktree_flag_leaves_boot_cwd_untouched_at_boot() {
+        let (tmp, cfg) = test_config(true);
+        assert!(
+            cfg.worktree_launch.is_none(),
+            "test_config's default must be inert"
+        );
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        assert!(
+            !tmp.path().join(".lingxi").join("worktrees").exists(),
+            "no --worktree flag must never create a worktrees dir"
+        );
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        assert!(
+            sys.contains(&format!(
+                "Primary working directory: {}",
+                tmp.path().display()
+            )),
+            "no --worktree flag must leave the plain boot cwd as the live session cwd: {sys}"
+        );
+    }
+
+    /// Initialize a minimal git repo with one commit (mirrors
+    /// `platforms/posix/src/worktree.rs`'s `create_tests::init_repo` helper) so
+    /// `PosixWorktreeManager::create_worktree` — which `build()`
+    /// unconditionally wires as `tool_ctx.worktree` — has something to branch
+    /// from. `test_config`'s tempdir is NOT a git repo by default (most
+    /// `build()` tests never touch the worktree subsystem), so the boot-level
+    /// worktree-launch test above opts into this explicitly.
+    async fn init_git_repo_for_worktree_launch_test(dir: &std::path::Path) {
+        async fn git(dir: &std::path::Path, args: &[&str]) {
+            let mut c = tokio::process::Command::new("git");
+            c.current_dir(dir);
+            for a in args {
+                c.arg(a);
+            }
+            assert!(
+                c.output().await.unwrap().status.success(),
+                "git {args:?} failed"
+            );
+        }
+        git(dir, &["init", "-q", "-b", "main"]).await;
+        git(dir, &["config", "user.email", "ci@test"]).await;
+        git(dir, &["config", "user.name", "ci"]).await;
+        tokio::fs::write(dir.join("seed.txt"), "seed")
+            .await
+            .unwrap();
+        git(dir, &["add", "seed.txt"]).await;
+        git(dir, &["commit", "-qm", "seed"]).await;
     }
 
     /// F2-01: `build()` constructs a fully-wired runtime from a `DesktopConfig`

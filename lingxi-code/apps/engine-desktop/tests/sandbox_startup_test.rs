@@ -111,6 +111,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         cli_agent: None,
         cli_plugin_dirs: Vec::new(),
         initial_effort: None,
+        worktree_launch: None,
     };
     (tmp, cfg)
 }

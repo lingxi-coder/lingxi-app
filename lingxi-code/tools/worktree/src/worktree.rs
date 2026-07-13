@@ -149,8 +149,13 @@ fn branch_suffix(branch_name: &str) -> String {
 /// short, slug-legal, effectively-unique name from a fresh ULID/UUID. Not
 /// byte-matched to the oracle (the upstream name is itself random), but
 /// satisfies the same contract: a fresh, valid, human-scannable slug.
+///
+/// `pub` (not `pub(crate)`) so the `--worktree`/`--tmux` boot-launch path
+/// (`apps/engine-desktop/src/lib.rs::build`, worktree-tmux-launch plan Task 3)
+/// can mint the SAME bare-`-w` random-name behavior as this tool's `name`-less
+/// `EnterWorktree` call, instead of duplicating the derivation.
 #[must_use]
-fn gen_random_slug() -> String {
+pub fn gen_random_slug() -> String {
     let id = tool_api::util::ids::ulid_or_uuid();
     let lower: String = id
         .chars()

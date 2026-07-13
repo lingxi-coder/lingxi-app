@@ -274,6 +274,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         cli_agent: None,
         cli_plugin_dirs: Vec::new(),
         initial_effort: None,
+        // The Electron bridge has no `-w`/`--worktree` flag; inert boot (no
+        // worktree launch).
+        worktree_launch: None,
     }
 }
 
@@ -627,6 +630,7 @@ mod tests {
             cli_agent: None,
             cli_plugin_dirs: Vec::new(),
             initial_effort: None,
+            worktree_launch: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

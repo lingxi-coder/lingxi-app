@@ -105,6 +105,23 @@ pub fn flatten_slug(slug: &str) -> String {
     slug.replace('/', "+")
 }
 
+/// Shared 206 success-message template for both the CREATE and ENTER
+/// (path-entry) cases of `EnterWorktree` on the MAIN session. Byte-exact to
+/// the binary's `SCd.call` non-pinned-agent branch:
+/// `` `${o} worktree at ${r.worktreePath}${n}. The session is now working in
+/// the worktree. Use ExitWorktree to leave mid-session, or exit the session
+/// to be prompted.` `` where `o` is `"Entered"` (path given) or `"Created"`
+/// (create). The port has no pinned-agent worktree-entry concept — its
+/// `session_cwd.swap` always moves the whole session — so BOTH call sites
+/// share this one template; there is no separate "this agent's working
+/// directory" message.
+#[must_use]
+fn worktree_session_message(verb: &str, display_path: &str, suffix: &str) -> String {
+    format!(
+        "{verb} worktree at {display_path}{suffix}. The session is now working in the worktree. Use ExitWorktree to leave mid-session, or exit the session to be prompted."
+    )
+}
+
 /// The `{branch}` suffix in the 206 success messages: `` ` on branch {branch}` ``
 /// when a real branch exists, else `""`. Byte-exact to `SCd.call`'s
 /// `` r.worktreeBranch?` on branch ${r.worktreeBranch}`:"" ``.
@@ -331,7 +348,10 @@ impl EnterWorktreeTool {
     }
 
     /// `path` present: switch the session into an ALREADY-EXISTING worktree
-    /// (`SCd.call`'s `e.path` branch). Never creates anything.
+    /// (`SCd.call`'s `e.path` branch, non-pinned-agent case — the port has no
+    /// pinned-agent worktree-entry concept). Never creates anything. Uses the
+    /// SAME success-message template as `call_create`
+    /// ([`worktree_session_message`]), just with the `"Entered"` verb.
     async fn call_enter_existing(
         &self,
         invocation_id: &str,
@@ -358,9 +378,7 @@ impl EnterWorktreeTool {
                     .await;
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
-                let message = format!(
-                    "Entered worktree at {display_path}{suffix}. This agent's working directory and write access now point at the worktree; the previous directory was left untouched."
-                );
+                let message = worktree_session_message("Entered", &display_path, &suffix);
                 Ok(ToolCallResult {
                     data: json!({
                         "path": display_path,
@@ -436,9 +454,7 @@ impl EnterWorktreeTool {
                     .await;
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
-                let message = format!(
-                    "Created worktree at {display_path}{suffix}. The session is now working in the worktree. Use ExitWorktree to leave mid-session, or exit the session to be prompted."
-                );
+                let message = worktree_session_message("Created", &display_path, &suffix);
                 Ok(ToolCallResult {
                     data: json!({
                         "path": display_path,
@@ -500,8 +516,13 @@ impl Tool for EnterWorktreeTool {
         Some("create an isolated git worktree and switch into it")
     }
     /// 2.1.206 `userFacingName(e){return e?.path?"Entering worktree":"Creating worktree"}`.
+    /// `e.path` is a JS truthiness check, so an empty-string `path` counts as
+    /// absent here too — matching the `call` dispatch's empty-string handling.
     fn user_facing_name_for_input(&self, input: &Value) -> Option<String> {
-        let has_path = input.get("path").and_then(Value::as_str).is_some();
+        let has_path = input
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|p| !p.is_empty());
         Some(
             if has_path {
                 "Entering worktree"
@@ -590,7 +611,10 @@ impl Tool for EnterWorktreeTool {
             }
         };
 
-        if let Some(path) = parsed.path {
+        // 206 `e.path` is a JS truthiness check — an empty string is falsy,
+        // so `path: ""` must be treated as ABSENT (create), not as an enter
+        // target. `Option::filter` drops the `Some("")` case back to `None`.
+        if let Some(path) = parsed.path.filter(|p| !p.is_empty()) {
             self.call_enter_existing(&invocation_id, started_at, path)
                 .await
         } else {
@@ -1027,7 +1051,7 @@ mod tests {
         assert_eq!(
             res.model_content.as_deref(),
             Some(
-                "Entered worktree at /tmp/repo-enter/.lingxi/worktrees/feat on branch worktree-feat. This agent's working directory and write access now point at the worktree; the previous directory was left untouched."
+                "Entered worktree at /tmp/repo-enter/.lingxi/worktrees/feat on branch worktree-feat. The session is now working in the worktree. Use ExitWorktree to leave mid-session, or exit the session to be prompted."
             )
         );
     }
@@ -1063,7 +1087,43 @@ mod tests {
         assert!(!msg.contains("on branch HEAD"), "msg: {msg}");
         assert_eq!(
             msg,
-            "Entered worktree at /tmp/repo-detached/.lingxi/worktrees/feat. This agent's working directory and write access now point at the worktree; the previous directory was left untouched."
+            "Entered worktree at /tmp/repo-detached/.lingxi/worktrees/feat. The session is now working in the worktree. Use ExitWorktree to leave mid-session, or exit the session to be prompted."
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_string_path_is_treated_as_absent_and_takes_create_path() {
+        // 206 `e.path` is a JS truthiness check — `path: ""` is falsy, so it
+        // must route to CREATE (no `name` either ⇒ a random slug), never to
+        // `call_enter_existing`.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-empty-path"));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let tool = EnterWorktreeTool::new(bctx);
+        let res = tool
+            .call(json!({ "path": "" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("empty-string path must be treated as absent and create");
+        assert_eq!(mock.created().len(), 1, "must have created, not entered");
+        let msg = res.model_content.as_deref().unwrap();
+        assert!(
+            msg.starts_with("Created worktree at "),
+            "msg should use the CREATE verb: {msg}"
+        );
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&WORKTREE_CREATED.to_string()));
+        assert!(!names.contains(&WORKTREE_ENTERED_EXISTING.to_string()));
+    }
+
+    #[test]
+    fn empty_string_path_user_facing_name_is_creating_worktree() {
+        let mock = Arc::new(MockWorktreeManager::new());
+        let (bctx, _sink) = make_bctx(mock);
+        let tool = EnterWorktreeTool::new(bctx);
+        assert_eq!(
+            tool.user_facing_name_for_input(&json!({ "path": "" }))
+                .as_deref(),
+            Some("Creating worktree")
         );
     }
 

@@ -345,6 +345,15 @@ pub struct SubagentInheritance {
     pub budget: Arc<dyn BudgetEnforcerHandle>,
 }
 
+impl std::fmt::Debug for SubagentInheritance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The trait-object handles intentionally have no Debug contract. Keep
+        // task-input diagnostics useful without exposing or fabricating their
+        // concrete implementations.
+        f.debug_struct("SubagentInheritance").finish_non_exhaustive()
+    }
+}
+
 /// One resolved subagent type, surfaced to `AgentTool` so it can build the
 /// dynamic tool prompt (claude-code's `formatAgentLine`,
 /// `AgentTool/prompt.ts:43-46`: `- {agentType}: {whenToUse} (Tools: …)`).

@@ -34,10 +34,9 @@
 //! `LocalAgentTaskState` shape (`agentId` + `agentType`). The caller that
 //! already resolved the `AgentDefinition` stamps `subagent_type` (applying the
 //! `'general-purpose'` fallback when the definition has none, matching the TS
-//! `selectedAgent.agentType ?? 'general-purpose'`), so this handler forwards
-//! the value verbatim into [`SubagentSpawnRequest`] with no `AgentId`-to-type
-//! derivation. `context_paths` has no source on the variant, so [`Vec::new`] is
-//! passed.
+//! `selectedAgent.agentType ?? 'general-purpose'`). Modern background Agent
+//! launches also carry the complete already-resolved request and inheritance
+//! handles; legacy direct-task callers retain the compact fallback path.
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -217,6 +216,8 @@ impl Task for LocalAgentHandler {
             // The registry's `state_for_spawn` stamps this onto `TaskStateBase`;
             // the handler itself doesn't consume it.
             tool_use_id: _,
+            spawn_request,
+            inheritance,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -241,28 +242,22 @@ impl Task for LocalAgentHandler {
             return Err(TaskError::Internal("spool path is not valid UTF-8".into()));
         }
 
-        // 3. Build the spawn request, forwarding the already-resolved
-        //    `subagent_type` verbatim (parity with TS `agentType`).
-        //    `context_paths` has no source on the variant, so an empty vec is
-        //    passed.
-        let request = SubagentSpawnRequest {
+        // 3. Preserve the complete background Agent request (model/cwd/context/
+        //    isolation/schema/depth and more). Direct TaskCreate-style callers
+        //    lack that payload, so only they use the compact legacy fallback.
+        let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
             subagent_type,
             prompt,
             context_paths: Vec::new(),
-            // AgentTool spawn-surface parity params — the LocalAgent variant
-            // carries no model/name/etc. overrides, so those default to None.
             description: None,
             model: None,
             model_profile: None,
-            // The LocalAgent variant IS the background path; wire its real
-            // `is_backgrounded` flag onto the spawn request's `run_in_background`.
             run_in_background: is_backgrounded,
             name: None,
             team_name: None,
             mode: None,
             isolation: None,
             cwd: None,
-            // Non-fork spawn.
             fork_context_messages: None,
             fork_parent_system_prompt: None,
             schema: None,
@@ -272,17 +267,15 @@ impl Task for LocalAgentHandler {
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
             depth: 0,
-            // Top-level spawn ⇒ the spawner's own default model anchors resolution.
             parent_model_override: None,
-        };
+        });
 
-        // 4. Bundle the inheritance. Cloning the Arcs preserves pointer
-        //    identity — required by the recursion-lock + budget-aggregation
-        //    invariants (the spawner asserts `Arc::ptr_eq` on these).
-        let inherit = SubagentInheritance {
+        // 4. Preserve the immediate parent's registry/budget handles. Root
+        //    handles are only the correct fallback for legacy direct tasks.
+        let inherit = inheritance.unwrap_or_else(|| SubagentInheritance {
             tool_invoker: self.tool_invoker.clone(),
             budget: self.budget.clone(),
-        };
+        });
 
         // 5. Drive the subagent to completion inside a runtime-spawned worker
         //    (engine code must not call tokio::spawn directly — D17). The worker
@@ -832,6 +825,8 @@ mod tests {
             prompt: prompt.into(),
             is_backgrounded: true,
             tool_use_id: None,
+            spawn_request: None,
+            inheritance: None,
         }
     }
 
@@ -1295,6 +1290,8 @@ mod tests {
             prompt: "p".into(),
             is_backgrounded: true,
             tool_use_id: None,
+            spawn_request: None,
+            inheritance: None,
         };
 
         handler.spawn(input, make_ctx(fs)).await.unwrap();
@@ -1305,6 +1302,85 @@ mod tests {
             "code-reviewer",
             "the variant's subagent_type drives the request verbatim"
         );
+    }
+
+    /// Background Agent invocations arrive through `TaskSpawnInput` after the
+    /// Agent tool has already resolved every override. The task boundary must
+    /// not reconstruct a stripped request or replace the immediate parent's
+    /// inheritance handles with composition-root defaults.
+    #[tokio::test]
+    async fn full_background_request_and_inheritance_survive_task_boundary() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let handler = make_handler(spawner.clone(), mgr, sink.clone());
+
+        let inherited_invoker: Arc<dyn ToolInvoker> = Arc::new(MockInvoker);
+        let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
+        let expected = SubagentSpawnRequest {
+            subagent_type: "code-reviewer".into(),
+            prompt: "inspect the background request".into(),
+            context_paths: vec![PathBuf::from("/workspace/CONTEXT.md")],
+            description: Some("review request".into()),
+            model: Some("opus".into()),
+            model_profile: Some("preferred-provider".into()),
+            run_in_background: true,
+            name: Some("reviewer".into()),
+            team_name: Some("team-a".into()),
+            mode: Some("plan".into()),
+            isolation: Some("worktree".into()),
+            cwd: Some("/workspace/subdir".into()),
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: Some(r#"{\"type\":\"object\"}"#.into()),
+            effort: Some(json!("high")),
+            tool_use_id: Some("toolu_background".into()),
+            system_prompt_override: Some("override".into()),
+            system_prompt_addendum: Some("addendum".into()),
+            additional_disallowed_tools: vec!["Bash".into()],
+            depth: 3,
+            parent_model_override: Some("claude-opus-4-6".into()),
+        };
+        let input = TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::new(),
+            // These compact task-index fields deliberately disagree with the
+            // full request so forwarding the stripped legacy reconstruction is
+            // observable.
+            subagent_type: "general-purpose".into(),
+            prompt: "legacy prompt".into(),
+            is_backgrounded: true,
+            tool_use_id: Some("toolu_background".into()),
+            spawn_request: Some(expected.clone()),
+            inheritance: Some(SubagentInheritance {
+                tool_invoker: inherited_invoker.clone(),
+                budget: inherited_budget.clone(),
+            }),
+        };
+
+        handler.spawn(input, make_ctx(fs)).await.unwrap();
+        await_terminal(&sink).await;
+
+        let observed = spawner.request().expect("worker received a request");
+        assert_eq!(observed, expected, "all Agent spawn overrides survive");
+        assert!(Arc::ptr_eq(
+            spawner
+                .seen_invoker
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("worker received inheritance"),
+            &inherited_invoker,
+        ));
+        assert!(Arc::ptr_eq(
+            spawner
+                .seen_budget
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("worker received inheritance"),
+            &inherited_budget,
+        ));
     }
 
     #[tokio::test]

@@ -1089,6 +1089,8 @@ async fn handler_rejects_a_non_workflow_input() {
         prompt: "p".into(),
         is_backgrounded: true,
         tool_use_id: None,
+        spawn_request: None,
+        inheritance: None,
     };
     match handler.spawn(wrong, make_ctx(fs)).await {
         Err(TaskError::Internal(_)) => {}

@@ -231,6 +231,8 @@ fn local_agent_input() -> TaskSpawnInput {
         prompt: "do the work".into(),
         is_backgrounded: true,
         tool_use_id: None,
+        spawn_request: None,
+        inheritance: None,
     }
 }
 
@@ -1209,6 +1211,8 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         prompt: "go".into(),
         is_backgrounded: true,
         tool_use_id: Some("toolu_bg42".into()),
+        spawn_request: None,
+        inheritance: None,
     };
     let state = state_for_spawn(base, &input);
     assert_eq!(state.base().tool_use_id.as_deref(), Some("toolu_bg42"));
@@ -1233,6 +1237,8 @@ fn state_for_spawn_stamps_local_agent_tool_use_id() {
         prompt: "go".into(),
         is_backgrounded: true,
         tool_use_id: None,
+        spawn_request: None,
+        inheritance: None,
     };
     assert_eq!(state_for_spawn(base2, &input2).base().tool_use_id, None);
 }

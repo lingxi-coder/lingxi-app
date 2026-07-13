@@ -92,7 +92,7 @@ impl SubagentSpawner for BackgroundAgentSpawner {
     async fn spawn_async(
         &self,
         request: SubagentSpawnRequest,
-        _inherit: SubagentInheritance,
+        inherit: SubagentInheritance,
     ) -> Result<AsyncLaunch, SubagentSpawnError> {
         // The advertised id (the `SendMessage` routing key / mailbox key). The
         // handler's persistent runner uses its OWN pool agent id internally;
@@ -113,6 +113,13 @@ impl SubagentSpawner for BackgroundAgentSpawner {
                     // Stamp the originating tool_use_id so the task-notification
                     // carries `<tool-use-id>` (claude-code parity).
                     tool_use_id: request.tool_use_id.clone(),
+                    // LocalAgent is a lifecycle wrapper, not a second spawn
+                    // surface: retain every resolved Agent option verbatim.
+                    spawn_request: Some(request.clone()),
+                    // Preserve the immediate parent registry + budget Arcs so
+                    // nested/background agents retain recursion and accounting
+                    // semantics rather than falling back to root handles.
+                    inheritance: Some(inherit),
                 },
                 description,
             )

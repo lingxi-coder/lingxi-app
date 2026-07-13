@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
-use traits::{FileSystem, RuntimeSpawner};
+use traits::{FileSystem, RuntimeSpawner, SubagentInheritance, SubagentSpawnRequest};
 
 /// Generic interface implemented by per-type task handlers.
 #[async_trait]
@@ -58,6 +58,16 @@ pub enum TaskSpawnInput {
         /// `<tool-use-id>` line (claude-code parity). `None` when not launched
         /// from a tool call.
         tool_use_id: Option<String>,
+        /// Complete spawn request for a background Agent invocation. The
+        /// duplicated state fields above remain the compact task-index surface;
+        /// this preserves model/cwd/context/isolation/schema/depth overrides for
+        /// the eventual runner. `None` keeps legacy direct task creation valid.
+        spawn_request: Option<SubagentSpawnRequest>,
+        /// The immediate parent's tool registry and budget handles. Background
+        /// agent execution must inherit these exact Arcs, not fall back to the
+        /// composition-root handles. `None` keeps legacy direct task creation
+        /// valid.
+        inheritance: Option<SubagentInheritance>,
     },
     /// Spawn a remote agent.
     RemoteAgent {

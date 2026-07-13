@@ -570,10 +570,19 @@ Reach for this when the task matches an available agent type, when you have inde
         // Binary: `…re-delegate.`:""}\n\n- The agent's final message…\n- Use…`
         // — DOUBLE `\n` before the FIRST bullet, SINGLE `\n` between subsequent
         // bullets (od -c verified on 2.1.195).
+        //
+        // The agent-definition bullet is an unconditional fixed literal between
+        // the SendMessage bullet and the isolation bullet (2.1.207 binary @
+        // ~222815108: `- Each agent type's model, reasoning effort, and tools come
+        // from its definition (\`.claude/agents/*.md\` frontmatter or SDK
+        // \`agents\`).`). Ported verbatim except the path is rebranded
+        // `.claude/agents/*.md` → `.lingxi/agents/*.md` per the accepted .lingxi
+        // naming divergence (cf. sandbox-runtime path_utils.rs `.lingxi/agents`).
         format!(
             "{intro}{when_to_use}{fork_addendum}\n\n\
 - The agent's final message is returned to you as the tool result; it is not shown to the user — relay what matters.\n\
 {send_message_bullet}\n\
+- Each agent type's model, reasoning effort, and tools come from its definition (`.lingxi/agents/*.md` frontmatter or SDK `agents`).\n\
 - `isolation: \"worktree\"` gives the agent its own git worktree (auto-cleaned if unchanged).\n\
 - Subagents run in the background by default; you'll be notified when one completes. Pass `run_in_background: false` for a synchronous run when you need the result before continuing."
         )

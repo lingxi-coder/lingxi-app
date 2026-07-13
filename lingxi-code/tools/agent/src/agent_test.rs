@@ -1473,6 +1473,35 @@ mod tests {
         assert!(slim.contains("- general-purpose: anything (Tools: All tools)"));
     }
 
+    // The lean-form bullet list carries the agent-definition bullet between the
+    // SendMessage bullet (`…call starts fresh.`) and the isolation bullet, a
+    // fixed literal from the 2.1.207 binary (@~222815108). Byte-verbatim except
+    // the path is rebranded `.claude/agents/*.md` → `.lingxi/agents/*.md` per the
+    // accepted .lingxi naming divergence. The single-`\n` adjacency locks both
+    // content and position.
+    #[test]
+    fn build_prompt_carries_agent_definition_bullet() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+        let agents = vec![traits::subagent_spawn::SubagentListingEntry {
+            agent_type: "general-purpose".into(),
+            when_to_use: "anything".into(),
+            tools_description: "All tools".into(),
+        }];
+        let prompt = AgentTool::build_prompt(&agents, &[], false);
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        assert!(
+            prompt.contains(
+                "call starts fresh.\n\
+- Each agent type's model, reasoning effort, and tools come from its definition (`.lingxi/agents/*.md` frontmatter or SDK `agents`).\n\
+- `isolation: \"worktree\"`"
+            ),
+            "agent-definition bullet missing or mispositioned; prompt was:\n{prompt}"
+        );
+    }
+
     // Pro-plan gate `d` (binary `d=vi()==="pro"?<block>:""`): a `pro`
     // subscription injects the "Do not spawn agents" block after the catalog
     // pointer line AND suppresses `## When to use`; the four bullets still render.

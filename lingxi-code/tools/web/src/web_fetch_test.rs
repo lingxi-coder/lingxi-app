@@ -98,12 +98,25 @@ mod tests {
     }
 
     #[test]
-    fn cap_flag_counts_chars_not_bytes_multibyte() {
-        // A run of multibyte chars: the cap is by CHAR (not byte). `cap` such
-        // multibyte chars is exactly at the cap (not over); `cap+1` is over.
+    fn cap_flag_counts_utf16_units_not_bytes_bmp() {
+        // BMP multibyte chars (`あ` = 3 UTF-8 bytes, 1 UTF-16 unit): the cap is
+        // by UTF-16 code unit (matching JS `.length`), NOT bytes. `cap` such
+        // chars is exactly at the cap (not over); `cap+1` is over.
         let at_cap = "あ".repeat(WEBFETCH_MAX_MARKDOWN_LEN);
         assert!(!body_exceeds_markdown_cap(&at_cap));
         let over = "あ".repeat(WEBFETCH_MAX_MARKDOWN_LEN + 1);
+        assert!(body_exceeds_markdown_cap(&over));
+    }
+
+    #[test]
+    fn cap_flag_counts_utf16_units_astral() {
+        // Astral char (`😀` U+1F600 = 1 Unicode scalar, but 2 UTF-16 units).
+        // JS `.length` counts 2 per emoji, so cap/2 emojis is exactly at the cap
+        // and cap/2 + 1 is over — this is where UTF-16 diverges from `chars()`.
+        let half = WEBFETCH_MAX_MARKDOWN_LEN / 2;
+        let at_cap = "😀".repeat(half);
+        assert!(!body_exceeds_markdown_cap(&at_cap));
+        let over = "😀".repeat(half + 1);
         assert!(body_exceeds_markdown_cap(&over));
     }
 

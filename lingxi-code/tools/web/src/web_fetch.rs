@@ -329,15 +329,15 @@ pub fn is_permitted_redirect(original_url: &str, redirect_url: &str) -> bool {
     orig_host.is_some() && orig_host == redir_host
 }
 
-/// Whether the FULL fetched `body` exceeds the 100k-char apply-step cap and would
+/// Whether the FULL fetched `body` exceeds the 100k apply-step cap and would
 /// therefore be truncated inside the apply step (`applyPromptToMarkdown` = `l9n`:
 /// `t.length > Cut`). PARITY (#88): the body is cached/returned in FULL; the cap
 /// only fires inside the apply step, so this is the source of the LingXi-internal
-/// `truncated` telemetry/result flag. Measured by `char` count (Unicode scalar),
-/// matching the raw fast-path condition `content.length < Cut`.
+/// `truncated` telemetry/result flag. Measured in UTF-16 code units to match JS
+/// `String.length` (the `t.length > Vnr` comparison), same as [`markdown::truncate_markdown`].
 #[must_use]
 pub fn body_exceeds_markdown_cap(body: &str) -> bool {
-    body.chars().count() > WEBFETCH_MAX_MARKDOWN_LEN
+    body.encode_utf16().count() > WEBFETCH_MAX_MARKDOWN_LEN
 }
 
 /// Format the byte-locked DNS-error string. Spec §5:

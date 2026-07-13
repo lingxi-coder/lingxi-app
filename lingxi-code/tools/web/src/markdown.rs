@@ -7,8 +7,9 @@
 use crate::web_fetch::WEBFETCH_TRUNCATION_SUFFIX;
 use once_cell::sync::Lazy;
 
-/// Markdown is truncated to this many bytes before the secondary model, to avoid
-/// "Prompt is too long" errors. claude-code `utils.ts` `MAX_MARKDOWN_LENGTH`.
+/// Markdown is truncated to this many UTF-16 code units before the secondary
+/// model, to avoid "Prompt is too long" errors. claude-code `utils.ts`
+/// `MAX_MARKDOWN_LENGTH` (`Vnr`); the cap counts JS `String.length` units.
 pub const MAX_MARKDOWN_LENGTH: usize = 100_000;
 
 /// True when the `Content-Type` header denotes HTML (case-insensitive substring
@@ -18,17 +19,31 @@ pub fn is_html_content_type(content_type: &str) -> bool {
     content_type.to_ascii_lowercase().contains("text/html")
 }
 
-/// Truncate `markdown` to `MAX_MARKDOWN_LENGTH` bytes (char-boundary safe),
-/// appending [`WEBFETCH_TRUNCATION_SUFFIX`] when truncated. Mirrors the
-/// `markdownContent.length > MAX_MARKDOWN_LENGTH` slice in `utils.ts`.
+/// Truncate `markdown` to `MAX_MARKDOWN_LENGTH` UTF-16 code units, appending
+/// [`WEBFETCH_TRUNCATION_SUFFIX`] when truncated. Byte-faithful port of the
+/// `t.length > Vnr ? t.slice(0, Vnr) + suffix : t` expression in `utils.ts`,
+/// where `.length`/`.slice` count UTF-16 code units (JS `String` semantics).
+///
+/// The cut lands on a char boundary: we take the longest prefix of whole
+/// `char`s whose cumulative UTF-16 length is `<= MAX_MARKDOWN_LENGTH`. This
+/// matches JS `slice(0, N)` for every input except the pathological case where
+/// `N` bisects a surrogate pair (an astral char straddling the cap) — JS would
+/// there emit a lone surrogate, which is unrepresentable in Rust's UTF-8
+/// `String`, so we stop one astral char earlier. That boundary case can differ
+/// by at most a single code point.
 #[must_use]
 pub fn truncate_markdown(markdown: String) -> String {
-    if markdown.len() <= MAX_MARKDOWN_LENGTH {
+    if markdown.encode_utf16().count() <= MAX_MARKDOWN_LENGTH {
         return markdown;
     }
-    let mut cut = MAX_MARKDOWN_LENGTH;
-    while cut > 0 && !markdown.is_char_boundary(cut) {
-        cut -= 1;
+    let mut units = 0usize;
+    let mut cut = markdown.len();
+    for (byte_idx, ch) in markdown.char_indices() {
+        if units + ch.len_utf16() > MAX_MARKDOWN_LENGTH {
+            cut = byte_idx;
+            break;
+        }
+        units += ch.len_utf16();
     }
     let mut out = markdown[..cut].to_string();
     out.push_str(WEBFETCH_TRUNCATION_SUFFIX);
@@ -277,6 +292,31 @@ mod tests {
     fn does_not_truncate_short_markdown() {
         let s = "hello".to_string();
         assert_eq!(truncate_markdown(s.clone()), s);
+    }
+
+    #[test]
+    fn truncates_by_utf16_units_bmp() {
+        // `あ` = 1 UTF-16 unit, 3 bytes. JS slices to MAX UTF-16 units, so the
+        // kept prefix is exactly `MAX` chars = `MAX*3` bytes (NOT `MAX` bytes).
+        let big = "あ".repeat(MAX_MARKDOWN_LENGTH + 10);
+        let out = truncate_markdown(big);
+        assert!(out.ends_with(crate::web_fetch::WEBFETCH_TRUNCATION_SUFFIX));
+        let body = &out[..out.len() - crate::web_fetch::WEBFETCH_TRUNCATION_SUFFIX.len()];
+        assert_eq!(body.encode_utf16().count(), MAX_MARKDOWN_LENGTH);
+        assert_eq!(body.chars().count(), MAX_MARKDOWN_LENGTH);
+        assert_eq!(body.len(), MAX_MARKDOWN_LENGTH * 3);
+    }
+
+    #[test]
+    fn truncates_by_utf16_units_astral() {
+        // `😀` = 2 UTF-16 units, 1 scalar, 4 bytes. JS `.slice(0, MAX)` keeps
+        // MAX/2 emojis (MAX UTF-16 units). The cut lands on a char boundary.
+        let big = "😀".repeat(MAX_MARKDOWN_LENGTH); // 2*MAX units, well over cap
+        let out = truncate_markdown(big);
+        assert!(out.ends_with(crate::web_fetch::WEBFETCH_TRUNCATION_SUFFIX));
+        let body = &out[..out.len() - crate::web_fetch::WEBFETCH_TRUNCATION_SUFFIX.len()];
+        assert_eq!(body.encode_utf16().count(), MAX_MARKDOWN_LENGTH);
+        assert_eq!(body.chars().count(), MAX_MARKDOWN_LENGTH / 2);
     }
 
     #[test]

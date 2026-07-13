@@ -18,10 +18,14 @@
 //! 4. SHUTDOWN — on SIGTERM/SIGINT, break the loop and [`daemon_lock::release`]
 //!    our lock.
 //!
+//! The supervisor now spawns headless workers with the dispatch environment
+//! (`bg_worker_env`) and does BUDGETED crash-respawn (`RESPAWN_BUDGET`) —
+//! `tengu_bg_worker_vanished`/`tengu_bg_respawn`/`tengu_bg_respawn_exhausted`.
+//!
 //! DELIBERATELY OUT OF SCOPE (unrecoverable wire protocol / higher risk, all
 //! follow-ons): the auth'd `control.sock` + `rvAuth`/`ptyAuth` IPC, actual
-//! pty-backed worker spawn, respawn/stall watchdog, low-memory handling, orphan
-//! reap beyond `retain_adoptable`, and upgrade takeover.
+//! pty-backed worker spawn, the PTY-owned attach-stall watchdog, low-memory
+//! handling, orphan reap beyond `retain_adoptable`, and upgrade takeover.
 //!
 //! The literal `daemon` token in `argv[1..4]` is what lets
 //! [`daemon_lock::classify_cmdline`] recognise this child as one of *our* daemon
@@ -45,12 +49,20 @@ use std::sync::Arc;
 /// byte-parity).
 const HEARTBEAT_MS: u64 = 2000;
 
+/// How many times a crashed/vanished worker is respawned before its job is
+/// marked terminally `failed`. Mirrors CC 2.1.207's attach-stall respawn budget
+/// (`attachStallRespawns >= 2` → `tengu_bg_attach_stall_gave_up`): two respawns,
+/// then bail to failure on the third crash.
+const RESPAWN_BUDGET: i64 = 2;
+
 /// Spawns a detached `__bg-run <short>` worker process. Abstracted (like
 /// [`crate::background_dispatch::DaemonSpawner`]) so the supervise loop's
 /// spawn decisions are testable without launching a real process.
 pub trait WorkerSpawner {
-    /// Spawn the detached headless worker for job `short`, returning its pid.
-    fn spawn_worker(&mut self, short: &str) -> std::io::Result<i32>;
+    /// Spawn the detached headless worker for job `short` with `env` layered
+    /// onto the inherited process environment, returning its pid.
+    fn spawn_worker(&mut self, short: &str, env: &BTreeMap<String, String>)
+        -> std::io::Result<i32>;
 }
 
 /// Production worker spawner: a detached `<current_exe> __bg-run <short>` with
@@ -60,7 +72,11 @@ pub trait WorkerSpawner {
 struct RealWorkerSpawner;
 
 impl WorkerSpawner for RealWorkerSpawner {
-    fn spawn_worker(&mut self, short: &str) -> std::io::Result<i32> {
+    fn spawn_worker(
+        &mut self,
+        short: &str,
+        env: &BTreeMap<String, String>,
+    ) -> std::io::Result<i32> {
         use std::process::{Command, Stdio};
         let exe = std::env::current_exe()?;
         let mut cmd = Command::new(exe);
@@ -69,6 +85,13 @@ impl WorkerSpawner for RealWorkerSpawner {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // Layer the background-session env onto the inherited daemon env
+        // (mirrors CC 2.1.207's worker-spawn `{...dispatch.env, CLAUDE_CODE_
+        // SESSION_KIND:"bg", CLAUDE_BG_BACKEND:"daemon", CLAUDE_BG_SOURCE,
+        // CLAUDE_JOB_DIR, CLAUDE_BG_ISOLATION}`, rebranded to LINGXI_).
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -77,6 +100,80 @@ impl WorkerSpawner for RealWorkerSpawner {
         let child = cmd.spawn()?;
         Ok(i32::try_from(child.id()).unwrap_or(i32::MAX))
     }
+}
+
+/// The `LINGXI_*` background-session environment a spawned `__bg-run` worker
+/// inherits. Rebrand of CC 2.1.207's worker-spawn env assembly
+/// (`{...dispatch.env, CLAUDE_CODE_SESSION_KIND:"bg", CLAUDE_BG_BACKEND:"daemon",
+/// CLAUDE_BG_SOURCE:e.source, CLAUDE_JOB_DIR:t, CLAUDE_BG_ISOLATION:…}`) onto the
+/// `LINGXI_` names lingxi's runtime reads: `bg_session::from_env`
+/// (`LINGXI_SESSION_KIND`/`LINGXI_JOB_DIR`/`LINGXI_BG_ISOLATION` → the
+/// `# Background Session` system-prompt section) and the `/stop` command
+/// (`LINGXI_JOB_DIR` → rewrite `$LINGXI_JOB_DIR/state.json`). Without this the
+/// worker ran a plain non-bg turn — the dispatch environment never reached it.
+///
+/// `isolation` is `"none"` (a `--bg` shell dispatch runs in place — the durable
+/// job carries no worktree binding) and `source` is `"shell"`; both match the
+/// `--bg` dispatch record `background_dispatch.rs` writes.
+fn bg_worker_env(runtime_dir: &Path, short: &str) -> BTreeMap<String, String> {
+    let job_dir = agents_registry::jobs_dir(runtime_dir).join(short);
+    let mut env = BTreeMap::new();
+    env.insert("LINGXI_SESSION_KIND".to_string(), "bg".to_string());
+    env.insert("LINGXI_BG_BACKEND".to_string(), "daemon".to_string());
+    env.insert("LINGXI_BG_SOURCE".to_string(), "shell".to_string());
+    env.insert("LINGXI_BG_ISOLATION".to_string(), "none".to_string());
+    env.insert("LINGXI_JOB_DIR".to_string(), job_dir.display().to_string());
+    env
+}
+
+/// Durable respawn-attempt counter for a job, kept in `jobs/<short>/respawns`
+/// (a plain-integer sibling of `state.json`, so the byte-faithful `state.json`
+/// schema is untouched). Absent/unparseable ⇒ 0.
+fn read_respawn_count(runtime_dir: &Path, short: &str) -> i64 {
+    let path = agents_registry::jobs_dir(runtime_dir)
+        .join(short)
+        .join("respawns");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Persist and return the job's respawn-attempt counter. Best effort — a write
+/// failure just means the next crash re-reads the prior value (bounded regress,
+/// never an unbounded respawn loop).
+fn write_respawn_count(runtime_dir: &Path, short: &str, count: i64) -> i64 {
+    let path = agents_registry::jobs_dir(runtime_dir)
+        .join(short)
+        .join("respawns");
+    let _ = std::fs::write(path, count.to_string());
+    count
+}
+
+/// `tengu_bg_worker_vanished` — a recorded worker pid is no longer alive and
+/// never wrote a terminal state (CC field shape `{short, recycled, fromPoll,
+/// uptimeMs}`; lingxi emits the byte-exact event name + the fields it can
+/// determine from the heartbeat poll).
+fn emit_worker_vanished(short: &str) {
+    tracing::info!(
+        event = "tengu_bg_worker_vanished",
+        short,
+        recycled = false,
+        from_poll = true,
+    );
+}
+
+/// `tengu_bg_respawn` — a vanished worker is being respawned (CC field shape is
+/// perf timings unavailable to lingxi's file-roster path; the byte-exact event
+/// name + the respawn `attempt` are emitted).
+fn emit_respawn(short: &str, attempt: i64) {
+    tracing::info!(event = "tengu_bg_respawn", short, attempt);
+}
+
+/// `tengu_bg_respawn_exhausted` — the respawn budget is spent; the job is being
+/// marked terminally `failed`.
+fn emit_respawn_exhausted(short: &str, attempts: i64) {
+    tracing::info!(event = "tengu_bg_respawn_exhausted", short, attempts);
 }
 
 /// `daemon` subcommand args — no options (internal, spawned by `--bg`).
@@ -312,8 +409,14 @@ fn heartbeat<PP: ProcProbe, WS: WorkerSpawner>(
 /// worker listed while alive and reaps it once it exits).
 ///
 /// CRASH HANDLING: a `working` job whose recorded `workerPid` is NO LONGER alive
-/// (the worker died before writing its own terminal state) is marked terminally
-/// `failed` here — never respawned — so it can't wedge in "working" forever.
+/// (the worker died before writing its own terminal state) is RESPAWNED with a
+/// bounded budget — mirroring CC 2.1.207, which respawns a vanished worker as a
+/// session resume and only bails to `failed` once the budget is spent
+/// (`tengu_bg_worker_vanished` → `tengu_bg_respawn` up to `RESPAWN_BUDGET`
+/// times, then `tengu_bg_respawn_exhausted` + terminal `failed`). The durable
+/// respawn counter lives in `jobs/<short>/respawns` so it survives a supervisor
+/// restart; a genuinely-crashing task therefore fails after a fixed number of
+/// attempts instead of respawning forever OR dying on its first hiccup.
 ///
 /// `runtime_dir` == the config home (`daemon_runtime_dir()`), so the jobs live
 /// at `jobs_dir(runtime_dir)`.
@@ -345,17 +448,39 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
                 continue;
             }
             // The recorded worker DIED without writing a terminal state (the
-            // worker itself writes "done"/"failed"). It crashed — mark the job
-            // terminally `failed` so it doesn't wedge in "working" forever. We
-            // deliberately do NOT auto-respawn: a genuinely-crashing task would
-            // respawn endlessly; a human/retry re-dispatches instead.
-            if let Err(e) = agents_registry::update_job_state(runtime_dir, &short, "failed", None) {
+            // worker itself writes "done"/"failed"). It vanished. CC 2.1.207
+            // respawns a vanished worker with a bounded budget instead of
+            // failing on the first crash.
+            emit_worker_vanished(&short);
+            let attempts = read_respawn_count(runtime_dir, &short);
+            if attempts >= RESPAWN_BUDGET {
+                // Budget spent — bail to terminal `failed` so a genuinely-
+                // crashing task can't respawn forever.
+                if let Err(e) =
+                    agents_registry::update_job_state(runtime_dir, &short, "failed", None)
+                {
+                    tracing::warn!(
+                        "lingxi-cli daemon: could not mark exhausted job {short} failed: {e}"
+                    );
+                }
+                emit_respawn_exhausted(&short, attempts);
+                claimed.remove(&short);
+                continue;
+            }
+            // Under budget — clear the dead worker pid (the job stays "working"),
+            // bump the durable respawn counter, and fall through to the spawn
+            // block below to launch a fresh worker THIS heartbeat. The respawned
+            // worker re-runs the recorded session/prompt, appending to the same
+            // `<sessionId>.jsonl` (CC's `launch:{mode:"resume", sessionId, …}`).
+            let next = write_respawn_count(runtime_dir, &short, attempts + 1);
+            if let Err(e) = agents_registry::update_job_state(runtime_dir, &short, "working", None) {
                 tracing::warn!(
-                    "lingxi-cli daemon: could not mark crashed job {short} failed: {e}"
+                    "lingxi-cli daemon: could not clear crashed workerPid for {short}: {e}"
                 );
             }
+            emit_respawn(&short, next);
             claimed.remove(&short);
-            continue;
+            // NB: no `continue` — fall through to the spawn block below.
         }
         // No recorded worker pid. If we already claimed it this lifetime the
         // pid simply hasn't been persisted yet (or its write failed) — protect
@@ -365,7 +490,8 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
             continue;
         }
 
-        match spawner.spawn_worker(&short) {
+        let worker_env = bg_worker_env(runtime_dir, &short);
+        match spawner.spawn_worker(&short, &worker_env) {
             Ok(child_pid) => {
                 // Durable pid record (state stays "working").
                 if let Err(e) =
@@ -509,16 +635,23 @@ mod tests {
         |_| {}
     }
 
-    /// Records the shorts it was asked to spawn and hands back monotonically
-    /// increasing fake pids (starting at 90_000). No real process is launched.
+    /// Records the shorts (and env) it was asked to spawn and hands back
+    /// monotonically increasing fake pids (starting at 90_000). No real process
+    /// is launched.
     #[derive(Default)]
     struct FakeWorkerSpawner {
         spawned: Vec<String>,
+        envs: Vec<BTreeMap<String, String>>,
         next_pid: i32,
     }
     impl WorkerSpawner for FakeWorkerSpawner {
-        fn spawn_worker(&mut self, short: &str) -> std::io::Result<i32> {
+        fn spawn_worker(
+            &mut self,
+            short: &str,
+            env: &BTreeMap<String, String>,
+        ) -> std::io::Result<i32> {
             self.spawned.push(short.to_string());
+            self.envs.push(env.clone());
             let pid = 90_000 + self.next_pid;
             self.next_pid += 1;
             Ok(pid)
@@ -528,7 +661,11 @@ mod tests {
     /// A spawner that must never be called (asserts no spawn happens).
     struct NeverSpawner;
     impl WorkerSpawner for NeverSpawner {
-        fn spawn_worker(&mut self, short: &str) -> std::io::Result<i32> {
+        fn spawn_worker(
+            &mut self,
+            short: &str,
+            _env: &BTreeMap<String, String>,
+        ) -> std::io::Result<i32> {
             panic!("unexpected worker spawn for {short}");
         }
     }
@@ -847,10 +984,15 @@ mod tests {
         let dir = tmpdir();
         seed_working_job(&dir, "ffff6666");
 
-        // The fake worker pid (90_000) is NOT reported alive by the proc probe,
-        // so ONLY the in-memory `claimed` guard can prevent the second spawn.
+        // The first fake worker pid (90_000) is reported alive — as a real
+        // freshly-spawned process would be — so heartbeat 2 sees the live worker
+        // (cross-restart guard) and does NOT re-spawn. (A pid the probe reports
+        // dead is now a VANISHED worker and is deliberately respawned; that path
+        // has its own test.)
+        let mut alive = HashMap::new();
+        alive.insert(90_000, true);
         let proc = FakeProc {
-            alive: HashMap::new(),
+            alive,
             start: HashMap::new(),
         };
         let lockp = FakeLockProbe {
@@ -879,7 +1021,7 @@ mod tests {
     // ---- crashed-worker recovery (FIX 2) ------------------------------------
 
     #[test]
-    fn job_whose_worker_died_is_marked_failed_not_respawned() {
+    fn crashed_worker_under_budget_is_respawned_not_failed() {
         let dir = tmpdir();
         seed_working_job(&dir, "cafe0001");
         // Record a worker pid on the job, then let the worker "die": the proc
@@ -887,13 +1029,55 @@ mod tests {
         agents_registry::update_job_state(&dir, "cafe0001", "working", Some(4321)).unwrap();
 
         let proc = FakeProc {
-            alive: HashMap::new(), // 4321 is NOT alive → crashed
+            alive: HashMap::new(), // 4321 is NOT alive → vanished
             start: HashMap::new(),
         };
         let lockp = FakeLockProbe {
             alive_daemon: HashMap::new(),
         };
-        // NeverSpawner: a crashed job must be failed, NOT respawned.
+        // A vanished worker under budget must be RESPAWNED (a fresh worker), not
+        // failed. FakeWorkerSpawner hands back a new pid.
+        let mut spawner = FakeWorkerSpawner::default();
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+
+        // Exactly one respawn happened for our job.
+        assert_eq!(spawner.spawned, vec!["cafe0001".to_string()]);
+        // The job stayed "working" with the FRESH worker pid recorded, NOT failed.
+        let job = agents_registry::read_job(&dir, "cafe0001").unwrap();
+        assert_eq!(job.state, "working", "vanished worker under budget → respawn");
+        assert_eq!(job.worker_pid, Some(90_000), "fresh worker pid recorded");
+        assert!(!agents_registry::job_is_terminal(&job));
+        // Durable respawn counter incremented.
+        assert_eq!(read_respawn_count(&dir, "cafe0001"), 1);
+    }
+
+    #[test]
+    fn crashed_worker_over_budget_is_marked_failed() {
+        let dir = tmpdir();
+        seed_working_job(&dir, "cafe0003");
+        // Pre-set the respawn counter to the budget: the next crash exhausts it.
+        write_respawn_count(&dir, "cafe0003", RESPAWN_BUDGET);
+        agents_registry::update_job_state(&dir, "cafe0003", "working", Some(4321)).unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::new(), // 4321 NOT alive → vanished, budget spent
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        // NeverSpawner: budget exhausted must fail the job, NOT respawn it.
         let code = run_supervisor(
             &dir,
             4242,
@@ -907,14 +1091,55 @@ mod tests {
         );
         assert_eq!(code, exit_codes::SUCCESS);
 
-        // The stuck job was moved to a terminal `failed` state (worker pid cleared).
-        let job = agents_registry::read_job(&dir, "cafe0001").unwrap();
-        assert_eq!(job.state, "failed", "crashed worker → job marked failed");
+        // Budget spent → terminal `failed`, worker pid cleared.
+        let job = agents_registry::read_job(&dir, "cafe0003").unwrap();
+        assert_eq!(job.state, "failed", "exhausted respawn budget → job failed");
         assert!(
             agents_registry::job_is_terminal(&job),
             "failed job is terminal (won't re-render as working)"
         );
         assert_eq!(job.worker_pid, None, "stale worker pid cleared");
+    }
+
+    #[test]
+    fn spawned_worker_receives_the_bg_session_env() {
+        // The daemon must launch `__bg-run` with the LINGXI_ background-session
+        // env (rebrand of CC's CLAUDE_CODE_SESSION_KIND/CLAUDE_BG_*/CLAUDE_JOB_DIR
+        // worker-spawn keys) so the worker's turn gets the `# Background Session`
+        // prompt section and `/stop` can locate the job.
+        let dir = tmpdir();
+        seed_working_job(&dir, "bead0001");
+        let proc = FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        assert_eq!(spawner.envs.len(), 1);
+        let env = &spawner.envs[0];
+        assert_eq!(env.get("LINGXI_SESSION_KIND").map(String::as_str), Some("bg"));
+        assert_eq!(env.get("LINGXI_BG_BACKEND").map(String::as_str), Some("daemon"));
+        assert_eq!(env.get("LINGXI_BG_SOURCE").map(String::as_str), Some("shell"));
+        assert_eq!(env.get("LINGXI_BG_ISOLATION").map(String::as_str), Some("none"));
+        let expected_job_dir = agents_registry::jobs_dir(&dir)
+            .join("bead0001")
+            .display()
+            .to_string();
+        assert_eq!(env.get("LINGXI_JOB_DIR"), Some(&expected_job_dir));
     }
 
     #[test]

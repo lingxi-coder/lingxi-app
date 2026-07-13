@@ -28,10 +28,15 @@
 //! test drives the `working → done`/`failed` transition with a stubbed executor
 //! and NO live LLM.
 //!
+//! The supervisor spawns this worker with the `LINGXI_*` background-session
+//! environment ([`crate::commands::daemon`]'s `bg_worker_env`), so the turn
+//! receives the `# Background Session` prompt section and `/stop` resolves the
+//! job; a vanished worker is respawned by the supervisor with a bounded budget.
+//!
 //! DELIBERATELY OUT OF SCOPE (unchanged from the daemon design): the
-//! `control.sock`/`rvAuth`/`ptyAuth` PTY IPC, respawn/stall watchdog,
-//! low-memory handling, and upgrade takeover. This worker is a plain detached
-//! headless process, NOT a PTY worker.
+//! `control.sock`/`rvAuth`/`ptyAuth` PTY IPC, the PTY-owned attach-stall
+//! watchdog, low-memory handling, and upgrade takeover. This worker is a plain
+//! detached headless process, NOT a PTY worker.
 
 use crate::agents_registry::{self, SessionRegistration};
 use crate::argv::Argv;

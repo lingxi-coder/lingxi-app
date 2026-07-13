@@ -435,6 +435,39 @@ fn attach_args(cli: &Cli, session_id: &str) -> Vec<String> {
     args
 }
 
+/// Whether any known job driving `session_id` is still executing under a LIVE
+/// worker process. Pure over the job store + a liveness probe so it is
+/// unit-testable.
+///
+/// Attaching a fresh `lingxi-cli --resume <sid>` to such a session opens a
+/// SECOND writer against the same `<sessionId>.jsonl` transcript while the
+/// daemon's `__bg-run` worker is still writing it — the concurrent-writer
+/// hazard. CC 2.1.207 attaches to the live worker over its rendezvous socket and
+/// explicitly refuses to fork a second resume writer
+/// (`tengu_bg_respawn_resume_conflict`); lingxi has no attach socket yet, so it
+/// declines the attach rather than corrupt the transcript.
+fn job_has_live_worker(
+    jobs: &[(String, crate::agents_registry::JobState)],
+    session_id: &str,
+    is_alive: &dyn Fn(i32) -> bool,
+) -> bool {
+    jobs.iter().any(|(_short, job)| {
+        job.session_id.as_deref() == Some(session_id)
+            && job.worker_pid.is_some_and(is_alive)
+    })
+}
+
+/// Production wrapper over [`job_has_live_worker`]: read the job store and probe
+/// worker liveness via the system proc probe.
+fn session_has_live_worker(home: &Path, session_id: &str) -> bool {
+    use crate::agents_registry as reg;
+    let jobs = reg::read_jobs(&reg::jobs_dir(home));
+    let probe = crate::daemon_roster::SystemProbe;
+    job_has_live_worker(&jobs, session_id, &|pid| {
+        crate::daemon_roster::ProcProbe::is_alive(&probe, pid)
+    })
+}
+
 /// Mount the agents view: draw/event loop on the alternate screen; `Enter`
 /// attaches (terminal restored, `lingxi-cli --resume <sid>` runs to
 /// completion, view remounts with FRESH registry rows — the 2.1.198 "return
@@ -484,6 +517,20 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
         match outcome {
             Ok(AgentsOutcome::Exit) => return crate::exit_codes::SUCCESS,
             Ok(AgentsOutcome::Attach(session_id)) => {
+                // Single-writer guard: never fork a second `--resume` JSONL
+                // writer against a session whose background worker is still
+                // live (the concurrent-writer hazard). CC attaches to the live
+                // worker over its socket; lingxi has no attach socket yet
+                // (Stage 2), so it declines and stays in the view. The worker
+                // keeps running and lands in "Completed" when it finishes.
+                if session_has_live_worker(&crate::run::lingxi_home_dir(), &session_id) {
+                    eprintln!(
+                        "lingxi-cli agents: session {session_id} is still running in the background \u{2014} it keeps running; attach opens once it finishes."
+                    );
+                    watcher.observe();
+                    state.reload(load_view_rows(cli));
+                    continue;
+                }
                 // Attach = run the resumed session in the foreground; when it
                 // ends, fall through and remount the view with fresh rows.
                 let exe = std::env::current_exe()
@@ -533,6 +580,47 @@ mod tests {
         assert!(parse(&["--permission-mode", "bypassPermissions"]).bypass_requested());
         assert!(!parse(&["--permission-mode", "plan"]).bypass_requested());
         assert!(!parse(&["--json"]).bypass_requested());
+    }
+
+    #[test]
+    fn live_worker_guard_blocks_only_a_running_workers_session() {
+        use crate::agents_registry::JobState;
+        let jobs = vec![
+            (
+                "aaaa0001".to_string(),
+                JobState {
+                    session_id: Some("sid-live".to_string()),
+                    worker_pid: Some(4321),
+                    ..Default::default()
+                },
+            ),
+            (
+                "aaaa0002".to_string(),
+                JobState {
+                    session_id: Some("sid-dead".to_string()),
+                    worker_pid: Some(9999),
+                    ..Default::default()
+                },
+            ),
+            (
+                "aaaa0003".to_string(),
+                JobState {
+                    session_id: Some("sid-workerless".to_string()),
+                    worker_pid: None,
+                    ..Default::default()
+                },
+            ),
+        ];
+        // Only pid 4321 is alive.
+        let alive = |pid: i32| pid == 4321;
+        // Live worker → attach is blocked.
+        assert!(job_has_live_worker(&jobs, "sid-live", &alive));
+        // Recorded worker pid is dead (crashed/finished) → attach allowed.
+        assert!(!job_has_live_worker(&jobs, "sid-dead", &alive));
+        // Workerless "working"/terminal job → attach allowed (safe to --resume).
+        assert!(!job_has_live_worker(&jobs, "sid-workerless", &alive));
+        // Unknown session id → attach allowed.
+        assert!(!job_has_live_worker(&jobs, "sid-unknown", &alive));
     }
 
     #[test]

@@ -5748,6 +5748,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // REJECT_MESSAGE; `None` → identical to before.
             let assistant_id = MessageId::new();
 
+            // P1-04 (cc 2.1.199 partial-stream finalize): set by the pump error
+            // arm when a completed partial is finalized in place. Drives the
+            // "API Error: … may be incomplete." notice (surfaced after the partial
+            // is persisted) and the terminal turn-end below. Reset per turn.
+            let mut partial_finalize: Option<crate::streaming_loop::PartialFinalizeCause> = None;
+            let mut partial_finalize_notice_id: Option<MessageId> = None;
+
             // hooks #39: MessageDisplay fires at the BEGIN of this assistant
             // message's stream (claude-code `begin(d)`, BIN off 208862320),
             // mirroring its `o={apiMessageId:d, messageId:randomUUID(),
@@ -5974,11 +5981,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
             };
 
-            // 3. Pump the stream (with mid-stream 529 → non-streaming fallback).
+            // 3. Pump the stream (with mid-stream 529 → non-streaming fallback OR
+            //    the cc 2.1.199 partial-finalize, whichever applies).
             //
             // Task 7 / claude.ts parity: if the stream errors with `LlmError::Overloaded`
             // after the first event — AND `LINGXI_DISABLE_NONSTREAMING_FALLBACK` is not
-            // set — discard the partial accumulation and issue a fresh non-streaming call
+            // set — AND no content block completed yet — issue a fresh non-streaming call
             // seeded with `initial_consecutive_overloaded = 1`.  This mirrors
             // `claude.ts:2469-2594` + `withRetry.ts:186` (`initialConsecutive529Errors`).
             //
@@ -5986,17 +5994,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             //   `process.env.LINGXI_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
             // Truthiness follows `isEnvTruthy` (non-empty, non-"false", non-"0").
             //
-            // M1 parity note (Task 7 review): TS yields partial deltas LIVE to callers
-            // as they arrive (claude.ts:2210 `yield m` fires inside the for-await loop,
-            // at each `content_block_stop`).  Our path likewise dispatches text deltas live
-            // via `event_router.rs` → `output.emit_text` for each `TextDelta`, so partial
-            // output DOES reach callers before the fallback fires.  This matches TS: both
-            // implementations dispatch partial output live, then dispatch the fallback-only
-            // output after the non-streaming call completes.  The PERSISTED assistant message
-            // (and the final `ConversationOutcome`) contains ONLY the fallback blocks —
-            // `pumped_from_fallback.assistant_blocks` — not the discarded partial stream
-            // fragments, which is correct: the partial stream never reached `content_block_stop`
-            // for its text block, so no completed block was accumulated.
+            // P1-04 (cc 2.1.199, binary-verified): once a REAL content block has
+            // COMPLETED (`content_block_stop` → `pumped.assistant_blocks`) the
+            // partial is NO LONGER discarded on a finalize-class error. The
+            // `partial_has_output` arm in the `match pump_outcome` below finalizes
+            // it in place (synthesized stop_reason + usage + `tengu_streaming_partial_finalized`),
+            // persists the streamed blocks, and appends the "API Error: … may be
+            // incomplete." notice — instead of the pre-2.1.199 discard-and-refetch.
+            // The non-streaming fallback therefore fires ONLY when the stream erred
+            // BEFORE its first block completed (a bare `content_block_start` that
+            // never reached `content_block_stop`), matching cc's `_r`-length guard.
+            // In both cases partial deltas already reached callers LIVE via
+            // `event_router.rs` → `output.emit_text` at each `TextDelta`
+            // (claude.ts:2210 `yield m`).
             // #1: a connect-phase prompt-too-long already recovered above (its
             // recovered non-streaming response was replayed) skips the pump; an
             // open stream is pumped as before.
@@ -6015,8 +6025,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // clean, so the retry reuses `exec` and re-snapshots history.
                 let mut cur_stream = first_stream;
                 let mut mid_stream_retries: u32 = 0;
-                let pump_outcome: Result<crate::streaming_loop::PumpedTurn, OrchestratorError> =
-                    loop {
+                let pump_outcome: Result<
+                    crate::streaming_loop::PumpedTurn,
+                    crate::streaming_loop::PumpFailure,
+                > = loop {
                         match crate::streaming_loop::pump_stream_with_executor_tracked(
                             cur_stream,
                             &self.output,
@@ -6072,28 +6084,111 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                         continue;
                                     }
                                     // Re-open failed: surface as the terminal
-                                    // pump error for the arms below.
-                                    Err(e) => break Err(OrchestratorError::Streaming(e)),
+                                    // pump error for the arms below. No partial to
+                                    // finalize here — the retry only fires while
+                                    // `!real_content_started`, so nothing real was
+                                    // yielded on the attempt we are abandoning.
+                                    Err(e) => {
+                                        break Err(crate::streaming_loop::PumpFailure {
+                                            error: OrchestratorError::Streaming(e),
+                                            real_content_started: false,
+                                            partial: crate::streaming_loop::PumpedTurn::default(),
+                                        })
+                                    }
                                 }
                             }
-                            Err(f) => break Err(f.error),
+                            Err(f) => break Err(f),
                         }
                     };
                 match pump_outcome {
                 Ok(p) => p,
-                Err(OrchestratorError::Streaming(
-                    ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
-                )) if !is_env_truthy(
-                    std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
-                        .as_deref()
-                        .ok(),
-                ) =>
+                // P1-04 (cc 2.1.199 partial-stream finalize, binary-verified): a
+                // finalize-class mid-stream error (server/overloaded/api error,
+                // watchdog stall, or connection close) that landed AFTER a real
+                // content block COMPLETED is NOT discarded. The already-streamed
+                // partial is finalized in place — persisted with a synthesized
+                // `stop_reason` (`tool_use` if any tool_use else `end_turn`) +
+                // usage — `tengu_streaming_partial_finalized` fires, and a byte-exact
+                // "API Error: … The response above may be incomplete." notice is
+                // surfaced after it (see the notice + terminal sites below, gated on
+                // `partial_finalize`). This runs BEFORE the 529 non-streaming
+                // fallback so a completed-partial 529 keeps its streamed output
+                // instead of re-fetching; a 529 that erred before any block
+                // completed (no output) falls through to the fallback as before.
+                Err(f)
+                    if crate::streaming_loop::partial_has_output(&f.partial)
+                        && crate::streaming_loop::partial_finalize_cause(&f.error).is_some() =>
+                {
+                    let cause = crate::streaming_loop::partial_finalize_cause(&f.error)
+                        .expect("finalize cause present (guarded above)");
+                    let mut partial = f.partial;
+                    // cc `gm=vd?"tool_use":"end_turn"`: a dispatched tool_use makes
+                    // this a tool turn, else a natural end.
+                    let synthesized_stop_reason = if partial.tool_uses.is_empty() {
+                        "end_turn"
+                    } else {
+                        "tool_use"
+                    };
+                    partial.stop_reason = Some(synthesized_stop_reason.to_string());
+                    // cc `_r.length`: one yielded message per completed content block.
+                    let blocks_yielded = partial.assistant_blocks.len() + partial.tool_uses.len();
+                    if let Some(bus) = self.analytics_bus.as_ref() {
+                        let mut md = telemetry::LogEventMetadata::new();
+                        md.insert(
+                            "model".into(),
+                            telemetry::AnalyticsValue::String(model.clone()),
+                        );
+                        md.insert(
+                            "blocks_yielded".into(),
+                            telemetry::AnalyticsValue::Int(
+                                i64::try_from(blocks_yielded).unwrap_or(i64::MAX),
+                            ),
+                        );
+                        // has_output is always true on this arm (partial_has_output).
+                        md.insert("has_output".into(), telemetry::AnalyticsValue::Bool(true));
+                        md.insert(
+                            "synthesized_stop_reason".into(),
+                            telemetry::AnalyticsValue::String(
+                                synthesized_stop_reason.to_string(),
+                            ),
+                        );
+                        md.insert(
+                            "cause".into(),
+                            telemetry::AnalyticsValue::String(cause.as_str().to_string()),
+                        );
+                        if let Some(rid) = self.api.last_request_id() {
+                            md.insert(
+                                "request_id".into(),
+                                telemetry::AnalyticsValue::String(rid),
+                            );
+                        }
+                        bus.log_event("tengu_streaming_partial_finalized", md).await;
+                    }
+                    // Arm the notice + terminal-end sites below; the partial flows
+                    // through the normal billing/persist/tool-drive path first.
+                    partial_finalize = Some(cause);
+                    partial
+                }
+                Err(f)
+                    if matches!(
+                        f.error,
+                        OrchestratorError::Streaming(
+                            LlmError::Overloaded { .. } | LlmError::ProviderInternal
+                        )
+                    ) && !is_env_truthy(
+                        std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
+                            .as_deref()
+                            .ok(),
+                    ) =>
                 {
                     // Seed: a streaming overload counts as 1 toward the consecutive
                     // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
                     // (e.g. ProviderInternal) seed 0 — matching TS
                     // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
-                    let seed: u8 = u8::from(matches!(e, LlmError::Overloaded { .. }));
+                    let seed: u8 = u8::from(matches!(
+                        f.error,
+                        OrchestratorError::Streaming(LlmError::Overloaded { .. })
+                    ));
 
                     // Re-snapshot history for the non-streaming call (the partial
                     // stream never touched session.history, so it is still the same
@@ -6171,14 +6266,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
                 // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
                 // downstream handling — propagate.
-                Err(e) if crate::turn_loop::is_carveout_propagated(&e) => return Err(e),
+                Err(f) if crate::turn_loop::is_carveout_propagated(&f.error) => {
+                    return Err(f.error)
+                }
                 // #10: any other mid-stream model/runtime error (e.g. Transport)
                 // ends the turn GRACEFULLY as `model_error` (faithful port of the
                 // `query.ts` catch) rather than bubbling a hard error / phantom
-                // interrupt. The assistant message for this turn is persisted only
-                // AFTER a successful pump, so the errored pump left no orphaned
-                // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
-                Err(other) => {
+                // interrupt. Reached when the partial finalize above did NOT apply —
+                // either no content block completed before the error (a bare
+                // `content_block_start` that never reached `content_block_stop`, so
+                // there is no orphaned tool_use to repair) or the error is not a
+                // finalize class. The assistant message for a partial-with-real-
+                // -output turn is persisted by the finalize arm above; here nothing
+                // was persisted (TS `yieldMissingToolResultBlocks` no-op).
+                Err(f) => {
+                    let other = f.error;
                     // Classify the typed mid-stream error (`Flp`/`KNn`) into the
                     // api-error envelope; the message text stays verbatim.
                     let env = classify_api_error(&other);
@@ -6231,7 +6333,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // streaming per-request success path (claude
                     // `j("tengu_api_success", {...})`). `tengu_cost_recorded`
                     // was port-only and dropped.
-                    if let Some(bus) = self.analytics_bus.as_ref() {
+                    //
+                    // P1-04: a partial-stream finalize is NOT a per-request success —
+                    // cc records cost (`Ae+=zhe`, kept above) but does NOT emit
+                    // `tengu_api_success` (it already fired `tengu_streaming_partial_finalized`).
+                    // Skip the success emit when this turn was finalized from a partial.
+                    if let Some(bus) = self
+                        .analytics_bus
+                        .as_ref()
+                        .filter(|_| partial_finalize.is_none())
+                    {
                         #[allow(clippy::cast_possible_truncation)]
                         let dur_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                         cost::emit_api_success(
@@ -6367,6 +6478,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // Fallback parent (the LAST persisted block's uuid) for any
             // tool_result whose tool_use id is missing from the map (defensive).
             let assistant_uuid = self.last_jsonl_uuid.lock().await.clone();
+
+            // P1-04 (cc 2.1.199): after the finalized partial assistant is
+            // persisted, yield the byte-exact incomplete-response notice as its own
+            // api-error assistant message — cc yields `tu({content:…, error:"server_error"})`
+            // RIGHT AFTER the patched partial and BEFORE any tool_results run. The
+            // notice's api-error category is hardcoded `server_error` regardless of
+            // the underlying finalize cause (cc `error:"server_error"`). Persisted
+            // without the `tengu_query_error` telemetry (that fires only from the
+            // top-level `model_error` catch, not this finalize path).
+            if let Some(cause) = partial_finalize {
+                let env = ApiErrorEnvelope {
+                    error: Some("server_error"),
+                    api_error_status: None,
+                    inner_stop_reason: None,
+                };
+                partial_finalize_notice_id = Some(
+                    crate::turn_loop::surface_api_error_notice(
+                        self,
+                        cause.incomplete_notice(),
+                        env,
+                    )
+                    .await,
+                );
+            }
 
             // #5 aborted_streaming vs aborted_tools disambiguation (faithful port
             // of claude-code's TWO distinct abort checkpoints): query.ts:1015 runs
@@ -6522,6 +6657,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     self.inject_meta_user_message(interrupt_message).await;
                 }
                 final_message_id = assistant_id;
+                break;
+            }
+
+            // P1-04 (cc 2.1.199): a finalized partial ends the turn once its
+            // dispatched tools have drained (above) and the incomplete-response
+            // notice has been surfaced — cc `break e`s out of the stream loop after
+            // yielding the notice; it does NOT re-enter the continuation logic. We
+            // terminate here (reason `model_error`, matching the api-error catch)
+            // rather than looping on the synthesized `tool_use`/`end_turn`, so the
+            // user sees the partial + notice and can retry. The synthesized
+            // stop_reason still rides on the persisted partial assistant line
+            // (patched above) for resume fidelity.
+            if partial_finalize.is_some() {
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn("model_error", &cost).await;
+                final_message_id = partial_finalize_notice_id.unwrap_or(assistant_id);
                 break;
             }
 

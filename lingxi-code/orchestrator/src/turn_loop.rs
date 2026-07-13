@@ -1740,6 +1740,19 @@ pub(crate) async fn surface_model_error(
         metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
         bus.log_event("tengu_query_error", metadata).await;
     }
+    surface_api_error_notice(orch, error_text, env).await
+}
+
+/// Persist + emit an api-error assistant message (the `createAssistantAPIErrorMessage`
+/// shape) WITHOUT the `tengu_query_error` telemetry that the top-level `model_error`
+/// catch logs. Shared by [`surface_model_error`] and the P1-04 partial-stream
+/// finalize notice (cc 2.1.199 yields the incomplete-response notice via `tu(...)`
+/// directly, not through the top-level catch — so it does NOT fire `tengu_query_error`).
+pub(crate) async fn surface_api_error_notice(
+    orch: &ConversationOrchestrator,
+    error_text: &str,
+    env: ApiErrorEnvelope,
+) -> MessageId {
     // `createAssistantAPIErrorMessage({ content })` renders `content` verbatim,
     // falling back to the `NO_CONTENT_MESSAGE` placeholder when empty.
     let text = if error_text.is_empty() {

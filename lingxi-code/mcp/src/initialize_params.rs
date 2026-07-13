@@ -5,11 +5,15 @@ use crate::identity::ClientInfo;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-/// Wire-shape `{"roots": {}, "elicitation": {}}` — both fields required,
-/// both empty objects (Java MCP SDK rejects unknown elicitation props).
+/// Wire-shape `{"roots": {"listChanged": true}, "elicitation": {}}` — both
+/// fields required. `roots.listChanged: true` advertises that the client will
+/// send `notifications/roots/list_changed` when its working-dir set changes
+/// (claude-code `J7n()` = `{roots:{listChanged:!0},elicitation:{}}`, parity
+/// 2.1.207). `elicitation` stays an EMPTY object (the Java MCP SDK rejects
+/// unknown elicitation props).
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientCapabilities {
-    /// `roots` capability marker — serialized as an empty JSON object.
+    /// `roots` capability marker — serialized as `{"listChanged": true}`.
     pub roots: Map<String, Value>,
     /// `elicitation` capability marker — serialized as an empty JSON object.
     pub elicitation: Map<String, Value>,
@@ -17,8 +21,10 @@ pub struct ClientCapabilities {
 
 impl Default for ClientCapabilities {
     fn default() -> Self {
+        let mut roots = Map::new();
+        roots.insert("listChanged".to_string(), Value::Bool(true));
         Self {
-            roots: Map::new(),
+            roots,
             elicitation: Map::new(),
         }
     }
@@ -66,7 +72,8 @@ mod tests {
         // LATEST_PROTOCOL_VERSION resolves to (SDK 1.29.0 → 2025-11-25).
         assert_eq!(json["protocolVersion"], "2025-11-25");
 
-        // capabilities is EXACTLY {"roots": {}, "elicitation": {}}.
+        // capabilities is EXACTLY
+        // {"roots": {"listChanged": true}, "elicitation": {}}.
         let caps = &json["capabilities"];
         assert!(caps.is_object(), "capabilities must be a JSON object");
         let caps_obj = caps.as_object().unwrap();
@@ -77,10 +84,11 @@ mod tests {
             "elicitation key required"
         );
         assert!(caps["roots"].is_object(), "roots must be an object");
+        // roots advertises listChanged:true (parity 2.1.207 J7n()).
         assert_eq!(
-            caps["roots"].as_object().unwrap().len(),
-            0,
-            "roots must be EMPTY"
+            caps["roots"],
+            serde_json::json!({ "listChanged": true }),
+            "roots must be {{\"listChanged\":true}}"
         );
         assert!(
             caps["elicitation"].is_object(),
@@ -110,6 +118,12 @@ mod tests {
         assert!(
             s.contains(r#""name":"lingxi""#),
             "wire bytes must contain literal \"name\":\"lingxi\", got: {s}",
+        );
+        // Capability bytes are EXACTLY the claude-code 2.1.207 shape
+        // {"roots":{"listChanged":true},"elicitation":{}}.
+        assert!(
+            s.contains(r#""capabilities":{"roots":{"listChanged":true},"elicitation":{}}"#),
+            "wire bytes must contain the parity capability shape, got: {s}",
         );
     }
 }

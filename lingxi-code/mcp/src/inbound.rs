@@ -1,5 +1,5 @@
 //! Inbound JSON-RPC request handlers required by the
-//! `{roots:{}, elicitation:{}}` capability declaration.
+//! `{roots:{listChanged:true}, elicitation:{}}` capability declaration.
 //!
 //! Implementations match claude-code's defaults in
 //! `services/mcp/client.ts` lines 1009-1018 (roots) and 1188-1197
@@ -16,22 +16,46 @@ use crate::hook_dispatch::{ElicitationHookOutcome, ElicitationHookRequest, HookD
 
 /// Handler for inbound `roots/list` requests from the MCP server.
 ///
-/// Returns `{"roots": [{"uri": "file://<cwd>"}]}` where `<cwd>` is the
-/// absolute path supplied at [`crate::McpClient`] construction time.
+/// Returns `{"roots": [{"uri": "file://<dir>"}, ...]}` — the session's
+/// current working directory FIRST, followed by every additional working
+/// directory (settings `additionalDirectories` + CLI `--add-dir`), matching
+/// claude-code 2.1.207 `r1d()` which builds the list from
+/// `[sn(), ...qzn()]` (cwd + `additionalWorkingDirectories`) and dedupes by
+/// `pathToFileURL(...).href`. With no additional dirs this collapses to the
+/// single-root `{"roots": [{"uri": "file://<cwd>"}]}` shape.
 pub struct RootsListHandler {
-    /// Absolute current working directory advertised as the single root.
+    /// Absolute current working directory — always the FIRST advertised root.
     pub cwd: PathBuf,
+    /// Additional working directories advertised as roots after `cwd`
+    /// (settings `additionalDirectories` union CLI `--add-dir`). Deduplicated
+    /// against `cwd` and each other by file URL, preserving discovery order.
+    pub additional: Vec<PathBuf>,
+}
+
+impl RootsListHandler {
+    /// Build the `{"roots": [...]}` result value: cwd-first, then each
+    /// additional dir, deduplicated by `file://` URL (claude-code `r1d()`).
+    fn roots_value(&self) -> Value {
+        let mut seen = std::collections::HashSet::new();
+        let mut roots = Vec::new();
+        for dir in std::iter::once(&self.cwd).chain(self.additional.iter()) {
+            let uri = format!("file://{}", dir.display());
+            if seen.insert(uri.clone()) {
+                roots.push(json!({ "uri": uri }));
+            }
+        }
+        json!({ "roots": roots })
+    }
 }
 
 #[async_trait]
 impl InboundHandler for RootsListHandler {
     async fn handle(&self, req: Request) -> Response {
-        // claude-code wire shape: {"roots": [{"uri": "file://<absolute-cwd>"}]}.
-        // The path is forwarded verbatim — caller is responsible for passing
-        // an absolute path (the platform crate that constructs McpClient
-        // resolves cwd via `std::env::current_dir()` before handing it in).
-        let uri = format!("file://{}", self.cwd.display());
-        Response::success(req.id, json!({ "roots": [ { "uri": uri } ] }))
+        // claude-code wire shape: {"roots": [{"uri": "file://<absolute-dir>"}]}.
+        // Paths are forwarded verbatim — the caller is responsible for passing
+        // absolute paths (the platform crate that constructs McpClient resolves
+        // cwd via `std::env::current_dir()` and expands the additional dirs).
+        Response::success(req.id, self.roots_value())
     }
 }
 
@@ -163,6 +187,7 @@ mod tests {
     async fn roots_list_returns_file_uri_with_absolute_cwd() {
         let handler = RootsListHandler {
             cwd: PathBuf::from("/Users/example/project"),
+            additional: Vec::new(),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -173,9 +198,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn roots_list_includes_additional_dirs_cwd_first() {
+        // claude-code r1d(): cwd FIRST, then each additionalWorkingDirectory,
+        // each advertised as a `file://` root.
+        let handler = RootsListHandler {
+            cwd: PathBuf::from("/proj"),
+            additional: vec![PathBuf::from("/tmp/extra"), PathBuf::from("/opt/data")],
+        };
+        let resp = handler.handle(req("roots/list")).await;
+        let result = resp.result.expect("success result");
+        let roots = result["roots"].as_array().expect("roots array");
+        assert_eq!(roots.len(), 3, "cwd + 2 extras");
+        assert_eq!(roots[0]["uri"], "file:///proj", "cwd is first");
+        assert_eq!(roots[1]["uri"], "file:///tmp/extra");
+        assert_eq!(roots[2]["uri"], "file:///opt/data");
+    }
+
+    #[tokio::test]
+    async fn roots_list_dedupes_additional_dir_matching_cwd() {
+        // A duplicate dir (equal to cwd, or repeated) is deduped by file URL —
+        // r1d() builds the list through a URL-keyed set.
+        let handler = RootsListHandler {
+            cwd: PathBuf::from("/proj"),
+            additional: vec![
+                PathBuf::from("/proj"),      // dup of cwd
+                PathBuf::from("/tmp/extra"),
+                PathBuf::from("/tmp/extra"), // dup of an extra
+            ],
+        };
+        let resp = handler.handle(req("roots/list")).await;
+        let result = resp.result.expect("success result");
+        let roots = result["roots"].as_array().expect("roots array");
+        assert_eq!(roots.len(), 2, "cwd + one unique extra (dups dropped)");
+        assert_eq!(roots[0]["uri"], "file:///proj");
+        assert_eq!(roots[1]["uri"], "file:///tmp/extra");
+    }
+
+    #[tokio::test]
     async fn roots_list_uri_uses_literal_file_scheme() {
         let handler = RootsListHandler {
             cwd: PathBuf::from("/tmp/x"),
+            additional: Vec::new(),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -193,6 +256,7 @@ mod tests {
         // protocol-incompatible. Lock the outer-envelope shape here.
         let handler = RootsListHandler {
             cwd: PathBuf::from("/x"),
+            additional: Vec::new(),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -231,6 +295,7 @@ mod tests {
         // Per JSON-RPC 2.0: response.id MUST match request.id.
         let r1 = RootsListHandler {
             cwd: PathBuf::from("/x"),
+            additional: Vec::new(),
         }
         .handle(Request::new("roots/list", None, Id::Number(7)))
         .await;

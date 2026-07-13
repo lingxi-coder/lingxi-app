@@ -2763,6 +2763,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_path_inside_additional_trusted_dir() {
+        // parity 2.1.207 P1-08: file tools accept a path inside an `--add-dir` /
+        // settings `additionalDirectories` root (trusted_dirs = [cwd, extra]),
+        // not just cwd. claude-code allows file tools in additionalWorkingDirectories.
+        let cwd = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let target = extra.path().join("note.txt");
+        std::fs::write(&target, "hello from extra").unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![cwd.path().to_path_buf(), extra.path().to_path_buf()],
+        );
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["file"]["content"], "hello from extra");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_path_outside_all_trusted_dirs() {
+        // With two trusted dirs [cwd, extra], a path outside BOTH is still
+        // blocked. Symlink inside `extra` pointing out → canonicalize escapes.
+        let cwd = TempDir::new().unwrap();
+        let extra = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target_real = outside.path().join("secret.txt");
+        std::fs::write(&target_real, "x").unwrap();
+        let link = extra.path().join("escape");
+        std::os::unix::fs::symlink(&target_real, &link).unwrap();
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![cwd.path().to_path_buf(), extra.path().to_path_buf()],
+        );
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": link.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::PathBlocked { .. }),
+            "expected PathBlocked, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn empty_file_emits_empty_warning_model_content() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("empty.txt");

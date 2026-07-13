@@ -154,6 +154,15 @@ pub struct McpRegistry {
     /// static headers; static-token servers are unaffected either way. Wired
     /// via [`Self::with_oauth`].
     oauth: Option<OAuthDeps>,
+    /// Additional working directories (settings `additionalDirectories` union
+    /// CLI `--add-dir`) advertised alongside cwd on each server's `roots/list`.
+    ///
+    /// Forwarded into every [`McpClient`] built by [`Self::connect`] (via
+    /// [`McpClient::with_roots`]) so a connected server sees the FULL working-dir
+    /// set, matching claude-code 2.1.207 `r1d()` (`[cwd, ...additionalWorkingDirectories]`).
+    /// Empty by default (cwd-only roots, unchanged). Set via
+    /// [`Self::with_additional_roots`].
+    additional_roots: Vec<std::path::PathBuf>,
     /// Interval used by the background health-check task.
     #[allow(dead_code)] // consumed by the health-check loop in Plan 13
     pub health_check_interval: Duration,
@@ -179,6 +188,7 @@ impl McpRegistry {
             raw_conn: None,
             hook_dispatcher: None,
             oauth: None,
+            additional_roots: Vec::new(),
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
         }
@@ -234,6 +244,24 @@ impl McpRegistry {
     #[must_use]
     pub fn with_oauth(mut self, deps: OAuthDeps) -> Self {
         self.oauth = Some(deps);
+        self
+    }
+
+    /// Inject the session's additional working directories (settings
+    /// `additionalDirectories` union CLI `--add-dir`) advertised alongside cwd
+    /// on each connected server's `roots/list`. Builder-style so it composes
+    /// with [`Self::new`] / [`Self::with_raw_conn`]:
+    ///
+    /// ```ignore
+    /// let reg = McpRegistry::with_raw_conn(transport, raw_conn)
+    ///     .with_additional_roots(vec![PathBuf::from("/tmp/extra")]);
+    /// ```
+    ///
+    /// Empty (the default) leaves `roots/list` cwd-only (unchanged). Matches
+    /// claude-code 2.1.207 `r1d()` = `[cwd, ...additionalWorkingDirectories]`.
+    #[must_use]
+    pub fn with_additional_roots(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
+        self.additional_roots = dirs;
         self
     }
 
@@ -480,11 +508,16 @@ impl McpRegistry {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 // Forward the optional hook dispatcher so this server's
                 // `elicitation/create` handler can fire the `Elicitation` hook.
-                // `None` => default `{"action":"cancel"}` (unchanged).
+                // `None` => default `{"action":"cancel"}` (unchanged). Also
+                // advertise the session's additional working dirs (settings
+                // `additionalDirectories` + `--add-dir`) on `roots/list`, so a
+                // connected server sees the full working-dir set (parity 2.1.207
+                // r1d() = [cwd, ...additionalWorkingDirectories]).
                 let client = Arc::new(
-                    McpClient::with_hook_dispatcher(
+                    McpClient::with_roots(
                         server_name.clone(),
                         cwd,
+                        self.additional_roots.clone(),
                         connection,
                         self.hook_dispatcher.clone(),
                     )

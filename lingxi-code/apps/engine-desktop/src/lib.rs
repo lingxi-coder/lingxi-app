@@ -523,6 +523,35 @@ fn cron_scheduler_enabled(disable_cron_env: Option<&str>) -> bool {
     !traits::env::is_env_truthy(disable_cron_env)
 }
 
+/// Expand a raw additional-working-dir entry (settings `additionalDirectories`
+/// or CLI `--add-dir`) into an absolute path suitable for
+/// [`tool_api::BuiltinToolContext::trusted_dirs`], mirroring the permission
+/// policy's `expand_path`: `~`/`~/…` resolve against `home`, a relative path
+/// resolves against `cwd`, an absolute path is taken verbatim. Lexical only —
+/// `canonicalize_and_validate` still resolves symlinks/`..` on each file-tool
+/// use, so the file-tool allowed set matches claude-code `FY(t)` (cwd +
+/// additionalWorkingDirectories) rather than hard-blocking `--add-dir` roots.
+fn expand_trusted_dir(
+    raw: &std::path::Path,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let s = raw.to_string_lossy();
+    let t = s.trim();
+    if t == "~" {
+        home.map_or_else(|| std::path::PathBuf::from(t), std::path::Path::to_path_buf)
+    } else if let Some(rest) = t.strip_prefix("~/") {
+        home.map_or_else(|| std::path::PathBuf::from(t), |h| h.join(rest))
+    } else {
+        let p = std::path::Path::new(t);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        }
+    }
+}
+
 /// Fold the `sandbox` subsection of the settings tiers (ascending priority, last
 /// write wins) into a full [`sandbox::runtime_config::SandboxRuntimeConfig`].
 ///
@@ -1305,6 +1334,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cli_agent: None,
 ///     cli_plugin_dirs: Vec::new(),
 ///     initial_effort: None,
+///     plan_mode_instructions: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -4063,6 +4093,17 @@ pub async fn build(
     // `None` only when enforcement is off (no boot policy is built) — the
     // `tool_ctx` literal then falls back to a Default-mode policy with roots.
     let mut boot_permission_policy: Option<Arc<permission::PermissionPolicy>> = None;
+    // The session's additional working directories (settings
+    // `additionalDirectories` union CLI `--add-dir`), captured out of the
+    // enforcement branch so BOTH the file-tool `trusted_dirs` (below) and the
+    // MCP registry `roots/list` source see them. claude-code's file tools
+    // (`FY(t)`) and `roots/list` (`r1d()`) BOTH advertise cwd +
+    // additionalWorkingDirectories — file tools inside an `--add-dir` root are
+    // allowed, not hard-blocked (parity 2.1.207 P1-08). Raw entries (`~`,
+    // relative) are expanded when they land in `trusted_dirs`. Assigned in BOTH
+    // arms below (the full union when enforcing; `--add-dir` only otherwise), so
+    // it is always initialized before its later reads.
+    let boot_additional_working_dirs: Vec<std::path::PathBuf>;
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →
         // project → local (3c: settings.local.json read after project so a
@@ -4086,6 +4127,9 @@ pub async fn build(
         // `additionalDirectories` entry (claude-code "Additional directories
         // to allow tool access to").
         additional_working_dirs.extend(cfg.add_dir.iter().cloned());
+        // Capture the union (settings additionalDirectories + --add-dir) for the
+        // file-tool `trusted_dirs` and MCP `roots/list` source below.
+        boot_additional_working_dirs = additional_working_dirs.clone();
         let rule_count = rules.len();
         // Phase 3a: supply the filesystem roots so file-path CONTENT rules
         // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
@@ -4152,6 +4196,11 @@ pub async fn build(
         );
         Arc::new(permission::PolicyPermissionGate::new(policy, perms))
     } else {
+        // Enforcement off: the settings `additionalDirectories` tiers are not
+        // loaded here, but the CLI `--add-dir` dirs still widen file-tool access
+        // and the MCP roots (claude-code's `additionalWorkingDirectories` are
+        // independent of permission mode).
+        boot_additional_working_dirs = cfg.add_dir.clone();
         perms
     };
 
@@ -4341,7 +4390,11 @@ pub async fn build(
             posix as Arc<dyn mcp::RawConnectionProvider>,
         )
         .with_hook_dispatcher(Some(elicitation_dispatcher))
-        .with_oauth(mcp_oauth_deps),
+        .with_oauth(mcp_oauth_deps)
+        // Advertise the session's additional working dirs (settings
+        // `additionalDirectories` + `--add-dir`) on every server's `roots/list`,
+        // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].
+        .with_additional_roots(boot_additional_working_dirs.clone()),
     );
     mcp_registry.connect_all(mcp_configs).await;
     tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
@@ -4959,6 +5012,22 @@ pub async fn build(
     let sandbox_desc_auto_allow = sandbox_runtime_cfg.auto_allow_bash_if_sandboxed;
     let sandbox_desc_fallback = sandbox_runtime_cfg.are_unsandboxed_commands_allowed();
     let sandbox_desc_deps_ok = sandbox_deps.errors.is_empty();
+    // File-tool trusted dirs = cwd FIRST, then every additional working dir
+    // (settings `additionalDirectories` + `--add-dir`), expanded and deduped.
+    // claude-code allows file tools (Read/Edit/Write/Glob/Grep/NotebookEdit)
+    // inside `additionalWorkingDirectories`; without this they hard-error on any
+    // `--add-dir` path (parity 2.1.207 P1-08).
+    let trusted_dirs = {
+        let home = dirs::home_dir();
+        let mut dirs_vec = vec![cwd.clone()];
+        for raw in &boot_additional_working_dirs {
+            let expanded = expand_trusted_dir(raw, &cwd, home.as_deref());
+            if !dirs_vec.contains(&expanded) {
+                dirs_vec.push(expanded);
+            }
+        }
+        dirs_vec
+    };
     let tool_ctx = BuiltinToolContext {
         // FILE.B: file tools share one read-state map for the (future) staleness
         // guard / Read-dedup; the composition-root Arc-share with the orchestrator
@@ -4969,7 +5038,7 @@ pub async fn build(
         read_deny_exclude_globs,
         fs: Arc::new(PosixFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
-        trusted_dirs: vec![cwd.clone()],
+        trusted_dirs,
         process: Arc::new(PosixProcess::new()),
         sandbox: Arc::new(PosixSandbox::new()),
         clock: clock.clone(),

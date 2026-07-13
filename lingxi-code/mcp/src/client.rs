@@ -241,7 +241,7 @@ impl McpClient {
     /// Build a new client wrapping a JSON-RPC `Connection`.
     ///
     /// Registers two inbound request handlers required by the
-    /// `{roots:{}, elicitation:{}}` capability advertisement:
+    /// `{roots:{listChanged:true}, elicitation:{}}` capability advertisement:
     ///
     /// * `roots/list` -> [`RootsListHandler`] returning `file://<cwd>`.
     /// * `elicitation/create` -> [`ElicitationCreateHandler`] returning
@@ -269,9 +269,30 @@ impl McpClient {
     /// `dispatcher == None` is byte-identical to [`Self::new`]: the handler
     /// keeps its default `{"action":"cancel"}` behavior. `Some(_)` enables the
     /// hook fire-and-resolve path (claude-code `runElicitationHooks`).
+    ///
+    /// Advertises ONLY `cwd` on `roots/list` (no additional working dirs) —
+    /// use [`Self::with_roots`] to also advertise `--add-dir` / settings
+    /// `additionalDirectories` roots.
     pub async fn with_hook_dispatcher(
         server_name: impl Into<String>,
         cwd: PathBuf,
+        connection: Arc<jsonrpc::Connection>,
+        dispatcher: Option<Arc<dyn HookDispatcher>>,
+    ) -> Self {
+        Self::with_roots(server_name, cwd, Vec::new(), connection, dispatcher).await
+    }
+
+    /// Like [`Self::with_hook_dispatcher`], but also advertises `additional_roots`
+    /// alongside `cwd` on `roots/list` (the session's additional working
+    /// directories — settings `additionalDirectories` union CLI `--add-dir`).
+    ///
+    /// Matches claude-code 2.1.207 `r1d()`, which returns `roots/list` as
+    /// `[cwd, ...additionalWorkingDirectories]` deduped by file URL. Passing an
+    /// empty `additional_roots` is byte-identical to [`Self::with_hook_dispatcher`].
+    pub async fn with_roots(
+        server_name: impl Into<String>,
+        cwd: PathBuf,
+        additional_roots: Vec<PathBuf>,
         connection: Arc<jsonrpc::Connection>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
@@ -279,7 +300,10 @@ impl McpClient {
         connection
             .register_handler(
                 "roots/list",
-                Arc::new(RootsListHandler { cwd: cwd.clone() }),
+                Arc::new(RootsListHandler {
+                    cwd: cwd.clone(),
+                    additional: additional_roots,
+                }),
             )
             .await;
         connection
@@ -301,6 +325,27 @@ impl McpClient {
         }
     }
 
+    /// Send `notifications/roots/list_changed` to the server, telling it the
+    /// client's working-dir set changed so it should re-query `roots/list`.
+    ///
+    /// Backs the `roots.listChanged: true` capability advertised on
+    /// `initialize` (parity 2.1.207 `J7n()`). Fire-and-forget and best-effort:
+    /// a send failure is logged with the claude-code parity string and
+    /// swallowed (`sendRootsListChanged()` → `MCP: failed to send
+    /// roots/list_changed: ${err}`).
+    pub fn send_roots_list_changed(&self) {
+        if let Err(e) = self
+            .connection
+            .notify("notifications/roots/list_changed", serde_json::json!({}))
+        {
+            tracing::warn!(
+                target: "lingxi_mcp::client",
+                server = %self.server_name,
+                "MCP: failed to send roots/list_changed: {e}",
+            );
+        }
+    }
+
     /// Server name supplied at construction time. Used as the `<server>`
     /// component in the `mcp__<server>__<tool>` tool full-name format.
     #[must_use]
@@ -316,7 +361,7 @@ impl McpClient {
     ///   * `"method":"initialize"`
     ///   * `"clientInfo":{"name":"lingxi", ...}`
     ///   * `"protocolVersion":"2025-11-25"`
-    ///   * `"capabilities":{"roots":{},"elicitation":{}}`
+    ///   * `"capabilities":{"roots":{"listChanged":true},"elicitation":{}}`
     ///
     /// On success, the parsed [`ServerCapabilitiesDto`] is both returned
     /// and stored in [`McpClient::server_capabilities`]; the optional
@@ -1115,6 +1160,60 @@ mod constructor_tests {
         assert!(
             text2.contains(r#""action":"cancel""#),
             "elicitation/create handler not registered: {text2}",
+        );
+    }
+
+    #[tokio::test]
+    async fn with_roots_advertises_additional_dirs_on_roots_list() {
+        // A client built with additional roots answers `roots/list` with cwd
+        // first, then each additional dir (parity 2.1.207 r1d()).
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let _client = McpClient::with_roots(
+            "filesystem",
+            std::path::PathBuf::from("/proj"),
+            vec![std::path::PathBuf::from("/tmp/extra")],
+            conn,
+            None,
+        )
+        .await;
+
+        let req = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"roots/list\"}\n";
+        peer_tx
+            .send(Bytes::from_static(req))
+            .await
+            .expect("send into broker");
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("response within timeout")
+            .expect("frame was sent");
+        let text = std::str::from_utf8(&frame).expect("utf-8 frame");
+        assert!(
+            text.contains(r#""roots":[{"uri":"file:///proj"},{"uri":"file:///tmp/extra"}]"#),
+            "roots/list must advertise cwd + additional dir: {text}",
+        );
+    }
+
+    #[tokio::test]
+    async fn send_roots_list_changed_emits_notification_frame() {
+        // The client can notify the server its roots changed — the wire frame
+        // is a JSON-RPC notification (no id) for `notifications/roots/list_changed`.
+        let (conn, _peer_tx, mut peer_rx) = paired_connection();
+        let client =
+            McpClient::new("filesystem", std::path::PathBuf::from("/proj"), conn).await;
+        client.send_roots_list_changed();
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("notification within timeout")
+            .expect("frame was sent");
+        let text = std::str::from_utf8(&frame).expect("utf-8 frame");
+        assert!(
+            text.contains(r#""method":"notifications/roots/list_changed""#),
+            "must emit the roots/list_changed notification: {text}",
+        );
+        assert!(
+            !text.contains(r#""id""#),
+            "a notification carries no id: {text}",
         );
     }
 

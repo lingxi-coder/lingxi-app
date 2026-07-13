@@ -11,6 +11,7 @@ use crate::anthropic_request::AnthropicRequestBuilder;
 use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
 use crate::session_cwd::SessionCwd;
+use crate::worktree_session::WorktreeSessionCell;
 use permission::PermissionMode;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
@@ -91,6 +92,17 @@ pub struct BuiltinToolContext {
     /// boot values this was constructed with — byte-identical to the old
     /// frozen fields.
     pub session_cwd: Arc<SessionCwd>,
+    /// Shared record of the single active worktree the session entered via
+    /// `EnterWorktree` (worktree 206 parity plan, Task 8). `None` when no
+    /// worktree is active — the INERT default at every construction site.
+    /// `EnterWorktreeTool` writes `Some(WorktreeSession { .. })` here on a
+    /// successful create/enter (capturing the pre-swap cwd alongside the new
+    /// worktree's path/branch/base-commit); `ExitWorktreeTool` reads it to
+    /// restore [`crate::worktree_session::WorktreeSession::original_cwd`] and
+    /// decide keep/remove, then clears it back to `None`. Shared behind an
+    /// `Arc<Mutex<..>>` (not `ArcSwap`, unlike [`Self::session_cwd`]) because
+    /// both tools need the WHOLE record, not a hot-path single-field read.
+    pub worktree_session: WorktreeSessionCell,
     /// Detected platform — drives `wrap_with_sandbox` branch (M4-02).
     pub platform: Platform,
     /// HTTP transport for web tools (WebFetch + WebSearch) (M4-03). M1 trait;

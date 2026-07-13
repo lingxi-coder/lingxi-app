@@ -921,6 +921,11 @@ pub async fn build_mobile_inner(
             .expect("boot permission policy is built unconditionally above"),
         sandbox_available: false,
         session_cwd: session_cwd.clone(),
+        // Worktree 206 parity (Task 8): a fresh, empty (`None`) session
+        // record. Mobile never registers the worktree tool (see the
+        // `session_cwd` note above), so this cell stays inert in production —
+        // wired for shape-consistency with desktop.
+        worktree_session: tool_api::worktree_session::new_worktree_session_cell(),
         platform: if cfg!(target_os = "macos") {
             SandboxPlatform::Mac
         } else {

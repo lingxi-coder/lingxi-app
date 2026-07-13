@@ -4953,6 +4953,11 @@ pub async fn build(
         }),
         sandbox_available,
         session_cwd: session_cwd.clone(),
+        // Worktree 206 parity (Task 8): a fresh, empty (`None`) session
+        // record — inert until `EnterWorktree` populates it. Not shared with
+        // anything else at this composition root (no other consumer reads it
+        // yet).
+        worktree_session: tool_api::worktree_session::new_worktree_session_cell(),
         platform: sandbox_platform,
         http: http.clone(),
         provider: tool_provider,

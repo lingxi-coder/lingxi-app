@@ -621,6 +621,7 @@ pub fn ctx_for_file_tools(
         permission_policy: Arc::new(permission::PermissionPolicy::new(PermissionMode::Default)),
         sandbox_available: false,
         session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted_dirs),
+        worktree_session: crate::worktree_session::new_worktree_session_cell(),
         platform: if cfg!(target_os = "macos") {
             Platform::Mac
         } else {
@@ -684,6 +685,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
             PathBuf::from("/tmp"),
             vec![PathBuf::from("/tmp")],
         ),
+        worktree_session: crate::worktree_session::new_worktree_session_cell(),
         platform: if cfg!(target_os = "macos") {
             Platform::Mac
         } else {

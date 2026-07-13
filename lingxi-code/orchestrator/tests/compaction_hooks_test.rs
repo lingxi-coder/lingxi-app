@@ -78,6 +78,8 @@ struct Probe {
     pre_trigger: Mutex<Option<String>>,
     /// The `summary` carried by the last `PostCompact` event.
     post_summary: Mutex<Option<String>>,
+    /// The `trigger` (`manual`/`auto`) carried by the last `PostCompact` event.
+    post_trigger: Mutex<Option<String>>,
 }
 
 /// `PreCompact` hook that records the trigger. `fail` makes it return a non-zero
@@ -135,9 +137,13 @@ impl BuiltinHookHandler for RecordPostCompact {
         "record-post-compact"
     }
     async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
-        if let HookEvent::PostCompact { summary, .. } = event {
+        if let HookEvent::PostCompact {
+            summary, trigger, ..
+        } = event
+        {
             self.probe.post_fired.store(true, Ordering::SeqCst);
             *self.probe.post_summary.lock().unwrap() = Some(summary.clone());
+            *self.probe.post_trigger.lock().unwrap() = Some(trigger.clone());
         }
         HookResult {
             outcome: HookOutcome::Success,
@@ -284,6 +290,13 @@ async fn pre_and_post_compact_hooks_fire_on_proactive_autocompact() {
     assert!(
         probe.post_summary.lock().unwrap().is_some(),
         "PostCompact must carry the compaction summary payload"
+    );
+    // P2-04: the proactive/automatic path carries trigger=auto, threaded onto
+    // the PostCompact event (so a matcher of "auto" would filter to it).
+    assert_eq!(
+        probe.post_trigger.lock().unwrap().as_deref(),
+        Some("auto"),
+        "PostCompact from the proactive autocompact path must carry trigger=auto"
     );
 }
 

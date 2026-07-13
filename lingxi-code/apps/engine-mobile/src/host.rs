@@ -890,9 +890,14 @@ pub async fn build_mobile_inner(
     //     device capabilities (camera / voice / share) come from `platform`;
     //     desktop-only seams (subagent / mcp / lsp / team / worktree-tool) are
     //     absent because `engine-mobile` does not link those tool crates.
+    // P1-06: ONE per-session read-file-state registry (see engine-desktop
+    // note) — cloned into the file tools' `BuiltinToolContext` and the SAME
+    // `Arc` handed to the orchestrator via `.with_read_state_map(...)` below.
+    let read_state_map = tool_api::read_file_state::new_read_file_state_map();
     let tool_ctx = BuiltinToolContext {
-        // FILE.B: file tools share one read-state map (see engine-desktop note).
-        read_file_state: tool_api::read_file_state::new_read_file_state_map(),
+        // FILE.B / P1-06: file tools share the ONE per-session read-state map
+        // (see engine-desktop note).
+        read_file_state: read_state_map.clone(),
         // Read(deny) → Grep/Glob search excludes, resolved from the local
         // `PermissionPolicy` built above (empty when no Read-deny rule ⇒
         // unchanged default).
@@ -1111,7 +1116,11 @@ pub async fn build_mobile_inner(
     .with_cache_safe_slot(cache_safe_slot)
     // Audit fix (#13): per-turn V2 `<task-reminder>` over the file-backed
     // TodoStore (tool_task IS registered on mobile) — mirror of desktop.
-    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()));
+    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+    // P1-06: share the ONE `readFileState` map with the file tools (created
+    // above) so post-compact file restore + staleness consumers see a tool's
+    // `readFileState.set` — mirror of desktop.
+    .with_read_state_map(read_state_map);
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);

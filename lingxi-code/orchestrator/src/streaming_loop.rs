@@ -149,6 +149,127 @@ pub(crate) struct PumpFailure {
     pub(crate) error: OrchestratorError,
     /// `true` once a non-thinking content block had started streaming.
     pub(crate) real_content_started: bool,
+    /// The turn accumulated SO FAR before the failure: completed content blocks
+    /// (text/thinking that reached `content_block_stop`) + dispatched `tool_use`s
+    /// + a usage seed (`message_start` usage when no `message_delta` arrived).
+    ///
+    /// P1-04 (cc 2.1.199 partial-finalize, binary-verified): when a mid-stream
+    /// server/overloaded/api error, watchdog stall, or connection close lands
+    /// AFTER a real content block completed, the caller finalizes this partial in
+    /// place (synthesized `stop_reason` + `usage`) instead of discarding it — see
+    /// [`partial_has_output`] / [`partial_finalize_cause`]. Empty on the paths
+    /// where nothing completed (a bare `content_block_start` that never reached
+    /// `content_block_stop`), which still route to the non-streaming fallback.
+    pub(crate) partial: PumpedTurn,
+}
+
+/// The finalize cause the caller stamps onto `tengu_streaming_partial_finalized`
+/// and uses to pick the byte-exact incomplete-response notice. Mirrors cc's
+/// `cause:Ws?"watchdog":La?"server_error":She.has(code)?"network_down":"stale_connection"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartialFinalizeCause {
+    /// Stream idle-timeout (watchdog) abort (`Cn`/`Ws`).
+    Watchdog,
+    /// Overloaded (529) / provider-internal (5xx) / api_error (`La`).
+    ServerError,
+    /// A recognized connection-drop error code (`She.has(code)`).
+    NetworkDown,
+    /// Any other stale/closed connection.
+    StaleConnection,
+}
+
+impl PartialFinalizeCause {
+    /// The `cause` telemetry enum value (byte-exact cc strings).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Watchdog => "watchdog",
+            Self::ServerError => "server_error",
+            Self::NetworkDown => "network_down",
+            Self::StaleConnection => "stale_connection",
+        }
+    }
+
+    /// The byte-exact incomplete-response notice for a HAS-OUTPUT partial finalize
+    /// (cc 2.1.207 `jT="API Error"` + the cause-specific tail). Only the
+    /// has-output variants are ported here — the thinking-only "Try again"
+    /// variants are handled by the retry/exhaustion path, not this finalize.
+    pub(crate) fn incomplete_notice(self) -> &'static str {
+        match self {
+            Self::Watchdog => {
+                "API Error: Response stalled mid-stream. The response above may be incomplete."
+            }
+            Self::ServerError => {
+                "API Error: Server error mid-response. The response above may be incomplete."
+            }
+            Self::NetworkDown | Self::StaleConnection => {
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+            }
+        }
+    }
+}
+
+/// Classify a terminal pump [`OrchestratorError`] into a partial-finalize cause,
+/// or `None` when the error is NOT a finalize-class error (protocol violation,
+/// auth, invalid-request, …). Ordering mirrors cc: watchdog first, then
+/// server_error, then the connection-drop family.
+pub(crate) fn partial_finalize_cause(error: &OrchestratorError) -> Option<PartialFinalizeCause> {
+    match error {
+        OrchestratorError::Streaming(e)
+            if llm_client::model::stream_watchdog::is_stream_idle_timeout(e) =>
+        {
+            Some(PartialFinalizeCause::Watchdog)
+        }
+        OrchestratorError::Streaming(LlmError::Overloaded { .. } | LlmError::ProviderInternal) => {
+            Some(PartialFinalizeCause::ServerError)
+        }
+        OrchestratorError::Streaming(LlmError::Transport { .. }) => {
+            Some(PartialFinalizeCause::StaleConnection)
+        }
+        // A stream that closed before `message_stop` is a mid-response connection
+        // close — cc's `network_down` bucket.
+        OrchestratorError::StreamEndedWithoutStop => Some(PartialFinalizeCause::NetworkDown),
+        _ => None,
+    }
+}
+
+/// Whether the accumulated partial carries REAL (non-thinking) output worth
+/// preserving: a COMPLETED non-thinking content block or a dispatched `tool_use`.
+///
+/// Mirrors cc's `_r.some(m=>m.message.content.some(b=>b.type!=="thinking" &&
+/// b.type!=="redacted_thinking"))` finalize guard. Because `assistant_blocks`
+/// only holds blocks that reached `content_block_stop`, a block that merely
+/// STARTED (a bare `content_block_start` + deltas, no stop) is absent here — so a
+/// stream that erred before its first block completed still routes to the
+/// non-streaming fallback, not the partial finalize (matching cc, where such a
+/// block is not yet in `_r`).
+pub(crate) fn partial_has_output(turn: &PumpedTurn) -> bool {
+    !turn.tool_uses.is_empty()
+        || turn.assistant_blocks.iter().any(|b| {
+            !matches!(
+                b,
+                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+            )
+        })
+}
+
+/// Attach the accumulated partial + a usage seed to a terminal pump error.
+fn build_failure(
+    mut partial: PumpedTurn,
+    message_start_usage: &Option<LlmUsage>,
+    error: OrchestratorError,
+    real_content_started: bool,
+) -> PumpFailure {
+    // Seed billing from `message_start` when no `message_delta` usage arrived, so
+    // a finalized partial still records input tokens (cc patches `message.usage`
+    // onto every yielded message from the same `pn` snapshot).
+    if partial.usage.is_none() {
+        partial.usage = message_start_usage.clone();
+    }
+    PumpFailure {
+        error,
+        real_content_started,
+        partial,
+    }
 }
 
 /// Whether a mid-stream [`LlmError`] is a TRANSIENT network failure eligible
@@ -298,10 +419,12 @@ async fn pump_stream_inner(
         let event = match item {
             Ok(ev) => ev,
             Err(e) => {
-                return Err(PumpFailure {
-                    error: OrchestratorError::Streaming(e),
+                return Err(build_failure(
+                    turn,
+                    &message_start_usage,
+                    OrchestratorError::Streaming(e),
                     real_content_started,
-                });
+                ));
             }
         };
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
@@ -322,10 +445,12 @@ async fn pump_stream_inner(
         let action = match dispatch_event(event, &mut acc, output).await {
             Ok(a) => a,
             Err(e) => {
-                return Err(PumpFailure {
-                    error: OrchestratorError::StreamingProtocol(e.to_string()),
+                return Err(build_failure(
+                    turn,
+                    &message_start_usage,
+                    OrchestratorError::StreamingProtocol(e.to_string()),
                     real_content_started,
-                });
+                ));
             }
         };
         match action {
@@ -407,10 +532,12 @@ async fn pump_stream_inner(
         }
     }
     // Stream ended without a MessageStop.
-    Err(PumpFailure {
-        error: OrchestratorError::StreamEndedWithoutStop,
+    Err(build_failure(
+        turn,
+        &message_start_usage,
+        OrchestratorError::StreamEndedWithoutStop,
         real_content_started,
-    })
+    ))
 }
 
 #[cfg(test)]

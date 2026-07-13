@@ -1586,10 +1586,11 @@ fn build_lifecycle_envelope_body(
             Some(("StopFailure", serde_json::to_string(&payload).ok()?))
         }
         // B6 — additional events whose `HookEvent` variant already exists.
-        // Where the variant carries fewer fields than the wire schema (e.g.
-        // `Setup`/`PostCompact` lack `trigger`), the missing fields default
-        // exactly as the B1 arms above (`""` / `Value::Null` / `None`) until
-        // richer context is threaded through `HookEvent` / `HookContext`.
+        // Where the variant carries fewer fields than the wire schema, the
+        // missing fields default exactly as the B1 arms above (`""` /
+        // `Value::Null` / `None`) until richer context is threaded through
+        // `HookEvent` / `HookContext`. (`Setup`/`PostCompact` now carry the
+        // real `trigger` from the firing site.)
         // `PostToolUseFailure` now carries the dispatched `tool_input` (the
         // same `effective_input` the `PostToolUse` arm threads), matching the
         // claude-code `PostToolUseFailure` input schema.
@@ -1649,7 +1650,9 @@ fn build_lifecycle_envelope_body(
             };
             Some(("PreCompact", serde_json::to_string(&payload).ok()?))
         }
-        HookEvent::PostCompact { summary, .. } => {
+        HookEvent::PostCompact {
+            summary, trigger, ..
+        } => {
             let payload = PostCompactPayload {
                 hook_event_name: HookEventNamePostCompact,
                 session_id: b.session_id,
@@ -1659,7 +1662,7 @@ fn build_lifecycle_envelope_body(
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
                 effort: b.effort,
-                trigger: String::new(),
+                trigger: trigger.clone(),
                 compact_summary: summary.clone(),
             };
             Some(("PostCompact", serde_json::to_string(&payload).ok()?))
@@ -1722,7 +1725,7 @@ fn build_lifecycle_envelope_body(
             };
             Some(("PermissionDenied", serde_json::to_string(&payload).ok()?))
         }
-        HookEvent::Setup => {
+        HookEvent::Setup { trigger } => {
             let payload = SetupPayload {
                 hook_event_name: HookEventNameSetup,
                 session_id: b.session_id,
@@ -1732,7 +1735,7 @@ fn build_lifecycle_envelope_body(
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
                 effort: b.effort,
-                trigger: String::new(),
+                trigger: trigger.clone(),
             };
             Some(("Setup", serde_json::to_string(&payload).ok()?))
         }

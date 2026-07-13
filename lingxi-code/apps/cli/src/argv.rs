@@ -262,12 +262,17 @@ pub struct Argv {
     //
     // claude-code `--agent <agent>` takes EXACTLY ONE value.
     //
-    // CARRIED: threads into `DesktopConfig.cli_agent`;
-    // `engine_desktop::build` resolves it against the final agent catalog
-    // (binary `dts`: exact agentType, else `…:{name}` FQN suffix) and logs
-    // the byte-matched `Warning: agent "X" not found …` on a miss. RESIDUAL:
-    // applying the hit (`xz` → `mainThreadAgentType`) needs a main-thread
-    // agent runtime lingxi does not have yet.
+    // WIRED: threads into `DesktopConfig.cli_agent`; `engine_desktop::build`
+    // resolves it against the final agent catalog (binary `dts`: exact
+    // agentType, else `…:{name}` FQN suffix) and logs the byte-matched
+    // `Warning: agent "X" not found …` on a miss. On a HIT it APPLIES the agent
+    // to the MAIN thread (`bde`/`mainThreadAgentDefinition`): the `agentType`
+    // rides lifecycle hook payloads, the system prompt becomes the main-loop
+    // prompt (`nre`, `--system-prompt` still winning), the `tools:` /
+    // `disallowedTools` frontmatter narrows the tool pool (`HJ`), and the agent
+    // `model` overrides the main loop (`jb(Zo(model))`) unless `--model` was
+    // given. RESIDUAL (follow-up): frontmatter `hooks`/`mcpServers` swap + resume
+    // restoration (`rVe`).
     #[arg(long = "agent", value_name = "agent")]
     pub agent: Option<String>,
 

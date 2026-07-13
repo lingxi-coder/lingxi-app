@@ -489,11 +489,9 @@ impl HookRegistry {
     ///   → `source`; `InstructionsLoaded` → `load_reason`; `FileChanged` →
     ///   `basename(file_path)`.
     ///
-    /// Two of those map onto a port variant that carries no equivalent field
-    /// (an event-*payload*-schema gap, distinct from this matcher wiring):
-    /// `Setup` (no fields) and `PostCompact` (carries `summary`/`tokens_freed`,
-    /// no `trigger`). Those return `None` here (matcher skipped) until the
-    /// variants gain the field; see the `_ =>` arm comment.
+    /// `Setup` (trigger `init`/`maintenance`) and `PostCompact` (trigger
+    /// `manual`/`auto`) both carry `trigger` on the port variant and derive
+    /// their query from it, exactly like `PreCompact`.
     fn match_query_for(event: &HookEvent) -> Option<String> {
         match event {
             HookEvent::PreToolUse { tool_name, .. }
@@ -515,9 +513,11 @@ impl HookRegistry {
             // claude `i = r.notification_type`; the port carries it as `kind`.
             HookEvent::Notification { kind, .. } => Some(kind.clone()),
             // claude `i = r.trigger`; the port's PreCompact carries it as
-            // `reason` (e.g. "manual"). (`Setup`/`PostCompact` carry no such
-            // field — see the `_ =>` gap note.)
+            // `reason` (e.g. "manual"). `Setup` (init/maintenance) and
+            // `PostCompact` (manual/auto) carry the trigger directly.
             HookEvent::PreCompact { reason, .. } => Some(reason.clone()),
+            HookEvent::Setup { trigger } => Some(trigger.clone()),
+            HookEvent::PostCompact { trigger, .. } => Some(trigger.clone()),
             // claude `i = r.mcp_server_name` for both elicitation events.
             HookEvent::Elicitation { server_name, .. }
             | HookEvent::ElicitationResult { server_name, .. } => Some(server_name.clone()),
@@ -534,12 +534,9 @@ impl HookRegistry {
             HookEvent::FileChanged { path, .. } => {
                 path.file_name().map(|n| n.to_string_lossy().into_owned())
             }
-            // Remaining query-deriving events whose port variant lacks the
-            // field claude reads (event-schema gap): `Setup`→`trigger` and
-            // `PostCompact`→`trigger`. They fall here and skip the matcher
-            // filter until the variants carry the field. Everything else
-            // (TeammateIdle/TaskCreated/TaskCompleted, WorktreeCreate/Remove,
-            // CwdChanged, …) has no claude query either.
+            // Events with no claude query (TeammateIdle/TaskCreated/
+            // TaskCompleted, WorktreeCreate/Remove, CwdChanged, …) derive no
+            // match query and fire regardless of any declared matcher.
             _ => None,
         }
     }
@@ -811,7 +808,12 @@ mod all_hooks_tests {
             "HTTP hook dropped from SessionStart"
         );
 
-        let setup = r.match_event(&HookEvent::Setup, &HookContext::default());
+        let setup = r.match_event(
+            &HookEvent::Setup {
+                trigger: "init".into(),
+            },
+            &HookContext::default(),
+        );
         assert!(
             setup.is_empty(),
             "HTTP hook dropped from Setup; got {setup:?}"
@@ -1287,6 +1289,52 @@ mod match_event_matcher_tests {
             reason: "done".into(),
         };
         assert_eq!(matched_names(&reg, &event), vec!["stopper"]);
+    }
+
+    #[test]
+    fn post_compact_matcher_filters_on_trigger() {
+        // P2-04: `PostCompact` derives its matchQuery from `trigger`
+        // (`manual`/`auto`), so a hook declaring matcher `"manual"` fires on a
+        // manual compaction and is dropped on an auto one.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "on-manual",
+            HookEventType::PostCompact,
+            Some("manual"),
+        ));
+        let manual = HookEvent::PostCompact {
+            summary: "s".into(),
+            tokens_freed: 0,
+            trigger: "manual".into(),
+        };
+        let auto = HookEvent::PostCompact {
+            summary: "s".into(),
+            tokens_freed: 0,
+            trigger: "auto".into(),
+        };
+        assert_eq!(matched_names(&reg, &manual), vec!["on-manual"]);
+        assert!(matched_names(&reg, &auto).is_empty());
+    }
+
+    #[test]
+    fn setup_matcher_filters_on_trigger() {
+        // P2-04: `Setup` derives its matchQuery from `trigger`
+        // (`init`/`maintenance`); a hook matcher of `"maintenance"` fires on a
+        // maintenance Setup and is dropped on an init one.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "on-maint",
+            HookEventType::Setup,
+            Some("maintenance"),
+        ));
+        let maint = HookEvent::Setup {
+            trigger: "maintenance".into(),
+        };
+        let init = HookEvent::Setup {
+            trigger: "init".into(),
+        };
+        assert_eq!(matched_names(&reg, &maint), vec!["on-maint"]);
+        assert!(matched_names(&reg, &init).is_empty());
     }
 
     #[test]

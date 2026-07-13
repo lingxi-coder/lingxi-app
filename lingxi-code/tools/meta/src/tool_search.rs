@@ -15,15 +15,23 @@
 //! - `max_results` is a runtime parameter (default 5), bounded by a hard
 //!   ceiling guard.
 //!
-//! Rust divergences from TS (no substrate): there is no deferred-vs-loaded
-//! tool distinction (the whole `ToolRegistryView` is the candidate set), no
-//! `tool_reference` result blocks (we return a plain `matches` name list),
-//! and `getToolDescriptionMemoized` (`tool.prompt(...)`) is replaced by the
-//! stored `description`/`search_hint` carried on each entry.
+//! The candidate set is the DEFERRED tool set: the shared `ToolRegistryView`
+//! (a live cell owned by the `ToolRegistry` and refreshed from its deferred
+//! tools — see `ToolRegistry::refresh_tool_search_view`). On a successful search
+//! the matched tools are marked LOADED in the shared [`DeferralState`], so the
+//! wire serializer stops deferring them on the next turn (the cross-turn
+//! "search → load" lifecycle).
 //!
-//! Avoids holding `Arc<ToolRegistry>` directly (which would cycle) by
-//! accepting a `ToolRegistryView` snapshot at construction time. The
-//! dispatcher passes a freshly-snapshotted vec when registering this tool.
+//! Remaining Rust divergences from TS (documented follow-ups): the result is a
+//! plain `matches` name list rather than `tool_reference` content blocks (so a
+//! tool becomes callable on the NEXT turn, not mid-turn), and
+//! `getToolDescriptionMemoized` (`tool.prompt(...)`) is replaced by the stored
+//! `description`/`search_hint` carried on each entry (the registry refresh
+//! leaves `description` empty; scoring still ranks on name-parts + searchHint).
+//!
+//! Avoids holding `Arc<ToolRegistry>` directly (which would cycle) by accepting
+//! a `ToolRegistryView` handle at construction time; the composition root
+//! populates the shared cell after the registry is fully assembled.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,6 +53,11 @@ use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
+use tool_api::DeferralState;
+// The registry-view surface (`ToolSearchEntry` / `ToolRegistryView` /
+// `StaticRegistryView`) lives in `tool-api` so the `ToolRegistry` can own the
+// live view cell; re-exported here for the search implementation and tests.
+pub use tool_api::{StaticRegistryView, ToolRegistryView, ToolSearchEntry};
 
 /// Tool name byte-lock.
 pub const TOOL_SEARCH_TOOL_NAME: &str = "ToolSearch";
@@ -55,68 +68,49 @@ pub const TOOL_SEARCH_DEFAULT_MAX_RESULTS: usize = 5;
 /// an unbounded list. Kept at 20 to preserve the parity wire-identifier lock.
 pub const TOOL_SEARCH_MAX_RESULTS: usize = 20;
 
-/// One row in the searchable registry view.
-#[derive(Debug, Clone)]
-pub struct ToolSearchEntry {
-    /// Tool name (used for ranking + select/exact/prefix matching).
-    pub name: String,
-    /// Tool description (lower-signal token source, scored at +2).
-    pub description: String,
-    /// Curated capability phrase (`tool.searchHint`), scored at +4. TS scores
-    /// `searchHint` separately from (and higher than) the prompt-derived
-    /// description.
-    pub search_hint: Option<String>,
-}
-
-/// Read-only snapshot of registered tools fed to `ToolSearchTool` at
-/// construction. Avoids the `Arc<ToolRegistry>` cycle that would arise from
-/// `lingxi-tools::ToolSearchTool` holding a strong ref to its owner.
-pub trait ToolRegistryView: Send + Sync {
-    /// All registered tool entries (name + description + search hint).
-    fn entries(&self) -> Vec<ToolSearchEntry>;
-}
-
-/// Static-vec implementation — `register_all_builtin_tools` builds one of
-/// these from the registry it just populated.
-pub struct StaticRegistryView {
-    entries: Vec<ToolSearchEntry>,
-}
-
-impl StaticRegistryView {
-    /// Construct from a vec of entries.
-    #[must_use]
-    pub fn new(entries: Vec<ToolSearchEntry>) -> Self {
-        Self { entries }
-    }
-}
-
-impl ToolRegistryView for StaticRegistryView {
-    fn entries(&self) -> Vec<ToolSearchEntry> {
-        self.entries.clone()
-    }
-}
-
 /// `ToolSearchTool` — deferred-tool search over the registry.
 pub struct ToolSearchTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
     pub(crate) view: Arc<dyn ToolRegistryView>,
+    /// Shared session deferral state. On a successful search the matched tools
+    /// are marked LOADED here, so the wire serializer stops deferring them on
+    /// the next turn (the cross-turn "search → load" lifecycle). Disabled by
+    /// default (hermetic / test paths).
+    pub(crate) defer: Arc<DeferralState>,
 }
 
 impl ToolSearchTool {
-    /// Construct with an empty view (always returns no results — hermetic
-    /// default for when no registry snapshot has been wired).
+    /// Construct with an empty view + disabled deferral — the hermetic default
+    /// for when no registry snapshot has been wired.
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self {
             ctx,
             view: Arc::new(StaticRegistryView::new(Vec::new())),
+            defer: Arc::new(DeferralState::disabled()),
         }
     }
 
-    /// Construct with a caller-supplied view (production use).
+    /// Construct with a caller-supplied view and disabled deferral (test seam).
     #[must_use]
     pub fn with_view(ctx: tool_api::BuiltinToolContext, view: Arc<dyn ToolRegistryView>) -> Self {
-        Self { ctx, view }
+        Self {
+            ctx,
+            view,
+            defer: Arc::new(DeferralState::disabled()),
+        }
+    }
+
+    /// Construct with a caller-supplied view AND the shared deferral state
+    /// (production use). `tool_meta::register_all` passes the registry's live
+    /// view cell and shared `DeferralState` so a search marks matches loaded.
+    #[must_use]
+    pub fn with_view_and_deferral(
+        ctx: tool_api::BuiltinToolContext,
+        view: Arc<dyn ToolRegistryView>,
+        defer: Arc<DeferralState>,
+    ) -> Self {
+        Self { ctx, view, defer }
     }
 }
 
@@ -578,6 +572,12 @@ impl Tool for ToolSearchTool {
             },
         };
 
+        // Lifecycle: the model has pulled these tools' schemas into context, so
+        // mark them LOADED — the wire serializer stops deferring them next turn.
+        if !matches.is_empty() {
+            self.defer.mark_loaded(matches.iter().cloned());
+        }
+
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "duration_ms".into(),
@@ -913,6 +913,55 @@ mod tests {
         assert_eq!(out.data["query"], json!("select:Read,Write"));
         assert_eq!(out.data["total_deferred_tools"], json!(2));
         assert_eq!(out.data["max_results"], json!(5));
+    }
+
+    #[tokio::test]
+    async fn call_marks_matches_loaded_in_shared_deferral() {
+        // Lifecycle: a successful ToolSearch marks the matched tools LOADED in the
+        // shared DeferralState, so the wire serializer stops deferring them.
+        use tool_api::ToolSearchMode;
+        let defer = Arc::new(DeferralState::new(ToolSearchMode::Enabled, false));
+        let tool = ToolSearchTool::with_view_and_deferral(
+            shell_test_ctx(dummy_out()),
+            mk_view(vec![
+                entry("Task", "run a subagent"),
+                entry("TaskUpdate", "update a task"),
+            ]),
+            defer.clone(),
+        );
+        // Before: nothing loaded; both are deferred.
+        assert!(defer.should_defer("Task", true));
+        let out = tool
+            .call(
+                json!({"query": "select:Task,TaskUpdate"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out.data["matches"], json!(["Task", "TaskUpdate"]));
+        // After: both matched tools are loaded ⇒ no longer deferred.
+        assert!(defer.is_loaded("Task"));
+        assert!(defer.is_loaded("TaskUpdate"));
+        assert!(!defer.should_defer("Task", true));
+        assert!(!defer.should_defer("TaskUpdate", true));
+    }
+
+    #[tokio::test]
+    async fn call_unknown_select_marks_nothing_loaded() {
+        use tool_api::ToolSearchMode;
+        let defer = Arc::new(DeferralState::new(ToolSearchMode::Enabled, false));
+        let tool = ToolSearchTool::with_view_and_deferral(
+            shell_test_ctx(dummy_out()),
+            mk_view(vec![entry("Read", "read a file")]),
+            defer.clone(),
+        );
+        let out = tool
+            .call(json!({"query": "select:Nope"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["matches"], json!([]));
+        assert!(!defer.is_loaded("Nope"));
     }
 
     #[tokio::test]

@@ -581,9 +581,9 @@ pub struct PreCompactPayload {
 /// Wire-format `PostCompact` payload (1:1 with `coreSchemas.ts:579-589`
 /// `PostCompactHookInputSchema`; constructed at `utils/hooks.ts:4044-4049`).
 ///
-/// `trigger` (`manual` / `auto`) has no field on the `HookEvent::PostCompact`
-/// variant yet, so it defaults to an empty string (the B1 default-fill
-/// convention). `compact_summary` is fed from the variant's `summary`.
+/// `trigger` (`manual` / `auto`) is fed from the `HookEvent::PostCompact`
+/// variant's `trigger` field (the compaction firing site passes `"manual"` /
+/// `"auto"`). `compact_summary` is fed from the variant's `summary`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PostCompactPayload {
@@ -688,9 +688,8 @@ pub struct PermissionDeniedPayload {
 /// Wire-format `Setup` payload (1:1 with `coreSchemas.ts:504-511`
 /// `SetupHookInputSchema`; constructed at `utils/hooks.ts:3908-3912`).
 ///
-/// `trigger` (`init` / `maintenance`) has no field on the unit
-/// `HookEvent::Setup` variant yet, so it defaults to an empty string (the B1
-/// default-fill convention).
+/// `trigger` (`init` / `maintenance`) is fed from the `HookEvent::Setup`
+/// variant's `trigger` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct SetupPayload {

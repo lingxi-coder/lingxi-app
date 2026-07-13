@@ -124,7 +124,9 @@ pub struct HookResponse {
     /// `hookSpecificOutput.suppressOriginalPrompt` returned by a `UserPromptSubmit`
     /// hook (binary-confirmed at BIN off 201754804; description: "When decision is
     /// 'block', omit the original prompt from the block message"). Additive default
-    /// `false`. TODO: wire at the block-message render site.
+    /// `false`. Applied by the orchestrator's `fire_user_prompt_submit` block-message
+    /// render (P2-04): on a `Block`, the warning collapses to bare `${reason}` when
+    /// this is `true` instead of appending `\n\nOriginal prompt: ${prompt}`.
     #[serde(default)]
     pub suppress_original_prompt: bool,
     /// `hookSpecificOutput.displayContent` returned by a `MessageDisplay` hook
@@ -323,7 +325,8 @@ pub struct AggregateHookResult {
     /// `suppressOriginalPrompt: true` (binary-confirmed at BIN off 201754804;
     /// description: "When decision is 'block', omit the original prompt from the
     /// block message"). OR-folded: a single hook setting it flips the aggregate.
-    /// TODO: wire the display suppression at the block-message render site.
+    /// Consumed by the orchestrator's `fire_user_prompt_submit` block-message
+    /// render (P2-04) to omit the `Original prompt:` tail on a `Block`.
     pub suppress_original_prompt: bool,
     /// The last `displayContent` any folded `MessageDisplay` hook returned
     /// (binary-confirmed at BIN off 201757586). When `Some`, the orchestrator

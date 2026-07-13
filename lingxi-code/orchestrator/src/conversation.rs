@@ -676,6 +676,32 @@ const INTERRUPT_MESSAGE_FOR_TOOL_USE: &str = "[Request interrupted by user for t
 ///
 /// Construction is via `new(...)` (batched-only) or `new_with_streaming(...)`
 /// (both paths). Driven via `run_turn(prompt)` or `run_turn_streaming(prompt)`.
+/// Snapshot of the `--agent`-adopted main-thread agent (claude-code
+/// `mainThreadAgentDefinition` reduced to the fields LingXi applies on the MAIN
+/// conversation loop). Set once at startup by the composition root; see
+/// [`ConversationOrchestrator::main_thread_agent`].
+#[derive(Debug, Clone)]
+pub(crate) struct MainThreadAgentState {
+    /// The agent's stable `agentType` (claude-code `mainThreadAgentType` /
+    /// `MB()`), threaded into every main-thread lifecycle hook payload.
+    pub(crate) agent_type: String,
+    /// The agent's system-prompt body (claude-code `agentDef.getSystemPrompt()`)
+    /// — becomes the main-loop system prompt on every query unless
+    /// `--system-prompt` (`overrideSystemPrompt`) is set. `None` for an agent
+    /// that declares no prompt (the assembled default prompt is then used).
+    pub(crate) system_prompt: Option<String>,
+    /// The agent's `tools:` frontmatter policy (claude-code `agentDef.tools`).
+    /// Filters the advertised main-loop tool pool via [`Self::build_wire_tools`]
+    /// — the `HJ(agentDef,to,!1,!0)` port with `n=true`, which keeps everything
+    /// on [`AgentToolPolicy::All`] (no `tools:` field) and narrows to the named
+    /// tools on [`AgentToolPolicy::Explicit`].
+    pub(crate) tool_policy: agent::AgentToolPolicy,
+    /// The agent's per-definition `disallowedTools` (claude-code
+    /// `agentDef.disallowedTools`) — subtracted from the advertised pool BEFORE
+    /// the `tool_policy` projection (base tool name, `(rule)` stripped).
+    pub(crate) disallowed_tools: Vec<String>,
+}
+
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
@@ -822,6 +848,22 @@ pub struct ConversationOrchestrator {
     /// then returns `vec![]`. The CLI binary populates from
     /// `~/.lingxi/agents/` + project `.lingxi/agents/`.
     pub(crate) agent_catalog: Option<Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>>,
+    /// Main-thread agent adopted via `--agent` (claude-code
+    /// `Pt.mainThreadAgentType` / `mainThreadAgentDefinition`, read per query
+    /// through `MB()`). `Some` once the composition root resolves `--agent` to a
+    /// catalog hit and calls [`Self::set_main_thread_agent`]; `None` otherwise.
+    /// Interior-mutable because the binary applies the agent to live session
+    /// state AFTER the REPL is constructed — the flag is resolved against the
+    /// FINAL catalog (dir + `--agents` + plugin agents) once the orchestrator is
+    /// already `Arc`-wrapped. Consumed by [`Self::effective_system_prompt`] (the
+    /// agent's prompt becomes the main-loop system prompt, `--system-prompt`
+    /// still winning), [`Self::build_wire_tools`] (its `tools:` / `disallowedTools`
+    /// frontmatter narrows the advertised tool pool, claude `HJ(agentDef,to,!1,!0)`),
+    /// and [`Self::lifecycle_hook_ctx`] (its `agentType` rides every main-thread
+    /// lifecycle hook payload, claude-code `wf`/`MVe` `?? MB()`). The agent's
+    /// `model` is applied eagerly to the session by [`Self::set_main_thread_agent`],
+    /// not stored here.
+    pub(crate) main_thread_agent: tokio::sync::RwLock<Option<MainThreadAgentState>>,
     /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
     /// not configured — `force_compact` then falls back to the legacy
     /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
@@ -948,15 +990,19 @@ pub struct ConversationOrchestrator {
     /// offset, limit}`) — the 1:1 port of claude-code's `readFileState` map
     /// (`FileReadTool.ts:1032`). Kept SEPARATE from the `read_file_state`
     /// `Vec` above, which preserves the existing `/files` ordering semantics.
-    /// The orchestrator shares this `Arc` with the file tools' construction-
-    /// time `BuiltinToolContext` so a tool's `readFileState.set` is visible
-    /// here (and to the future staleness guards / Read dedup).
+    /// The composition root creates ONE map, passes a clone into the file
+    /// tools' `BuiltinToolContext`, and shares the SAME `Arc` here via
+    /// [`Self::with_read_state_map`] (P1-06), so a tool's `readFileState.set`
+    /// (Read/Edit/Write/…) is visible here — 1:1 with claude-code's single
+    /// per-session map on the `ToolUseContext`. Tests / binaries without a
+    /// composition root keep the constructor's fresh default (unshared, but
+    /// harmless — nothing populates it, so consumers observe an empty map).
     ///
     /// CONSUMED post-compact (#59): [`Self::restore_post_compact_attachments`]
     /// snapshots this registry, clears it, and re-attaches the most-recent files
-    /// after the compaction boundary (`K2p`/`Pqn`). The composition root shares
-    /// this `Arc` into the file tools' `BuiltinToolContext`. The staleness guards
-    /// (D/E/F) and Read dedup (A) are later additional consumers.
+    /// after the compaction boundary (`K2p`/`Pqn`). The staleness guards
+    /// (D/E/F) and Read dedup (A) are additional in-tool consumers of the SAME
+    /// shared map.
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
     /// Task 8 (llm-client future-work batch 3): the last rate-limit snapshot
     /// forwarded to [`traits::OutputStream::emit_rate_limit`], for the
@@ -1254,6 +1300,7 @@ impl ConversationOrchestrator {
             mcp_registry: None,
             hook_registry: None,
             agent_catalog: None,
+            main_thread_agent: tokio::sync::RwLock::new(None),
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
@@ -1308,6 +1355,26 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_jsonl_writer(&self) -> bool {
         self.jsonl_writer.is_some()
+    }
+
+    /// Share the per-session read-file-state registry (claude-code's
+    /// `readFileState` map) with the file tools. Builder-style — the
+    /// composition root creates ONE
+    /// [`tool_api::read_file_state::ReadFileStateMap`], passes a clone into the
+    /// file tools' [`tool_api::BuiltinToolContext`], and hands the SAME `Arc`
+    /// here, so a tool's `readFileState.set` (Read/Edit/Write/NotebookEdit) is
+    /// visible to the orchestrator's post-compact restore, `/files`, and the
+    /// staleness consumers — 1:1 with claude-code's single per-session map on
+    /// the `ToolUseContext` (P1-06). Overwrites the fresh, unshared default the
+    /// constructor allocated. Wired at the desktop + mobile composition roots;
+    /// tests that need a live registry can call this with a map they also seed.
+    #[must_use]
+    pub fn with_read_state_map(
+        mut self,
+        map: tool_api::read_file_state::ReadFileStateMap,
+    ) -> Self {
+        self.read_state_map = map;
+        self
     }
 
     /// Seed the JSONL parent-uuid chain pointer so the FIRST append after a
@@ -1683,8 +1750,10 @@ impl ConversationOrchestrator {
     }
 
     /// Mid-turn drain step: pull any queued main-thread, non-slash input from the
-    /// wired source and inject it as a META user message so the next sampling
-    /// sees it. A strict no-op when no source is wired (the default) or the queue
+    /// wired source and inject it as a plain (non-meta) user message so the next
+    /// sampling sees it — CC 2.1.207's `queued_command` guard leaves plain human
+    /// input non-meta (`r!==void 0&&!Ree(r)||e.isMeta` → `{}`). A strict no-op
+    /// when no source is wired (the default) or the queue
     /// is empty. Returns `true` if anything was injected (for the caller's
     /// observability — the loop continues regardless). Mirrors claude-code's
     /// `joinPromptValues` + meta-prompt injection at query.ts ~1570-1580.
@@ -1706,7 +1775,7 @@ impl ConversationOrchestrator {
             match source.take_mid_turn_input().await {
                 Some(text) => {
                     let wrapped = Self::wrap_mid_turn_user_message(&text);
-                    self.inject_meta_user_message(&wrapped).await;
+                    self.inject_user_message(&wrapped).await;
                     injected = true;
                 }
                 None => break,
@@ -2325,18 +2394,29 @@ impl ConversationOrchestrator {
     /// files are re-attached — capped at
     /// [`compaction::POST_COMPACT_MAX_TOKENS_PER_FILE`] each and a running
     /// [`compaction::POST_COMPACT_TOKEN_BUDGET`] total — so the model keeps the
-    /// freshest file context across the boundary. The selection/budgeting is the
-    /// pure [`compaction::restore_post_compact_files`]; this method supplies the
-    /// candidates (from `read_state_map`, the `{content, mtime_ms}` registry) and
-    /// renders each survivor as a `<system-reminder>` meta user message.
+    /// freshest file context across the boundary. Selection is the pure
+    /// [`compaction::select_post_compact_files`]; each survivor is then RE-READ
+    /// from disk (the byte-faithful `eRg`/`XQn` behaviour — see below) before
+    /// [`compaction::budget_post_compact_files`] budgets the fresh contents, and
+    /// each survivor is rendered as a `<system-reminder>` meta user message.
     ///
-    /// SKILL restoration (`Lqn`) is NOT wired here: this orchestrator carries no
-    /// invoked-skill registry to source candidates from, so the skill arm of
-    /// `K2p` has no data seam yet (documented residual). FILE restoration uses
-    /// the SNAPSHOT content the model last saw rather than a fresh disk re-read
-    /// (the binary re-reads via `R6n` with `maxTokens:J9p`); the per-file cap is
-    /// applied to the snapshot here, which is observably equivalent for an
-    /// unchanged file.
+    /// P2-12 / `eRg` (`bin/claude.exe` offset ~91938880): the binary re-reads
+    /// each selected file at compact time via `XQn(filename,
+    /// {...ctx,fileReadingLimits:{maxTokens:z0g}}, "…_success", "…_error",
+    /// "compact")` rather than reusing the stale `readFileState` snapshot. A
+    /// successful re-read fires `tengu_post_compact_file_restore_success` (empty
+    /// payload, `N(r,{})`) and attaches the FRESH content; an unreadable/deleted
+    /// file fires `tengu_post_compact_file_restore_error` (`N(n,{})`) and is
+    /// dropped — the model never sees stale/since-deleted content. This differs
+    /// observably from the snapshot only when a file changed or was deleted after
+    /// its last read.
+    ///
+    /// SKILL restoration (`rRg`/`kGo`) is NOT wired here: this orchestrator
+    /// carries no invoked-skill registry to source candidates from, so the skill
+    /// arm has no data seam yet (documented residual — the pure
+    /// [`compaction::restore_post_compact_skills`] helper exists and is
+    /// unit-tested, awaiting a runtime `invokedSkills` registry + skill-call-site
+    /// wiring).
     async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
         // Snapshot then clear the read-file-state registries (the `eOt` snapshot
         // + `readFileState.clear()` step). Both the rich map and the `/files`
@@ -2364,10 +2444,36 @@ impl ConversationOrchestrator {
             })
             .collect();
 
-        // `already_attached` is empty: this port does not thread the running
-        // attachment set into the boundary builder, so no file is double-counted
-        // here (the snapshot is the sole source).
-        let restored = compaction::restore_post_compact_files(candidates, &[]);
+        // Selection half of `eRg`: filter already-attached + sort mtime DESC +
+        // top-5. `already_attached` is empty: this port does not thread the
+        // running attachment set into the boundary builder (the snapshot is the
+        // sole source), and the plan-file filter (`aRg`) has no seam here — both
+        // documented residuals.
+        let selected = compaction::select_post_compact_files(candidates, &[]);
+
+        // RE-READ each selected file from disk (`XQn`), firing the restore
+        // telemetry per file. A file that changed since its last read yields the
+        // FRESH content; a deleted/unreadable file is dropped (never restoring the
+        // stale snapshot content the model would otherwise have carried across the
+        // boundary).
+        let mut fresh: Vec<compaction::FileRestoreCandidate> = Vec::with_capacity(selected.len());
+        for candidate in selected {
+            match tokio::fs::read_to_string(&candidate.path).await {
+                Ok(content) => {
+                    self.fire_post_compact_file_restore(true).await;
+                    fresh.push(compaction::FileRestoreCandidate { content, ..candidate });
+                }
+                Err(_) => {
+                    // Unreadable/deleted at compact time → drop; `XQn` returns
+                    // null and the file is filtered out of the attachment set.
+                    self.fire_post_compact_file_restore(false).await;
+                }
+            }
+        }
+
+        // Budgeting half of `eRg`: per-file cap (maxTokens 5000) + running budget
+        // (50000) over the FRESH re-read contents, preserving the DESC order.
+        let restored = compaction::budget_post_compact_files(fresh);
 
         restored
             .into_iter()
@@ -2384,6 +2490,27 @@ impl ConversationOrchestrator {
                 protocol::ConversationMessage::user_meta(protocol::MessageId::new(), body)
             })
             .collect()
+    }
+
+    /// Fire the post-compact file-restore telemetry — `N(r,{})` / `N(n,{})` in
+    /// the binary's `XQn`: an EMPTY payload, one event per re-read attempt.
+    ///
+    /// `true` → `tengu_post_compact_file_restore_success` (the file re-read
+    /// cleanly); `false` → `tengu_post_compact_file_restore_error` (unreadable /
+    /// deleted). No-op when no analytics bus is wired (library/test callers),
+    /// mirroring the other `fire_*` compaction telemetry helpers.
+    async fn fire_post_compact_file_restore(&self, success: bool) {
+        let Some(bus) = self.analytics_bus.as_ref() else {
+            return;
+        };
+        let event = if success {
+            "tengu_post_compact_file_restore_success"
+        } else {
+            "tengu_post_compact_file_restore_error"
+        };
+        // Empty metadata — the binary fires `N(r,{})` / `N(n,{})` with no fields.
+        bus.log_event(event, telemetry::LogEventMetadata::new())
+            .await;
     }
 
     pub(crate) async fn apply_post_compact(
@@ -2404,14 +2531,14 @@ impl ConversationOrchestrator {
         // the byte-exact `"Conversation compacted"` sentinel) instead of the ad-hoc
         // `[Compacted N → M]` marker, so the TUI scrollback + next-turn system-prompt
         // assembly see the same boundary TS emits. The rich `CompactBoundaryMetadata`
-        // has no orchestrator-side consumer yet (no sidecar store / no
-        // `get_messages_after_compact_boundary` caller), so it is discarded here; a
-        // follow-up that persists it can swap `_metadata` for a real store.
+        // is persisted below as the boundary line's `compactMetadata` (P1-05), so a
+        // cold `--resume` reconstructs the post-compact transition.
         //
         // #58: when a tail was preserved, the boundary carries a
         // `preserved_segment` (`WAo`): head = first kept msg, anchor = the LAST
-        // summary message (suffix-preserving splice point), tail = last kept msg.
-        // The anchor is the last of `result.messages` (the summary set). When the
+        // summary message (suffix-preserving splice point), tail = last kept msg —
+        // plus the loader's `preserved_messages` re-splice list (`E$_`). The
+        // anchor is the last of `result.messages` (the summary set). When the
         // tail is empty, `create_compact_boundary_with_preserved_tail` yields
         // `preserved_segment: None`, identical to the plain constructor.
         let anchor_uuid = if preserved_tail.is_empty() {
@@ -2422,7 +2549,7 @@ impl ConversationOrchestrator {
                 .last()
                 .map(protocol::ConversationMessage::id)
         };
-        let (marker, _metadata) = compaction::create_compact_boundary_with_preserved_tail(
+        let (marker, metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
             0,
             None,
@@ -2452,13 +2579,14 @@ impl ConversationOrchestrator {
         let mut history_after = Vec::with_capacity(
             result.messages.len() + 1 + preserved_tail.len() + restored_attachments.len(),
         );
+        let tail_preserved = !preserved_tail.is_empty();
         history_after.push(marker.clone());
-        history_after.extend(result.messages);
+        history_after.extend(result.messages.iter().cloned());
         // #58: the usage-zeroed verbatim tail (`messagesToKeep`).
         history_after.extend(preserved_tail);
         // Restored file attachments ride after the summary + kept tail (the
         // `attachments` slot in `buildPostCompactMessages`).
-        history_after.extend(restored_attachments);
+        history_after.extend(restored_attachments.iter().cloned());
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
@@ -2475,12 +2603,41 @@ impl ConversationOrchestrator {
         // main-thread resets fire.
         compaction::run_post_compact_cleanup(None);
 
-        // Persist the boundary marker to the optional JSONL writer so a
-        // `--resume` of this session sees the compaction transition (the
-        // summary user message(s) inside `result.messages` are the compactor's
-        // output; the marker is the orchestrator-side boundary). Best-effort —
-        // a write failure never fails the turn.
-        self.persist_message_to_jsonl(&marker).await;
+        // P1-05: persist the full compaction transition (claude 2.1.207
+        // `insertMessageChain` + the compact flow), so a cold `--resume`
+        // reconstructs exactly the post-compact state. Best-effort — a write
+        // failure never fails the turn.
+        //
+        // 1. The boundary line: `parentUuid: null` (chain reset — a tip→root
+        //    walk stops here) with the real parent stashed in
+        //    `logicalParentUuid`, plus the flattened `subtype:"compact_boundary"`
+        //    / `content` / `level:"info"` / `compactMetadata` envelope.
+        // 2. The summary user line(s) (`isCompactSummary` +
+        //    `isVisibleInTranscriptOnly`), chained off the boundary.
+        // 3. The preserved verbatim tail is NOT rewritten — its lines are
+        //    already on disk (claude doesn't rewrite them either); the
+        //    boundary's `preservedSegment`/`preservedMessages` metadata carries
+        //    the loader's re-splice info. The chain pointer is reset to the
+        //    tail's LAST on-disk line so subsequent lines parent off the kept
+        //    tail, exactly like claude (whose writer chains off the in-memory
+        //    array `[boundary, ...summary, ...messagesToKeep, ...]`, skipping
+        //    already-persisted members).
+        // 4. Restored file attachments, chained after the tail (the
+        //    `attachments` slot of `buildPostCompactMessages`).
+        let pre_boundary_last_uuid = self.last_jsonl_uuid.lock().await.clone();
+        self.persist_compact_boundary_to_jsonl(&marker, &metadata)
+            .await;
+        for m in &result.messages {
+            self.persist_compact_summary_to_jsonl(m).await;
+        }
+        if tail_preserved {
+            if let Some(tail_last) = pre_boundary_last_uuid {
+                *self.last_jsonl_uuid.lock().await = Some(tail_last);
+            }
+        }
+        for m in &restored_attachments {
+            self.persist_message_to_jsonl(m).await;
+        }
 
         // Best-effort emit so the TUI hears about it.
         self.output
@@ -3023,13 +3180,12 @@ impl ConversationOrchestrator {
     /// drives [`check_token_budget`], and on `continue` appends a meta user
     /// message carrying the byte-exact `getBudgetContinuationMessage` nudge.
     /// The completion telemetry is emitted as a `tracing` event on stop.
-    /// Inject a meta nudge as a plain user text message into both the live
-    /// session history and the JSONL persistence stream. The protocol carries
-    /// no `isMeta` flag (cf. the max-output-tokens / token-budget nudges), so a
-    /// meta message is a plain user text message carrying the byte-exact bytes.
-    /// Shared by the malformed-tool-use retry (#77) and thinking-only (#78)
-    /// continuations, which mirror the same injection pattern as the
-    /// max-output-tokens recovery nudge.
+    /// The continuation nudge is injected as a META user message
+    /// ([`Self::inject_meta_user_message`] / [`ConversationMessage::user_meta`])
+    /// into both the live session history and the JSONL persistence stream,
+    /// where it persists with top-level `isMeta:true`. The same META injection
+    /// pattern is shared by the malformed-tool-use retry (#77), thinking-only
+    /// (#78), and max-output-tokens recovery nudges.
     /// Finding #80: refusal → fallback-model swap (claude-code `bin/claude.exe`
     /// offset ~205871579, `vr === "refusal" && rc !== void 0`). When the active
     /// turn's response has `stop_reason == "refusal"`, a
@@ -3102,8 +3258,32 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         true
     }
 
+    /// Inject an engine META user message (`isMeta:true`) into both the live
+    /// session history and the JSONL persistence stream — the recovery /
+    /// continuation nudges (thinking-only, malformed-tool retry) that claude-code
+    /// creates via `createUserMessage({ …, isMeta: true })`. Persisting stamps the
+    /// top-level `isMeta:true` envelope flag (see `to_jsonl_message`), so these
+    /// lines are skipped by title / first-prompt / fork-name / visible-count
+    /// extraction, exactly as in CC 2.1.207.
     async fn inject_meta_user_message(&self, text: &str) {
-        let msg = ConversationMessage::user(MessageId::new(), text.to_string());
+        self.inject_user_text(text, true).await;
+    }
+
+    /// Inject a PLAIN (non-meta) user text message. Used for interrupt markers
+    /// (`[Request interrupted by user]`) and mid-turn drained HUMAN input, which
+    /// CC 2.1.207 persists WITHOUT `isMeta` — interrupt lines are built with no
+    /// `isMeta` field, and queued human input is non-meta per the `queued_command`
+    /// guard (`r!==void 0&&!Ree(r)||e.isMeta` → `{}` for plain human input).
+    async fn inject_user_message(&self, text: &str) {
+        self.inject_user_text(text, false).await;
+    }
+
+    async fn inject_user_text(&self, text: &str, is_meta: bool) {
+        let msg = if is_meta {
+            ConversationMessage::user_meta(MessageId::new(), text.to_string())
+        } else {
+            ConversationMessage::user(MessageId::new(), text.to_string())
+        };
         {
             let mut s = self.session.lock().await;
             s.history.push(msg.clone());
@@ -3142,10 +3322,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     budget,
                     "token budget continuation #{continuation_count}: {pct}% ({turn_tokens} / {budget})"
                 );
-                // Inject the continuation nudge as a meta user message. The
-                // protocol carries no `isMeta` flag, so it is a plain user text
-                // message with the byte-exact nudge string.
-                let nudge_msg = ConversationMessage::user(MessageId::new(), nudge_message);
+                // Inject the continuation nudge as a META user message
+                // (`createUserMessage({content: nudgeMessage, isMeta: true})`,
+                // query.ts:1327). It persists with top-level `isMeta:true` and is
+                // skipped by title / first-prompt / visible-count extraction.
+                let nudge_msg = ConversationMessage::user_meta(MessageId::new(), nudge_message);
                 {
                     let mut s = self.session.lock().await;
                     s.history.push(nudge_msg.clone());
@@ -3727,7 +3908,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         msg: &ConversationMessage,
         parent_override: Option<String>,
     ) {
-        self.persist_message_to_jsonl_inner(msg, parent_override, None)
+        self.persist_message_to_jsonl_inner(msg, parent_override, None, false)
             .await;
     }
 
@@ -3740,17 +3921,114 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         msg: &ConversationMessage,
         env: ApiErrorEnvelope,
     ) {
-        self.persist_message_to_jsonl_inner(msg, None, Some(env))
+        self.persist_message_to_jsonl_inner(msg, None, Some(env), false)
             .await;
     }
 
-    /// Shared append body for [`Self::persist_message_to_jsonl_with_parent`] and
-    /// [`Self::persist_api_error_message_to_jsonl`].
+    /// Persist a compaction summary user line, stamping the top-level
+    /// `isVisibleInTranscriptOnly: true` + `isCompactSummary: true` envelope
+    /// flags. 1:1 with claude 2.1.207's summary persist
+    /// (`$r({content: v9r(...), isCompactSummary: !0,
+    /// isVisibleInTranscriptOnly: !0})`, round-tripped by the writer's
+    /// `...f.isCompactSummary===!0&&{isCompactSummary:!0}`); the line chains
+    /// off `last_jsonl_uuid` (the compact-boundary line).
+    pub(crate) async fn persist_compact_summary_to_jsonl(&self, msg: &ConversationMessage) {
+        self.persist_message_to_jsonl_inner(msg, None, None, true)
+            .await;
+    }
+
+    /// Persist the compact-boundary system line (P1-05) — claude 2.1.207's
+    /// `insertMessageChain` chain reset: the boundary gets `parentUuid: null`
+    /// (`CC(d)` ⇒ `{parentUuid: p?null:f, logicalParentUuid: p?i:void 0}`) with
+    /// the real parent (the last pre-compact on-disk line) stashed in
+    /// `logicalParentUuid`, plus the flattened system envelope
+    /// (`subtype:"compact_boundary"`, `content:"Conversation compacted"`,
+    /// `level:"info"`, camelCase `compactMetadata`) and NO inner `message`.
+    /// Best-effort like every other JSONL append; advances `last_jsonl_uuid`
+    /// to the boundary's uuid on success so the summary line chains off it.
+    async fn persist_compact_boundary_to_jsonl(
+        &self,
+        marker: &ConversationMessage,
+        metadata: &compaction::CompactBoundaryMetadata,
+    ) {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id_str = self.session.lock().await.session_id.to_string();
+        // The real parent this line WOULD have chained to — claude stashes it
+        // in `logicalParentUuid` and writes `parentUuid: null`.
+        let logical_parent = self.last_jsonl_uuid.lock().await.clone();
+        let git_branch = self.resolve_git_branch().await;
+
+        // `compactMetadata` wire value: CompactBoundaryMetadata serializes
+        // claude's camelCase keys; `logicalParentUuid` is a TOP-LEVEL line
+        // field (`x9r` spreads it as a message-level sibling), never a
+        // `compactMetadata` member — strip it defensively.
+        let mut compact_metadata =
+            serde_json::to_value(metadata).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = compact_metadata.as_object_mut() {
+            obj.remove("logicalParentUuid");
+        }
+        let content = match marker {
+            ConversationMessage::System { content, .. } => content.clone(),
+            _ => compaction::BOUNDARY_CONTENT.to_string(),
+        };
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "subtype".to_string(),
+            serde_json::Value::String("compact_boundary".to_string()),
+        );
+        extra.insert("content".to_string(), serde_json::Value::String(content));
+        extra.insert(
+            "level".to_string(),
+            serde_json::Value::String("info".to_string()),
+        );
+        extra.insert("compactMetadata".to_string(), compact_metadata);
+
+        let jmsg = session::JsonlMessage {
+            message_type: "system".to_string(),
+            uuid: marker.id().as_uuid().to_string(),
+            parent_uuid: None,
+            session_id: session_id_str.clone(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            // Boundary lines carry NO inner `message` (the schema's
+            // compact-boundary arm skips the field entirely).
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch,
+            entrypoint: Some(entrypoint_value()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: logical_parent,
+            extra,
+        };
+        let uuid_for_chain = jmsg.uuid.clone();
+        match writer.append(&jmsg).await {
+            Ok(()) => {
+                *self.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
+                telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "jsonl writer append failed");
+                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+            }
+        }
+    }
+
+    /// Shared append body for [`Self::persist_message_to_jsonl_with_parent`],
+    /// [`Self::persist_api_error_message_to_jsonl`] and
+    /// [`Self::persist_compact_summary_to_jsonl`].
     async fn persist_message_to_jsonl_inner(
         &self,
         msg: &ConversationMessage,
         parent_override: Option<String>,
         api_error: Option<ApiErrorEnvelope>,
+        compact_summary: bool,
     ) {
         let Some(writer) = self.jsonl_writer.as_ref() else {
             return;
@@ -3774,7 +4052,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         let git_branch = self.resolve_git_branch().await;
         let entrypoint = Some(entrypoint_value());
         let prompt_id = self.prompt_id_for_message(msg).await;
-        let jmsg = self.to_jsonl_message_with_inner_id(
+        let mut jmsg = self.to_jsonl_message_with_inner_id(
             msg,
             &session_id_str,
             parent_uuid,
@@ -3787,6 +4065,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             None,
             api_error.as_ref(),
         );
+        // Compaction summary user line: stamp the top-level envelope flags in
+        // claude's on-disk order (`isVisibleInTranscriptOnly` before
+        // `isCompactSummary`, between `message` and `uuid` — the schema's user
+        // arm emits them there).
+        if compact_summary {
+            jmsg.extra.insert(
+                "isVisibleInTranscriptOnly".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            jmsg.extra
+                .insert("isCompactSummary".to_string(), serde_json::Value::Bool(true));
+        }
         let uuid_for_chain = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
             Ok(()) => {
@@ -4182,12 +4472,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .as_ref()
             .map(|w| w.path().to_path_buf())
             .unwrap_or_else(|| self.computed_transcript_path(&session_id));
+        // Main-thread lifecycle hooks (SessionStart / UserPromptSubmit / Stop /
+        // expansion) carry the adopted `--agent`'s `agentType` — claude-code's
+        // base hook-input builder `wf` uses `r?.agentType ?? MB()`, and these
+        // firings have no tool-use context `r`, so they fall through to `MB()`
+        // (the main-thread agent type). `None` when no `--agent` was applied.
+        let agent_type = self.main_thread_agent_type().await;
         HookContext {
             session_id,
             cwd: self.current_cwd(),
             transcript_path,
             permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
             stop_hook_active,
+            agent_type,
             ..Default::default()
         }
     }
@@ -4227,6 +4524,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `true` when a hook returned a `Block` decision, signalling the caller to
     /// ABORT the turn before any API call. Strict no-op (returns `false`) when
     /// no matching hook is registered, so existing flows are unaffected.
+    ///
+    /// Two `hookSpecificOutput` fields are applied here (P2-04), matching the
+    /// binary's prompt-hook switch:
+    /// - `sessionTitle` renames the session via the same custom-title write
+    ///   path as `/rename` (claude `kje(title,"hook")`), applied for any
+    ///   outcome (not only on block).
+    /// - On a `Block`, a warning message is rendered to the output stream —
+    ///   claude `dPs`/`Tc(...,"warning",void 0,!0)`:
+    ///   `"UserPromptSubmit operation blocked by hook:\n{reason}"`, and unless
+    ///   the hook set `suppressOriginalPrompt`, `"\n\nOriginal prompt: {prompt}"`
+    ///   is appended. The reason defaults to `"Blocked by hook"` when the hook
+    ///   omits one (`e.reason||"Blocked by hook"`). The message is display-only
+    ///   (isMeta warning) — the turn still aborts (`shouldQuery:!1`).
     async fn fire_user_prompt_submit(&self, prompt: &str) -> bool {
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
@@ -4238,7 +4548,37 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 ctx,
             )
             .await;
-        matches!(agg.decision, Some(hooks::response::HookDecision::Block))
+
+        // `hookSpecificOutput.sessionTitle` — rename the session (claude
+        // applies it regardless of the block outcome). Best-effort: no writer
+        // wired (library/test callers) ⇒ silent no-op, an empty title is
+        // ignored.
+        if let Some(title) = agg.session_title.as_deref() {
+            if !title.is_empty() {
+                if let Some(writer) = self.jsonl_writer.as_ref() {
+                    let session_id = self.session.lock().await.session_id;
+                    let _ = writer
+                        .append_custom_title(&session_id.as_uuid().to_string(), title)
+                        .await;
+                }
+            }
+        }
+
+        let blocked = matches!(agg.decision, Some(hooks::response::HookDecision::Block));
+        if blocked {
+            let reason = agg
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Blocked by hook".to_string());
+            let base = format!("UserPromptSubmit operation blocked by hook:\n{reason}");
+            let warning = if agg.suppress_original_prompt {
+                base
+            } else {
+                format!("{base}\n\nOriginal prompt: {prompt}")
+            };
+            self.output.emit_text(&warning).await;
+        }
+        blocked
     }
 
     /// Fire the `MessageDisplay` hooks at the BEGIN of an assistant-message
@@ -4605,11 +4945,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         summary: String,
         tokens_freed: u64,
     ) {
-        // `trigger` is part of the TS PostCompact `matchQuery` but the
-        // `HookEvent::PostCompact` wire builder emits an empty `trigger` field
-        // (`hooks/executor.rs:768`); accepted here for call-site symmetry with
-        // `fire_pre_compact` and forward-compatibility if the payload widens.
-        let _ = trigger;
+        // `trigger` (`manual` / `auto`) is threaded onto the `PostCompact`
+        // event so it becomes the TS `matchQuery` (claude `getMatchingHooks`
+        // `i = r.trigger`) AND rides the wire payload — a hook matcher of
+        // `"manual"` / `"auto"` now filters correctly.
         let ctx = self.lifecycle_hook_ctx(false).await;
         let _ = self
             .hooks
@@ -4617,6 +4956,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 HookEvent::PostCompact {
                     summary,
                     tokens_freed,
+                    trigger: trigger.to_string(),
                 },
                 ctx,
             )
@@ -4928,11 +5268,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     async fn try_run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
-        // 0. Build the system prompt for THIS turn. Override always wins.
-        let system_prompt: Option<String> = match &self.config.system_prompt_override {
-            Some(custom) => Some(custom.clone()),
-            None => Some(self.build_system_prompt().await),
-        };
+        // 0. Build the system prompt for THIS turn.
+        // claude-code `nre` precedence: `--system-prompt` (override) wins; else
+        // the `--agent`-adopted main-thread agent's prompt; else the default.
+        let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
         // 1. Append the user prompt to session history.
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
@@ -5133,11 +5472,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // finish before it can open its own stream.
         self.abort_startup_responses_websocket_prewarm();
 
-        // 0. Build the system prompt for THIS turn. Override always wins.
-        let system_prompt: Option<String> = match &self.config.system_prompt_override {
-            Some(custom) => Some(custom.clone()),
-            None => Some(self.build_system_prompt().await),
-        };
+        // 0. Build the system prompt for THIS turn.
+        // claude-code `nre` precedence: `--system-prompt` (override) wins; else
+        // the `--agent`-adopted main-thread agent's prompt; else the default.
+        let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
         // 1. Append the user prompt (+ any pasted images) to session history.
         // `images` arrives already decoded (path-based callers ran `load_images`
@@ -5269,7 +5607,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                    self.inject_user_message(INTERRUPT_MESSAGE).await;
                 }
                 final_message_id = last_message_id;
                 break;
@@ -5527,6 +5865,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // REJECT_MESSAGE; `None` → identical to before.
             let assistant_id = MessageId::new();
 
+            // P1-04 (cc 2.1.199 partial-stream finalize): set by the pump error
+            // arm when a completed partial is finalized in place. Drives the
+            // "API Error: … may be incomplete." notice (surfaced after the partial
+            // is persisted) and the terminal turn-end below. Reset per turn.
+            let mut partial_finalize: Option<crate::streaming_loop::PartialFinalizeCause> = None;
+            let mut partial_finalize_notice_id: Option<MessageId> = None;
+
             // hooks #39: MessageDisplay fires at the BEGIN of this assistant
             // message's stream (claude-code `begin(d)`, BIN off 208862320),
             // mirroring its `o={apiMessageId:d, messageId:randomUUID(),
@@ -5753,11 +6098,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
             };
 
-            // 3. Pump the stream (with mid-stream 529 → non-streaming fallback).
+            // 3. Pump the stream (with mid-stream 529 → non-streaming fallback OR
+            //    the cc 2.1.199 partial-finalize, whichever applies).
             //
             // Task 7 / claude.ts parity: if the stream errors with `LlmError::Overloaded`
             // after the first event — AND `LINGXI_DISABLE_NONSTREAMING_FALLBACK` is not
-            // set — discard the partial accumulation and issue a fresh non-streaming call
+            // set — AND no content block completed yet — issue a fresh non-streaming call
             // seeded with `initial_consecutive_overloaded = 1`.  This mirrors
             // `claude.ts:2469-2594` + `withRetry.ts:186` (`initialConsecutive529Errors`).
             //
@@ -5765,17 +6111,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             //   `process.env.LINGXI_DISABLE_NONSTREAMING_FALLBACK` (claude.ts:2470)
             // Truthiness follows `isEnvTruthy` (non-empty, non-"false", non-"0").
             //
-            // M1 parity note (Task 7 review): TS yields partial deltas LIVE to callers
-            // as they arrive (claude.ts:2210 `yield m` fires inside the for-await loop,
-            // at each `content_block_stop`).  Our path likewise dispatches text deltas live
-            // via `event_router.rs` → `output.emit_text` for each `TextDelta`, so partial
-            // output DOES reach callers before the fallback fires.  This matches TS: both
-            // implementations dispatch partial output live, then dispatch the fallback-only
-            // output after the non-streaming call completes.  The PERSISTED assistant message
-            // (and the final `ConversationOutcome`) contains ONLY the fallback blocks —
-            // `pumped_from_fallback.assistant_blocks` — not the discarded partial stream
-            // fragments, which is correct: the partial stream never reached `content_block_stop`
-            // for its text block, so no completed block was accumulated.
+            // P1-04 (cc 2.1.199, binary-verified): once a REAL content block has
+            // COMPLETED (`content_block_stop` → `pumped.assistant_blocks`) the
+            // partial is NO LONGER discarded on a finalize-class error. The
+            // `partial_has_output` arm in the `match pump_outcome` below finalizes
+            // it in place (synthesized stop_reason + usage + `tengu_streaming_partial_finalized`),
+            // persists the streamed blocks, and appends the "API Error: … may be
+            // incomplete." notice — instead of the pre-2.1.199 discard-and-refetch.
+            // The non-streaming fallback therefore fires ONLY when the stream erred
+            // BEFORE its first block completed (a bare `content_block_start` that
+            // never reached `content_block_stop`), matching cc's `_r`-length guard.
+            // In both cases partial deltas already reached callers LIVE via
+            // `event_router.rs` → `output.emit_text` at each `TextDelta`
+            // (claude.ts:2210 `yield m`).
             // #1: a connect-phase prompt-too-long already recovered above (its
             // recovered non-streaming response was replayed) skips the pump; an
             // open stream is pumped as before.
@@ -5794,8 +6142,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 // clean, so the retry reuses `exec` and re-snapshots history.
                 let mut cur_stream = first_stream;
                 let mut mid_stream_retries: u32 = 0;
-                let pump_outcome: Result<crate::streaming_loop::PumpedTurn, OrchestratorError> =
-                    loop {
+                let pump_outcome: Result<
+                    crate::streaming_loop::PumpedTurn,
+                    crate::streaming_loop::PumpFailure,
+                > = loop {
                         match crate::streaming_loop::pump_stream_with_executor_tracked(
                             cur_stream,
                             &self.output,
@@ -5851,28 +6201,111 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                         continue;
                                     }
                                     // Re-open failed: surface as the terminal
-                                    // pump error for the arms below.
-                                    Err(e) => break Err(OrchestratorError::Streaming(e)),
+                                    // pump error for the arms below. No partial to
+                                    // finalize here — the retry only fires while
+                                    // `!real_content_started`, so nothing real was
+                                    // yielded on the attempt we are abandoning.
+                                    Err(e) => {
+                                        break Err(crate::streaming_loop::PumpFailure {
+                                            error: OrchestratorError::Streaming(e),
+                                            real_content_started: false,
+                                            partial: crate::streaming_loop::PumpedTurn::default(),
+                                        })
+                                    }
                                 }
                             }
-                            Err(f) => break Err(f.error),
+                            Err(f) => break Err(f),
                         }
                     };
                 match pump_outcome {
                 Ok(p) => p,
-                Err(OrchestratorError::Streaming(
-                    ref e @ (LlmError::Overloaded { .. } | LlmError::ProviderInternal),
-                )) if !is_env_truthy(
-                    std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
-                        .as_deref()
-                        .ok(),
-                ) =>
+                // P1-04 (cc 2.1.199 partial-stream finalize, binary-verified): a
+                // finalize-class mid-stream error (server/overloaded/api error,
+                // watchdog stall, or connection close) that landed AFTER a real
+                // content block COMPLETED is NOT discarded. The already-streamed
+                // partial is finalized in place — persisted with a synthesized
+                // `stop_reason` (`tool_use` if any tool_use else `end_turn`) +
+                // usage — `tengu_streaming_partial_finalized` fires, and a byte-exact
+                // "API Error: … The response above may be incomplete." notice is
+                // surfaced after it (see the notice + terminal sites below, gated on
+                // `partial_finalize`). This runs BEFORE the 529 non-streaming
+                // fallback so a completed-partial 529 keeps its streamed output
+                // instead of re-fetching; a 529 that erred before any block
+                // completed (no output) falls through to the fallback as before.
+                Err(f)
+                    if crate::streaming_loop::partial_has_output(&f.partial)
+                        && crate::streaming_loop::partial_finalize_cause(&f.error).is_some() =>
+                {
+                    let cause = crate::streaming_loop::partial_finalize_cause(&f.error)
+                        .expect("finalize cause present (guarded above)");
+                    let mut partial = f.partial;
+                    // cc `gm=vd?"tool_use":"end_turn"`: a dispatched tool_use makes
+                    // this a tool turn, else a natural end.
+                    let synthesized_stop_reason = if partial.tool_uses.is_empty() {
+                        "end_turn"
+                    } else {
+                        "tool_use"
+                    };
+                    partial.stop_reason = Some(synthesized_stop_reason.to_string());
+                    // cc `_r.length`: one yielded message per completed content block.
+                    let blocks_yielded = partial.assistant_blocks.len() + partial.tool_uses.len();
+                    if let Some(bus) = self.analytics_bus.as_ref() {
+                        let mut md = telemetry::LogEventMetadata::new();
+                        md.insert(
+                            "model".into(),
+                            telemetry::AnalyticsValue::String(model.clone()),
+                        );
+                        md.insert(
+                            "blocks_yielded".into(),
+                            telemetry::AnalyticsValue::Int(
+                                i64::try_from(blocks_yielded).unwrap_or(i64::MAX),
+                            ),
+                        );
+                        // has_output is always true on this arm (partial_has_output).
+                        md.insert("has_output".into(), telemetry::AnalyticsValue::Bool(true));
+                        md.insert(
+                            "synthesized_stop_reason".into(),
+                            telemetry::AnalyticsValue::String(
+                                synthesized_stop_reason.to_string(),
+                            ),
+                        );
+                        md.insert(
+                            "cause".into(),
+                            telemetry::AnalyticsValue::String(cause.as_str().to_string()),
+                        );
+                        if let Some(rid) = self.api.last_request_id() {
+                            md.insert(
+                                "request_id".into(),
+                                telemetry::AnalyticsValue::String(rid),
+                            );
+                        }
+                        bus.log_event("tengu_streaming_partial_finalized", md).await;
+                    }
+                    // Arm the notice + terminal-end sites below; the partial flows
+                    // through the normal billing/persist/tool-drive path first.
+                    partial_finalize = Some(cause);
+                    partial
+                }
+                Err(f)
+                    if matches!(
+                        f.error,
+                        OrchestratorError::Streaming(
+                            LlmError::Overloaded { .. } | LlmError::ProviderInternal
+                        )
+                    ) && !is_env_truthy(
+                        std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
+                            .as_deref()
+                            .ok(),
+                    ) =>
                 {
                     // Seed: a streaming overload counts as 1 toward the consecutive
                     // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
                     // (e.g. ProviderInternal) seed 0 — matching TS
                     // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
-                    let seed: u8 = u8::from(matches!(e, LlmError::Overloaded { .. }));
+                    let seed: u8 = u8::from(matches!(
+                        f.error,
+                        OrchestratorError::Streaming(LlmError::Overloaded { .. })
+                    ));
 
                     // Re-snapshot history for the non-streaming call (the partial
                     // stream never touched session.history, so it is still the same
@@ -5950,14 +6383,21 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 }
                 // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
                 // downstream handling — propagate.
-                Err(e) if crate::turn_loop::is_carveout_propagated(&e) => return Err(e),
+                Err(f) if crate::turn_loop::is_carveout_propagated(&f.error) => {
+                    return Err(f.error)
+                }
                 // #10: any other mid-stream model/runtime error (e.g. Transport)
                 // ends the turn GRACEFULLY as `model_error` (faithful port of the
                 // `query.ts` catch) rather than bubbling a hard error / phantom
-                // interrupt. The assistant message for this turn is persisted only
-                // AFTER a successful pump, so the errored pump left no orphaned
-                // tool_use to repair (TS `yieldMissingToolResultBlocks` no-op here).
-                Err(other) => {
+                // interrupt. Reached when the partial finalize above did NOT apply —
+                // either no content block completed before the error (a bare
+                // `content_block_start` that never reached `content_block_stop`, so
+                // there is no orphaned tool_use to repair) or the error is not a
+                // finalize class. The assistant message for a partial-with-real-
+                // -output turn is persisted by the finalize arm above; here nothing
+                // was persisted (TS `yieldMissingToolResultBlocks` no-op).
+                Err(f) => {
+                    let other = f.error;
                     // Classify the typed mid-stream error (`Flp`/`KNn`) into the
                     // api-error envelope; the message text stays verbatim.
                     let env = classify_api_error(&other);
@@ -6010,7 +6450,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // streaming per-request success path (claude
                     // `j("tengu_api_success", {...})`). `tengu_cost_recorded`
                     // was port-only and dropped.
-                    if let Some(bus) = self.analytics_bus.as_ref() {
+                    //
+                    // P1-04: a partial-stream finalize is NOT a per-request success —
+                    // cc records cost (`Ae+=zhe`, kept above) but does NOT emit
+                    // `tengu_api_success` (it already fired `tengu_streaming_partial_finalized`).
+                    // Skip the success emit when this turn was finalized from a partial.
+                    if let Some(bus) = self
+                        .analytics_bus
+                        .as_ref()
+                        .filter(|_| partial_finalize.is_none())
+                    {
                         #[allow(clippy::cast_possible_truncation)]
                         let dur_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                         cost::emit_api_success(
@@ -6146,6 +6595,30 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // Fallback parent (the LAST persisted block's uuid) for any
             // tool_result whose tool_use id is missing from the map (defensive).
             let assistant_uuid = self.last_jsonl_uuid.lock().await.clone();
+
+            // P1-04 (cc 2.1.199): after the finalized partial assistant is
+            // persisted, yield the byte-exact incomplete-response notice as its own
+            // api-error assistant message — cc yields `tu({content:…, error:"server_error"})`
+            // RIGHT AFTER the patched partial and BEFORE any tool_results run. The
+            // notice's api-error category is hardcoded `server_error` regardless of
+            // the underlying finalize cause (cc `error:"server_error"`). Persisted
+            // without the `tengu_query_error` telemetry (that fires only from the
+            // top-level `model_error` catch, not this finalize path).
+            if let Some(cause) = partial_finalize {
+                let env = ApiErrorEnvelope {
+                    error: Some("server_error"),
+                    api_error_status: None,
+                    inner_stop_reason: None,
+                };
+                partial_finalize_notice_id = Some(
+                    crate::turn_loop::surface_api_error_notice(
+                        self,
+                        cause.incomplete_notice(),
+                        env,
+                    )
+                    .await,
+                );
+            }
 
             // #5 aborted_streaming vs aborted_tools disambiguation (faithful port
             // of claude-code's TWO distinct abort checkpoints): query.ts:1015 runs
@@ -6298,9 +6771,25 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_meta_user_message(interrupt_message).await;
+                    self.inject_user_message(interrupt_message).await;
                 }
                 final_message_id = assistant_id;
+                break;
+            }
+
+            // P1-04 (cc 2.1.199): a finalized partial ends the turn once its
+            // dispatched tools have drained (above) and the incomplete-response
+            // notice has been surfaced — cc `break e`s out of the stream loop after
+            // yielding the notice; it does NOT re-enter the continuation logic. We
+            // terminate here (reason `model_error`, matching the api-error catch)
+            // rather than looping on the synthesized `tool_use`/`end_turn`, so the
+            // user sees the partial + notice and can retry. The synthesized
+            // stop_reason still rides on the persisted partial assistant line
+            // (patched above) for resume fidelity.
+            if partial_finalize.is_some() {
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn("model_error", &cost).await;
+                final_message_id = partial_finalize_notice_id.unwrap_or(assistant_id);
                 break;
             }
 
@@ -6479,9 +6968,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     if recovery.max_output_tokens_recovery_count
                         < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT =>
                 {
-                    // The nudge is a plain user text message carrying the
-                    // byte-exact string (the protocol has no `isMeta` flag).
-                    let nudge_msg = ConversationMessage::user(
+                    // The nudge is a META user message carrying the byte-exact
+                    // string — CC 2.1.207 builds it via `createUserMessage({…,
+                    // isMeta:!0})`, so it persists with top-level `isMeta:true`.
+                    let nudge_msg = ConversationMessage::user_meta(
                         MessageId::new(),
                         MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string(),
                     );
@@ -6685,10 +7175,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         // 0. Build the system prompt (same as non-cancelable path).
-        let system_prompt: Option<String> = match &self.config.system_prompt_override {
-            Some(custom) => Some(custom.clone()),
-            None => Some(self.build_system_prompt().await),
-        };
+        // claude-code `nre` precedence: `--system-prompt` (override) wins; else the
+        // `--agent` main-thread agent's prompt; else the default (`build_system_prompt`).
+        let system_prompt: Option<String> = Some(self.effective_system_prompt().await);
 
         // 1. Append the user prompt to session history.
         let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
@@ -6743,7 +7232,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                    self.inject_user_message(INTERRUPT_MESSAGE).await;
                 }
                 return Ok(TurnOutcome::Cancelled);
             }
@@ -6775,7 +7264,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     if self.cancel_reason_now()
                         != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                     {
-                        self.inject_meta_user_message(INTERRUPT_MESSAGE).await;
+                        self.inject_user_message(INTERRUPT_MESSAGE).await;
                     }
                     return Ok(TurnOutcome::Cancelled);
                 }
@@ -7005,10 +7494,75 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `real_provider()`) actually reaches the system prompt, without a live
     /// model round-trip.
     pub async fn assemble_system_prompt_preview(&self) -> String {
-        match &self.config.system_prompt_override {
-            Some(p) => p.clone(),
-            None => self.build_system_prompt().await,
+        self.effective_system_prompt().await
+    }
+
+    /// Adopt a `--agent`-resolved definition for the MAIN conversation loop
+    /// (claude-code `bde(agentDef.agentType)` + `mainThreadAgentDefinition`).
+    /// Called ONCE at startup by the composition root when `--agent` resolves to
+    /// a catalog hit — the resolution runs against the FINAL agent catalog after
+    /// this orchestrator is already `Arc`-wrapped, so the seam is interior-mutable.
+    /// After this, `agent_type` rides every main-thread lifecycle hook payload,
+    /// `system_prompt` (when `Some`) becomes the main-loop system prompt on every
+    /// query — `--system-prompt` (`system_prompt_override`) still winning — and
+    /// `tool_policy` / `disallowed_tools` narrow the advertised tool pool (claude
+    /// `HJ(agentDef,to,!1,!0)`).
+    ///
+    /// `model_override` is the agent's frontmatter `model` ALREADY resolved to a
+    /// concrete wire id and gated by the caller (claude-code
+    /// `if(!userSpecifiedModel&&y.model&&y.model!=="inherit"){jb(Zo(y.model))}` —
+    /// the `!userSpecifiedModel` / `!=="inherit"` checks live at the composition
+    /// root, which owns `--model`). When `Some`, it replaces the session model
+    /// (profile cleared: agent frontmatter carries a bare id, no provider profile).
+    pub async fn set_main_thread_agent(
+        &self,
+        agent_type: String,
+        system_prompt: Option<String>,
+        tool_policy: agent::AgentToolPolicy,
+        disallowed_tools: Vec<String>,
+        model_override: Option<String>,
+    ) {
+        if let Some(model) = model_override {
+            let mut s = self.session.lock().await;
+            s.model = model;
+            s.model_profile = None;
         }
+        *self.main_thread_agent.write().await = Some(MainThreadAgentState {
+            agent_type,
+            system_prompt,
+            tool_policy,
+            disallowed_tools,
+        });
+    }
+
+    /// The adopted main-thread agent's `agentType` (claude-code `MB()`), or
+    /// `None` when no `--agent` was applied. Threaded into main-thread lifecycle
+    /// hook payloads.
+    pub(crate) async fn main_thread_agent_type(&self) -> Option<String> {
+        self.main_thread_agent
+            .read()
+            .await
+            .as_ref()
+            .map(|a| a.agent_type.clone())
+    }
+
+    /// The system prompt for the next query, applying claude-code `nre`
+    /// precedence: `overrideSystemPrompt` (`--system-prompt`) wins; else the
+    /// adopted main-thread agent's prompt (`mainThreadAgentDefinition`
+    /// `.getSystemPrompt()`); else the freshly assembled default.
+    pub(crate) async fn effective_system_prompt(&self) -> String {
+        if let Some(custom) = &self.config.system_prompt_override {
+            return custom.clone();
+        }
+        {
+            let guard = self.main_thread_agent.read().await;
+            if let Some(agent) = guard.as_ref() {
+                if let Some(prompt) = &agent.system_prompt {
+                    return prompt.clone();
+                }
+            }
+        }
+        self.build_system_prompt().await
     }
 
     /// Read-only introspection seam for the leading additional-context
@@ -7340,12 +7894,11 @@ As you answer the user's questions, you can use the following context:\n\
     /// the system-prompt section above), so the styleless path stays
     /// byte-identical and the locked turn-loop + streaming fixtures stay green.
     ///
-    /// The protocol has no `isMeta` flag, so — exactly like the A1 "resume
-    /// directly" nudge ([`crate::turn_loop::MAX_OUTPUT_TOKENS_RECOVERY_NUDGE`]) —
-    /// the reminder is a plain user-text [`ConversationMessage`] carrying the
+    /// The reminder is a plain user-text [`ConversationMessage`] carrying the
     /// byte-exact string. The fresh [`MessageId`] is irrelevant: callers append
     /// this ONLY to the per-turn outgoing message snapshot, never to
-    /// `session.history` nor JSONL, so it is TRANSIENT and never accumulates
+    /// `session.history` nor JSONL, so it is TRANSIENT and never accumulates —
+    /// its `isMeta` state is therefore immaterial (nothing persists it)
     /// (TS recomputes the attachment each turn — see `query.ts` mid-turn
     /// `getAttachmentMessages`). Position mirrors TS: the caller appends it as a
     /// trailing meta user message after the user prompt / tool-results
@@ -7524,8 +8077,11 @@ As you answer the user's questions, you can use the following context:\n\
     /// registry's terminal-not-notified tasks (CONSUME-ONCE — the registry marks
     /// each `notified` + evicts on drain) and renders their `<task-notification>`
     /// blocks (claude-code's per-task-type `enqueue*Notification` formats) inside
-    /// one `<system-reminder>` meta user message. Appended ONLY to the per-turn
-    /// OUTGOING snapshot, never `session.history` / JSONL, so it never
+    /// one `<system-reminder>` meta user message, stamped at the front with the
+    /// `NON_USER_INPUT_HEADER` provenance header (claude-code's `v6r`, applied to
+    /// every `task-notification`-origin user message so the model never treats a
+    /// machine-generated completion as user consent). Appended ONLY to the
+    /// per-turn OUTGOING snapshot, never `session.history` / JSONL, so it never
     /// accumulates. No delta set is needed — draining the registry IS the dedup.
     pub(crate) async fn task_notification_reminder_message(&self) -> Option<ConversationMessage> {
         let provider = self.task_notifications.as_ref()?;
@@ -8097,6 +8653,40 @@ As you answer the user's questions, you can use the following context:\n\
                     .any(|d| permission::tool_wide_name_matches(d, t.name()))
             });
         }
+        // (P2-02 cc2.1.207) Main-thread `--agent` tool restriction. When `--agent`
+        // adopted an agent, the binary filters the advertised tool pool through
+        // its frontmatter: `_o=MB();…let us=yn.find(a=>a.agentType===_o);if(us){to=
+        // HJ(us,to,!1,!0).resolvedTools}`. `HJ`'s 4th arg (`n=true`) makes it
+        // SKIP the subagent always-disallowed strip (`_Ty`) — the main thread
+        // keeps ExitPlanMode / AskUserQuestion / … — so only two drops apply:
+        //   (1) the per-definition `disallowedTools` filter, then
+        //   (2) the `tools:` policy projection (`s===undefined` ⇒ keep all;
+        //       an explicit list ⇒ allow-list).
+        // Runs AFTER the tool-wide deny (claude `PNt` precedes `HJ`) and BEFORE
+        // wire serialization, on the SAME assembled pool. A strict no-op unless
+        // `--agent` was applied (guard `main_thread_agent.is_some()`).
+        {
+            let guard = self.main_thread_agent.read().await;
+            if let Some(a) = guard.as_ref() {
+                if !a.disallowed_tools.is_empty() {
+                    let def_denied: std::collections::HashSet<&str> = a
+                        .disallowed_tools
+                        .iter()
+                        .map(|spec| spec.split('(').next().unwrap_or(spec).trim())
+                        .collect();
+                    tools.retain(|t| !def_denied.contains(t.name()));
+                }
+                match &a.tool_policy {
+                    agent::AgentToolPolicy::All { .. } => {}
+                    agent::AgentToolPolicy::Explicit(names) => {
+                        tools.retain(|t| names.iter().any(|n| n == t.name()));
+                    }
+                    agent::AgentToolPolicy::Except(names) => {
+                        tools.retain(|t| !names.iter().any(|n| n == t.name()));
+                    }
+                }
+            }
+        }
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
@@ -8130,6 +8720,12 @@ As you answer the user's questions, you can use the following context:\n\
                 }
             }
         }
+        // Tool Search (2.1.207): stamp `defer_loading: true` onto tools the
+        // shared `DeferralState` defers this turn (claude-code's deferred-tool
+        // wire form). Disabled by default ⇒ no-op ⇒ wire bytes unchanged. The
+        // `DeferralState` is owned by the registry, shared with `ToolSearch`, so
+        // a tool loaded via a prior `ToolSearch` call is no longer deferred here.
+        tool_api::wire::apply_defer_loading(&mut wire, &tools, self.tools.deferral());
         wire
     }
 
@@ -11158,16 +11754,20 @@ mod skill_listing_reminder_tests {
             .await
             .expect("turn-0 task notification")
             .text_content();
-        assert_eq!(
-            t0,
-            "<system-reminder>\n\
+        let body = "<system-reminder>\n\
 <task-notification>\n\
 <task-id>b12345678</task-id>\n\
 <output-file>/tmp/tasks/b12345678.output</output-file>\n\
 <status>completed</status>\n\
 <summary>Background command \"run tests\" completed (exit code 0)</summary>\n\
 </task-notification>\n\
-</system-reminder>"
+</system-reminder>";
+        assert_eq!(
+            t0,
+            format!(
+                "{}{body}",
+                crate::prompt::task_notification::NON_USER_INPUT_HEADER
+            )
         );
         // Turn 1: consume-once — the notified+evicted task must NOT re-appear.
         assert!(
@@ -13636,5 +14236,494 @@ mod todo_reminder_tests {
             "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
         );
         std::env::remove_var("LINGXI_ENABLE_TASKS");
+    }
+}
+
+// ── P2-12: post-compact FILE restoration re-reads from disk ───────────────────
+//
+// `restore_post_compact_attachments` must RE-READ each selected file from disk
+// (the binary's `eRg`/`XQn` behaviour) rather than reusing the stale
+// `readFileState` snapshot content: a file that changed after its last read is
+// restored with FRESH content, a deleted/unreadable file is dropped, and each
+// re-read attempt fires the `tengu_post_compact_file_restore_{success,error}`
+// telemetry (empty payload).
+#[cfg(test)]
+mod post_compact_file_restore_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::sync::Arc;
+    use tool_api::read_file_state::{set, ReadFileEntry};
+    use tool_api::registry::ToolRegistry;
+
+    fn stale_entry(content: &str) -> ReadFileEntry {
+        ReadFileEntry {
+            content: content.to_string(),
+            mtime_ms: 1,
+            offset: None,
+            limit: None,
+            from_read: true,
+        }
+    }
+
+    async fn orch_with_bus(
+        cwd: std::path::PathBuf,
+        map: tool_api::read_file_state::ReadFileStateMap,
+        sink: Arc<telemetry::InMemorySink>,
+    ) -> ConversationOrchestrator {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        bus.attach_sink(sink).await;
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            cwd,
+        )
+        .with_analytics_bus(bus)
+        .with_read_state_map(map)
+    }
+
+    fn restore_names(events: &[telemetry::RecordedEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| e.name.starts_with("tengu_post_compact_file_restore"))
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn reread_restores_fresh_content_not_stale_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("live.txt");
+        // Snapshot recorded "OLD"; on disk the file now holds "NEW CONTENT".
+        std::fs::write(&path, "NEW CONTENT").expect("write file");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("OLD STALE SNAPSHOT"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1, "the live file is restored");
+        let body = restored[0].text_content();
+        assert!(
+            body.contains("NEW CONTENT"),
+            "must restore FRESH disk content; got: {body}"
+        );
+        assert!(
+            !body.contains("OLD STALE SNAPSHOT"),
+            "must NOT restore the stale snapshot content; got: {body}"
+        );
+
+        // Exactly one success event fired, no error event.
+        assert_eq!(
+            restore_names(&sink.events().await),
+            vec!["tengu_post_compact_file_restore_success".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_file_is_dropped_and_fires_error_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A path recorded in the snapshot but never written to disk (deleted).
+        let missing = dir.path().join("gone.txt");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, missing, stale_entry("content the model saw before deletion"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(
+            restored.is_empty(),
+            "an unreadable/deleted file must be dropped, not restored from the stale snapshot"
+        );
+        assert_eq!(
+            restore_names(&sink.events().await),
+            vec!["tengu_post_compact_file_restore_error".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn success_and_error_events_fire_per_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("a.txt");
+        std::fs::write(&live, "alive").expect("write file");
+        let gone = dir.path().join("b.txt"); // never created
+
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        // Higher mtime → selected/re-read first (DESC), but ordering of the two
+        // telemetry events is not asserted — only the multiset.
+        set(&map, live.clone(), stale_entry("stale-a"));
+        set(&map, gone, stale_entry("stale-b"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1, "only the live file survives");
+        assert!(restored[0].text_content().contains("alive"));
+
+        let mut names = restore_names(&sink.events().await);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "tengu_post_compact_file_restore_error".to_string(),
+                "tengu_post_compact_file_restore_success".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_read_state_restores_nothing_and_fires_no_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(restored.is_empty());
+        assert!(restore_names(&sink.events().await).is_empty());
+    }
+}
+
+/// P2-02 (cc2.1.207): `--agent` adopts a main-thread agent — its system prompt
+/// becomes the main-loop system prompt (claude-code `nre`, `--system-prompt`
+/// still winning) and its `agentType` rides every main-thread lifecycle hook
+/// payload (`bde`/`MB()`, base builder `wf` `?? MB()`).
+#[cfg(test)]
+mod main_thread_agent_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    /// The "no `tools:` frontmatter" policy (claude `s===undefined`) — keeps the
+    /// whole tool pool. Used as the default in the system-prompt-focused tests.
+    fn keep_all_tools() -> agent::AgentToolPolicy {
+        agent::AgentToolPolicy::All {
+            use_exact_tools: false,
+        }
+    }
+
+    fn orch_with_config(config: OrchestratorConfig) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            config,
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    /// A minimal builtin tool exposing a fixed `name()` — enough for the wire
+    /// serializer (`build_wire_tools`) to advertise it and for the main-thread
+    /// agent filter to inspect its name.
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| json!({ "type": "object", "properties": {} }))
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            self.0.into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({ "content": "ok" }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Build an orchestrator whose registry advertises the named builtin tools.
+    fn orch_with_tools(names: &[&'static str]) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        for n in names {
+            registry.register_builtin(Arc::new(NamedTool(n)) as Arc<dyn Tool>);
+        }
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            PathBuf::from("/work/repo"),
+        )
+    }
+
+    /// The set of `name` fields the wire tool array advertises.
+    async fn wire_tool_names(orch: &ConversationOrchestrator) -> Vec<String> {
+        orch.build_wire_tools()
+            .await
+            .into_iter()
+            .filter_map(|t| {
+                t.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    /// A resolved `--agent` with a prompt REPLACES the assembled default system
+    /// prompt on every query (claude-code `nre` uses `agentDef.getSystemPrompt()`
+    /// as the whole system prompt, exactly like `--system-prompt`).
+    #[tokio::test]
+    async fn main_thread_agent_prompt_replaces_default() {
+        let orch = orch_with_config(OrchestratorConfig::default());
+        let default = orch.assemble_system_prompt_preview().await;
+        orch.set_main_thread_agent(
+            "code-reviewer".to_string(),
+            Some("You are a meticulous code reviewer.".to_string()),
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
+        let after = orch.assemble_system_prompt_preview().await;
+        assert_eq!(after, "You are a meticulous code reviewer.");
+        assert_ne!(
+            after, default,
+            "the agent prompt must replace the assembled default"
+        );
+    }
+
+    /// `--system-prompt` (`system_prompt_override` / claude `overrideSystemPrompt`)
+    /// beats the main-thread agent's prompt — `nre` returns `Zu([overrideSystemPrompt])`
+    /// before ever consulting the agent definition.
+    #[tokio::test]
+    async fn system_prompt_override_beats_main_thread_agent() {
+        let mut config = OrchestratorConfig::default();
+        config.system_prompt_override = Some("EXPLICIT --system-prompt wins".to_string());
+        let orch = orch_with_config(config);
+        orch.set_main_thread_agent(
+            "code-reviewer".to_string(),
+            Some("agent prompt should be ignored".to_string()),
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            orch.assemble_system_prompt_preview().await,
+            "EXPLICIT --system-prompt wins"
+        );
+    }
+
+    /// An adopted agent that declares NO prompt falls through to the assembled
+    /// default (claude `getSystemPrompt()` -> undefined -> default path).
+    #[tokio::test]
+    async fn main_thread_agent_without_prompt_uses_default() {
+        let orch = orch_with_config(OrchestratorConfig::default());
+        let default = orch.assemble_system_prompt_preview().await;
+        orch.set_main_thread_agent(
+            "promptless".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(orch.assemble_system_prompt_preview().await, default);
+    }
+
+    /// The adopted agent's `agentType` rides main-thread lifecycle hook payloads
+    /// (`expansion_hook_context` shares the `lifecycle_hook_ctx` builder that
+    /// `SessionStart` / `UserPromptSubmit` / `Stop` use). `None` before any
+    /// `--agent` is applied.
+    #[tokio::test]
+    async fn lifecycle_hook_ctx_carries_main_thread_agent_type() {
+        let orch = orch_with_config(OrchestratorConfig::default());
+        assert_eq!(orch.expansion_hook_context().await.agent_type, None);
+        orch.set_main_thread_agent(
+            "code-reviewer".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            orch.expansion_hook_context().await.agent_type,
+            Some("code-reviewer".to_string())
+        );
+    }
+
+    /// An adopted agent with a `tools:` allow-list narrows the advertised main-
+    /// loop tool pool to the named tools (claude `HJ(agentDef,to,!1,!0)` with an
+    /// explicit `s`: only listed tools survive). Tools not in the list are
+    /// dropped; a listed name that does not exist is simply absent.
+    #[tokio::test]
+    async fn main_thread_agent_explicit_tools_narrow_the_pool() {
+        let orch = orch_with_tools(&["Read", "Write", "Bash", "Grep"]);
+        // No agent yet ⇒ every registered tool is advertised.
+        let before = wire_tool_names(&orch).await;
+        assert_eq!(before, vec!["Bash", "Grep", "Read", "Write"]);
+
+        orch.set_main_thread_agent(
+            "reviewer".to_string(),
+            None,
+            agent::AgentToolPolicy::Explicit(vec!["Read".to_string(), "Grep".to_string()]),
+            Vec::new(),
+            None,
+        )
+        .await;
+        let after = wire_tool_names(&orch).await;
+        assert_eq!(after, vec!["Grep", "Read"]);
+    }
+
+    /// `AgentToolPolicy::All` (no `tools:` frontmatter, claude `s===undefined`)
+    /// keeps the WHOLE pool — including tools the SUBAGENT filter would strip as
+    /// "always-disallowed" (ExitPlanMode / AskUserQuestion). The main-thread
+    /// filter runs `HJ` with `n=true`, which bypasses that strip. Regression
+    /// guard against accidentally reusing the subagent resolver here.
+    #[tokio::test]
+    async fn main_thread_agent_all_policy_keeps_always_disallowed_tools() {
+        let orch = orch_with_tools(&["Read", "ExitPlanMode", "AskUserQuestion"]);
+        orch.set_main_thread_agent(
+            "planner".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
+        let after = wire_tool_names(&orch).await;
+        assert_eq!(after, vec!["AskUserQuestion", "ExitPlanMode", "Read"]);
+    }
+
+    /// The agent's per-definition `disallowedTools` subtracts from the pool
+    /// (base tool name; a trailing `(rule)` is stripped) BEFORE the `tools:`
+    /// projection — claude `HJ` `g=u.filter(P=>!isToolDisallowed(P))`.
+    #[tokio::test]
+    async fn main_thread_agent_disallowed_tools_subtract() {
+        let orch = orch_with_tools(&["Read", "Write", "Bash"]);
+        orch.set_main_thread_agent(
+            "safe".to_string(),
+            None,
+            keep_all_tools(),
+            vec!["Write".to_string(), "Bash(rm -rf)".to_string()],
+            None,
+        )
+        .await;
+        let after = wire_tool_names(&orch).await;
+        assert_eq!(after, vec!["Read"]);
+    }
+
+    /// A resolved `--agent` model (`Some(resolved_id)`) replaces the session
+    /// model (claude `jb(Zo(y.model))`); the caller has already gated it on
+    /// `!userSpecifiedModel` and resolved the alias to a wire id. The profile is
+    /// cleared (agent frontmatter carries a bare id).
+    #[tokio::test]
+    async fn main_thread_agent_model_override_replaces_session_model() {
+        let mut config = OrchestratorConfig::default();
+        config.model = "base-model".to_string();
+        let orch = orch_with_config(config);
+        assert_eq!(orch.session().lock().await.model, "base-model");
+
+        orch.set_main_thread_agent(
+            "fast".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            Some("claude-agent-model".to_string()),
+        )
+        .await;
+        let session = orch.session();
+        let s = session.lock().await;
+        assert_eq!(s.model, "claude-agent-model");
+        assert_eq!(s.model_profile, None);
+    }
+
+    /// `model_override == None` (agent `model: inherit`, or the user passed
+    /// `--model` so the caller gated it out) leaves the session model untouched.
+    #[tokio::test]
+    async fn main_thread_agent_no_model_override_leaves_session_model() {
+        let mut config = OrchestratorConfig::default();
+        config.model = "base-model".to_string();
+        let orch = orch_with_config(config);
+        orch.set_main_thread_agent("inheritor".to_string(), None, keep_all_tools(), Vec::new(), None)
+            .await;
+        assert_eq!(orch.session().lock().await.model, "base-model");
     }
 }

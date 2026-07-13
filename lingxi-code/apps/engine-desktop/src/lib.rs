@@ -1592,9 +1592,11 @@ pub struct DesktopConfig {
     /// Overrides the 'agent' setting."). `build()` resolves it against the
     /// final catalog with the `dts` lookup (exact `agentType`, else FQN
     /// `…:{name}` suffix) and logs the binary's `Warning: agent "X" not
-    /// found …` line when absent. RESIDUAL seam: lingxi has no main-thread
-    /// agent runtime (`xz` → `mainThreadAgentType` re-skins the MAIN session's
-    /// system prompt/tools), so a resolved agent is not yet applied.
+    /// found …` line when absent. (P2-02 cc2.1.207) On a HIT it APPLIES the
+    /// agent to the MAIN thread (`bde`/`mainThreadAgentDefinition`): agentType,
+    /// system prompt (`nre`), `tools:`/`disallowedTools` pool filter (`HJ`), and
+    /// `model` override (`jb(Zo(model))`, unless `--model` was given). RESIDUAL:
+    /// frontmatter `hooks`/`mcpServers` swap + resume restoration (`rVe`).
     pub cli_agent: Option<String>,
     /// (M4 cc2.1.198) CLI `--plugin-dir <path>` entries ("Load a plugin from a
     /// directory or .zip for this session only", repeatable). Each entry feeds
@@ -5116,11 +5118,18 @@ pub async fn build(
         }
         dirs_vec
     };
+    // P1-06: ONE per-session read-file-state registry (claude-code's single
+    // `readFileState` map on the `ToolUseContext`). Created here, cloned into
+    // every file tool's `BuiltinToolContext` below, and the SAME `Arc` handed to
+    // the orchestrator via `.with_read_state_map(...)` at the builder chain, so a
+    // tool's `readFileState.set` feeds the orchestrator's post-compact restore
+    // (and the staleness / `/files` consumers).
+    let read_state_map = tool_api::read_file_state::new_read_file_state_map();
     let tool_ctx = BuiltinToolContext {
-        // FILE.B: file tools share one read-state map for the (future) staleness
-        // guard / Read-dedup; the composition-root Arc-share with the orchestrator
-        // is wired when a consumer (FILE.A/D/E/F) reads it.
-        read_file_state: tool_api::read_file_state::new_read_file_state_map(),
+        // FILE.B / P1-06: file tools share the ONE per-session read-state map
+        // (staleness guard, Read-dedup) — the SAME `Arc` the orchestrator adopts
+        // via `.with_read_state_map(read_state_map)` below.
+        read_file_state: read_state_map.clone(),
         // Read(deny) → Grep/Glob search excludes (resolved from the boot policy
         // above; empty when enforcement is off or no Read-deny rule applies).
         read_deny_exclude_globs,
@@ -5445,6 +5454,13 @@ pub async fn build(
             slot
         });
 
+    // Tool Search (2.1.207): now that the registry is fully assembled (builtins
+    // + workflow + MCP + structured-output + end-conversation), publish the
+    // DEFERRED tool set to `ToolSearch`'s live view cell. When tool search is
+    // disabled (the default) the deferred set is empty, so this leaves the view
+    // empty — the correct behavior — and the wire stays byte-identical.
+    tools_inner.refresh_tool_search_view();
+
     let tools = Arc::new(tools_inner);
 
     // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
@@ -5683,7 +5699,12 @@ pub async fn build(
     // `TodoStore` for the active list each turn, resolving the list id via the
     // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
     // needs no provider; it reads `session.todos` directly.
-    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()));
+    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+    // P1-06: hand the orchestrator the SAME `readFileState` map the file tools'
+    // `BuiltinToolContext` share (created just above), so a tool's
+    // `readFileState.set` feeds the post-compact file restore + staleness /
+    // `/files` consumers — 1:1 with claude-code's single per-session map.
+    .with_read_state_map(read_state_map);
 
     // P0.1 ACTIVATION (gated, default OFF). When `LINGXI_MEMDIR_PREFETCH`
     // is truthy, wire the memdir-backed memory selector so relevant
@@ -5968,34 +5989,87 @@ pub async fn build(
     // lookup: exact `agentType` match, else FQN `…:{name}` suffix; a miss logs
     // `Warning: agent "X" not found. Available agents: …. Using default
     // behavior.` and the session proceeds with default behavior.
-    // RESIDUAL seam: the binary then applies the hit via `xz(h?.agentType)` →
-    // `mainThreadAgentType` (the MAIN session adopts the agent's system
-    // prompt / tools / hooks). lingxi has no main-thread-agent runtime yet, so
-    // a successful resolution is logged but not applied — porting
-    // `mainThreadAgentType` consumption is the follow-up seam. (Built-in agent
-    // defs live in the subagent spawner, not this catalog, so their names are
-    // absent from the miss warning's "Available agents" list — residual.)
+    //
+    // (P2-02 cc2.1.207) On a HIT the binary APPLIES the agent to the MAIN loop
+    // via `bde(h?.agentType)` + `mainThreadAgentDefinition`. We adopt the
+    // model-visible pieces here:
+    //   • `agentType` — rides every main-thread lifecycle hook payload (claude
+    //     `wf`/`MVe` `?? MB()`);
+    //   • system prompt — becomes the main-loop system prompt on every query via
+    //     `nre` (`--system-prompt` still winning);
+    //   • `tools:` + `disallowedTools` frontmatter — narrows the advertised tool
+    //     pool (claude `HJ(us,to,!1,!0).resolvedTools`, `n=true` ⇒ NO subagent
+    //     always-disallowed strip);
+    //   • `model` — replaces the main-loop model (claude `jb(Zo(y.model))`),
+    //     gated exactly like the binary: only when the user did NOT pass
+    //     `--model` (`!cfg.default_model_explicit` ≙ `!userSpecifiedModel`) AND
+    //     the agent declares an explicit model (`AgentModel != Inherit`).
+    // This runs BEFORE the `SessionStart` firing below so that hook carries the
+    // `agentType`, and AFTER the default-model seed above so the override wins.
+    // RESIDUAL seam (follow-up, same `mainThreadAgentType`): frontmatter `hooks`
+    // registration (`Rft`→`mainThreadAgentHooks`), frontmatter `mcpServers`
+    // (scope `"agent"`), and resume restoration (`rVe`). (Built-in agent defs
+    // live in the subagent spawner, not this catalog, so their names are absent
+    // from the miss warning's "Available agents" list — residual.)
     if let Some(wanted) = cfg.cli_agent.as_deref() {
-        let cat = plugin_agent_catalog.read().await;
-        let hit = cat
-            .iter()
-            .find(|a| a.agent_type == wanted)
-            .or_else(|| {
-                let suffix = format!(":{wanted}");
-                cat.iter().find(|a| a.agent_type.ends_with(&suffix))
-            });
-        match hit {
-            Some(a) => tracing::debug!(
-                agent = %a.agent_type,
-                "--agent resolved (main-thread agent application is a pending seam)"
-            ),
-            None => tracing::warn!(
-                "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
-                cat.iter()
-                    .map(|a| a.agent_type.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+        // Resolve against the FINAL catalog, extracting what the main thread
+        // applies (agentType + system prompt + tool policy + model) so the
+        // catalog read lock is released before we mutate the orchestrator seam.
+        let applied = {
+            let cat = plugin_agent_catalog.read().await;
+            let hit = cat
+                .iter()
+                .find(|a| a.agent_type == wanted)
+                .or_else(|| {
+                    let suffix = format!(":{wanted}");
+                    cat.iter().find(|a| a.agent_type.ends_with(&suffix))
+                });
+            match hit {
+                Some(a) => {
+                    // claude `if(!userSpecifiedModel&&y.model&&y.model!=="inherit")
+                    // {jb(Zo(y.model))}`. `Zo` = `resolve_user_specified_model`
+                    // (alias→wire id). Frontmatter never yields `Explicit`, but
+                    // handle both alias/explicit arms for completeness.
+                    let model_override = if cfg.default_model_explicit {
+                        None
+                    } else {
+                        match &a.model {
+                            agent::AgentModel::Alias(spec) | agent::AgentModel::Explicit(spec) => {
+                                Some(agent::model_resolution::resolve_user_specified_model(spec))
+                            }
+                            agent::AgentModel::Inherit => None,
+                        }
+                    };
+                    Some((
+                        a.agent_type.clone(),
+                        a.system_prompt.clone(),
+                        a.tools.clone(),
+                        a.disallowed_tools.clone(),
+                        model_override,
+                    ))
+                }
+                None => {
+                    tracing::warn!(
+                        "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
+                        cat.iter()
+                            .map(|a| a.agent_type.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    None
+                }
+            }
+        };
+        if let Some((agent_type, system_prompt, tools, disallowed_tools, model_override)) = applied {
+            tracing::debug!(agent = %agent_type, "--agent applied to main thread");
+            orch.set_main_thread_agent(
+                agent_type,
+                system_prompt,
+                tools,
+                disallowed_tools,
+                model_override,
+            )
+            .await;
         }
     }
 

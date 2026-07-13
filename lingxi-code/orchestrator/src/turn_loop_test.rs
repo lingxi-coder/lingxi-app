@@ -1300,9 +1300,16 @@ mod read_file_state_tests {
         }
 
         // Seed the read-file-state registry with two files at distinct mtimes.
+        // P2-12: the restore RE-READS from disk (not the snapshot content), so
+        // the files must exist on disk with the asserted content.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old_path = dir.path().join("old.rs");
+        let new_path = dir.path().join("new.rs");
+        std::fs::write(&old_path, "fn old() {}\n").expect("write old.rs");
+        std::fs::write(&new_path, "fn fresh() {}\n").expect("write new.rs");
         tool_api::read_file_state::set(
             &orch.read_state_map,
-            PathBuf::from("/tmp/old.rs"),
+            old_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "fn old() {}\n".into(),
                 mtime_ms: 100,
@@ -1313,7 +1320,7 @@ mod read_file_state_tests {
         );
         tool_api::read_file_state::set(
             &orch.read_state_map,
-            PathBuf::from("/tmp/new.rs"),
+            new_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "fn fresh() {}\n".into(),
                 mtime_ms: 200,
@@ -1363,9 +1370,130 @@ mod read_file_state_tests {
             restored.iter().any(|t| t.contains("fn fresh() {}")),
             "the freshest file content must be restored"
         );
+        let new_disp = new_path.display().to_string();
         assert!(
-            restored.iter().any(|t| t.contains("/tmp/new.rs")),
+            restored.iter().any(|t| t.contains(&new_disp)),
             "the restored attachment names the file path"
+        );
+    }
+
+    // ----- P1-06 composition-root read-state-map sharing -----
+
+    #[tokio::test]
+    async fn with_read_state_map_adopts_the_composition_root_arc() {
+        // The crux of P1-06: the builder OVERWRITES the constructor's fresh
+        // default with the SAME `Arc` the composition root passes into the file
+        // tools' `BuiltinToolContext`, so both sides observe one registry.
+        let shared = tool_api::read_file_state::new_read_file_state_map();
+        let orch =
+            orch_with_tools(PathBuf::from("/tmp"), vec![]).with_read_state_map(shared.clone());
+        assert!(
+            Arc::ptr_eq(&orch.read_state_map, &shared),
+            "with_read_state_map must adopt the shared Arc, not keep the default"
+        );
+        // A set through the composition-root handle is visible on the
+        // orchestrator's field (the same allocation).
+        tool_api::read_file_state::set(
+            &shared,
+            PathBuf::from("/tmp/wired.txt"),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "wired\n".into(),
+                mtime_ms: 7,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+        assert!(
+            tool_api::read_file_state::get(
+                &orch.read_state_map,
+                std::path::Path::new("/tmp/wired.txt")
+            )
+            .is_some(),
+            "a set through the shared map must be visible on the orchestrator"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_read_state_map_feeds_post_compact_restore() {
+        // End-to-end wiring proof: when the composition root shares its map (the
+        // one the file tools write via `readFileState.set`) into the
+        // orchestrator, a tool's read feeds the post-compact file restore. Before
+        // P1-06 the orchestrator held a THIRD, unshared map, so this restore was
+        // always empty in production.
+        use compaction::CompactionOrchestrator;
+        use protocol::{ConversationMessage, MessageId};
+        use traits::OrchestratorHandle;
+
+        // The composition-root-owned map (also handed to `BuiltinToolContext`).
+        let shared = tool_api::read_file_state::new_read_file_state_map();
+        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
+            .with_compaction(Arc::new(CompactionOrchestrator::new(10)))
+            .with_read_state_map(shared.clone());
+        let orch = Arc::new(orch);
+
+        {
+            let session = orch.session();
+            let mut s = session.lock().await;
+            for i in 0..20 {
+                s.history.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!(
+                        "turn-{i} padded body text to push the token estimate over the threshold"
+                    ),
+                ));
+            }
+        }
+
+        // A tool's `readFileState.set` goes through the SHARED handle (as the
+        // real `FileReadTool` does via its `BuiltinToolContext.read_file_state`).
+        // P2-12: the post-compact restore RE-READS from disk, so the file must
+        // exist on disk with the asserted content.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool_read_path = dir.path().join("tool_read.rs");
+        std::fs::write(&tool_read_path, "fn tool_read() {}\n").expect("write tool_read.rs");
+        tool_api::read_file_state::set(
+            &shared,
+            tool_read_path.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "fn tool_read() {}\n".into(),
+                mtime_ms: 321,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+
+        orch.force_compact().await.expect("force_compact ok");
+
+        // The shared map is drained/cleared post-compact.
+        assert!(
+            orch.read_state_map.lock().unwrap().is_empty(),
+            "shared read_state_map must be cleared after compaction"
+        );
+
+        // The tool's read was restored as a post-compact attachment — proving the
+        // share, not the orchestrator's own now-removed default, fed the restore.
+        let session = orch.session();
+        let s = session.lock().await;
+        let restored = s.history.iter().any(|m| match m {
+            ConversationMessage::User {
+                content,
+                is_meta: true,
+                ..
+            } => content.iter().any(|b| match b {
+                protocol::ContentBlock::Text { text } => {
+                    text.contains("restored after compaction")
+                        && text.contains(&tool_read_path.display().to_string())
+                        && text.contains("fn tool_read() {}")
+                }
+                _ => false,
+            }),
+            _ => false,
+        });
+        assert!(
+            restored,
+            "a tool's read through the shared map must feed post-compact restore"
         );
     }
 
@@ -1579,8 +1707,13 @@ mod max_output_tokens_recovery_tests {
         let h = history(&orch).await;
         let last = h.last().expect("nudge appended");
         match last {
-            ConversationMessage::User { content, .. } => {
+            ConversationMessage::User {
+                content, is_meta, ..
+            } => {
                 assert_eq!(content.len(), 1, "single text block");
+                // (parity 2.1.207 P2-05) the recovery nudge is a META user
+                // message (`createUserMessage({…, isMeta:!0})`).
+                assert!(*is_meta, "max-output-tokens recovery nudge must be is_meta");
                 match &content[0] {
                     // (Test plan 4) the nudge is a User message with exact bytes.
                     ContentBlock::Text { text } => {
@@ -1591,6 +1724,56 @@ mod max_output_tokens_recovery_tests {
             }
             other => panic!("expected User nudge message, got {other:?}"),
         }
+    }
+
+    /// (parity 2.1.207 P2-05) End-to-end persist: driving a real `max_tokens`
+    /// recovery turn through the orchestrator with a wired JSONL writer stamps the
+    /// injected recovery nudge with the top-level `isMeta:true` envelope flag, so
+    /// title / first-prompt / fork-name / visible-count extraction skips it.
+    #[tokio::test]
+    async fn max_tokens_recovery_nudge_persists_with_top_level_is_meta() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session_path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            session_path.clone(),
+            fs,
+        ));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![max_tokens_response()])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_jsonl_writer(writer);
+
+        let mut state = RecoveryState::default();
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("turn step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+
+        let contents = tokio::fs::read_to_string(&session_path)
+            .await
+            .expect("jsonl written");
+        let nudge_line = contents
+            .lines()
+            .find(|l| l.contains(MAX_OUTPUT_TOKENS_RECOVERY_NUDGE))
+            .expect("recovery nudge line persisted to JSONL");
+        let v: serde_json::Value =
+            serde_json::from_str(nudge_line).expect("nudge line is valid JSON");
+        assert_eq!(v["type"], "user", "nudge persists as a user line");
+        assert_eq!(
+            v["isMeta"],
+            serde_json::Value::Bool(true),
+            "recovery nudge must carry top-level isMeta:true: {nudge_line}"
+        );
     }
 
     /// (Test plan 1) `max_tokens` at counts 1 and 2 → Continue, counter
@@ -1999,6 +2182,15 @@ mod malformed_and_thinking_only_tests {
         }
     }
 
+    /// `is_meta` flag of the last history entry when it is a User message.
+    /// (parity 2.1.207 P2-05: recovery/continuation nudges are `isMeta:!0`.)
+    fn last_user_is_meta(h: &[ConversationMessage]) -> Option<bool> {
+        match h.last()? {
+            ConversationMessage::User { is_meta, .. } => Some(*is_meta),
+            _ => None,
+        }
+    }
+
     // ---- byte-exact strings ------------------------------------------------
 
     #[test]
@@ -2050,6 +2242,11 @@ mod malformed_and_thinking_only_tests {
         assert_eq!(
             last_user_text(&h).as_deref(),
             Some(MALFORMED_TOOL_USE_RETRY_NUDGE)
+        );
+        assert_eq!(
+            last_user_is_meta(&h),
+            Some(true),
+            "malformed-tool retry nudge must be a META user message (isMeta:!0)"
         );
     }
 
@@ -2267,6 +2464,11 @@ mod malformed_and_thinking_only_tests {
         assert!(state.thinking_only_nudged, "guard armed");
         let h = history(&orch).await;
         assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+        assert_eq!(
+            last_user_is_meta(&h),
+            Some(true),
+            "thinking-only nudge must be a META user message (isMeta:!0)"
+        );
     }
 
     /// A `stop_sequence` thinking-only response also triggers the nudge.
@@ -2282,6 +2484,11 @@ mod malformed_and_thinking_only_tests {
         assert!(state.thinking_only_nudged);
         let h = history(&orch).await;
         assert_eq!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
+        assert_eq!(
+            last_user_is_meta(&h),
+            Some(true),
+            "thinking-only nudge must be a META user message (isMeta:!0)"
+        );
     }
 
     /// Once nudged, a still-thinking-only `end_turn` ends the turn normally

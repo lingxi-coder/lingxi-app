@@ -237,7 +237,12 @@ pub enum HookEvent {
         reason: String,
     },
     /// Engine startup setup phase. Fired once early in the lifecycle.
-    Setup,
+    Setup {
+        /// Setup trigger (`init` / `maintenance`). claude keys `Setup` hook
+        /// matchers on it (`getMatchingHooks` `i = r.trigger`) and threads it
+        /// into the wire payload (`{hook_event_name:"Setup", trigger}`).
+        trigger: String,
+    },
     /// User submitted a top-level prompt. Hooks may rewrite or block.
     UserPromptSubmit {
         /// The user-supplied prompt text.
@@ -285,6 +290,11 @@ pub enum HookEvent {
         summary: String,
         /// Number of tokens reclaimed by the compaction.
         tokens_freed: u64,
+        /// Compaction trigger (`manual` / `auto`). claude keys `PostCompact`
+        /// hook matchers on it (`getMatchingHooks` `i = r.trigger`) and threads
+        /// it into the wire payload (`{hook_event_name:"PostCompact", trigger,
+        /// compact_summary}`).
+        trigger: String,
     },
     /// Engine is about to request permission.
     PermissionRequest {
@@ -553,7 +563,7 @@ impl HookEvent {
             Self::PostToolUseFailure { .. } => HookEventType::PostToolUseFailure,
             Self::SessionStart { .. } => HookEventType::SessionStart,
             Self::SessionEnd { .. } => HookEventType::SessionEnd,
-            Self::Setup => HookEventType::Setup,
+            Self::Setup { .. } => HookEventType::Setup,
             Self::UserPromptSubmit { .. } => HookEventType::UserPromptSubmit,
             Self::Stop { .. } => HookEventType::Stop,
             Self::StopFailure { .. } => HookEventType::StopFailure,

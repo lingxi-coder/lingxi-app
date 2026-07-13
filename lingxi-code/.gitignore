@@ -19,3 +19,8 @@ Cargo.lock.*
 
 # LingXi scratch/cache (workflow saved-script staging, etc.)
 .lingxi-scratch/
+
+# one-off agent patch scripts + captured test-output dumps + temp scratch
+patch*.py
+test_output*.txt
+tmp/

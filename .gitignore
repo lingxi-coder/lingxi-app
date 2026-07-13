@@ -3,6 +3,9 @@
 # ---------------------------------------------------------------
 claude-code/
 claw-code/
+codex/
+opencode/
+liter-llm/
 
 # ---------------------------------------------------------------
 # Generated graphify artifacts (rebuildable; large)
@@ -19,13 +22,25 @@ claw-code-graphify-orchestrator/
 # ---------------------------------------------------------------
 .omx/
 .omc/
+.omo/
 .claude/
 .claude.json
 .claw/
 .claw.json
+.claire/
+.lingxi/
+.lingxi-scratch/
 .port_sessions/
 .sandbox-home/
 .clawd-todos.json
+
+# ---------------------------------------------------------------
+# Generated code-intel indexes + tool output (rebuildable; any level)
+# ---------------------------------------------------------------
+.codegraph/
+.understand-anything/
+# Gradle build cache (android-aar)
+.gradle/
 
 # ---------------------------------------------------------------
 # OS / editor noise

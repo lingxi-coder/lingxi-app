@@ -33,6 +33,7 @@ impl HttpTransport for CountingTransport {
             status: 200,
             headers: vec![],
             body,
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {

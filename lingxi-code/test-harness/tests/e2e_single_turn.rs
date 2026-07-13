@@ -105,6 +105,7 @@ async fn anthropic_provider_against_mock_http_does_one_roundtrip() {
         status: 200,
         headers: vec![],
         body: r#"{"id":"msg_test","model":"claude-opus-4-6","content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#.into(),
+        body_bytes: Vec::new(),
     }));
 
     let builder = AnthropicRequestBuilder::new("sk-ant-test", None);

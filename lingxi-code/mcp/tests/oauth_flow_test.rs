@@ -131,6 +131,7 @@ impl HttpTransport for MockAs {
             status: canned.status,
             headers: vec![],
             body: canned.body,
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -809,6 +810,7 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
                 status,
                 headers: vec![],
                 body,
+                body_bytes: Vec::new(),
             })
         }
         async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -1103,6 +1105,7 @@ impl HttpTransport for XaaHttp {
             status,
             headers: vec![],
             body,
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {

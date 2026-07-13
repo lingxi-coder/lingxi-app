@@ -336,14 +336,21 @@ impl HttpTransport for ReqwestHttp {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        let body = resp
-            .text()
+        // Read the wire bytes ONCE and keep them intact. `body` is the lossy
+        // UTF-8 view (all existing String consumers unchanged); `body_bytes`
+        // carries the raw bytes so a binary body (PDF/image/invalid-UTF8)
+        // survives byte-identically to consumers such as WebFetch's artifact
+        // persist. Mirrors claude-code's `responseType:"arraybuffer"`.
+        let raw = resp
+            .bytes()
             .await
             .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
+        let body = String::from_utf8_lossy(&raw).into_owned();
         Ok(HttpResponse {
             status,
             headers,
             body,
+            body_bytes: raw.to_vec(),
         })
     }
 
@@ -367,14 +374,19 @@ impl HttpTransport for ReqwestHttp {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        let body = resp
-            .text()
+        // Raw bytes preserved alongside the lossy `body` (see `request`): the
+        // WebFetch redirect loop drives this method, so binary bodies must
+        // reach the caller byte-exact for the artifact-persist path.
+        let raw = resp
+            .bytes()
             .await
             .map_err(|e| HttpError::InvalidResponse(e.to_string()))?;
+        let body = String::from_utf8_lossy(&raw).into_owned();
         Ok(HttpResponse {
             status,
             headers,
             body,
+            body_bytes: raw.to_vec(),
         })
     }
 

@@ -825,6 +825,7 @@ mod tests {
                         status: *status,
                         headers: vec![],
                         body: body.clone(),
+                        body_bytes: Vec::new(),
                     });
                 }
             }

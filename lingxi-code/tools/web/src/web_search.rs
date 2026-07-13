@@ -2063,6 +2063,7 @@ mod tests {
             status,
             headers: vec![],
             body: body.to_string(),
+            body_bytes: Vec::new(),
         })
     }
 

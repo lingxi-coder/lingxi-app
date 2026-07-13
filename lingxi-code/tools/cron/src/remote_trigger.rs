@@ -408,6 +408,7 @@ impl Tool for RemoteTriggerTool {
                 status,
                 headers: vec![],
                 body,
+                body_bytes: Vec::new(),
             },
             Err(e) => {
                 emit_failed(&bus, "transport", started.elapsed().as_millis() as u64).await;
@@ -517,6 +518,7 @@ mod tests {
                 status: self.status,
                 headers: vec![],
                 body: self.body.clone(),
+                body_bytes: Vec::new(),
             })
         }
         async fn stream_sse(&self, _: HttpRequest) -> Result<SseStream, HttpError> {

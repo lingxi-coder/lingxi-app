@@ -39,6 +39,7 @@ impl HttpTransport for FreshTokenTransport {
             status: 200,
             headers: vec![],
             body: r#"{"access_token":"tok-refreshed","refresh_token":"ref-new","expires_in":3600,"scope":"read:user"}"#.to_string(),
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
@@ -56,6 +57,7 @@ impl HttpTransport for FailingTransport {
             status: 401,
             headers: vec![],
             body: r#"{"error":"invalid_grant"}"#.to_string(),
+            body_bytes: Vec::new(),
         })
     }
     async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {

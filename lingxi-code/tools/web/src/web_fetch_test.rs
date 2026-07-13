@@ -343,6 +343,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status,
             headers: vec![],
             body: body.to_string(),
+            body_bytes: Vec::new(),
         })
     }
 
@@ -450,6 +451,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 429,
             headers: vec![("Retry-After".into(), "30".into())],
             body: String::new(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let result = tool
@@ -580,10 +582,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
             .expect("must have user-agent header");
-        // R-V1: UA carries the claude-code parity-target version (2.1.206), not
+        // R-V1: UA carries the claude-code parity-target version (2.1.207), not
         // LingXi's CARGO_PKG_VERSION.
         assert_eq!(
-            ua_value, "Claude-User (claude-code/2.1.206; +https://support.anthropic.com/)",
+            ua_value, "Claude-User (claude-code/2.1.207; +https://support.anthropic.com/)",
             "WebFetch UA must be claude-code's `Claude-User (...)` form with the parity version"
         );
     }
@@ -1104,6 +1106,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![],
                 body: "WRONG-PATH: plain request was called".into(),
+                body_bytes: Vec::new(),
             })
         }
         async fn request_no_follow(
@@ -1132,6 +1135,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status,
             headers: vec![("location".into(), location.to_string())],
             body: String::new(),
+            body_bytes: Vec::new(),
         }
     }
 
@@ -1211,6 +1215,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![],
                 body: "final body".into(),
+                body_bytes: Vec::new(),
             },
         ]);
         let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
@@ -1290,6 +1295,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 301,
             headers: vec![],
             body: String::new(),
+            body_bytes: Vec::new(),
         }]);
         let ctx = ctx_with_transport(http.clone() as Arc<dyn HttpTransport>);
         let tool = WebFetchTool::new(ctx);
@@ -1387,6 +1393,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Doc</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1431,6 +1438,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>NoPrompt</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1467,6 +1475,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: "# Raw markdown".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1505,6 +1514,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: big,
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1538,6 +1548,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/markdown".into())],
                 body: "# md".into(),
+                body_bytes: Vec::new(),
             }));
             let capture = std::sync::Arc::new(CapturingSideQuery {
                 captured: std::sync::Mutex::new(None),
@@ -1569,6 +1580,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Fallback</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let tool = WebFetchTool::new(ctx).with_side_query(std::sync::Arc::new(EmptySideQuery));
             let res = tool
@@ -1593,6 +1605,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 status: 200,
                 headers: vec![("content-type".into(), "text/html".into())],
                 body: "<h1>Recovered</h1>".into(),
+                body_bytes: Vec::new(),
             }));
             let tool =
                 WebFetchTool::new(ctx).with_side_query(std::sync::Arc::new(FailingSideQuery));
@@ -1620,6 +1633,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "text/html".into())],
             body: "<h1>Title</h1><p>Body text</p>".into(),
+            body_bytes: Vec::new(),
         }));
         let capture = std::sync::Arc::new(markdown_apply::CapturingSideQuery {
             captured: std::sync::Mutex::new(None),
@@ -1656,6 +1670,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "text/html".into())],
             body: "<h1>Hi</h1>".into(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let res = tool
@@ -1767,6 +1782,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "application/pdf".into())],
             body: body.to_string(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let res = tool
@@ -1807,6 +1823,75 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(std::fs::read(entries[0].path()).unwrap(), body.as_bytes());
     }
 
+    // PARITY (P3-ALL): a genuinely-binary body (invalid UTF-8) must be persisted
+    // BYTE-IDENTICALLY to the wire. The transport carries the raw bytes in
+    // `HttpResponse.body_bytes` (populated by reqwest's `resp.bytes()` —
+    // claude-code's `responseType:"arraybuffer"`); the lossy `body` String is
+    // NOT byte-identical, so persisting `body.as_bytes()` would corrupt the
+    // artifact. This pins that WebFetch persists the raw `body_bytes`.
+    #[tokio::test]
+    async fn binary_body_persists_raw_bytes_not_lossy_string() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (ctx, http, _sink) = make_web_ctx_with_workspace(tmp.path().to_path_buf());
+        // `%PDF-1.4` then NUL + invalid-UTF8 bytes (0xFF 0xFE 0x89) — these are
+        // replaced by U+FFFD under lossy decoding, so the String differs from
+        // the wire both in bytes and in length.
+        let raw: Vec<u8> = vec![
+            0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34, 0x00, 0xFF, 0xFE, 0x89,
+        ];
+        let lossy = String::from_utf8_lossy(&raw).into_owned();
+        assert_ne!(
+            lossy.as_bytes(),
+            raw.as_slice(),
+            "sanity: lossy String must differ from the raw wire bytes"
+        );
+        http.enqueue(preflight_allow());
+        http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/pdf".into())],
+            body: lossy,
+            body_bytes: raw.clone(),
+        }));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://binary.example/raw.pdf" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        // The reported byte count is the RAW wire length (arraybuffer byteLength).
+        assert_eq!(res.data["bytes"], raw.len());
+        // The footer shows the raw byte size.
+        let content = res.data["result"].as_str().unwrap();
+        assert!(
+            content.contains(&format!(
+                "\n\n[Binary content (application/pdf, {}) also saved to ",
+                crate::persist::human_size(raw.len() as u64)
+            )),
+            "missing binary footer: {content}"
+        );
+        // The persisted artifact is byte-identical to the WIRE, not to the lossy
+        // String — the whole point of P3-ALL.
+        let results_dir = tmp.path().join(".lingxi").join("tool-results");
+        let entries: Vec<_> = std::fs::read_dir(&results_dir)
+            .expect("tool-results dir created")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one persisted artifact");
+        let saved = std::fs::read(entries[0].path()).unwrap();
+        assert_eq!(saved, raw, "persisted artifact must be the raw wire bytes");
+        assert_ne!(
+            saved,
+            String::from_utf8_lossy(&raw).into_owned().into_bytes(),
+            "persisted artifact must NOT be the lossy-decoded String bytes"
+        );
+    }
+
     // PARITY (#94): a NON-binary (text/html) body does NOT persist and gets NO
     // footer.
     #[tokio::test]
@@ -1821,6 +1906,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             status: 200,
             headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
             body: "<p>hi</p>".into(),
+            body_bytes: Vec::new(),
         }));
         let tool = WebFetchTool::new(ctx);
         let res = tool

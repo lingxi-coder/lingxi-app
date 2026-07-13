@@ -252,6 +252,7 @@ mod tests {
                 status: self.response_status,
                 headers: Vec::new(),
                 body: self.response_body.clone(),
+                body_bytes: Vec::new(),
             })
         }
         async fn stream_sse(

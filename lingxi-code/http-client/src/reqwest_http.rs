@@ -51,12 +51,20 @@ impl ReqwestHttp {
     /// fatal startup error and the process should not continue.
     #[must_use]
     pub fn new() -> Self {
+        // mTLS client identity + custom CA-trust (`CLAUDE_CODE_CLIENT_CERT` /
+        // `_KEY` / `_KEY_PASSPHRASE` / `CERT_STORE`, `NODE_EXTRA_CA_CERTS`) is
+        // read once here and applied identically to BOTH clients so a corporate
+        // mutual-TLS / custom-CA endpoint is reachable on every request path.
+        let tls = crate::tls_config::TlsSettings::from_env();
         Self {
-            client: reqwest::Client::builder()
+            client: tls
+                .apply_to_builder(reqwest::Client::builder())
                 .build()
                 .expect("reqwest client init"),
-            no_redirect_client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
+            no_redirect_client: tls
+                .apply_to_builder(
+                    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
+                )
                 .build()
                 .expect("reqwest no-redirect client init"),
         }

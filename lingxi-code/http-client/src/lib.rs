@@ -5,5 +5,6 @@
 //! duplicated `platforms/{common,windows,posix}` copies.
 
 pub mod reqwest_http;
+mod tls_config;
 
 pub use reqwest_http::ReqwestHttp;

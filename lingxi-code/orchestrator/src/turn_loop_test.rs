@@ -1300,9 +1300,16 @@ mod read_file_state_tests {
         }
 
         // Seed the read-file-state registry with two files at distinct mtimes.
+        // P2-12: the restore RE-READS from disk (not the snapshot content), so
+        // the files must exist on disk with the asserted content.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old_path = dir.path().join("old.rs");
+        let new_path = dir.path().join("new.rs");
+        std::fs::write(&old_path, "fn old() {}\n").expect("write old.rs");
+        std::fs::write(&new_path, "fn fresh() {}\n").expect("write new.rs");
         tool_api::read_file_state::set(
             &orch.read_state_map,
-            PathBuf::from("/tmp/old.rs"),
+            old_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "fn old() {}\n".into(),
                 mtime_ms: 100,
@@ -1313,7 +1320,7 @@ mod read_file_state_tests {
         );
         tool_api::read_file_state::set(
             &orch.read_state_map,
-            PathBuf::from("/tmp/new.rs"),
+            new_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "fn fresh() {}\n".into(),
                 mtime_ms: 200,
@@ -1363,8 +1370,9 @@ mod read_file_state_tests {
             restored.iter().any(|t| t.contains("fn fresh() {}")),
             "the freshest file content must be restored"
         );
+        let new_disp = new_path.display().to_string();
         assert!(
-            restored.iter().any(|t| t.contains("/tmp/new.rs")),
+            restored.iter().any(|t| t.contains(&new_disp)),
             "the restored attachment names the file path"
         );
     }
@@ -1439,9 +1447,14 @@ mod read_file_state_tests {
 
         // A tool's `readFileState.set` goes through the SHARED handle (as the
         // real `FileReadTool` does via its `BuiltinToolContext.read_file_state`).
+        // P2-12: the post-compact restore RE-READS from disk, so the file must
+        // exist on disk with the asserted content.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool_read_path = dir.path().join("tool_read.rs");
+        std::fs::write(&tool_read_path, "fn tool_read() {}\n").expect("write tool_read.rs");
         tool_api::read_file_state::set(
             &shared,
-            PathBuf::from("/tmp/tool_read.rs"),
+            tool_read_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: "fn tool_read() {}\n".into(),
                 mtime_ms: 321,
@@ -1471,7 +1484,7 @@ mod read_file_state_tests {
             } => content.iter().any(|b| match b {
                 protocol::ContentBlock::Text { text } => {
                     text.contains("restored after compaction")
-                        && text.contains("/tmp/tool_read.rs")
+                        && text.contains(&tool_read_path.display().to_string())
                         && text.contains("fn tool_read() {}")
                 }
                 _ => false,

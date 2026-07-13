@@ -2349,18 +2349,29 @@ impl ConversationOrchestrator {
     /// files are re-attached — capped at
     /// [`compaction::POST_COMPACT_MAX_TOKENS_PER_FILE`] each and a running
     /// [`compaction::POST_COMPACT_TOKEN_BUDGET`] total — so the model keeps the
-    /// freshest file context across the boundary. The selection/budgeting is the
-    /// pure [`compaction::restore_post_compact_files`]; this method supplies the
-    /// candidates (from `read_state_map`, the `{content, mtime_ms}` registry) and
-    /// renders each survivor as a `<system-reminder>` meta user message.
+    /// freshest file context across the boundary. Selection is the pure
+    /// [`compaction::select_post_compact_files`]; each survivor is then RE-READ
+    /// from disk (the byte-faithful `eRg`/`XQn` behaviour — see below) before
+    /// [`compaction::budget_post_compact_files`] budgets the fresh contents, and
+    /// each survivor is rendered as a `<system-reminder>` meta user message.
     ///
-    /// SKILL restoration (`Lqn`) is NOT wired here: this orchestrator carries no
-    /// invoked-skill registry to source candidates from, so the skill arm of
-    /// `K2p` has no data seam yet (documented residual). FILE restoration uses
-    /// the SNAPSHOT content the model last saw rather than a fresh disk re-read
-    /// (the binary re-reads via `R6n` with `maxTokens:J9p`); the per-file cap is
-    /// applied to the snapshot here, which is observably equivalent for an
-    /// unchanged file.
+    /// P2-12 / `eRg` (`bin/claude.exe` offset ~91938880): the binary re-reads
+    /// each selected file at compact time via `XQn(filename,
+    /// {...ctx,fileReadingLimits:{maxTokens:z0g}}, "…_success", "…_error",
+    /// "compact")` rather than reusing the stale `readFileState` snapshot. A
+    /// successful re-read fires `tengu_post_compact_file_restore_success` (empty
+    /// payload, `N(r,{})`) and attaches the FRESH content; an unreadable/deleted
+    /// file fires `tengu_post_compact_file_restore_error` (`N(n,{})`) and is
+    /// dropped — the model never sees stale/since-deleted content. This differs
+    /// observably from the snapshot only when a file changed or was deleted after
+    /// its last read.
+    ///
+    /// SKILL restoration (`rRg`/`kGo`) is NOT wired here: this orchestrator
+    /// carries no invoked-skill registry to source candidates from, so the skill
+    /// arm has no data seam yet (documented residual — the pure
+    /// [`compaction::restore_post_compact_skills`] helper exists and is
+    /// unit-tested, awaiting a runtime `invokedSkills` registry + skill-call-site
+    /// wiring).
     async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
         // Snapshot then clear the read-file-state registries (the `eOt` snapshot
         // + `readFileState.clear()` step). Both the rich map and the `/files`
@@ -2388,10 +2399,36 @@ impl ConversationOrchestrator {
             })
             .collect();
 
-        // `already_attached` is empty: this port does not thread the running
-        // attachment set into the boundary builder, so no file is double-counted
-        // here (the snapshot is the sole source).
-        let restored = compaction::restore_post_compact_files(candidates, &[]);
+        // Selection half of `eRg`: filter already-attached + sort mtime DESC +
+        // top-5. `already_attached` is empty: this port does not thread the
+        // running attachment set into the boundary builder (the snapshot is the
+        // sole source), and the plan-file filter (`aRg`) has no seam here — both
+        // documented residuals.
+        let selected = compaction::select_post_compact_files(candidates, &[]);
+
+        // RE-READ each selected file from disk (`XQn`), firing the restore
+        // telemetry per file. A file that changed since its last read yields the
+        // FRESH content; a deleted/unreadable file is dropped (never restoring the
+        // stale snapshot content the model would otherwise have carried across the
+        // boundary).
+        let mut fresh: Vec<compaction::FileRestoreCandidate> = Vec::with_capacity(selected.len());
+        for candidate in selected {
+            match tokio::fs::read_to_string(&candidate.path).await {
+                Ok(content) => {
+                    self.fire_post_compact_file_restore(true).await;
+                    fresh.push(compaction::FileRestoreCandidate { content, ..candidate });
+                }
+                Err(_) => {
+                    // Unreadable/deleted at compact time → drop; `XQn` returns
+                    // null and the file is filtered out of the attachment set.
+                    self.fire_post_compact_file_restore(false).await;
+                }
+            }
+        }
+
+        // Budgeting half of `eRg`: per-file cap (maxTokens 5000) + running budget
+        // (50000) over the FRESH re-read contents, preserving the DESC order.
+        let restored = compaction::budget_post_compact_files(fresh);
 
         restored
             .into_iter()
@@ -2408,6 +2445,27 @@ impl ConversationOrchestrator {
                 protocol::ConversationMessage::user_meta(protocol::MessageId::new(), body)
             })
             .collect()
+    }
+
+    /// Fire the post-compact file-restore telemetry — `N(r,{})` / `N(n,{})` in
+    /// the binary's `XQn`: an EMPTY payload, one event per re-read attempt.
+    ///
+    /// `true` → `tengu_post_compact_file_restore_success` (the file re-read
+    /// cleanly); `false` → `tengu_post_compact_file_restore_error` (unreadable /
+    /// deleted). No-op when no analytics bus is wired (library/test callers),
+    /// mirroring the other `fire_*` compaction telemetry helpers.
+    async fn fire_post_compact_file_restore(&self, success: bool) {
+        let Some(bus) = self.analytics_bus.as_ref() else {
+            return;
+        };
+        let event = if success {
+            "tengu_post_compact_file_restore_success"
+        } else {
+            "tengu_post_compact_file_restore_error"
+        };
+        // Empty metadata — the binary fires `N(r,{})` / `N(n,{})` with no fields.
+        bus.log_event(event, telemetry::LogEventMetadata::new())
+            .await;
     }
 
     pub(crate) async fn apply_post_compact(
@@ -13799,5 +13857,161 @@ mod todo_reminder_tests {
             "The task tools haven't been used recently. If you're working on tasks that would benefit from tracking progress, consider using TaskCreate to add new tasks and TaskUpdate to update task status (set to in_progress when starting, completed when done). Also consider cleaning up the task list if it has become stale. Only use these if relevant to the current work. This is just a gentle reminder - ignore if not applicable.\n"
         );
         std::env::remove_var("LINGXI_ENABLE_TASKS");
+    }
+}
+
+// ── P2-12: post-compact FILE restoration re-reads from disk ───────────────────
+//
+// `restore_post_compact_attachments` must RE-READ each selected file from disk
+// (the binary's `eRg`/`XQn` behaviour) rather than reusing the stale
+// `readFileState` snapshot content: a file that changed after its last read is
+// restored with FRESH content, a deleted/unreadable file is dropped, and each
+// re-read attempt fires the `tengu_post_compact_file_restore_{success,error}`
+// telemetry (empty payload).
+#[cfg(test)]
+mod post_compact_file_restore_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use std::sync::Arc;
+    use tool_api::read_file_state::{set, ReadFileEntry};
+    use tool_api::registry::ToolRegistry;
+
+    fn stale_entry(content: &str) -> ReadFileEntry {
+        ReadFileEntry {
+            content: content.to_string(),
+            mtime_ms: 1,
+            offset: None,
+            limit: None,
+            from_read: true,
+        }
+    }
+
+    async fn orch_with_bus(
+        cwd: std::path::PathBuf,
+        map: tool_api::read_file_state::ReadFileStateMap,
+        sink: Arc<telemetry::InMemorySink>,
+    ) -> ConversationOrchestrator {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        bus.attach_sink(sink).await;
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::with_files(vec![])),
+            cwd,
+        )
+        .with_analytics_bus(bus)
+        .with_read_state_map(map)
+    }
+
+    fn restore_names(events: &[telemetry::RecordedEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| e.name.starts_with("tengu_post_compact_file_restore"))
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn reread_restores_fresh_content_not_stale_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("live.txt");
+        // Snapshot recorded "OLD"; on disk the file now holds "NEW CONTENT".
+        std::fs::write(&path, "NEW CONTENT").expect("write file");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, path.clone(), stale_entry("OLD STALE SNAPSHOT"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1, "the live file is restored");
+        let body = restored[0].text_content();
+        assert!(
+            body.contains("NEW CONTENT"),
+            "must restore FRESH disk content; got: {body}"
+        );
+        assert!(
+            !body.contains("OLD STALE SNAPSHOT"),
+            "must NOT restore the stale snapshot content; got: {body}"
+        );
+
+        // Exactly one success event fired, no error event.
+        assert_eq!(
+            restore_names(&sink.events().await),
+            vec!["tengu_post_compact_file_restore_success".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_file_is_dropped_and_fires_error_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A path recorded in the snapshot but never written to disk (deleted).
+        let missing = dir.path().join("gone.txt");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        set(&map, missing, stale_entry("content the model saw before deletion"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(
+            restored.is_empty(),
+            "an unreadable/deleted file must be dropped, not restored from the stale snapshot"
+        );
+        assert_eq!(
+            restore_names(&sink.events().await),
+            vec!["tengu_post_compact_file_restore_error".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn success_and_error_events_fire_per_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join("a.txt");
+        std::fs::write(&live, "alive").expect("write file");
+        let gone = dir.path().join("b.txt"); // never created
+
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        // Higher mtime → selected/re-read first (DESC), but ordering of the two
+        // telemetry events is not asserted — only the multiset.
+        set(&map, live.clone(), stale_entry("stale-a"));
+        set(&map, gone, stale_entry("stale-b"));
+
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1, "only the live file survives");
+        assert!(restored[0].text_content().contains("alive"));
+
+        let mut names = restore_names(&sink.events().await);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "tengu_post_compact_file_restore_error".to_string(),
+                "tengu_post_compact_file_restore_success".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_read_state_restores_nothing_and_fires_no_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(restored.is_empty());
+        assert!(restore_names(&sink.events().await).is_empty());
     }
 }

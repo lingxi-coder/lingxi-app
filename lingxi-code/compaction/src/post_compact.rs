@@ -121,27 +121,25 @@ pub struct RestoredSkill {
     pub content: String,
 }
 
-/// Select and budget the recent files to restore after a compaction.
+/// Select the recent files to restore after a compaction — the **selection**
+/// half of `eRg` (`bin/claude.exe` offset ~91938880), pure and disk-free.
 ///
-/// 1:1 with `Pqn(readFileState, ctx, n, alreadyAttached)` (`bin/claude.exe`
-/// offset 203001477):
+/// 1:1 with the head of `eRg(readFileState, ctx, G0g, alreadyAttached)`:
 /// 1. Drop candidates already attached elsewhere (`alreadyAttached`, matched by
-///    path) — the binary also drops plan files via `s3p`; the plan-file filter
+///    path) — the binary also drops plan files via `aRg`; the plan-file filter
 ///    lives in the caller here.
 /// 2. Sort by `timestamp` DESC (most-recently-read first).
-/// 3. Take the first [`POST_COMPACT_MAX_FILES_TO_RESTORE`] (`n = Dqn = 5`).
-/// 4. Cap each file's content at [`POST_COMPACT_MAX_TOKENS_PER_FILE`]
-///    (`J9p = 5000`) — the binary passes `fileReadingLimits:{maxTokens:J9p}` to
-///    the re-reader; here the per-file cap truncates the supplied content.
-/// 5. Keep files greedily while the running total stays `<=`
-///    [`POST_COMPACT_TOKEN_BUDGET`] (`Y9p = 50000`); a file that would overflow
-///    is dropped (NOT truncated to fit) and iteration continues, exactly like
-///    the binary's `if(a+c<=Y9p)return a+=c,!0; return !1` filter.
+/// 3. Take the first [`POST_COMPACT_MAX_FILES_TO_RESTORE`] (`G0g = 5`).
+///
+/// The caller then RE-READS each survivor from disk (`XQn` with
+/// `fileReadingLimits:{maxTokens:z0g}`) before feeding the fresh contents to
+/// [`budget_post_compact_files`] — the binary re-reads at compact time rather
+/// than reusing the stale `readFileState` snapshot content.
 #[must_use]
-pub fn restore_post_compact_files(
+pub fn select_post_compact_files(
     candidates: Vec<FileRestoreCandidate>,
     already_attached: &[std::path::PathBuf],
-) -> Vec<RestoredFile> {
+) -> Vec<FileRestoreCandidate> {
     let mut selected: Vec<FileRestoreCandidate> = candidates
         .into_iter()
         .filter(|c| !already_attached.iter().any(|p| p == &c.path))
@@ -150,17 +148,37 @@ pub fn restore_post_compact_files(
     // `.sort((l,c)=>c.timestamp-l.timestamp)` for equal timestamps.
     selected.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
     selected.truncate(POST_COMPACT_MAX_FILES_TO_RESTORE);
+    selected
+}
 
+/// Apply the per-file cap + running token budget to (freshly re-read) file
+/// candidates — the **budgeting** half of `eRg`.
+///
+/// Each candidate's `content` is the fresh disk re-read the caller performed
+/// (with `fileReadingLimits:{maxTokens:z0g}`); this:
+/// 1. Caps each file's content at [`POST_COMPACT_MAX_TOKENS_PER_FILE`]
+///    (`z0g = 5000`) — the binary's re-reader applies its own maxTokens
+///    truncation; here the per-file cap truncates the supplied content.
+/// 2. Keeps files greedily while the running total stays `<=`
+///    [`POST_COMPACT_TOKEN_BUDGET`] (`V0g = 50000`); a file that would overflow
+///    is dropped (NOT truncated to fit) and iteration continues, exactly like
+///    the binary's `if(a+c<=V0g)return a+=c,!0; return !1` filter.
+///
+/// Candidates are processed in the order given; the caller keeps the
+/// [`select_post_compact_files`] DESC order so the greedy budget matches the
+/// binary's timestamp-DESC filter.
+#[must_use]
+pub fn budget_post_compact_files(candidates: Vec<FileRestoreCandidate>) -> Vec<RestoredFile> {
     let mut running = 0u64;
     let mut out = Vec::new();
-    for candidate in selected {
-        // Per-file cap (`fileReadingLimits:{maxTokens:J9p}`): truncate content
+    for candidate in candidates {
+        // Per-file cap (`fileReadingLimits:{maxTokens:z0g}`): truncate content
         // exceeding the per-file token budget. Reuse the skill truncation shape
         // (the binary's re-reader applies its own maxTokens truncation; the
         // observable effect is a per-file ceiling).
         let content = truncate_skill_content(&candidate.content, POST_COMPACT_MAX_TOKENS_PER_FILE);
         let cost = estimate_content_tokens(&content);
-        // Running budget: keep while total + cost <= Y9p; else DROP (continue).
+        // Running budget: keep while total + cost <= V0g; else DROP (continue).
         if running.saturating_add(cost) <= POST_COMPACT_TOKEN_BUDGET {
             running = running.saturating_add(cost);
             out.push(RestoredFile {
@@ -170,6 +188,22 @@ pub fn restore_post_compact_files(
         }
     }
     out
+}
+
+/// Select **and** budget the recent files to restore after a compaction, over
+/// the SNAPSHOT content (no disk re-read).
+///
+/// Composes [`select_post_compact_files`] + [`budget_post_compact_files`]. The
+/// production orchestrator path re-reads each selected file from disk BETWEEN
+/// these two halves (the byte-faithful `eRg` behaviour); this composed form is
+/// retained for the pure [`PostCompactBuilder::build`] shape + its unit tests,
+/// where no filesystem is available.
+#[must_use]
+pub fn restore_post_compact_files(
+    candidates: Vec<FileRestoreCandidate>,
+    already_attached: &[std::path::PathBuf],
+) -> Vec<RestoredFile> {
+    budget_post_compact_files(select_post_compact_files(candidates, already_attached))
 }
 
 /// Select and budget the invoked skills to restore after a compaction.
@@ -528,6 +562,62 @@ mod tests {
         assert_eq!(restored.len(), 5);
         assert_eq!(restored[4].path, PathBuf::from("/small"));
         assert_eq!(restored[4].content, "tiny");
+    }
+
+    #[test]
+    fn select_files_top5_desc_and_filters_already_attached() {
+        // Selection half of `eRg`: DESC by timestamp, top-5, drops already-attached.
+        let candidates = vec![
+            file("/f0", "a", 0),
+            file("/f5", "a", 5),
+            file("/dup", "a", 9), // highest ts but already attached → dropped
+            file("/f3", "a", 3),
+            file("/f4", "a", 4),
+            file("/f1", "a", 1),
+            file("/f2", "a", 2),
+        ];
+        let selected = select_post_compact_files(candidates, &[PathBuf::from("/dup")]);
+        // Top-5 by timestamp DESC, /dup filtered out first.
+        let paths: Vec<_> = selected.iter().map(|c| c.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/f5"),
+                PathBuf::from("/f4"),
+                PathBuf::from("/f3"),
+                PathBuf::from("/f2"),
+                PathBuf::from("/f1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn budget_files_caps_each_and_respects_running_budget() {
+        // Budgeting half of `eRg`: per-file cap + running budget over the
+        // caller-supplied (fresh) contents; order is preserved.
+        let big = "x".repeat(40_000); // caps to ~5_000 tokens
+        let candidates = vec![
+            file("/b1", &big, 5),
+            file("/b2", &big, 4),
+            file("/small", "tiny", 1),
+        ];
+        let restored = budget_post_compact_files(candidates);
+        // 2 big (~5_000 each = 10_000) + small (~1) = 10_001 <= 50_000 → all kept,
+        // order preserved (no re-sort in the budgeting half).
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[0].path, PathBuf::from("/b1"));
+        assert!(restored[0].content.ends_with(SKILL_TRUNCATION_MARKER));
+        assert_eq!(restored[2].path, PathBuf::from("/small"));
+        assert_eq!(restored[2].content, "tiny");
+    }
+
+    #[test]
+    fn restore_files_composes_select_then_budget() {
+        // The composed pure form must equal select-then-budget.
+        let candidates = vec![file("/a", "one", 2), file("/b", "two", 1)];
+        let composed = restore_post_compact_files(candidates.clone(), &[]);
+        let manual = budget_post_compact_files(select_post_compact_files(candidates, &[]));
+        assert_eq!(composed, manual);
     }
 
     #[test]

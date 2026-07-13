@@ -47,10 +47,11 @@ pub use partial::{
     select_preserved_tail, zero_preserved_tail_usage, zero_preserved_usage, PreservedTailSplit,
 };
 pub use post_compact::{
-    estimate_content_tokens, is_main_thread_compact, restore_post_compact_files,
-    restore_post_compact_skills, run_post_compact_cleanup, truncate_skill_content,
-    FileRestoreCandidate, PostCompactBuilder, PostCompactMessages, RestoredFile, RestoredSkill,
-    SkillRestoreCandidate, SKILL_TRUNCATION_MARKER,
+    budget_post_compact_files, estimate_content_tokens, is_main_thread_compact,
+    restore_post_compact_files, restore_post_compact_skills, run_post_compact_cleanup,
+    select_post_compact_files, truncate_skill_content, FileRestoreCandidate, PostCompactBuilder,
+    PostCompactMessages, RestoredFile, RestoredSkill, SkillRestoreCandidate,
+    SKILL_TRUNCATION_MARKER,
 };
 pub use prompt::{
     format_compact_summary, get_compact_prompt, get_compact_user_summary_message,

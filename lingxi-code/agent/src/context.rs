@@ -184,4 +184,15 @@ pub struct SubagentContext {
     /// [`crate::tool_resolver::AgentToolResolver`] to gate the `Agent` tool at
     /// `depth < 5` (claude `e9t = 5`).
     pub depth: u32,
+    /// The child's EFFECTIVE permission-context mode as a WIRE string
+    /// (`"plan"`/`"acceptEdits"`/…), computed by [`crate::handle`] from the Agent
+    /// tool `mode` clamped against the parent's live mode (claude-code 2.1.207
+    /// `wKe`/`ve`) or the agent definition's own permission mode. `Some` ⇒ the
+    /// runner threads it into every dispatched tool's
+    /// [`traits::tool_invoker::SubagentInvocationContext::mode_override`] so the
+    /// child's tool-dispatch permission checks run under this mode — e.g. a
+    /// `mode:"plan"` child gates mutations (`Edit`/`Write`/`Bash`) while reads stay
+    /// frictionless. `None` ⇒ the child inherits the shared gate's live/boot mode
+    /// (byte-identical to pre-2.1.207). The fork path never sets it.
+    pub permission_mode_override: Option<String>,
 }

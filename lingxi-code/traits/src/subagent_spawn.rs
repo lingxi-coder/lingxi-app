@@ -71,8 +71,12 @@ pub struct SubagentSpawnRequest {
     /// routing is deferred.
     #[serde(default)]
     pub team_name: Option<String>,
-    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
-    /// Carried through; permission-mode application is deferred.
+    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`). The
+    /// spawner clamps it against the parent's live mode (claude-code 2.1.207
+    /// `wKe`/`zol`) and threads the result into the child's tool-dispatch
+    /// permission checks (`SubagentContext::permission_mode_override`) so a
+    /// `mode:"plan"` child gates mutations while reads stay frictionless. The fork
+    /// path leaves it `None`.
     #[serde(default)]
     pub mode: Option<String>,
     /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). Carried

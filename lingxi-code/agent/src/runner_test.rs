@@ -400,6 +400,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         hook_session_id: protocol::SessionId::nil(),
         hook_cwd: std::path::PathBuf::new(),
         depth: 0,
+        permission_mode_override: None,
     }
 }
 

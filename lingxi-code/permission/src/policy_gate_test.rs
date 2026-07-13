@@ -752,6 +752,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn check_with_context_mode_override_gates_mutation_under_plan() {
+        // A per-call plan override (a spawned `mode:"plan"` child, claude-code
+        // 2.1.207 `ve`) re-authorizes THIS dispatch under Plan even though the
+        // gate's boot mode (bypassPermissions) would allow the mutation outright:
+        // the mutation trips the plan backstop → delegated to the inner transport,
+        // while a read-only tool stays frictionless. The gate's own mode is never
+        // mutated (the parent's checks are unaffected).
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::BypassPermissions);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "plan blocks writes".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+
+        // No override: boot bypass allows the write, inner never consulted.
+        let baseline = gate
+            .check_with_context(
+                "Edit",
+                &serde_json::json!({ "file_path": "/x.rs" }),
+                &PermissionCheckContext::default(),
+            )
+            .await;
+        assert!(
+            matches!(baseline, PermissionOutcome::Allow { .. }),
+            "boot bypassPermissions allows the mutation with no override"
+        );
+        assert_eq!(inner.calls(), 0, "bypass does not delegate to the prompt");
+
+        // Override plan: Edit trips the plan backstop → delegated to inner (Deny).
+        let plan_ctx = PermissionCheckContext {
+            mode_override: Some("plan".into()),
+            ..Default::default()
+        };
+        let edit = gate
+            .check_with_context("Edit", &serde_json::json!({ "file_path": "/x.rs" }), &plan_ctx)
+            .await;
+        match edit {
+            PermissionOutcome::Deny { reason } => {
+                assert!(reason.contains("plan blocks writes"), "got {reason}");
+            }
+            other => panic!("expected Deny under plan override, got {other:?}"),
+        }
+        assert_eq!(
+            inner.calls(),
+            1,
+            "the plan override delegates the mutation to the inner transport"
+        );
+
+        // Override plan: Read is plan-safe / AllowByDefault → auto-allow, no prompt.
+        let read = gate
+            .check_with_context("Read", &serde_json::json!({}), &plan_ctx)
+            .await;
+        assert!(
+            matches!(read, PermissionOutcome::Allow { .. }),
+            "a plan child's reads stay frictionless"
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "plan-safe read auto-allows without delegating"
+        );
+    }
+
     #[test]
     fn map_decision_source_maps_classifier_rejected_to_classifier() {
         // The classifier source is what unblocks the PermissionDenied hook; the

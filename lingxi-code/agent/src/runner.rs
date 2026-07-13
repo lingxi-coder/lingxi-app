@@ -1099,6 +1099,14 @@ async fn run_subagent_loop(
                         // into that field; the definition's model is already the concrete
                         // Explicit id resolved at spawn time.
                         parent_model: Some(resolve_model(&ctx)),
+                        // This subagent's EFFECTIVE permission mode (claude-code
+                        // 2.1.207 Agent `mode` → the child's
+                        // `toolPermissionContext.mode`, `wKe`/`ve`): threaded into
+                        // the dispatch gate's `PermissionCheckContext` so the child's
+                        // tool calls authorize under it (a `mode:"plan"` child gates
+                        // mutations while reads stay frictionless). `None` = inherit
+                        // the gate's live/boot mode.
+                        mode_override: ctx.permission_mode_override.clone(),
                     };
                     match invoker.invoke(name, input.clone(), inv_ctx).await {
                         Ok(value) => {

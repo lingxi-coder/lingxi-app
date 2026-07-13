@@ -146,30 +146,24 @@ pub fn compose_rate_limit(
     info: &RateLimitInfo,
     sub: &SubscriptionSnapshot,
 ) -> Option<ComposedRateLimit> {
-    // 2.1.206 `lhe` (the compiled `formatLimitReachedText`) no longer
-    // branches on `process.env.USER_TYPE === 'ant'` — that #briarpatch-cc
-    // arm was removed (see `format_limit_reached_text`'s doc comment below).
-    // The `USER_TYPE` env read and the `is_ant` parameter it feeds are kept
-    // threaded through regardless: they're now inert (no branch reads
-    // `is_ant`), but re-wiring the signature to drop them is deliberately
-    // deferred. `extraUsage.isEnabled()` (commands/extra-usage/index.ts:6-17)
-    // reads `DISABLE_EXTRA_USAGE_COMMAND` through `isEnvTruthy`. Both env
-    // reads happen here so the core stays injectable for tests.
+    // 2.1.206 `lhe` (the compiled `formatLimitReachedText`) no longer branches
+    // on `process.env.USER_TYPE === 'ant'` — that #briarpatch-cc arm was removed
+    // (see `format_limit_reached_text`'s doc comment), so the `USER_TYPE` read
+    // and the `is_ant` thread it fed are gone. `extraUsage.isEnabled()`
+    // (commands/extra-usage/index.ts:6-17) reads `DISABLE_EXTRA_USAGE_COMMAND`
+    // through `isEnvTruthy`; the read happens here so the core stays injectable.
     let disable_extra_usage =
         is_env_truthy(std::env::var("DISABLE_EXTRA_USAGE_COMMAND").ok().as_deref());
     compose_with(
         info,
-        std::env::var("USER_TYPE").as_deref() == Ok("ant"),
         sub,
         sub.is_extra_usage_command_enabled(disable_extra_usage),
     )
 }
 
-/// Testable core of [`compose_rate_limit`] with the `USER_TYPE === 'ant'`
-/// flag and `extraUsage.isEnabled()` injected.
+/// Testable core of [`compose_rate_limit`] with `extraUsage.isEnabled()` injected.
 fn compose_with(
     info: &RateLimitInfo,
-    is_ant: bool,
     sub: &SubscriptionSnapshot,
     extra_usage_cmd_enabled: bool,
 ) -> Option<ComposedRateLimit> {
@@ -228,7 +222,7 @@ fn compose_with(
             })
         };
         return Some(ComposedRateLimit {
-            text: limit_reached_text(info, is_ant, sub),
+            text: limit_reached_text(info, sub),
             upsell,
         });
     }
@@ -449,7 +443,7 @@ const HQI_REASONS: [&str; 2] = ["org_level_disabled_until", "org_spend_cap_reach
 /// `ZA(t)` is the only consumer of the model parameter `t` in this function,
 /// so the model is not threaded here; see [`is_fable_model`] /
 /// [`overage_consent_required`] for the pinned leaves.
-fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnapshot) -> String {
+fn limit_reached_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> String {
     let r = sub.is_usage_based_billing();
     let n = sub.has_claude_ai_billing_access();
     let o: &str = if n {
@@ -465,7 +459,7 @@ fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnap
         .map_or_else(String::new, |t| format!(" \u{b7} resets {t}"));
 
     let c = qcg_limit_name(info.rate_limit_type.as_deref(), sub)
-        .map(|name| format_limit_reached_text(name, &reset_message, is_ant));
+        .map(|name| format_limit_reached_text(name, &reset_message));
 
     let reason = info.overage_disabled_reason.as_deref();
     let is_hqi_reason = reason.is_some_and(|x| HQI_REASONS.contains(&x));
@@ -490,7 +484,6 @@ fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnap
                 } else {
                     " \u{b7} run /usage-credits to ask your admin for a higher limit"
                 },
-                is_ant,
             );
         }
         return format_limit_reached_text(
@@ -504,7 +497,6 @@ fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnap
             } else {
                 " \u{b7} ask your admin to raise it at claude.ai/settings/usage"
             },
-            is_ant,
         );
     }
 
@@ -545,7 +537,7 @@ fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnap
             let d = overage_reset_time
                 .as_deref()
                 .map_or_else(String::new, |t| format!(" \u{b7} resets {t}"));
-            return format_limit_reached_text("org's monthly usage limit", &d, is_ant);
+            return format_limit_reached_text("org's monthly usage limit", &d);
         }
         if matches!(
             reason,
@@ -569,18 +561,18 @@ fn limit_reached_text(info: &RateLimitInfo, is_ant: bool, sub: &SubscriptionSnap
             return "Your group's usage limit is set to $0 \u{b7} run /usage-credits to ask your admin for a higher limit".to_owned();
         }
         if r {
-            return format_limit_reached_text("usage limit", o, is_ant);
+            return format_limit_reached_text("usage limit", o);
         }
-        return format_limit_reached_text("limit", &u, is_ant);
+        return format_limit_reached_text("limit", &u);
     }
 
     if let Some(c) = c {
         return c;
     }
     if r {
-        return format_limit_reached_text("usage limit", o, is_ant);
+        return format_limit_reached_text("usage limit", o);
     }
-    format_limit_reached_text("usage limit", &reset_message, is_ant)
+    format_limit_reached_text("usage limit", &reset_message)
 }
 
 /// Port of `qcg` (2.1.206 binary @217905040) limit-name mapping:
@@ -713,11 +705,11 @@ fn early_warning_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> Optio
     Some(with_upsell(base))
 }
 
-/// Port of `formatLimitReachedText` (rateLimitMessages.ts:333-344). The TS
-/// `model` parameter is unused there (`_model`) and omitted here.
-fn format_limit_reached_text(limit: &str, reset_message: &str, _is_ant: bool) -> String {
-    // 2.1.206 `lhe(e,t,r)` = `You've hit your ${e}${t}` — the USER_TYPE==='ant'
-    // #briarpatch-cc/reset-limits branch was removed in 206.
+/// Port of 2.1.206 `lhe(e,t,r)` = `You've hit your ${e}${t}` — the
+/// `formatLimitReachedText` (`rateLimitMessages.ts`). The pre-206
+/// `USER_TYPE==='ant'` #briarpatch-cc/reset-limits branch (and the `model`/`_model`
+/// arg) were removed in 206, so this is a pure two-part concatenation.
+fn format_limit_reached_text(limit: &str, reset_message: &str) -> String {
     format!("You've hit your {limit}{reset_message}")
 }
 
@@ -1123,8 +1115,8 @@ mod tests {
 
     /// Legacy shorthand: unknown subscription (default snapshot), extra-usage
     /// command disabled — the pre-batch-4 composer behaviour.
-    fn compose(info: &RateLimitInfo, is_ant: bool) -> Option<ComposedRateLimit> {
-        compose_with(info, is_ant, &SubscriptionSnapshot::default(), false)
+    fn compose(info: &RateLimitInfo) -> Option<ComposedRateLimit> {
+        compose_with(info, &SubscriptionSnapshot::default(), false)
     }
 
     /// Pro subscriber on Stripe billing.
@@ -1194,7 +1186,7 @@ mod tests {
 
     #[test]
     fn all_fields_absent_composes_nothing() {
-        assert_eq!(compose(&RateLimitInfo::default(), false), None);
+        assert_eq!(compose(&RateLimitInfo::default()), None);
     }
 
     #[test]
@@ -1203,7 +1195,7 @@ mod tests {
             status: Some("allowed".into()),
             ..RateLimitInfo::default()
         };
-        assert_eq!(compose(&info, false), None);
+        assert_eq!(compose(&info), None);
     }
 
     // ── isUsingOverage derivation (claudeAiLimits.ts:406-409) ──────────────
@@ -1217,7 +1209,7 @@ mod tests {
             overage_status: Some("allowed".into()),
             ..RateLimitInfo::default()
         };
-        assert_eq!(compose(&info, false), None);
+        assert_eq!(compose(&info), None);
     }
 
     #[test]
@@ -1232,7 +1224,7 @@ mod tests {
             overage_status: Some("allowed_warning".into()),
             ..RateLimitInfo::default()
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(got.text, "You're close to your usage credit limit");
         assert!(!got.text.contains('\u{2019}'));
         assert_eq!(got.upsell, None, "warnings carry no dim upsell line");
@@ -1243,7 +1235,7 @@ mod tests {
     #[test]
     fn rejected_five_hour_hits_session_limit_with_reset() {
         let ts = ts_in(3600);
-        let got = compose(&rejected(Some("five_hour"), Some(ts)), false).unwrap();
+        let got = compose(&rejected(Some("five_hour"), Some(ts))).unwrap();
         assert_eq!(
             got.text,
             format!("You've hit your session limit \u{b7} resets {}", reset(ts))
@@ -1257,7 +1249,7 @@ mod tests {
     #[test]
     fn rejected_seven_day_hits_weekly_limit() {
         let ts = ts_in(3600);
-        let got = compose(&rejected(Some("seven_day"), Some(ts)), false).unwrap();
+        let got = compose(&rejected(Some("seven_day"), Some(ts))).unwrap();
         assert_eq!(
             got.text,
             format!("You've hit your weekly limit \u{b7} resets {}", reset(ts))
@@ -1266,7 +1258,7 @@ mod tests {
 
     #[test]
     fn rejected_seven_day_opus_hits_opus_limit() {
-        let got = compose(&rejected(Some("seven_day_opus"), None), false).unwrap();
+        let got = compose(&rejected(Some("seven_day_opus"), None)).unwrap();
         assert_eq!(got.text, "You've hit your Opus limit");
     }
 
@@ -1274,32 +1266,32 @@ mod tests {
     fn rejected_seven_day_sonnet_hits_sonnet_limit() {
         // Unknown subscription → the non-pro/enterprise default 'Sonnet
         // limit' (TS :175-182; gap documented in the module docs).
-        let got = compose(&rejected(Some("seven_day_sonnet"), None), false).unwrap();
+        let got = compose(&rejected(Some("seven_day_sonnet"), None)).unwrap();
         assert_eq!(got.text, "You've hit your Sonnet limit");
     }
 
     #[test]
     fn rejected_unknown_type_hits_usage_limit() {
-        let got = compose(&rejected(None, None), false).unwrap();
+        let got = compose(&rejected(None, None)).unwrap();
         assert_eq!(got.text, "You've hit your usage limit");
     }
 
     #[test]
     fn rejected_ant_user_gets_plain_text_206() {
-        // 2.1.206 `lhe` dropped the USER_TYPE === 'ant' #briarpatch-cc
-        // branch entirely; `is_ant` no longer changes the output.
-        let got = compose(&rejected(Some("five_hour"), None), true).unwrap();
+        // 2.1.206 `lhe` dropped the USER_TYPE === 'ant' #briarpatch-cc branch
+        // entirely — the output is now plain regardless of user type.
+        let got = compose(&rejected(Some("five_hour"), None)).unwrap();
         assert_eq!(got.text, "You've hit your session limit");
     }
 
     #[test]
     fn lhe_206_has_no_ant_branch() {
         assert_eq!(
-            format_limit_reached_text("session limit", " · resets 3pm", true),
+            format_limit_reached_text("session limit", " · resets 3pm"),
             "You've hit your session limit · resets 3pm"
         );
         assert_eq!(
-            format_limit_reached_text("weekly limit", "", false),
+            format_limit_reached_text("weekly limit", ""),
             "You've hit your weekly limit"
         );
     }
@@ -1326,7 +1318,7 @@ mod tests {
             overage_resets_at: Some(ts),
             ..rejected(None, None)
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(
             got.text,
             format!("You're out of usage credits \u{b7} resets {}", reset(ts))
@@ -1342,7 +1334,7 @@ mod tests {
             overage_status: Some("rejected".into()),
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(got.text, "You've hit your limit");
     }
 
@@ -1356,7 +1348,7 @@ mod tests {
             overage_resets_at: Some(late),
             ..rejected(Some("five_hour"), Some(early))
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(
             got.text,
             format!("You've hit your limit \u{b7} resets {}", reset(early))
@@ -1367,7 +1359,7 @@ mod tests {
             overage_resets_at: Some(early),
             ..rejected(Some("five_hour"), Some(late))
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(
             got.text,
             format!("You've hit your limit \u{b7} resets {}", reset(early))
@@ -1405,7 +1397,7 @@ mod tests {
             overage_disabled_reason: Some("out_of_credits".into()),
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose_with(&info, false, &sub, false).unwrap();
+        let got = compose_with(&info, &sub, false).unwrap();
         assert_eq!(
             got.text,
             "Your org is out of usage \u{b7} add funds to continue"
@@ -1428,7 +1420,7 @@ mod tests {
             overage_disabled_reason: Some("out_of_credits".into()),
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose_with(&info, false, &sub, false).unwrap();
+        let got = compose_with(&info, &sub, false).unwrap();
         assert_eq!(
             got.text,
             "Your org is out of usage \u{b7} contact your admin"
@@ -1449,7 +1441,7 @@ mod tests {
                 overage_disabled_reason: Some(reason.into()),
                 ..rejected(None, None)
             };
-            let got = compose(&info, false).unwrap();
+            let got = compose(&info).unwrap();
             assert_eq!(got.text, "Your seat type doesn't include usage credits");
         }
     }
@@ -1464,7 +1456,7 @@ mod tests {
             overage_disabled_reason: Some("seat_tier_zero_credit_limit".into()),
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose_with(&info, false, &sub, false).unwrap();
+        let got = compose_with(&info, &sub, false).unwrap();
         assert_eq!(got.text, "Your seat type doesn't include usage");
     }
 
@@ -1477,7 +1469,7 @@ mod tests {
             overage_disabled_reason: Some("org_service_level_disabled".into()),
             ..rejected(None, None)
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(got.text, "This service is disabled for your org");
     }
 
@@ -1491,7 +1483,7 @@ mod tests {
                 overage_disabled_reason: Some(reason.into()),
                 ..rejected(None, None)
             };
-            let got = compose(&info, false).unwrap();
+            let got = compose(&info).unwrap();
             assert_eq!(
                 got.text,
                 "Your usage allocation has been disabled by your admin \u{b7} run /usage-credits to ask your admin for a higher limit"
@@ -1508,7 +1500,7 @@ mod tests {
             overage_disabled_reason: Some("group_zero_credit_limit".into()),
             ..rejected(None, None)
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(
             got.text,
             "Your group's usage limit is set to $0 \u{b7} run /usage-credits to ask your admin for a higher limit"
@@ -1533,7 +1525,7 @@ mod tests {
                 overage_disabled_reason: Some(reason.into()),
                 ..rejected(Some("five_hour"), None)
             };
-            let got = compose_with(&info, false, &admin, false).unwrap();
+            let got = compose_with(&info, &admin, false).unwrap();
             assert_eq!(
                 got.text,
                 "You've hit your org's monthly spend limit \u{b7} run /usage-credits to raise it, or visit claude.ai/admin-settings/usage"
@@ -1543,7 +1535,7 @@ mod tests {
                 organization_role: Some("member".into()),
                 ..admin
             };
-            let got = compose_with(&info, false, &member, false).unwrap();
+            let got = compose_with(&info, &member, false).unwrap();
             assert_eq!(
                 got.text,
                 "You've hit your org's monthly spend limit \u{b7} run /usage-credits to ask your admin for a higher limit"
@@ -1565,14 +1557,14 @@ mod tests {
             overage_disabled_reason: Some("org_level_disabled_until".into()),
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose_with(&info, false, &billed, false).unwrap();
+        let got = compose_with(&info, &billed, false).unwrap();
         assert_eq!(
             got.text,
             "You've hit your monthly spend limit \u{b7} raise it at claude.ai/settings/usage"
         );
 
         // Unknown/no billing access (default snapshot) → the org-facing copy.
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(
             got.text,
             "You've hit your org's monthly spend limit \u{b7} ask your admin to raise it at claude.ai/settings/usage"
@@ -1592,7 +1584,7 @@ mod tests {
             overage_resets_at: Some(ts),
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose_with(&info, false, &sub, false).unwrap();
+        let got = compose_with(&info, &sub, false).unwrap();
         assert_eq!(
             got.text,
             format!("You've hit your org's monthly usage limit \u{b7} resets {}", reset(ts))
@@ -1603,7 +1595,7 @@ mod tests {
             overage_resets_at: None,
             ..info
         };
-        let got = compose_with(&info_no_reset, false, &sub, false).unwrap();
+        let got = compose_with(&info_no_reset, &sub, false).unwrap();
         assert_eq!(got.text, "You've hit your org's monthly usage limit");
     }
 
@@ -1619,14 +1611,14 @@ mod tests {
             ..SubscriptionSnapshot::default()
         });
         let info = rejected(Some("overage"), None); // "overage" is unmapped by qcg.
-        let got = compose_with(&info, false, &usage_billed_admin, false).unwrap();
+        let got = compose_with(&info, &usage_billed_admin, false).unwrap();
         assert_eq!(got.text, "You've hit your usage limit");
 
         let usage_billed_member = SubscriptionSnapshot {
             organization_role: Some("member".into()),
             ..usage_billed_admin
         };
-        let got = compose_with(&info, false, &usage_billed_member, false).unwrap();
+        let got = compose_with(&info, &usage_billed_member, false).unwrap();
         assert_eq!(
             got.text,
             "You've hit your usage limit \u{b7} contact your admin to increase it"
@@ -1635,7 +1627,7 @@ mod tests {
         // Non-usage-based, with a reset time → the `l` (reset_message) arm.
         let ts = ts_in(1800);
         let info_with_reset = rejected(Some("overage"), Some(ts));
-        let got = compose(&info_with_reset, false).unwrap();
+        let got = compose(&info_with_reset).unwrap();
         assert_eq!(
             got.text,
             format!("You've hit your usage limit \u{b7} resets {}", reset(ts))
@@ -1656,7 +1648,7 @@ mod tests {
             overage_disabled_reason: Some("some_unrecognized_reason".into()),
             ..rejected(Some("seven_day_opus"), None)
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(got.text, "You've hit your Opus limit");
     }
 
@@ -1674,7 +1666,7 @@ mod tests {
         // `shouldShowUpsell = isClaudeAISubscriber()` (:78) — the default
         // snapshot is not a subscriber. (Pre-batch-4 this asserted the
         // generic `upsell::UPGRADE` proxy.)
-        let got = compose(&rejected(Some("five_hour"), None), false).unwrap();
+        let got = compose(&rejected(Some("five_hour"), None)).unwrap();
         assert_eq!(got.upsell, None);
     }
 
@@ -1688,7 +1680,7 @@ mod tests {
             overage_status: Some("rejected".into()),
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose(&info, false).unwrap();
+        let got = compose(&info).unwrap();
         assert_eq!(got.upsell, None);
     }
 
@@ -1696,7 +1688,7 @@ mod tests {
     fn unknown_subscription_keeps_rev28_copy() {
         // Default snapshot reproduces the rev2.8 (batch-3) composition:
         // non-pro 'Sonnet limit' naming and no error upsell.
-        let got = compose(&rejected(Some("seven_day_sonnet"), None), false).unwrap();
+        let got = compose(&rejected(Some("seven_day_sonnet"), None)).unwrap();
         assert_eq!(got.text, "You've hit your Sonnet limit");
         assert_eq!(got.upsell, None);
     }
@@ -1707,7 +1699,6 @@ mod tests {
         // rateLimitMessages.ts:175-182.
         let got = compose_with(
             &rejected(Some("seven_day_sonnet"), None),
-            false,
             &pro(),
             false,
         )
@@ -1724,7 +1715,6 @@ mod tests {
         };
         let got = compose_with(
             &rejected(Some("seven_day_sonnet"), None),
-            false,
             &enterprise,
             false,
         )
@@ -1975,7 +1965,7 @@ mod tests {
         // errorCode==="credits_required"` hard-nulls the upsell BEFORE `Gid`
         // ever runs, regardless of subscription state.
         let info = rejected(Some("seven_day_overage_included"), None);
-        let got = compose_with(&info, false, &pro(), true).unwrap();
+        let got = compose_with(&info, &pro(), true).unwrap();
         assert_eq!(got.upsell, None);
     }
 
@@ -1985,7 +1975,7 @@ mod tests {
             credits_required: true,
             ..rejected(Some("five_hour"), None)
         };
-        let got = compose_with(&info, false, &pro(), true).unwrap();
+        let got = compose_with(&info, &pro(), true).unwrap();
         assert_eq!(got.upsell, None);
     }
 
@@ -2008,14 +1998,14 @@ mod tests {
     #[test]
     fn warning_below_threshold_composes_nothing() {
         let info = warning(Some("seven_day"), Some(0.69), Some(ts_in(3600)));
-        assert_eq!(compose(&info, false), None);
+        assert_eq!(compose(&info), None);
     }
 
     #[test]
     fn warning_at_threshold_composes() {
         // TS gate is `utilization < WARNING_THRESHOLD` → exactly 0.7 warns.
         let ts = ts_in(3600);
-        let got = compose(&warning(Some("seven_day"), Some(0.7), Some(ts)), false).unwrap();
+        let got = compose(&warning(Some("seven_day"), Some(0.7), Some(ts))).unwrap();
         assert_eq!(
             got.text,
             format!(
@@ -2029,7 +2019,7 @@ mod tests {
     #[test]
     fn warning_used_percentage_floors() {
         // Math.floor(0.857 * 100) = 85 (TS :223).
-        let got = compose(&warning(Some("seven_day"), Some(0.857), None), false).unwrap();
+        let got = compose(&warning(Some("seven_day"), Some(0.857), None)).unwrap();
         assert_eq!(got.text, "You've used 85% of your weekly limit");
     }
 
@@ -2038,7 +2028,7 @@ mod tests {
         // TS only short-circuits when utilization !== undefined (:73-78);
         // absent utilization falls through to the 'Approaching' copy (:247-253).
         let ts = ts_in(3600);
-        let got = compose(&warning(Some("five_hour"), None, Some(ts)), false).unwrap();
+        let got = compose(&warning(Some("five_hour"), None, Some(ts))).unwrap();
         assert_eq!(
             got.text,
             format!("Approaching session limit \u{b7} resets {}", reset(ts))
@@ -2050,7 +2040,7 @@ mod tests {
         // 206 `jcg`: `t=A5()?"usage limit":"usage credit limit"` on the
         // Approaching path. Default (unknown) subscription → A5()==false →
         // "usage credit limit" (was "extra usage limit" pre-206).
-        let got = compose(&warning(Some("overage"), None, None), false).unwrap();
+        let got = compose(&warning(Some("overage"), None, None)).unwrap();
         assert_eq!(got.text, "Approaching usage credit limit");
     }
 
@@ -2059,7 +2049,7 @@ mod tests {
         // 206 `jcg`: `t=A5()?"usage":"usage credits"` pre-Approaching.
         // Default (unknown) subscription → A5()==false → "usage credits"
         // (was "extra usage" pre-206).
-        let got = compose(&warning(Some("overage"), Some(0.9), None), false).unwrap();
+        let got = compose(&warning(Some("overage"), Some(0.9), None)).unwrap();
         assert_eq!(got.text, "You've used 90% of your usage credits");
     }
 
@@ -2075,7 +2065,6 @@ mod tests {
         let ts = ts_in(3600);
         let got = compose_with(
             &warning(Some("overage"), Some(0.9), Some(ts)),
-            false,
             &sub,
             false,
         )
@@ -2089,18 +2078,14 @@ mod tests {
             billing_type: Some("usage_based".into()),
             ..SubscriptionSnapshot::default()
         };
-        let got = compose_with(&warning(Some("overage"), None, None), false, &sub, false).unwrap();
+        let got = compose_with(&warning(Some("overage"), None, None), &sub, false).unwrap();
         assert_eq!(got.text, "Approaching usage limit");
     }
 
     #[test]
     fn jcg_seven_day_overage_included_reads_fable_5_limit() {
         // NEW in 206: `case"seven_day_overage_included":t="Fable 5 limit"`.
-        let got = compose(
-            &warning(Some("seven_day_overage_included"), Some(0.75), None),
-            false,
-        )
-        .unwrap();
+        let got = compose(&warning(Some("seven_day_overage_included"), Some(0.75), None)).unwrap();
         assert_eq!(got.text, "You've used 75% of your Fable 5 limit");
     }
 
@@ -2109,14 +2094,14 @@ mod tests {
         // `0 !== undefined` and `0 < 0.7` → the TS threshold guard returns
         // null (TS :73-78).
         let info = warning(Some("seven_day"), Some(0.0), Some(ts_in(3600)));
-        assert_eq!(compose(&info, false), None);
+        assert_eq!(compose(&info), None);
     }
 
     #[test]
     fn warning_unknown_type_composes_nothing() {
         // TS getEarlyWarningText returns null for `undefined` (:217-218);
         // unknown strings can't occur in the typed union — treated alike.
-        assert_eq!(compose(&warning(None, Some(0.9), None), false), None);
+        assert_eq!(compose(&warning(None, Some(0.9), None)), None);
     }
 
     // ── team/enterprise warning suppression (TS :80-94) ───────────────────
@@ -2127,7 +2112,7 @@ mod tests {
         // plan limits if overages are enabled" — rateLimitMessages.ts:80-94.
         // Role None → no billing access.
         let info = warning(Some("five_hour"), Some(0.8), Some(ts_in(3600)));
-        assert_eq!(compose_with(&info, false, &team(true, None), false), None);
+        assert_eq!(compose_with(&info, &team(true, None), false), None);
     }
 
     #[test]
@@ -2135,7 +2120,7 @@ mod tests {
         // Billing access (admin role) defeats the suppression (TS :91).
         let ts = ts_in(3600);
         let info = warning(Some("five_hour"), Some(0.8), Some(ts));
-        let got = compose_with(&info, false, &team(true, Some("admin")), false).unwrap();
+        let got = compose_with(&info, &team(true, Some("admin")), false).unwrap();
         assert_eq!(
             got.text,
             format!(
@@ -2153,7 +2138,7 @@ mod tests {
         // appended ` · {upsell}` to the base copy (:232-234).
         let ts = ts_in(3600);
         let info = warning(Some("five_hour"), Some(0.8), Some(ts));
-        let got = compose_with(&info, false, &pro(), false).unwrap();
+        let got = compose_with(&info, &pro(), false).unwrap();
         assert_eq!(
             got.text,
             format!(
@@ -2168,7 +2153,7 @@ mod tests {
             subscription_type: Some("max".into()),
             ..pro()
         };
-        let got = compose_with(&info, false, &max, false).unwrap();
+        let got = compose_with(&info, &max, false).unwrap();
         assert!(got.text.ends_with(" \u{b7} /upgrade to keep using LingXi"));
     }
 
@@ -2181,7 +2166,6 @@ mod tests {
         // '/extra-usage to request more' pre-206).
         let got = compose_with(
             &warning(Some("five_hour"), Some(0.8), None),
-            false,
             &team(false, Some("admin")),
             false,
         )
@@ -2198,7 +2182,6 @@ mod tests {
         // "ask your admin for more" wording.
         let got = compose_with(
             &warning(Some("five_hour"), Some(0.8), None),
-            false,
             &team(false, Some("member")),
             false,
         )
@@ -2215,7 +2198,6 @@ mod tests {
         // TS :276-277. Admin role so the :80-94 suppression doesn't apply.
         let got = compose_with(
             &warning(Some("five_hour"), Some(0.8), None),
-            false,
             &team(true, Some("admin")),
             false,
         )
@@ -2228,7 +2210,6 @@ mod tests {
         // "Weekly limit warnings don't show upsell per spec" — TS :295-296.
         let got = compose_with(
             &warning(Some("seven_day"), Some(0.8), None),
-            false,
             &pro(),
             false,
         )
@@ -2246,7 +2227,6 @@ mod tests {
         // pre-206, on the old 'extra usage limit' wording).
         let got = compose_with(
             &warning(Some("overage"), None, None),
-            false,
             &team(false, Some("admin")),
             false,
         )
@@ -2271,7 +2251,6 @@ mod tests {
         // directly in `wcg_team_raise_cap_vs_ask_admin_by_billing_access`.
         let got = compose_with(
             &warning(Some("overage"), None, None),
-            false,
             &team(true, Some("admin")),
             false,
         )
@@ -2589,7 +2568,7 @@ mod tests {
         // not usage_based → "usage credit limit" (A5() == false).
         let sub = SubscriptionSnapshot::default();
         assert_eq!(
-            compose_with(&info, false, &sub, true).unwrap().text,
+            compose_with(&info, &sub, true).unwrap().text,
             "You're close to your usage credit limit"
         );
         // A5() == true → "usage limit".
@@ -2598,11 +2577,11 @@ mod tests {
             ..SubscriptionSnapshot::default()
         };
         assert_eq!(
-            compose_with(&info, false, &sub, true).unwrap().text,
+            compose_with(&info, &sub, true).unwrap().text,
             "You're close to your usage limit"
         );
         assert!(
-            !compose_with(&info, false, &sub, true)
+            !compose_with(&info, &sub, true)
                 .unwrap()
                 .text
                 .contains('\u{2019}'),
@@ -2651,15 +2630,12 @@ mod tests {
     // Every test above drives the composer through the env-injectable
     // `compose_with` seam. These drive the REAL public entry point,
     // `compose_rate_limit(&RateLimitInfo, &SubscriptionSnapshot)` — the one
-    // `chat_widget` actually calls — so the `USER_TYPE` /
-    // `DISABLE_EXTRA_USAGE_COMMAND` env-var plumbing is pinned end-to-end
-    // too, not just the pure core. No other test in this crate touches
-    // either var, so clearing them here is deterministic and race-free
-    // under the parallel test harness (nothing else mutates or depends on
-    // their value concurrently).
+    // `chat_widget` actually calls — so the `DISABLE_EXTRA_USAGE_COMMAND`
+    // env-var plumbing is pinned end-to-end too, not just the pure core. No
+    // other test in this crate touches that var, so clearing it here is
+    // deterministic and race-free under the parallel test harness.
 
     fn clear_rate_limit_env() {
-        std::env::remove_var("USER_TYPE");
         std::env::remove_var("DISABLE_EXTRA_USAGE_COMMAND");
     }
 

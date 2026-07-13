@@ -122,7 +122,7 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "body": {
                 "type": "object",
-                "description": "JSON body for create and update"
+                "description": "Required for create and update; optional for run"
             }
         },
         "required": ["action"]

@@ -43,6 +43,15 @@ pub struct LspRegistry {
     clients: RwLock<HashMap<String, Arc<LspClient>>>,
     /// File → server-name routing cache (populated by [`Self::ensure_server_for_file`]).
     file_route_cache: RwLock<HashMap<PathBuf, String>>,
+    /// Extension (lowercased, with leading dot) → server names in
+    /// REGISTRATION order.
+    ///
+    /// Mirrors claude-code's LSP server manager, whose routing table is an
+    /// extension → ordered array of server names built in config-registration
+    /// order: `getServerForFile` always resolves the FIRST entry, so a
+    /// later-registered same-extension server is shadowed and never used
+    /// (it gets a registration-time warning instead).
+    ext_routes: RwLock<HashMap<String, Vec<String>>>,
     /// Underlying transport used to start / talk to servers.
     transport: Arc<dyn LspTransport>,
     /// Plugin id → server names contributed by that plugin (used by
@@ -66,6 +75,7 @@ impl LspRegistry {
             servers: RwLock::new(HashMap::new()),
             clients: RwLock::new(HashMap::new()),
             file_route_cache: RwLock::new(HashMap::new()),
+            ext_routes: RwLock::new(HashMap::new()),
             transport,
             plugin_servers: RwLock::new(HashMap::new()),
             diagnostics: None,
@@ -111,6 +121,7 @@ impl LspRegistry {
         config: LspServerConfig,
         client: Arc<LspClient>,
     ) {
+        self.record_routes(&config).await;
         self.servers
             .write()
             .await
@@ -123,17 +134,47 @@ impl LspRegistry {
     /// Crate-private: callers outside `lingxi-lsp` must use
     /// [`Self::register_plugin_servers`].
     pub(crate) async fn register_config(&self, config: LspServerConfig) {
+        self.record_routes(&config).await;
         self.servers.write().await.insert(
             config.name.clone(),
             LspConnectionState::Disconnected { config },
         );
     }
 
+    /// Record `config`'s extensions in the registration-order routing table.
+    ///
+    /// First-registered wins: when another server already handles an
+    /// extension, the newcomer is shadowed and — matching claude-code's
+    /// registration-time console warning byte-for-byte — we warn
+    /// `LSP: extension {ext} already handled by "{first}"; "{name}" will not
+    /// be used for {ext} files`.
+    async fn record_routes(&self, config: &LspServerConfig) {
+        let mut routes = self.ext_routes.write().await;
+        for key in config.extension_to_language.keys() {
+            let ext = key.to_ascii_lowercase();
+            let names = routes.entry(ext.clone()).or_default();
+            if names.iter().any(|n| n == &config.name) {
+                continue; // re-registration of the same server
+            }
+            if let Some(first) = names.first() {
+                let name = &config.name;
+                tracing::warn!(
+                    target: "lingxi_lsp::registry",
+                    "LSP: extension {ext} already handled by \"{first}\"; \"{name}\" will not be used for {ext} files"
+                );
+            }
+            names.push(config.name.clone());
+        }
+    }
+
     /// Return (or start) the server responsible for `path`.
     ///
-    /// Mirrors claude-code `getOrStartServerForFile`: resolve the configured
-    /// server whose `extension_to_language` covers the file's extension; if it
-    /// is already `Initialized`, return its connection; otherwise spawn it via
+    /// Mirrors claude-code `getOrStartServerForFile`: resolve the
+    /// FIRST-registered server whose `extension_to_language` covers the file's
+    /// extension (claude-code's `getServerForFile` always takes the first
+    /// entry of its extension → ordered-server-array table; shadowed
+    /// same-extension servers are never used); if it is already
+    /// `Initialized`, return its connection; otherwise spawn it via
     /// the transport, run the `initialize` handshake against the project root,
     /// bridge the transport's connection into a registry-side [`LspClient`] (so
     /// the `LSPTool` can dispatch over it), record the `Initialized` state, and
@@ -143,29 +184,39 @@ impl LspRegistry {
     /// # Errors
     /// [`LspError::Unavailable`] when no configured server handles the file;
     /// [`LspError::Transport`] / [`LspError::ServerError`] on spawn/handshake
-    /// failure.
+    /// failure (like claude-code's `ensureServerStarted`, a start failure is
+    /// NOT retried against a shadowed same-extension server).
     pub async fn ensure_server_for_file(&self, path: &Path) -> Result<McpConnectionId, LspError> {
-        let ext = file_extension(path);
-
-        // Resolve the responsible server (already-initialized wins; else the
-        // first config whose extension map covers this file).
-        let chosen = {
-            let servers = self.servers.read().await;
-            let mut pick: Option<(String, LspServerConfig)> = None;
-            for (name, state) in servers.iter() {
-                if !config_handles_ext(state.config(), ext.as_deref()) {
-                    continue;
-                }
-                if let LspConnectionState::Initialized { connection_id, .. } = state {
-                    return Ok(*connection_id);
-                }
-                pick = Some((name.clone(), state.config().clone()));
-                break;
-            }
-            pick
+        // Resolve the responsible server deterministically: the
+        // first-registered server handling this extension.
+        let name = {
+            let Some(ext) = file_extension(path) else {
+                return Err(LspError::Unavailable);
+            };
+            self.ext_routes
+                .read()
+                .await
+                .get(&ext)
+                .and_then(|names| names.first().cloned())
+                .ok_or(LspError::Unavailable)?
         };
-        let Some((name, config)) = chosen else {
-            return Err(LspError::Unavailable);
+
+        // Already initialized → reuse it, recording the route for THIS path
+        // so `ensure_client_for_file` resolves every file of the extension,
+        // not just the one that first spawned the server.
+        let config = {
+            let servers = self.servers.read().await;
+            let state = servers.get(&name).ok_or(LspError::Unavailable)?;
+            if let LspConnectionState::Initialized { connection_id, .. } = state {
+                let connection_id = *connection_id;
+                drop(servers);
+                self.file_route_cache
+                    .write()
+                    .await
+                    .insert(path.to_path_buf(), name);
+                return Ok(connection_id);
+            }
+            state.config().clone()
         };
 
         // Spawn + initialize.
@@ -248,7 +299,9 @@ impl LspRegistry {
     ///
     /// Removes each contributed server from the live state map (and any cached
     /// client), symmetric with [`Self::register_plugin_servers`], so a disabled
-    /// plugin leaves no orphaned LSP server behind.
+    /// plugin leaves no orphaned LSP server behind. Extension routes and
+    /// file-route cache entries pointing at the removed servers are purged so
+    /// a stale route can never resolve to a vanished client.
     pub async fn unregister_plugin(&self, plugin_id: &PluginId) -> Vec<String> {
         let names = self
             .plugin_servers
@@ -257,14 +310,27 @@ impl LspRegistry {
             .remove(plugin_id)
             .unwrap_or_default();
         if !names.is_empty() {
-            let mut servers = self.servers.write().await;
-            let mut clients = self.clients.write().await;
-            let mut subs = self.subscribers.write().await;
-            for n in &names {
-                servers.remove(n);
-                clients.remove(n);
-                subs.remove(n); // drop aborts the subscriber task
+            {
+                let mut servers = self.servers.write().await;
+                let mut clients = self.clients.write().await;
+                let mut subs = self.subscribers.write().await;
+                for n in &names {
+                    servers.remove(n);
+                    clients.remove(n);
+                    subs.remove(n); // drop aborts the subscriber task
+                }
             }
+            {
+                let mut routes = self.ext_routes.write().await;
+                for list in routes.values_mut() {
+                    list.retain(|n| !names.contains(n));
+                }
+                routes.retain(|_, list| !list.is_empty());
+            }
+            self.file_route_cache
+                .write()
+                .await
+                .retain(|_, n| !names.contains(n));
         }
         names
     }
@@ -293,10 +359,12 @@ mod routing_tests {
         }
     }
 
-    /// Mock transport: returns a fixed connection over an in-memory pipe.
+    /// Mock transport: returns a fixed connection over an in-memory pipe and
+    /// records the name of every server config it is asked to start.
     struct MockTransport {
         conn: Arc<Connection>,
         id: McpConnectionId,
+        started: std::sync::Mutex<Vec<String>>,
     }
     impl MockTransport {
         fn new() -> Self {
@@ -305,6 +373,7 @@ mod routing_tests {
             Self {
                 conn: Arc::new(Connection::new_line_delimited(r, w)),
                 id: McpConnectionId::new(),
+                started: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -312,8 +381,9 @@ mod routing_tests {
     impl LspTransport for MockTransport {
         async fn start_server(
             &self,
-            _config: &LspServerConfig,
+            config: &LspServerConfig,
         ) -> Result<LspRawConnection, LspError> {
+            self.started.lock().unwrap().push(config.name.clone());
             Ok(LspRawConnection {
                 connection_id: self.id,
             })
@@ -348,8 +418,12 @@ mod routing_tests {
     }
 
     fn rust_config() -> LspServerConfig {
+        named_rust_config("rust-analyzer")
+    }
+
+    fn named_rust_config(name: &str) -> LspServerConfig {
         LspServerConfig {
-            name: "rust-analyzer".into(),
+            name: name.into(),
             command: "rust-analyzer".into(),
             args: vec![],
             env: HashMap::new(),
@@ -390,6 +464,76 @@ mod routing_tests {
             .expect("reuses running server");
         assert_eq!(id, id2, "already-initialized server is reused");
     }
+
+    /// Regression (2.1.207 P1-09): the already-initialized hit path skipped
+    /// the file-route-cache write, so a SECOND file of the same extension
+    /// failed `ensure_client_for_file` with `Unavailable` while the server
+    /// was healthy (claude-code recomputes routing per call, so every file of
+    /// a handled extension resolves).
+    #[tokio::test]
+    async fn ensure_client_resolves_every_file_of_the_extension() {
+        let reg = LspRegistry::new(Arc::new(MockTransport::new()));
+        reg.register_config(rust_config()).await;
+
+        let (name_a, _, _) = reg
+            .ensure_client_for_file(Path::new("/p/a.rs"))
+            .await
+            .expect("first file resolves");
+        let (name_b, _, _) = reg
+            .ensure_client_for_file(Path::new("/p/b.rs"))
+            .await
+            .expect("second file of the same extension resolves too");
+        assert_eq!(name_a, "rust-analyzer");
+        assert_eq!(name_a, name_b, "both files route to the same server");
+    }
+
+    /// Parity (2.1.207 P1-09): claude-code's routing table is extension →
+    /// ordered array in registration order and `getServerForFile` always
+    /// takes the first entry — the pick must be deterministic
+    /// (first-registered wins) and the shadowed server must never start.
+    #[tokio::test]
+    async fn first_registered_server_wins_and_shadowed_never_starts() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        // Names chosen so any accidental alphabetical/hash ordering loses.
+        reg.register_config(named_rust_config("zzz-first")).await;
+        reg.register_config(named_rust_config("aaa-second")).await;
+
+        for file in ["/p/a.rs", "/p/b.rs"] {
+            let (name, _, _) = reg
+                .ensure_client_for_file(Path::new(file))
+                .await
+                .expect("routes to the first-registered server");
+            assert_eq!(name, "zzz-first", "first-registered server wins");
+        }
+        assert_eq!(
+            *transport.started.lock().unwrap(),
+            vec!["zzz-first".to_string()],
+            "shadowed same-extension server is never started"
+        );
+    }
+
+    /// After `unregister_plugin`, routing entries pointing at the removed
+    /// servers are purged: no stale route may resolve to a vanished client.
+    #[tokio::test]
+    async fn unregister_plugin_purges_routes() {
+        let reg = LspRegistry::new(Arc::new(MockTransport::new()));
+        let plugin = PluginId::new();
+        reg.register_plugin_servers(plugin, vec![rust_config()])
+            .await;
+        reg.ensure_client_for_file(Path::new("/p/a.rs"))
+            .await
+            .expect("resolves while registered");
+
+        let removed = reg.unregister_plugin(&plugin).await;
+        assert_eq!(removed, vec!["rust-analyzer".to_string()]);
+        assert!(matches!(
+            reg.ensure_client_for_file(Path::new("/p/a.rs")).await,
+            Err(LspError::Unavailable)
+        ));
+        assert!(reg.file_route_cache.read().await.is_empty());
+        assert!(reg.ext_routes.read().await.is_empty());
+    }
 }
 
 /// The file's lowercased extension WITH a leading dot (e.g. `.rs`), matching
@@ -398,18 +542,6 @@ mod routing_tests {
 fn file_extension(path: &Path) -> Option<String> {
     path.extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
-}
-
-/// Whether `config` handles a file with extension `ext` (case-folded match
-/// against its `extension_to_language` keys).
-fn config_handles_ext(config: &LspServerConfig, ext: Option<&str>) -> bool {
-    let Some(ext) = ext else {
-        return false;
-    };
-    config
-        .extension_to_language
-        .keys()
-        .any(|k| k.to_ascii_lowercase() == ext)
 }
 
 /// The `file://` URI of the project root for `path`: the nearest ancestor

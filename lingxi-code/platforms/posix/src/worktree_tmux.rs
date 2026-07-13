@@ -74,6 +74,51 @@ pub async fn create_worktree_tmux_session(
     Ok(())
 }
 
+/// Derives the tmux `-s` session name for a worktree, given the worktree's
+/// name (e.g. a branch-derived slug like `"feature/x"` or `"pr-123"`).
+///
+/// **Recovered from the 2.1.206 binary** (not derived-from-scratch): the
+/// `--worktree`/`--tmux` CLI site (@225872136) computes the session name as
+/// `bWn(repoRoot, Xvt(worktreeName))`, where
+/// - `Xvt(name) = "worktree-" + name.replaceAll("/", "+")` (@216338465)
+/// - `bWn(root, tag) = (basename(root) + "_" + tag).replace(/[/.]/g, "_")`
+///   (@216338294)
+///
+/// i.e. 206's real session name embeds BOTH the git repo root's basename
+/// AND the worktree name: `/` in the worktree name is swapped to `+` first,
+/// then any remaining `/` or `.` in the whole `{repo}_worktree-{name}`
+/// string (from either half) is squashed to `_`.
+///
+/// **Documented deviation:** this fn's signature (per the Task 2 plan) is
+/// pure and takes only `worktree_name` — no repo-root path is threaded
+/// through this seam, so the `basename(repoRoot)` half of 206's name is NOT
+/// reproduced here; a fixed `"lingxi"` literal stands in for it. The
+/// worktree-name half of the transform (`worktree-` prefix, `/` -> `+`,
+/// then `/`/`.` -> `_`) is byte-faithful to 206's `Xvt` + `bWn` composition.
+/// This is acceptable because the tmux session name is an internal `-s`
+/// argument, not a user-facing byte-locked string.
+///
+/// We additionally fold `:` and whitespace to `_`. 206 doesn't do this
+/// because the worktree names it feeds in (branch-derived slugs) are
+/// already colon/whitespace-free by construction; this fn accepts an
+/// arbitrary `&str`, so the extra folding is a defensive addition — tmux
+/// treats `:` and whitespace specially in `-t`/`-s` target syntax.
+#[must_use]
+pub fn worktree_tmux_session_name(worktree_name: &str) -> String {
+    let slug = worktree_name.replace('/', "+");
+    let combined = format!("lingxi_worktree-{slug}");
+    combined
+        .chars()
+        .map(|c| {
+            if c == '.' || c == '/' || c == ':' || c.is_whitespace() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +221,44 @@ mod tests {
         let path = PathBuf::from("/tmp/wt-y");
         let result = create_worktree_tmux_session(&runner, &sandbox, "wt-y", &path).await;
         assert_eq!(result, Err("boom".to_string()));
+    }
+
+    #[test]
+    fn session_name_is_deterministic() {
+        assert_eq!(
+            worktree_tmux_session_name("feature/x"),
+            worktree_tmux_session_name("feature/x")
+        );
+    }
+
+    #[test]
+    fn session_name_is_tmux_legal() {
+        for input in ["feature/x", "release/1.2.3", "pr 123", "weird:name", ""] {
+            let name = worktree_tmux_session_name(input);
+            assert!(
+                !name.contains('.') && !name.contains(':') && !name.chars().any(char::is_whitespace),
+                "session name {name:?} (from {input:?}) is not tmux -s legal"
+            );
+        }
+    }
+
+    #[test]
+    fn session_name_matches_documented_scheme() {
+        // Xvt("feature/x") = "worktree-feature+x" (no dots to squash), then
+        // the documented "lingxi" stand-in for basename(repoRoot).
+        assert_eq!(
+            worktree_tmux_session_name("feature/x"),
+            "lingxi_worktree-feature+x"
+        );
+        // A worktree name with a dot exercises 206's `/[/.]/g -> "_"` squash.
+        assert_eq!(
+            worktree_tmux_session_name("release/1.2.3"),
+            "lingxi_worktree-release+1_2_3"
+        );
+    }
+
+    #[test]
+    fn session_name_is_non_empty_for_edge_input() {
+        assert!(!worktree_tmux_session_name("").is_empty());
     }
 }

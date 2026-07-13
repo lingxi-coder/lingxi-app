@@ -652,6 +652,45 @@ fn managed_only_sandbox_overrides(
     (domains, reads)
 }
 
+/// Resolve the SOURCE-RESTRICTED `allowAppleEvents` value. claude-code honors
+/// this sandbox setting ONLY from user, managed/policy, or CLI `--settings`
+/// (`flagSettings`) sources — project & local `.lingxi/settings*.json` are
+/// IGNORED (sandbox-adapter.ts 2.1.207 @223928133:
+/// `allowAppleEvents:[...managedSources, wr("flagSettings"), userSettings]
+/// .map(z => z?.sandbox?.allowAppleEvents).find(z => z !== undefined)`).
+/// First-defined wins in order managed/policy → flag → user; CC pre-folds the
+/// file-based managed tiers into ONE object, so we merge them the same
+/// whole-`sandbox`-block last-write-wins way `managed_only_sandbox_overrides`
+/// does (drop-ins override the base) before reading the flag. The engine has no
+/// boot-time `--settings` analog (see the `sandbox_runtime_cfg` comment on
+/// `flagSettings`), so the flag slot is skipped. Returns `None` when no honored
+/// source set it — matching CC's `.find(...) === undefined ⇒ manager reads
+/// `false``. Threaded onto
+/// [`SandboxConvertContext::allow_apple_events_override`].
+fn apple_events_override(
+    managed_raw_tiers: &[String],
+    user_settings_raw: Option<&str>,
+) -> Option<bool> {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+    // Managed/policy sources first (pre-merged, last-write-wins across tiers).
+    let mut merged_managed: Option<SandboxSettingsJson> = None;
+    for raw in managed_raw_tiers {
+        if let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) {
+            if let Some(s) = parsed.sandbox {
+                merged_managed = Some(s);
+            }
+        }
+    }
+    if let Some(v) = merged_managed.and_then(|s| s.allow_apple_events) {
+        return Some(v);
+    }
+    // flagSettings has no boot-time analog in the engine (skipped) — then user.
+    user_settings_raw
+        .and_then(|raw| serde_json::from_str::<SettingsJson>(raw).ok())
+        .and_then(|s| s.sandbox)
+        .and_then(|s| s.allow_apple_events)
+}
+
 /// claude-code `getClaudeTempDir()` + `getClaudeTempDirName()` analog (Shell.ts:307),
 /// identical to the canonical private `lingxi_temp_dir()` in `tool-shell`'s
 /// `prompt.rs`: `baseTmpDir = LINGXI_TMPDIR || (windows ? tmpdir() : "/tmp")`,
@@ -4894,8 +4933,17 @@ pub async fn build(
     };
     let sandbox_runtime_cfg = {
         let mut tiers: Vec<String> = Vec::new();
+        // Read the USER tier (lingxi_home/settings.json) separately so the
+        // source-restricted `allowAppleEvents` resolution can consult it: CC honors
+        // allowAppleEvents from user / managed / flag only, NOT project/local.
+        let user_settings_raw =
+            tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+                .await
+                .ok();
+        if let Some(raw) = &user_settings_raw {
+            tiers.push(raw.clone());
+        }
         for p in [
-            cfg.lingxi_home.join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.json"),
             cwd.join(branding::DOT_DIR).join("settings.local.json"),
         ] {
@@ -4918,6 +4966,11 @@ pub async fn build(
         // conversion overrides the merged allowlist when the flag is set.
         let (managed_allowed_domains, managed_read_paths) =
             managed_only_sandbox_overrides(&managed_tiers, &cwd);
+        // allowAppleEvents: source-restricted to user / managed / flag (project &
+        // local are IGNORED — CC parity @223928133). First-defined wins managed →
+        // flag(none) → user; `None` leaves the default `false`.
+        let allow_apple_events_override =
+            apple_events_override(&managed_tiers, user_settings_raw.as_deref());
         // Seed the `SandboxConvertContext` with the boot-resolvable hardening
         // paths so the settings/skills denyWrite defense actually fires
         // (sandbox-adapter.ts:225-299). Seeds with no boot analog
@@ -4937,6 +4990,7 @@ pub async fn build(
             skills_dirs: vec![to_s(cwd.join(branding::DOT_DIR).join("skills"))],
             managed_allowed_domains,
             managed_read_paths,
+            allow_apple_events_override,
             ..Default::default()
         };
         sandbox_runtime_config_from_settings_tiers(&refs, &cwd, &ctx)
@@ -8300,6 +8354,61 @@ mod tests {
                 &ctx
             )
             .enabled
+        );
+    }
+
+    /// `allowAppleEvents` is SOURCE-RESTRICTED: claude-code honors it only from
+    /// user / managed-policy / CLI `--settings` — project & local `.lingxi`
+    /// settings are IGNORED (sandbox-adapter.ts 2.1.207 @223928133). The desktop
+    /// composition root computes the effective value via `apple_events_override`
+    /// (managed → flag(none) → user, first-defined wins) and threads it onto the
+    /// convert context; the general tier fold must NOT set it from project/local.
+    #[test]
+    fn apple_events_override_source_restriction() {
+        use super::apple_events_override;
+        let on = r#"{"sandbox":{"allowAppleEvents":true}}"#.to_string();
+        let off = r#"{"sandbox":{"allowAppleEvents":false}}"#.to_string();
+
+        // No honored source set it → None (⇒ default false downstream).
+        assert_eq!(apple_events_override(&[], None), None);
+        assert_eq!(
+            apple_events_override(&[], Some(r#"{"sandbox":{}}"#)),
+            None
+        );
+
+        // User tier sets it (no managed) → honored.
+        assert_eq!(apple_events_override(&[], Some(&on)), Some(true));
+        assert_eq!(apple_events_override(&[], Some(&off)), Some(false));
+
+        // Managed set → managed wins over user (first-defined managed → user).
+        assert_eq!(
+            apple_events_override(std::slice::from_ref(&on), Some(&off)),
+            Some(true),
+            "managed allowAppleEvents must win over the user tier"
+        );
+        assert_eq!(
+            apple_events_override(std::slice::from_ref(&off), Some(&on)),
+            Some(false),
+            "managed false must win over a user true"
+        );
+
+        // Multiple managed tiers: last write wins (drop-ins override the base),
+        // mirroring CC's pre-merge of the file-based managed sources.
+        assert_eq!(
+            apple_events_override(&[on.clone(), off.clone()], None),
+            Some(false)
+        );
+
+        // A managed tier WITHOUT the field but user WITH it → user honored.
+        assert_eq!(
+            apple_events_override(&[r#"{"sandbox":{"enabled":true}}"#.to_string()], Some(&on)),
+            Some(true)
+        );
+
+        // Malformed managed tiers are skipped, user still consulted.
+        assert_eq!(
+            apple_events_override(&["not json".to_string()], Some(&on)),
+            Some(true)
         );
     }
 

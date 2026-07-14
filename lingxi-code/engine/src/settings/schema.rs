@@ -180,6 +180,19 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_user_question_timeout: Option<String>,
 
+    /// Scalar field (later source wins). `viewMode`: the transcript view mode
+    /// applied on startup. CC 2.1.207 settings zod (verbatim):
+    /// `viewMode:E.enum(["default","verbose","focus"]).optional().catch(void 0)
+    /// .describe("Default transcript view mode on startup")`. Backs the
+    /// H-BIN-11 `/focus` command (which toggles `viewMode==="focus"`) and the
+    /// `/tui` renderer split. Typed `Option<String>` (like `outputStyle` /
+    /// `askUserQuestionTimeout`), tolerant of unknown values via the zod
+    /// `.catch(void 0)` — an out-of-enum string round-trips as the raw value and
+    /// is treated as `default` by the reader. Scalar-override merge (not in
+    /// `MERGE_STRATEGIES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_mode: Option<String>,
+
     /// Scalar field (later source wins). Telemetry on/off toggle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_enabled: Option<bool>,
@@ -670,6 +683,42 @@ mod tests {
         assert!(
             strategy_for("skipWebFetchPreflight").is_none(),
             "skipWebFetchPreflight must be scalar-override (later source wins)"
+        );
+    }
+
+    #[test]
+    fn view_mode_parses_roundtrips_and_is_scalar_override() {
+        // H-BIN-11 (cc2.1.207) zod:
+        // `viewMode:E.enum(["default","verbose","focus"]).optional()
+        //  .catch(void 0).describe("Default transcript view mode on startup")`.
+        // A settings.json carrying `"viewMode": "focus"` must parse into the
+        // typed `Some("focus")` so `/focus`/`/tui` can read it.
+        for value in ["default", "verbose", "focus"] {
+            let json = format!(r#"{{ "viewMode": "{value}", "model": "claude-sonnet-4-5" }}"#);
+            let parsed: SettingsJson =
+                serde_json::from_str(&json).expect("viewMode enum value must parse");
+            assert_eq!(parsed.view_mode.as_deref(), Some(value));
+            assert!(parsed.model.is_some(), "sibling fields must survive");
+        }
+        // camelCase on the wire; round-trips.
+        let parsed: SettingsJson = serde_json::from_str(r#"{"viewMode":"focus"}"#).unwrap();
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"viewMode\":\"focus\""), "{back}");
+        // zod `.catch(void 0)` tolerance: an out-of-enum value still parses
+        // (the string round-trips; the reader treats it as `default`).
+        let odd: SettingsJson =
+            serde_json::from_str(r#"{"viewMode":"bogus","model":"x"}"#).expect("catch tolerance");
+        assert_eq!(odd.view_mode.as_deref(), Some("bogus"));
+        assert!(odd.model.is_some(), "sibling fields survive an odd viewMode");
+        // Absent ⇒ None, and NOT emitted on re-serialize (skip_serializing_if).
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert_eq!(absent.view_mode, None);
+        assert!(!serde_json::to_string(&absent).unwrap().contains("viewMode"));
+        // Scalar-override merge (later layer wins) — NOT a registered
+        // ConcatDedup/DeepMerge field.
+        assert!(
+            strategy_for("viewMode").is_none(),
+            "viewMode must be scalar-override (later source wins)"
         );
     }
 

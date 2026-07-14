@@ -19,20 +19,23 @@ fn golden_starts_with_locked_header() {
 }
 
 #[test]
-fn golden_has_76_lines() {
-    // 1 header + 75 VISIBLE commands = 76 lines (each `\n`-terminated).
-    // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
+fn golden_has_80_lines() {
+    // 1 header + 79 VISIBLE commands = 80 lines (each `\n`-terminated).
+    // The 27 hidden/disabled commands (is_palette_hidden) are filtered out,
     // matching claude-code's `commands.filter(c => !c.isHidden && !$te(c))`.
-    // (101 builtins − 26 hidden = 75, no DISABLE_*_COMMAND env set.)
-    assert_eq!(GOLDEN.matches('\n').count(), 76);
+    // (106 builtins − 27 hidden = 79, no DISABLE_*_COMMAND env set.)
+    assert_eq!(GOLDEN.matches('\n').count(), 80);
 }
 
 #[test]
 fn golden_omits_hidden_and_disabled_commands() {
-    use command_api::builtin_support::names::{CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS};
+    use command_api::builtin_support::names::{
+        CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS, USAGE_CREDITS_BNR_GATED,
+    };
     for name in HIDDEN_PALETTE_COMMANDS
         .iter()
         .copied()
+        .chain(USAGE_CREDITS_BNR_GATED.iter().copied())
         .chain(CORRECT_BY_DESIGN_STUBS.iter().map(|(n, _)| *n))
     {
         assert!(

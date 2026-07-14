@@ -68,6 +68,53 @@ pub const TOOL_SEARCH_DEFAULT_MAX_RESULTS: usize = 5;
 /// an unbounded list. Kept at 20 to preserve the parity wire-identifier lock.
 pub const TOOL_SEARCH_MAX_RESULTS: usize = 20;
 
+// ---------------------------------------------------------------------------
+// Model-facing description — byte-exact port of the CC 2.1.207 binary's
+// `FGn()` (`getPrompt`), which the ToolSearch tool literal (`b9r`) wires into
+// BOTH `description()` and `prompt()`. The runtime string is
+// `HEAD + (Qbc() ? FETCH_RULE : DEFAULT) + BODY`, where `Qbc()` reads the
+// statsig config `juniper_shoal.gorse_hollow` (field `toolSearchFetchRule`)
+// whose frozen default is `false`. LingXi has no `juniper_shoal` config seam,
+// so the `fetch_rule` variant is register-but-disabled and the default text is
+// the `false` branch (DEFAULT sentence, "…so the tool cannot be invoked.").
+// Em-dashes are U+2014, matching the binary's `—` template-literal
+// escapes; the `\n\n` paragraph breaks are real newlines in the binary source.
+
+/// `UZh` — head paragraph (no unicode escapes; real `\n\n`).
+const TOOL_SEARCH_DESC_HEAD: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <system-reminder> messages.";
+
+/// `qZh` — default sentence appended when `Qbc()` is `false` (the binary
+/// default, and LingXi's fixed value).
+const TOOL_SEARCH_DESC_DEFAULT_SENTENCE: &str =
+    " Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked.";
+
+/// `jZh` — sentence appended when `Qbc()` (juniper_shoal.gorse_hollow /
+/// `toolSearchFetchRule`) is enabled. Register-but-disabled in LingXi.
+const TOOL_SEARCH_DESC_FETCH_RULE_SENTENCE: &str =
+    " Until fetched, only the name is known \u{2014} there is no parameter schema, so calling the tool fails with InputValidationError. When any instruction, system reminder, or other tool's description names a deferred tool, fetch it with query \"select:<name>\" before calling it.";
+
+/// `WZh` — body (real `\n\n` / `\n- ` bullets; em-dashes are U+2014).
+const TOOL_SEARCH_DESC_BODY: &str = " This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\nResult format: each matched tool appears as one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block \u{2014} the same encoding as the tool list at the top of this prompt.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms";
+
+/// Assemble the model-facing ToolSearch description, mirroring the binary's
+/// `FGn()`. `fetch_rule` mirrors `Qbc()`; the binary default (and LingXi's
+/// fixed value) is `false`.
+#[must_use]
+pub fn tool_search_description(fetch_rule: bool) -> String {
+    let mid = if fetch_rule {
+        TOOL_SEARCH_DESC_FETCH_RULE_SENTENCE
+    } else {
+        TOOL_SEARCH_DESC_DEFAULT_SENTENCE
+    };
+    let mut s = String::with_capacity(
+        TOOL_SEARCH_DESC_HEAD.len() + mid.len() + TOOL_SEARCH_DESC_BODY.len(),
+    );
+    s.push_str(TOOL_SEARCH_DESC_HEAD);
+    s.push_str(mid);
+    s.push_str(TOOL_SEARCH_DESC_BODY);
+    s
+}
+
 /// `ToolSearchTool` — deferred-tool search over the registry.
 pub struct ToolSearchTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
@@ -507,11 +554,13 @@ impl Tool for ToolSearchTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Fetches full schema definitions for deferred tools so they can be called.".into()
+        // Binary wires `FGn()` into both surfaces; gate `Qbc()` defaults `false`
+        // (juniper_shoal.gorse_hollow / toolSearchFetchRule).
+        tool_search_description(false)
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Fetches full schema definitions for deferred tools so they can be called.".into()
+        tool_search_description(false)
     }
 
     async fn validate_input(
@@ -1028,5 +1077,53 @@ mod tests {
         // Binary uses A.number() → JSON schema type "number" (not "integer").
         assert_eq!(schema["properties"]["max_results"]["type"], json!("number"));
         assert_eq!(schema["properties"]["max_results"]["minimum"], json!(1));
+    }
+
+    // ---- model-facing description (FGn() byte-lock) ----
+
+    /// Byte-exact CC 2.1.207 `FGn()` default (gate `Qbc()` == false): the
+    /// concatenation `UZh + qZh + WZh`. Em-dashes are U+2014; blank lines are
+    /// the `\n\n` paragraph breaks from the binary's template literals.
+    const EXPECTED_DEFAULT_DESC: &str = "Fetches full schema definitions for deferred tools so they can be called.\n\nDeferred tools appear by name in <system-reminder> messages. Until fetched, only the name is known \u{2014} there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.\n\nResult format: each matched tool appears as one <function>{\"description\": \"...\", \"name\": \"...\", \"parameters\": {...}}</function> line inside the <functions> block \u{2014} the same encoding as the tool list at the top of this prompt.\n\nQuery forms:\n- \"select:Read,Edit,Grep\" \u{2014} fetch these exact tools by name\n- \"notebook jupyter\" \u{2014} keyword search, up to max_results best matches\n- \"+slack send\" \u{2014} require \"slack\" in the name, rank by remaining terms";
+
+    #[test]
+    fn description_default_is_byte_exact() {
+        assert_eq!(tool_search_description(false), EXPECTED_DEFAULT_DESC);
+        // No leaked literal escape sequence; the em-dash must be U+2014.
+        assert!(!EXPECTED_DEFAULT_DESC.contains("\\u2014"));
+        assert!(EXPECTED_DEFAULT_DESC.contains('\u{2014}'));
+    }
+
+    #[tokio::test]
+    async fn description_and_prompt_match_full_text() {
+        let tool = ToolSearchTool::new(shell_test_ctx(dummy_out()));
+        let desc = tool
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
+            .await;
+        let prompt = tool.prompt(&PromptOptions::default()).await;
+        assert_eq!(desc, prompt);
+        assert_eq!(desc, EXPECTED_DEFAULT_DESC);
+        // Regression guard: no longer the old one-sentence stub.
+        assert_ne!(
+            desc,
+            "Fetches full schema definitions for deferred tools so they can be called."
+        );
+    }
+
+    #[test]
+    fn description_fetch_rule_variant() {
+        let s = tool_search_description(true);
+        // Shares head + body; only the middle sentence differs.
+        assert!(s.starts_with(TOOL_SEARCH_DESC_HEAD));
+        assert!(s.ends_with(TOOL_SEARCH_DESC_BODY));
+        assert!(s.contains("InputValidationError"));
+        assert!(s.contains("select:<name>"));
+        // The gated variant drops the "cannot be invoked" default sentence.
+        assert!(!s.contains("so the tool cannot be invoked."));
     }
 }

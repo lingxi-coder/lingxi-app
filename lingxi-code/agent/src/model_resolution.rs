@@ -78,23 +78,28 @@ fn family_default_id(family_lower: &str) -> Option<&'static str> {
 /// `sonnet.per_provider = {bedrock/vertex/foundry: "claude-sonnet-4-5"}`).
 ///
 /// Haiku does NOT diverge by provider (`getDefaultHaikuModel` has no provider
-/// branch — Haiku 4.5 is on all platforms). Opus DOES in 2.1.193 — see
-/// [`OPUS_3P_DEFAULT_ID`] / [`get_default_opus_model`].
+/// branch — Haiku 4.5 is on all platforms). Opus diverges only for Foundry as
+/// of 2.1.207 (Bedrock/Vertex joined the 4-8 default) — see
+/// [`OPUS_FOUNDRY_DEFAULT_ID`] / [`get_default_opus_model`].
 const SONNET_3P_DEFAULT_ID: &str = "claude-sonnet-4-5-20250929";
 
-/// The Opus family default id for the non-firstParty (3P) providers the port
-/// models (Bedrock/Vertex/Foundry). `getDefaultOpusModel()` returns `opus46`
-/// (`claude-opus-4-6`) for `!['firstParty','anthropicAws','gateway']`, while
-/// firstParty gets `opus48` (`family_default_id("opus")` = `claude-opus-4-8`).
-/// (claude also maps mantle / anthropicAws / gateway to `opus47`; the port
-/// detects only Bedrock/Vertex/Foundry via the `CLAUDE_CODE_USE_*` env vars, so
-/// those providers are not represented — same 2-way detection as Sonnet.)
-const OPUS_3P_DEFAULT_ID: &str = "claude-opus-4-6";
+/// The Opus family default id for the Foundry provider. In the 2.1.207 alias
+/// table Opus moved to per-provider ids: `opus.default = claude-opus-4-8` with
+/// `per_provider = {bedrock: "claude-opus-4-8", vertex: "claude-opus-4-8",
+/// foundry: "claude-opus-4-6", mantle: "claude-opus-4-8", anthropic_aws:
+/// "claude-opus-4-8", gateway: "claude-opus-4-7"}`. So Bedrock/Vertex now match
+/// the first-party 4-8 default and ONLY Foundry stays on 4-6 (verified against
+/// the 2.1.207 binary; the changelog names only Bedrock/Vertex/Claude-on-AWS).
+/// The port detects only Bedrock/Vertex/Foundry via the `CLAUDE_CODE_USE_*` env
+/// vars — mantle/anthropic_aws/gateway have no runtime representation and all
+/// resolve to the 4-8 default anyway (except gateway 4-7, undetected).
+const OPUS_FOUNDRY_DEFAULT_ID: &str = "claude-opus-4-6";
 
-/// `getDefaultOpusModel()` (`model.ts:105-116`): the `ANTHROPIC_DEFAULT_OPUS_MODEL`
-/// env override (when non-empty) wins; else provider-aware — `claude-opus-4-8`
-/// for firstParty, `claude-opus-4-6` (`OPUS_3P_DEFAULT_ID`) for
-/// Bedrock/Vertex/Foundry.
+/// `getDefaultOpusModel()` (`db()`/`nJe()` in 2.1.207): the
+/// `ANTHROPIC_DEFAULT_OPUS_MODEL` env override (when non-empty) wins; else the
+/// 2.1.207 alias table resolves `COn("opus", provider) ?? opus48`. Only Foundry
+/// (`OPUS_FOUNDRY_DEFAULT_ID` = `claude-opus-4-6`) diverges from the 4-8 default;
+/// firstParty/Bedrock/Vertex all get `claude-opus-4-8`.
 fn get_default_opus_model() -> String {
     if let Some(v) = std::env::var("ANTHROPIC_DEFAULT_OPUS_MODEL")
         .ok()
@@ -102,12 +107,12 @@ fn get_default_opus_model() -> String {
     {
         return v;
     }
-    if api_provider_is_first_party() {
-        return family_default_id("opus")
-            .expect("opus is a known family")
-            .to_string();
+    if api_provider_is_foundry() {
+        return OPUS_FOUNDRY_DEFAULT_ID.to_string();
     }
-    OPUS_3P_DEFAULT_ID.to_string()
+    family_default_id("opus")
+        .expect("opus is a known family")
+        .to_string()
 }
 
 /// `getDefaultSonnetModel()` (`model.ts:118-128`): the
@@ -252,6 +257,17 @@ fn apply_bedrock_region_prefix(model_id: &str, prefix: &str) -> String {
 /// prefix). Uses the strict-allowlist `is_env_truthy`.
 fn api_provider_is_bedrock() -> bool {
     is_env_truthy(std::env::var("CLAUDE_CODE_USE_BEDROCK").ok().as_deref())
+}
+
+/// `getAPIProvider() === 'foundry'`: the 2.1.207 precedence chain is
+/// `bedrock > foundry > anthropicAws > mantle > vertex > firstParty` (verified
+/// against the binary), so the provider is Foundry iff `CLAUDE_CODE_USE_BEDROCK`
+/// is falsy AND `CLAUDE_CODE_USE_FOUNDRY` is env-truthy (Foundry outranks
+/// Vertex/firstParty). This is the sole provider whose Opus default (4-6)
+/// diverges from the 4-8 alias-table default.
+fn api_provider_is_foundry() -> bool {
+    !is_env_truthy(std::env::var("CLAUDE_CODE_USE_BEDROCK").ok().as_deref())
+        && is_env_truthy(std::env::var("CLAUDE_CODE_USE_FOUNDRY").ok().as_deref())
 }
 
 /// `getAPIProvider() === 'firstParty'` (`providers.ts:6-13`): the falsy tail of
@@ -1084,27 +1100,56 @@ mod tests {
 
     #[test]
     fn opus_differs_by_provider_haiku_does_not() {
-        // #2: Opus is provider-aware (firstParty→claude-opus-4-8,
-        // Bedrock/Vertex/Foundry→claude-opus-4-6); Haiku has no provider branch
-        // (same id on all platforms), like the existing Sonnet split.
+        // 2.1.207 alias table: opus.default = claude-opus-4-8 with
+        // per_provider{bedrock:4-8, vertex:4-8, foundry:4-6, …}. Only Foundry
+        // diverges now (Bedrock/Vertex joined the 4-8 default). Haiku has no
+        // provider branch (same id on all platforms).
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = clear_provider_env();
+        // firstParty → 4-8
         assert_eq!(get_default_opus_model(), "claude-opus-4-8");
         let haiku_fp = get_default_haiku_model();
-        let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-        assert_eq!(get_default_opus_model(), "claude-opus-4-6");
-        assert_eq!(get_default_haiku_model(), haiku_fp);
+        // Bedrock → 4-8 (2.1.207 change)
+        {
+            let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
+            assert_eq!(get_default_opus_model(), "claude-opus-4-8");
+            assert_eq!(get_default_haiku_model(), haiku_fp);
+        }
+        // Vertex → 4-8 (2.1.207 change)
+        {
+            let _v = EnvGuard::set("CLAUDE_CODE_USE_VERTEX", "1");
+            assert_eq!(get_default_opus_model(), "claude-opus-4-8");
+        }
+        // Foundry → 4-6 (still diverges)
+        {
+            let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
+            assert_eq!(get_default_opus_model(), "claude-opus-4-6");
+        }
+        // Precedence: Bedrock outranks Foundry → 4-8 even with both set.
+        {
+            let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
+            let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
+            assert_eq!(get_default_opus_model(), "claude-opus-4-8");
+        }
+        // ANTHROPIC_DEFAULT_OPUS_MODEL override wins even on Foundry.
+        {
+            let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
+            let _o = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "custom-opus-id");
+            assert_eq!(get_default_opus_model(), "custom-opus-id");
+        }
     }
 
-    // ---- M2 Part B: 2.1.198 registry pins (anthropicAws provider identity) --
+    // ---- M2 Part B: registry pins (per-provider alias-table identity) -------
     //
-    // Verified against the REAL 2.1.198 binary registry (extracted 2026-07-02):
-    // - alias table `sonnet.per_provider.anthropic_aws = "claude-sonnet-4-6"`
-    //   (bedrock/vertex/foundry/mantle → "claude-sonnet-4-5",
-    //   gateway → "claude-sonnet-4-6"; default "claude-sonnet-5").
-    // - alias table `opus.per_provider.anthropic_aws = "claude-opus-4-7"`
-    //   (bedrock/vertex/foundry → "claude-opus-4-6"; mantle/gateway →
-    //   "claude-opus-4-7"; default "claude-opus-4-8").
+    // Verified against the REAL 2.1.207 binary registry (extracted 2026-07-14):
+    // - alias table `sonnet.per_provider = {bedrock/vertex/foundry/mantle →
+    //   "claude-sonnet-4-5", anthropic_aws/gateway → "claude-sonnet-4-6"}`,
+    //   default "claude-sonnet-5".
+    // - alias table `opus.per_provider = {bedrock/vertex/mantle/anthropic_aws →
+    //   "claude-opus-4-8", foundry → "claude-opus-4-6", gateway →
+    //   "claude-opus-4-7"}`, default "claude-opus-4-8". (2.1.207 moved
+    //   Bedrock/Vertex/Claude-on-AWS onto the 4-8 default; only Foundry stays
+    //   4-6.)
     // - sonnet-5 `provider_ids.anthropic_aws = "claude-sonnet-5"` (same string
     //   as first_party — the id does not diverge for anthropicAws).
     //
@@ -1115,7 +1160,7 @@ mod tests {
     // upstream alias-table change shows up as a deliberate test edit).
 
     #[test]
-    fn registry_2_1_198_pins_match_binary() {
+    fn registry_2_1_207_pins_match_binary() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = clear_provider_env();
         // Defaults (firstParty arm) — shared with the anthropic_aws sonnet-5
@@ -1123,17 +1168,18 @@ mod tests {
         assert_eq!(family_default_id("sonnet"), Some("claude-sonnet-5"));
         assert_eq!(family_default_id("opus"), Some("claude-opus-4-8"));
         assert_eq!(family_default_id("haiku"), Some("claude-haiku-4-5"));
-        // 3P arms the port models (bedrock/vertex/foundry per_provider).
-        assert_eq!(OPUS_3P_DEFAULT_ID, "claude-opus-4-6");
+        // Foundry arm — the only Opus per_provider divergence in 2.1.207.
+        assert_eq!(OPUS_FOUNDRY_DEFAULT_ID, "claude-opus-4-6");
+        // Sonnet 3P arm (bedrock/vertex/foundry per_provider) unchanged.
         assert_eq!(SONNET_3P_DEFAULT_ID, "claude-sonnet-4-5-20250929");
     }
 
     #[test]
-    fn registry_2_1_198_anthropic_aws_alias_targets_pass_through() {
-        // The anthropic_aws per_provider alias targets (sonnet →
-        // claude-sonnet-4-6, opus → claude-opus-4-7) are real catalog ids: an
-        // explicit request for either must pass through verbatim so an
-        // anthropicAws-configured profile can route them unmodified.
+    fn registry_anthropic_aws_gateway_alias_targets_pass_through() {
+        // The 2.1.207 per_provider alias targets (sonnet anthropic_aws/gateway
+        // → claude-sonnet-4-6, opus gateway → claude-opus-4-7) are real catalog
+        // ids: an explicit request for either must pass through verbatim so an
+        // anthropicAws/gateway-configured profile can route them unmodified.
         for id in ["claude-sonnet-4-6", "claude-opus-4-7"] {
             assert_eq!(
                 resolve_agent_model(

@@ -115,6 +115,40 @@ impl SubscriptionSnapshot {
         !disable_env_truthy && self.is_overage_provisioning_allowed()
     }
 
+    /// Port of `bnr()` (2.1.207 binary @221947558):
+    /// `function bnr(){if(be.DISABLE_EXTRA_USAGE_COMMAND)return!1;
+    /// if(S1()!==null)return!0;return NXe()}` — the shared `isEnabled` gate for
+    /// BOTH `/usage-credits` command objects (interactive `local-jsx` and the
+    /// non-interactive `local` supportsNonInteractive variant) and the
+    /// deprecated hidden `/extra-usage` alias. In words:
+    /// `!isEnvTruthy(DISABLE_EXTRA_USAGE_COMMAND) && (rateLimitStatus !== null ||
+    /// isOverageProvisioningAllowed())`. The 2.1.207 addition over
+    /// [`Self::is_extra_usage_command_enabled`] is the middle short-circuit:
+    /// when a live rate-limit status is present the command is enabled even
+    /// without overage provisioning (so the "you hit a limit → run
+    /// /usage-credits" flow always resolves).
+    ///
+    /// `S1()` = the current rate-limit status (`getRateLimitStatus()`, non-null
+    /// once the account has a resolved usage window); `NXe()` = `Self`'s
+    /// [`Self::is_overage_provisioning_allowed`]. Both the env read and the
+    /// rate-limit-status presence stay at the caller (keeps this type pure).
+    ///
+    /// The interactive object is additionally `&&!isNonInteractiveSession()`
+    /// and the non-interactive object `&&isNonInteractiveSession()` (with
+    /// `isHidden=!isNonInteractiveSession()`); that interactive split is applied
+    /// by the caller, not modeled here.
+    #[must_use]
+    pub fn is_usage_credits_command_enabled(
+        &self,
+        disable_env_truthy: bool,
+        has_rate_limit_status: bool,
+    ) -> bool {
+        if disable_env_truthy {
+            return false;
+        }
+        has_rate_limit_status || self.is_overage_provisioning_allowed()
+    }
+
     /// Port of `A5()` (`Uc()?.billingType==="usage_based"`) — selects "usage limit"
     /// vs "usage credit limit" wording in the 2.1.206 rate-limit messages.
     #[must_use]
@@ -388,6 +422,35 @@ mod tests {
         assert!(!no_billing.is_extra_usage_command_enabled(false));
 
         assert!(team.is_extra_usage_command_enabled(false));
+    }
+
+    #[test]
+    fn usage_credits_command_gate_bnr() {
+        // H-BIN-11 (cc2.1.207) `bnr()` gate matrix.
+        let team = team_snapshot(); // overage-provisioning allowed
+
+        // DISABLE_EXTRA_USAGE_COMMAND truthy → always disabled, even with a
+        // live rate-limit status and overage provisioning.
+        assert!(!team.is_usage_credits_command_enabled(true, true));
+        assert!(!team.is_usage_credits_command_enabled(true, false));
+
+        // Not disabled: a live rate-limit status short-circuits to enabled
+        // regardless of overage provisioning (the 2.1.207 addition).
+        let no_billing = SubscriptionSnapshot {
+            billing_type: None,
+            ..team_snapshot()
+        };
+        assert!(!no_billing.is_overage_provisioning_allowed());
+        assert!(no_billing.is_usage_credits_command_enabled(false, true));
+
+        // No rate-limit status: falls back to overage provisioning.
+        assert!(team.is_usage_credits_command_enabled(false, false));
+        assert!(!no_billing.is_usage_credits_command_enabled(false, false));
+
+        // Default (unknown) snapshot with neither signal → disabled.
+        let unknown = SubscriptionSnapshot::default();
+        assert!(!unknown.is_usage_credits_command_enabled(false, false));
+        assert!(unknown.is_usage_credits_command_enabled(false, true));
     }
 
     #[test]

@@ -589,6 +589,18 @@ impl TaskRegistry {
                 // `prompt::task_notification`). Part of the deferred async-agent work.
                 result: None,
                 usage: None,
+                // `killed_by` (the by-Claude/by-user split) + the isolation
+                // `<worktree>` section: `LocalAgentTaskState` tracks neither the
+                // stop reason nor the carried worktree handle today, so both stay
+                // `None` here — the byte-faithful "no reason / no worktree" case.
+                // The renderer (`prompt::task_notification`) emits the correct
+                // bytes the moment they are populated; wiring the stop reason
+                // through the kill paths and the worktree metadata onto the state
+                // is part of the same deferred backgrounded-local_agent work as
+                // `result`/`usage` above.
+                killed_by: None,
+                worktree_path: None,
+                worktree_branch: None,
             });
             // Mark notified + evict (terminal + notified is GC-able) so the
             // completion surfaces exactly once. Mirrors `mark_notified`'s eager
@@ -637,6 +649,12 @@ impl TaskRegistry {
                 // when a result exists; the renderer omits each clause when `None`.
                 result: payload.result,
                 usage: payload.usage,
+                // A rest notification is not a kill and carries no worktree
+                // metadata on the rest payload, so both stay `None` (see the
+                // terminal-drain note above; renderer-ready when populated).
+                killed_by: None,
+                worktree_path: None,
+                worktree_branch: None,
             });
         }
         out

@@ -142,13 +142,18 @@ fn default_sonnet_model() -> String {
     SONNET_3P_DEFAULT_ID.to_string()
 }
 
-/// The Opus family default id for non-firstParty (3P) providers (Bedrock/Vertex/
-/// Foundry). Mirrors `agent::model_resolution::OPUS_3P_DEFAULT_ID`.
-const OPUS_3P_DEFAULT_ID: &str = "claude-opus-4-6";
+/// The Opus family default id for the Foundry provider. Per the 2.1.207 alias
+/// table (`opus.per_provider = {bedrock/vertex/mantle/anthropic_aws: 4-8,
+/// foundry: 4-6, gateway: 4-7}`, default 4-8), Bedrock/Vertex joined the 4-8
+/// default and ONLY Foundry stays on 4-6. Mirrors
+/// `agent::model_resolution::OPUS_FOUNDRY_DEFAULT_ID`.
+const OPUS_FOUNDRY_DEFAULT_ID: &str = "claude-opus-4-6";
 
-/// `getDefaultOpusModel()` (`model.ts:105-116`): env override (non-empty) wins;
-/// else provider-aware — `claude-opus-4-8` for firstParty, `claude-opus-4-6` for
-/// Bedrock/Vertex/Foundry. Mirrors `agent::model_resolution::get_default_opus_model`.
+/// `getDefaultOpusModel()` (`db()`/`nJe()` in 2.1.207): env override (non-empty)
+/// wins; else the alias table resolves `COn("opus", provider) ?? opus48` — only
+/// Foundry (`claude-opus-4-6`) diverges from the `claude-opus-4-8` default;
+/// firstParty/Bedrock/Vertex all get 4-8. Mirrors
+/// `agent::model_resolution::get_default_opus_model`.
 fn default_opus_model() -> String {
     if let Some(v) = env::var("ANTHROPIC_DEFAULT_OPUS_MODEL")
         .ok()
@@ -156,12 +161,21 @@ fn default_opus_model() -> String {
     {
         return v;
     }
-    if api_provider_is_first_party() {
-        return family_default_id("opus")
-            .expect("opus is a known family")
-            .to_string();
+    if api_provider_is_foundry() {
+        return OPUS_FOUNDRY_DEFAULT_ID.to_string();
     }
-    OPUS_3P_DEFAULT_ID.to_string()
+    family_default_id("opus")
+        .expect("opus is a known family")
+        .to_string()
+}
+
+/// `getAPIProvider() === 'foundry'`: precedence `bedrock > foundry > … > vertex >
+/// firstParty`, so Foundry iff `CLAUDE_CODE_USE_BEDROCK` falsy AND
+/// `CLAUDE_CODE_USE_FOUNDRY` env-truthy. Mirrors
+/// `agent::model_resolution::api_provider_is_foundry`.
+fn api_provider_is_foundry() -> bool {
+    !is_env_truthy(env::var("CLAUDE_CODE_USE_BEDROCK").ok().as_deref())
+        && is_env_truthy(env::var("CLAUDE_CODE_USE_FOUNDRY").ok().as_deref())
 }
 
 /// `getAPIProvider() === 'firstParty'` (`providers.ts:6-13`): first-party iff none
@@ -440,6 +454,30 @@ mod tests {
             parse_user_specified_model("opusplan"),
             "claude-sonnet-4-5-20250929"
         );
+    }
+
+    #[test]
+    fn parse_opus_alias_is_provider_aware_2_1_207() {
+        // 2.1.207 opus alias table: default 4-8, per_provider foundry → 4-6,
+        // bedrock/vertex → 4-8. Only Foundry diverges.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-8");
+        {
+            let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
+            assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-8");
+        }
+        {
+            let _v = EnvGuard::set("CLAUDE_CODE_USE_VERTEX", "1");
+            assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-8");
+        }
+        {
+            let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
+            assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-6");
+            // Bedrock outranks Foundry in the provider precedence chain.
+            let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
+            assert_eq!(parse_user_specified_model("opus"), "claude-opus-4-8");
+        }
     }
 
     #[test]

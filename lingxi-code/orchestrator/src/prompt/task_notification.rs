@@ -114,12 +114,18 @@ fn render_one(n: &TaskNotification) -> String {
                     format!("Agent \"{}\" failed: {err}", n.description)
                 }
                 // `killed` (and any other terminal). claude branches on the stop
-                // REASON (`r==="parent"` → "was stopped by Claude", `r==="user"`
-                // → "was stopped by user", else → "was stopped"); the port's
-                // `TaskNotification` carries no reason, so it renders the generic
-                // else form. (Adding a reason field for the by-Claude/by-user
-                // split is a future refinement.)
-                _ => format!("Agent \"{}\" was stopped", n.description),
+                // REASON (`killedBy`): `r==="parent"` → "was stopped by Claude",
+                // `r==="user"` → "was stopped by user", else (undefined) → the
+                // generic "was stopped" (binary
+                // `n==="parent"?"was stopped by Claude":n==="user"?"was stopped by user":"was stopped"`).
+                _ => {
+                    let verb = match n.killed_by.as_deref() {
+                        Some("parent") => "was stopped by Claude",
+                        Some("user") => "was stopped by user",
+                        _ => "was stopped",
+                    };
+                    format!("Agent \"{}\" {verb}", n.description)
+                }
             };
             // Hardcoded, always-present `<note>` (v2.1.193).
             const NOTE: &str = "A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.";
@@ -136,12 +142,27 @@ fn render_one(n: &TaskNotification) -> String {
                 ),
                 None => String::new(),
             };
-            // The binary's trailing `${v}` (a teammate children/messages block,
-            // `$mr` tag) is another OPTIONAL section, omitted here — LingXi's
-            // local_agent carries no such data, so its absence is byte-faithful
-            // (the same `data ? … : ''` shape as result/usage).
+            // Optional `<worktree>` section — the binary's trailing
+            // `H=c?`\n<${pZo}><${fZo}>${c}</${fZo}>${u?`<${mZo}>${u}</${mZo}>`:""}</${pZo}>`:""`
+            // (tags `pZo="worktree"` / `fZo="worktreePath"` /
+            // `mZo="worktreeBranch"`). Gated on `worktree_path` (`c`); the
+            // `<worktreeBranch>` tag is INDEPENDENTLY optional INSIDE the section
+            // (`u ? … : ''`) and carries NO leading newline. Neither the path nor
+            // the branch is XML-escaped (the binary interpolates `c`/`u` raw,
+            // unlike the `Ql`-escaped summary/result). Rides AFTER `<usage>`,
+            // matching the binary's `${x}${k}${H}` order (result, usage, worktree).
+            let worktree_section = match &n.worktree_path {
+                Some(path) => {
+                    let branch = match &n.worktree_branch {
+                        Some(b) => format!("<worktreeBranch>{b}</worktreeBranch>"),
+                        None => String::new(),
+                    };
+                    format!("\n<worktree><worktreePath>{path}</worktreePath>{branch}</worktree>")
+                }
+                None => String::new(),
+            };
             format!(
-                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>{}</status>\n<summary>{}</summary>\n<note>{NOTE}</note>{result_section}{usage_section}\n</task-notification>",
+                "<task-notification>\n<task-id>{}</task-id>{tool_use_id_line}\n<output-file>{output_file}</output-file>\n<status>{}</status>\n<summary>{}</summary>\n<note>{NOTE}</note>{result_section}{usage_section}{worktree_section}\n</task-notification>",
                 n.task_id,
                 n.status,
                 escape_xml(&summary)
@@ -274,6 +295,9 @@ mod tests {
             error: None,
             result: None,
             usage: None,
+            killed_by: None,
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 
@@ -356,13 +380,94 @@ mod tests {
     }
 
     #[test]
-    fn agent_killed_is_was_stopped() {
+    fn agent_killed_absent_reason_is_was_stopped() {
+        // `killedBy` undefined ⇒ the generic verb (binary's `:"was stopped"`).
         let n = base("a12345678", "local_agent", "killed", "long job");
+        assert!(n.killed_by.is_none());
         assert!(
             render_one(&n).contains("<summary>Agent \"long job\" was stopped</summary>"),
             "got: {}",
             render_one(&n)
         );
+    }
+
+    /// `killedBy==="parent"` (a parent-agent / `TaskStop`-initiated stop) →
+    /// "was stopped by Claude" (binary `n==="parent"?"was stopped by Claude"`).
+    #[test]
+    fn agent_killed_by_parent_is_was_stopped_by_claude() {
+        let mut n = base("a12345678", "local_agent", "killed", "long job");
+        n.killed_by = Some("parent".to_string());
+        assert!(
+            render_one(&n).contains("<summary>Agent \"long job\" was stopped by Claude</summary>"),
+            "got: {}",
+            render_one(&n)
+        );
+    }
+
+    /// `killedBy==="user"` → "was stopped by user"
+    /// (binary `n==="user"?"was stopped by user"`).
+    #[test]
+    fn agent_killed_by_user_is_was_stopped_by_user() {
+        let mut n = base("a12345678", "local_agent", "killed", "long job");
+        n.killed_by = Some("user".to_string());
+        assert!(
+            render_one(&n).contains("<summary>Agent \"long job\" was stopped by user</summary>"),
+            "got: {}",
+            render_one(&n)
+        );
+    }
+
+    /// The optional `<worktree>` section with BOTH `<worktreePath>` and
+    /// `<worktreeBranch>`, byte-faithful to the binary's
+    /// `\n<worktree><worktreePath>${c}</worktreePath><worktreeBranch>${u}</worktreeBranch></worktree>`,
+    /// riding AFTER `<usage>` (the `${x}${k}${H}` order) and with the path/branch
+    /// interpolated RAW (not XML-escaped).
+    #[test]
+    fn agent_worktree_section_with_branch_rides_after_usage() {
+        let mut n = base("a12345678", "local_agent", "completed", "audit");
+        n.usage = Some(traits::task_registry::AgentRunUsage {
+            subagent_tokens: 5,
+            tool_uses: 0,
+            duration_ms: 1,
+        });
+        n.worktree_path = Some("/tmp/wt/agent-a1".to_string());
+        n.worktree_branch = Some("agent/a1".to_string());
+        assert_eq!(
+            render_one(&n),
+            "<task-notification>\n\
+<task-id>a12345678</task-id>\n\
+<output-file>/tmp/tasks/a12345678.output</output-file>\n\
+<status>completed</status>\n\
+<summary>Agent \"audit\" finished</summary>\n\
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n\
+<usage><subagent_tokens>5</subagent_tokens><tool_uses>0</tool_uses><duration_ms>1</duration_ms></usage>\n\
+<worktree><worktreePath>/tmp/wt/agent-a1</worktreePath><worktreeBranch>agent/a1</worktreeBranch></worktree>\n\
+</task-notification>"
+        );
+    }
+
+    /// `worktreePath` present but `worktreeBranch` absent: the section still
+    /// renders, but the `<worktreeBranch>` tag is omitted (binary's inner
+    /// `u ? … : ''`).
+    #[test]
+    fn agent_worktree_section_without_branch() {
+        let mut n = base("a12345678", "local_agent", "killed", "audit");
+        n.killed_by = Some("user".to_string());
+        n.worktree_path = Some("/tmp/wt/agent-a1".to_string());
+        let block = render_one(&n);
+        assert!(
+            block.contains("<worktree><worktreePath>/tmp/wt/agent-a1</worktreePath></worktree>"),
+            "got: {block}"
+        );
+        assert!(!block.contains("<worktreeBranch>"), "got: {block}");
+    }
+
+    /// No `worktree_path` ⇒ the entire `<worktree>` section is omitted (the
+    /// binary's `c ? … : ''`), byte-identical to a build with no worktree.
+    #[test]
+    fn agent_no_worktree_omits_section() {
+        let n = base("a12345678", "local_agent", "completed", "audit");
+        assert!(!render_one(&n).contains("<worktree>"));
     }
 
     /// The optional `<result>` (escaped) + `<usage>` sections, byte-faithful to

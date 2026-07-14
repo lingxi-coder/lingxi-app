@@ -168,6 +168,30 @@ pub struct TaskNotification {
     /// `local_agent` only: run usage → the optional `<usage>` section.
     /// `None` ⇒ omitted (claude-code's `i ? <usage>… : ''`).
     pub usage: Option<AgentRunUsage>,
+    /// `local_agent` only: the stop reason for a `killed` task — selects the
+    /// killed-summary verb (claude-code `enqueueAgentNotification`'s `killedBy`
+    /// param). `Some("parent")` → `was stopped by Claude` (a parent-agent /
+    /// `TaskStop`-initiated stop), `Some("user")` → `was stopped by user`,
+    /// `None`/other → the generic `was stopped` (the binary's
+    /// `n==="parent"?…:n==="user"?…:"was stopped"` fallback for an undefined
+    /// `killedBy`). Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<String>,
+    /// `local_agent` only: the isolation worktree's absolute path → gates AND
+    /// fills the optional `<worktree><worktreePath>…</worktreePath>…</worktree>`
+    /// section (claude-code `enqueueAgentNotification`'s `worktreePath`; tags
+    /// `pZo="worktree"` / `fZo="worktreePath"`). `None` ⇒ the whole worktree
+    /// section is omitted (the binary's `c ? … : ''`). Additive default `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    /// `local_agent` only: the isolation worktree's branch name → the optional
+    /// `<worktreeBranch>…</worktreeBranch>` tag rendered INSIDE the worktree
+    /// section (claude-code `worktreeBranch`; tag `mZo="worktreeBranch"`,
+    /// independently gated on `u`). `None` while `worktree_path` is `Some` ⇒ the
+    /// branch tag is omitted but the section still renders. Additive default
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
 }
 
 /// One chunk of a task's accumulated stdout/stderr spool.

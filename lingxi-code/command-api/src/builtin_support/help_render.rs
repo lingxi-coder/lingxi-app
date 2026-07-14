@@ -12,11 +12,11 @@
 //! Where `<description>` is `core_description(name)` — the real per-command
 //! one-liner for every visible builtin with a claude-code analogue (cp-01),
 //! falling back to the literal `"(unimplemented in v0.6.0)"` only for the few
-//! LingXi-specific / internal commands without one. The 26 hidden/disabled
+//! LingXi-specific / internal commands without one. The 27 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 75
-//! visible commands = 76 lines.
+//! default total (no `DISABLE_*_COMMAND` env gates set) is 1 header + 79
+//! visible commands = 80 lines.
 
 use crate::builtin_support::names::{
     core_description, is_command_env_disabled, is_palette_hidden, BUILTIN_COMMAND_NAMES,
@@ -84,29 +84,32 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_76_lines() {
-        // 1 header + 75 visible commands = 76 lines (each terminated by '\n').
-        // The 26 hidden/disabled commands (is_palette_hidden) are filtered out,
+    fn output_has_exactly_80_lines() {
+        // 1 header + 79 visible commands = 80 lines (each terminated by '\n').
+        // The 27 hidden/disabled commands (is_palette_hidden) are filtered out,
         // matching claude-code's `!isHidden && !$te` help/palette filter.
-        // (101 builtins − 26 hidden = 75 visible, with no DISABLE_* env set.)
+        // (106 builtins − 27 hidden = 79 visible, with no DISABLE_* env set.)
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
         // `DISABLE_*_COMMAND` mutation can't transiently drop a counted command.
         let _g = crate::builtin_support::names::ENV_LOCK.lock().unwrap();
         let s = render_help_screen();
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 76,
-            "expected 76 newlines (1 header + 75 visible commands), got {n}"
+            n, 80,
+            "expected 80 newlines (1 header + 79 visible commands), got {n}"
         );
     }
 
     #[test]
     fn hidden_and_disabled_commands_are_omitted() {
-        use crate::builtin_support::names::{CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS};
+        use crate::builtin_support::names::{
+            CORRECT_BY_DESIGN_STUBS, HIDDEN_PALETTE_COMMANDS, USAGE_CREDITS_BNR_GATED,
+        };
         let s = render_help_screen();
         for name in HIDDEN_PALETTE_COMMANDS
             .iter()
             .copied()
+            .chain(USAGE_CREDITS_BNR_GATED.iter().copied())
             .chain(CORRECT_BY_DESIGN_STUBS.iter().map(|(n, _)| *n))
         {
             let needle = format!("  /{name} ");

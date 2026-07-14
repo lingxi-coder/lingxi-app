@@ -53,6 +53,8 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         ask_user_question_timeout: next
             .ask_user_question_timeout
             .or(prev.ask_user_question_timeout),
+        // Scalar Override — `viewMode` (enum default|verbose|focus), H-BIN-11.
+        view_mode: next.view_mode.or(prev.view_mode),
         model: next.model.or(prev.model),
         // Managed model-restriction keys (H-BIN-08). `availableModels` (array)
         // and `enforceAvailableModels` (scalar) are scalar-override — CC's

@@ -84,6 +84,12 @@ fn read_only_disallowed() -> Vec<String> {
 /// (`SHARED_PREFIX` + concise-report sentence + `SHARED_GUIDELINES`). The
 /// absolute-path/emoji trailer that `enhanceSystemPromptWithEnvDetails`
 /// appends is host-env detail, not ported here.
+///
+/// The final anti-re-delegation bullet ("You are already the dedicated agent
+/// for this task…") was added in claude-code 2.1.203 (`bby` in the 2.1.207
+/// binary) — an unconditional bullet, separated from the previous one by a
+/// single `\n` (no blank line), with a literal em dash (U+2014) between
+/// "directly" and "do not".
 const GENERAL_PURPOSE_PROMPT: &str = r"You are an agent for Claude Code, Anthropic's official CLI for Claude. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done. When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.
 
 Your strengths:
@@ -97,7 +103,8 @@ Guidelines:
 - For analysis: Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
 - Be thorough: Check multiple locations, consider different naming conventions, look for related files.
 - NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one.
-- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested.";
+- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested.
+- You are already the dedicated agent for this task. Do the work directly — do not re-delegate your entire assignment to another single subagent.";
 
 /// `src/tools/AgentTool/built-in/exploreAgent.ts` (non-embedded branch:
 /// `Glob`/`Grep`/`Read`/`Bash`).
@@ -737,6 +744,26 @@ mod tests {
                 "{ty} should be a placeholder"
             );
         }
+    }
+
+    #[test]
+    fn general_purpose_ends_with_anti_re_delegation_bullet() {
+        // claude-code 2.1.203+ (`bby`, 2.1.207 binary): the general-purpose
+        // system prompt ends with an unconditional anti-re-delegation bullet,
+        // one `\n` after "…explicitly requested.", with a literal em dash
+        // (U+2014) between "directly" and "do not". Byte-exact.
+        let defs = builtin_agent_definitions();
+        let p = find(&defs, "general-purpose")
+            .system_prompt
+            .as_deref()
+            .unwrap();
+        assert!(
+            p.ends_with(
+                "Only create documentation files if explicitly requested.\n- You are already the dedicated agent for this task. Do the work directly \u{2014} do not re-delegate your entire assignment to another single subagent."
+            ),
+            "general-purpose must end with the anti-re-delegation bullet, got tail: {:?}",
+            &p[p.len().saturating_sub(220)..]
+        );
     }
 
     // ── workflow-subagent tests (Task 1, oracle: agentdef-and-validation.md) ──

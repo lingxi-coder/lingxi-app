@@ -152,6 +152,9 @@ fn one_task_notification() -> traits::task_registry::TaskNotification {
         error: None,
         result: None,
         usage: None,
+        killed_by: None,
+        worktree_path: None,
+        worktree_branch: None,
     }
 }
 

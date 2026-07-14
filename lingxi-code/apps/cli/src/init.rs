@@ -390,6 +390,23 @@ fn load_settings_model(include_user: bool, include_project: bool) -> Option<Stri
         .filter(|m| !m.trim().is_empty())
 }
 
+/// Load the merged `settings.plansDirectory` (project + user + env layers) —
+/// the custom plan-file directory (206 `iT`). `None` when unset/blank; the
+/// orchestrator resolves + containment-checks it against the project root.
+fn load_settings_plans_directory(include_user: bool, include_project: bool) -> Option<String> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.plans_directory)
+        .filter(|d| !d.trim().is_empty())
+}
+
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `LINGXI.md` files to exclude from the
 /// system prompt (claude-code `isLingxiMdExcluded`). Empty when unset.
@@ -620,6 +637,10 @@ pub(crate) fn resolve_desktop_config(
         } else {
             None
         },
+        // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory
+        // threaded to `OrchestratorConfig::plans_directory`, resolved against the
+        // project root with a within-root containment check by the orchestrator.
+        plans_directory: load_settings_plans_directory(incl_user, incl_project),
         max_budget_usd,
         // `--json-schema` structured output (print-gated above): `build()` forces
         // the StructuredOutput tool + surfaces a capture slot when this is `Some`.

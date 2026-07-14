@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+pub mod company_announcements;
 pub mod env_parser;
 pub mod loader;
 pub mod merger;

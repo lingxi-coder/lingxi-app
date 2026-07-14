@@ -7965,7 +7965,13 @@ As you answer the user's questions, you can use the following context:\n\
             if !s.plan_mode {
                 return None;
             }
-            let path = Self::plan_file_path(&s.session_id);
+            let path = Self::plan_file_path(
+                &s.session_id,
+                // 206 `Ct()` = the original project root (session-init cwd), NOT
+                // the post-`cd` shell cwd.
+                &self.cwd,
+                self.config.plans_directory.as_deref(),
+            );
             let exists = std::path::Path::new(&path).exists();
             // "full" on the first plan-mode turn (206 reminderType), "sparse"
             // after. Read-then-arm under the lock so concurrent turns can't both
@@ -7989,14 +7995,77 @@ As you answer the user's questions, you can use the following context:\n\
     }
 
     /// Resolve this session's plan file path (206 `ON(agentId)` →
-    /// `<plansDir>/<slug>.md`). 206's `plansDir` defaults to `~/.claude/plans/`;
-    /// the port rebrands the config-home to `$LINGXI_CONFIG_DIR ?? ~/.lingxi`
-    /// (`memory::lingxi_md::user_config_dir`), so the plans dir is
-    /// `<config-home>/plans/`. The slug is the session's UUID (206's slug is
-    /// likewise session-specific — exact bytes are not observable, the structure
-    /// is). Uses the bare UUID (not the `sess:` display form) so the filename has
-    /// no `:` separator, matching `computed_transcript_path`.
-    fn plan_file_path(session_id: &SessionId) -> String {
+    /// `<plansDir>/<slug>.md`). The plans directory is resolved by
+    /// [`Self::plans_dir`] (206 `iT`): the `plansDirectory` settings override
+    /// (relative to the project root, with a within-root containment check) when
+    /// present, else the default `<config-home>/plans/`. The slug is the
+    /// session's UUID (206's slug is likewise session-specific — exact bytes are
+    /// not observable, the structure is). Uses the bare UUID (not the `sess:`
+    /// display form) so the filename has no `:` separator, matching
+    /// `computed_transcript_path`.
+    fn plan_file_path(
+        session_id: &SessionId,
+        project_root: &std::path::Path,
+        plans_directory: Option<&str>,
+    ) -> String {
+        Self::plans_dir(project_root, plans_directory)
+            .join(format!("{}.md", session_id.as_uuid()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Resolve the plans DIRECTORY — 1:1 with the binary's `iT`:
+    ///
+    /// ```js
+    /// iT=Or(function(){
+    ///   let r=Wn().plansDirectory;
+    ///   if(r){
+    ///     let n=Ct(),o=Pne.resolve(n,r);
+    ///     if(W5_(o,n))return o;
+    ///     C(`plansDirectory must be within project root: ${r}`,{level:"error"})
+    ///   }
+    ///   return KPp()  // Pne.join(mn(),"plans")
+    /// })
+    /// ```
+    ///
+    /// When `plansDirectory` is set: resolve it against the project root
+    /// (absolute values are used verbatim, `path.resolve` semantics), normalize
+    /// `.`/`..` lexically, and accept it only if it is WITHIN the project root
+    /// (`W5_`'s primary check `o === n || o.startsWith(n + sep)`). On rejection,
+    /// log the byte-exact error at `error` level (the raw setting value `${r}`)
+    /// and fall through to the default. The default is the rebranded
+    /// `<config-home>/plans/` (206's `~/.claude/plans/` under the
+    /// `$LINGXI_CONFIG_DIR ?? ~/.lingxi` config-home).
+    ///
+    /// RESIDUAL: `W5_`'s two hardening refinements — the protected-directory
+    /// guard (`Zht(Kt(),o)`) and the same-repo-root walk (`V7e`) — are NOT
+    /// ported; only the documented "must be within project root" containment is,
+    /// which is the observable behavior of the settings key.
+    fn plans_dir(project_root: &std::path::Path, plans_directory: Option<&str>) -> std::path::PathBuf {
+        if let Some(r) = plans_directory.filter(|s| !s.is_empty()) {
+            // `path.resolve(project_root, r)`: absolute `r` wins; else join.
+            let candidate = if std::path::Path::new(r).is_absolute() {
+                std::path::PathBuf::from(r)
+            } else {
+                project_root.join(r)
+            };
+            let resolved = crate::turn_loop::normalize_lexically(&candidate);
+            let root = crate::turn_loop::normalize_lexically(project_root);
+            // `W5_` primary: `o === n || o.startsWith(n + sep)` — component-wise
+            // prefix containment on the normalized paths (so a `../escape` that
+            // popped above `root` is rejected).
+            if resolved.starts_with(&root) {
+                return resolved;
+            }
+            tracing::error!("plansDirectory must be within project root: {r}");
+        }
+        Self::default_plans_dir()
+    }
+
+    /// The default plans directory — `<config-home>/plans/`, rebranding 206's
+    /// `~/.claude/plans/` to `$LINGXI_CONFIG_DIR ?? ~/.lingxi`
+    /// (`memory::lingxi_md::user_config_dir`).
+    fn default_plans_dir() -> std::path::PathBuf {
         let config_home = dirs::home_dir()
             .map(|h| memory::lingxi_md::user_config_dir(&h))
             .unwrap_or_else(|| {
@@ -8004,11 +8073,7 @@ As you answer the user's questions, you can use the following context:\n\
                 std::env::var_os(branding::CONFIG_DIR_ENV)
                     .map_or_else(|| std::path::PathBuf::from(".lingxi"), std::path::PathBuf::from)
             });
-        config_home
-            .join("plans")
-            .join(format!("{}.md", session_id.as_uuid()))
-            .to_string_lossy()
-            .into_owned()
+        config_home.join("plans")
     }
 
     pub(crate) async fn skill_listing_reminder_message(&self) -> Option<ConversationMessage> {
@@ -14725,5 +14790,93 @@ mod main_thread_agent_tests {
         orch.set_main_thread_agent("inheritor".to_string(), None, keep_all_tools(), Vec::new(), None)
             .await;
         assert_eq!(orch.session().lock().await.model, "base-model");
+    }
+}
+
+/// `plansDirectory` (206 `iT`) resolution + within-root containment.
+#[cfg(test)]
+mod plans_dir_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn none_setting_falls_back_to_default_config_home_plans() {
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, None);
+        // Default: `<config-home>/plans` (never under the project root).
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+        assert!(got.ends_with("plans"));
+    }
+
+    #[test]
+    fn empty_setting_is_treated_as_absent() {
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some(""));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[test]
+    fn relative_within_root_is_accepted_and_resolved() {
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some("docs/plans"));
+        assert_eq!(got, PathBuf::from("/home/u/project/docs/plans"));
+    }
+
+    #[test]
+    fn dot_segments_normalize_but_stay_within_root() {
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some("./sub/../plans"));
+        assert_eq!(got, PathBuf::from("/home/u/project/plans"));
+    }
+
+    #[test]
+    fn parent_escape_is_rejected_and_falls_back_to_default() {
+        // `../outside` normalizes to `/home/u/outside`, which is NOT within the
+        // project root → reject, log the error, use the default.
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some("../outside"));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[test]
+    fn absolute_outside_root_is_rejected() {
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some("/etc/evil"));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[test]
+    fn absolute_inside_root_is_accepted() {
+        // `path.resolve` uses an absolute value verbatim; if it happens to be
+        // within the project root it is accepted.
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some("/home/u/project/plans"));
+        assert_eq!(got, PathBuf::from("/home/u/project/plans"));
+    }
+
+    #[test]
+    fn project_root_itself_is_within_root() {
+        // `o === n` branch of W5_ — the plans dir equal to the root is accepted.
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some("."));
+        assert_eq!(got, PathBuf::from("/home/u/project"));
+    }
+
+    #[test]
+    fn sibling_prefix_is_not_confused_for_containment() {
+        // Component-wise containment: `/home/u/project-evil` must NOT count as
+        // within `/home/u/project` (a naive string prefix would wrongly accept).
+        let root = Path::new("/home/u/project");
+        let got = ConversationOrchestrator::plans_dir(root, Some("/home/u/project-evil"));
+        assert_eq!(got, ConversationOrchestrator::default_plans_dir());
+    }
+
+    #[test]
+    fn plan_file_path_joins_uuid_md_under_resolved_dir() {
+        let sid = SessionId::new();
+        let root = Path::new("/home/u/project");
+        let path = ConversationOrchestrator::plan_file_path(&sid, root, Some("docs/plans"));
+        let expected = format!("/home/u/project/docs/plans/{}.md", sid.as_uuid());
+        assert_eq!(path, expected);
     }
 }

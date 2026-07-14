@@ -214,7 +214,7 @@ pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
 /// `50000`, `"0x10"` → `0`, `"  42 "` → `42`). Returns `None` for `NaN`
 /// (no leading digit run) — mirroring how claude-code's `parseInt(env,10)`
 /// yields `NaN`, which compares false against both `> 0` and `=== 0`.
-fn js_parse_int_base10(s: &str) -> Option<i64> {
+pub(crate) fn js_parse_int_base10(s: &str) -> Option<i64> {
     let t = s.trim_start_matches([' ', '\t', '\n', '\r', '\u{0c}', '\u{0b}']);
     let (neg, rest) = match t.strip_prefix('-') {
         Some(r) => (true, r),

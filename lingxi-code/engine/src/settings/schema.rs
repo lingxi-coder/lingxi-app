@@ -52,6 +52,10 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("enabledTools", MergeStrategy::ConcatDedup),
     ("additionalIncludes", MergeStrategy::ConcatDedup),
     ("lingxiMdExcludes", MergeStrategy::ConcatDedup),
+    // `companyAnnouncements` is an array field; CC's `settingsMergeCustomizer`
+    // concat-dedups all arrays across settings tiers, so it merges the same way
+    // as the other array keys (later-tier entries appended, dupes dropped).
+    ("companyAnnouncements", MergeStrategy::ConcatDedup),
     // Object-merge fields (spec §7).
     ("sandbox", MergeStrategy::DeepMerge),
     ("hooks", MergeStrategy::DeepMerge),
@@ -231,6 +235,42 @@ pub struct SettingsJson {
     /// Vertex flow lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcp_auth_refresh: Option<String>,
+
+    /// Array-merge field (concat-dedup). `companyAnnouncements`: strings shown
+    /// in the TUI startup header (one selected per process). CC 2.1.207 zod
+    /// (verbatim): `companyAnnouncements:E.array(E.string()).optional()
+    /// .describe("Company announcements to display at startup (one will be
+    /// randomly selected if multiple are provided)")`. Consumed by the selection
+    /// helper [`crate::settings::company_announcements::select_company_announcement`]
+    /// (port of binary `jxo`/`oip`): non-empty entries only, `[0]` when
+    /// `numStartups==1` else uniform-random, memoized once per process. Merged
+    /// concat-dedup, matching CC's `settingsMergeCustomizer` array customizer
+    /// (`Array.isArray(t)&&Array.isArray(e)?(t.forEach(a=>{e.includes(a)||e.push(a)}))`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub company_announcements: Option<Vec<String>>,
+
+    /// Scalar field (later source wins). `plansDirectory`: custom directory for
+    /// plan-mode plan files, relative to the project root. CC 2.1.207 zod
+    /// (verbatim): `plansDirectory:E.string().optional().describe("Custom
+    /// directory for plan files, relative to project root. If not set, defaults
+    /// to ~/.claude/plans/")`. Consumed by the orchestrator plan-file resolver
+    /// (`ConversationOrchestrator::plan_file_path`, port of binary `iT`): when
+    /// set, resolved against the project root with a within-root containment
+    /// check; on failure the byte-exact error `plansDirectory must be within
+    /// project root: {r}` is logged and the resolver falls back to the default
+    /// `<config-home>/plans`. Scalar-override merge (not in `MERGE_STRATEGIES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plans_directory: Option<String>,
+
+    /// Scalar field (later source wins). `apiKeyHelper`: path to (or command
+    /// line of) a script whose stdout is the Anthropic auth value. CC 2.1.207
+    /// zod (verbatim): `apiKeyHelper:E.string().optional().describe("Path to a
+    /// script that outputs authentication values")`. Consumed by the auth
+    /// executor (`llm_client::oauth::anthropic::run_api_key_helper`, port of
+    /// binary `LTh`) with the TTL cache (`api_key_helper_ttl_ms`, port of `obc`).
+    /// Scalar-override merge (not in `MERGE_STRATEGIES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_helper: Option<String>,
 
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
@@ -545,6 +585,58 @@ mod tests {
         assert!(parsed.providers.is_some());
         let back = serde_json::to_string(&parsed).expect("serialize");
         assert!(back.contains("\"providers\""));
+    }
+
+    #[test]
+    fn company_announcements_parses_roundtrips_and_is_concat_dedup() {
+        // CC 2.1.207 zod: `companyAnnouncements:E.array(E.string()).optional()`.
+        let json = r#"{ "companyAnnouncements": ["hi", "there"], "model": "x" }"#;
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("companyAnnouncements array must parse");
+        assert_eq!(
+            parsed.company_announcements.as_deref(),
+            Some(&["hi".to_string(), "there".to_string()][..])
+        );
+        // Sibling survives.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"companyAnnouncements\":[\"hi\",\"there\"]"), "{back}");
+        // Absent ⇒ None, not emitted.
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert_eq!(absent.company_announcements, None);
+        assert!(!serde_json::to_string(&absent)
+            .unwrap()
+            .contains("companyAnnouncements"));
+        // Array-merge (concat-dedup), matching CC's array customizer.
+        assert!(
+            matches!(strategy_for("companyAnnouncements"), Some(MergeStrategy::ConcatDedup)),
+            "companyAnnouncements must be ConcatDedup"
+        );
+    }
+
+    #[test]
+    fn plans_directory_and_api_key_helper_parse_roundtrip_and_are_scalar_override() {
+        // CC 2.1.207 zod: both are `E.string().optional()`, scalar-override merge.
+        let json = r#"{ "plansDirectory": "docs/plans", "apiKeyHelper": "/usr/local/bin/get-key.sh", "model": "x" }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("must parse");
+        assert_eq!(parsed.plans_directory.as_deref(), Some("docs/plans"));
+        assert_eq!(
+            parsed.api_key_helper.as_deref(),
+            Some("/usr/local/bin/get-key.sh")
+        );
+        assert!(parsed.model.is_some());
+        // camelCase on the wire.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"plansDirectory\":\"docs/plans\""), "{back}");
+        assert!(back.contains("\"apiKeyHelper\":\"/usr/local/bin/get-key.sh\""), "{back}");
+        // Absent ⇒ None, not emitted.
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert_eq!(absent.plans_directory, None);
+        assert_eq!(absent.api_key_helper, None);
+        // Scalar-override merge (not registered ConcatDedup/DeepMerge).
+        assert!(strategy_for("plansDirectory").is_none());
+        assert!(strategy_for("apiKeyHelper").is_none());
     }
 
     #[test]

@@ -1381,6 +1381,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cli_plugin_dirs: Vec::new(),
 ///     initial_effort: None,
 ///     plan_mode_instructions: None,
+///     plans_directory: None,
 ///     default_model_env_pinned: false,
 ///     session_thinking: Default::default(),
 /// };
@@ -1457,6 +1458,11 @@ pub struct DesktopConfig {
     /// [`orchestrator::OrchestratorConfig::plan_mode_instructions`] in `build()`.
     /// `None` (the default) = the default 5-phase plan reminder.
     pub plan_mode_instructions: Option<String>,
+    /// `settings.json` `plansDirectory` (206 `iT`): custom directory for plan
+    /// files, relative to the project root, mapped to
+    /// [`orchestrator::OrchestratorConfig::plans_directory`] in `build()`.
+    /// `None` (the default) = the default `<config-home>/plans/`.
+    pub plans_directory: Option<String>,
     /// CLI `--max-budget USD`: cost ceiling in USD, mapped to
     /// [`orchestrator::OrchestratorConfig::max_budget_nano_usd`] (× 1e9) in
     /// `build()`. `None` (the default) = no cap.
@@ -1819,6 +1825,7 @@ impl Default for DesktopConfig {
             deny_unresolved_ask: false,
             max_turns: None,
             plan_mode_instructions: None,
+            plans_directory: None,
             max_budget_usd: None,
             json_schema: None,
             injected_permission_gate: None,
@@ -3804,6 +3811,10 @@ pub async fn build(
     orch_cfg
         .plan_mode_instructions
         .clone_from(&cfg.plan_mode_instructions);
+    // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory,
+    // resolved against the project root with a within-root containment check by
+    // the orchestrator. `None` keeps the default `<config-home>/plans/`.
+    orch_cfg.plans_directory.clone_from(&cfg.plans_directory);
     // CLI `--exclude-dynamic-system-prompt-sections`: move the per-machine env
     // block out of the (cacheable) system prompt into the first user message.
     orch_cfg.exclude_dynamic_system_prompt_sections = cfg.exclude_dynamic_system_prompt_sections;
@@ -6894,6 +6905,7 @@ mod tests {
             deny_unresolved_ask: false,
             max_turns: None,
             plan_mode_instructions: None,
+            plans_directory: None,
             max_budget_usd: None,
             json_schema: None,
             injected_permission_gate: None,

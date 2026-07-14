@@ -437,17 +437,29 @@ pub struct Argv {
     pub dangerously_skip_permissions: bool,
 
     /// Initial permission mode (`--permission-mode <mode>`).
-    // claude-code 2.1.191 commander `.choices(['acceptEdits','auto',
-    // 'bypassPermissions','default','dontAsk','plan'])` — an out-of-choices value
-    // is HARD-REJECTED at parse time (exit 1 with an allowed-choices message), so
-    // the `value_parser` below mirrors that. `auto` is a real choice and resolves
-    // to `PermissionMode::Auto` downstream.
+    // claude-code 2.1.207 commander `.choices(bha)` where `bha=WB.map(e=>
+    // e==="default"?"manual":e)` DISPLAYS `manual` in place of `default`, while
+    // the accepted set `$7_=[...WB,"manual"]` keeps BOTH spellings (the shared
+    // `ZS(e)=e==="manual"?"default":e` preprocess normalizes `manual`→`default`).
+    // An out-of-set value is HARD-REJECTED at parse time. We mirror that with a
+    // `PossibleValuesParser`: `manual` sits in the `default` slot (visible) and
+    // `default` is a hidden-but-accepted alias, so help/errors show `manual` yet
+    // `--permission-mode default` still parses. `auto` resolves to
+    // `PermissionMode::Auto` and `manual`/`default` to `Default` downstream.
     #[arg(
         long = "permission-mode",
         // lowercase placeholder so the help line and the commander-style
         // invalid-value error read `--permission-mode <mode>` (not `<MODE>`).
         value_name = "mode",
-        value_parser = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]
+        value_parser = clap::builder::PossibleValuesParser::new([
+            clap::builder::PossibleValue::new("acceptEdits"),
+            clap::builder::PossibleValue::new("auto"),
+            clap::builder::PossibleValue::new("bypassPermissions"),
+            clap::builder::PossibleValue::new("manual"),
+            clap::builder::PossibleValue::new("default").hide(true),
+            clap::builder::PossibleValue::new("dontAsk"),
+            clap::builder::PossibleValue::new("plan"),
+        ])
     )]
     pub permission_mode: Option<String>,
 

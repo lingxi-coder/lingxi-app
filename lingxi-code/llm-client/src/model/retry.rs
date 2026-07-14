@@ -89,6 +89,97 @@ pub fn max_retries_from_env() -> u32 {
     max_retries_from_env_value(std::env::var("LINGXI_MAX_RETRIES").ok().as_deref())
 }
 
+/// Retry-watchdog default max-retries. Binary `_j_ = 300` — when the
+/// `CLAUDE_CODE_RETRY_WATCHDOG` watchdog is ON and no explicit override is set,
+/// the default retry budget jumps from [`DEFAULT_MAX_RETRIES`] (10) to 300
+/// (`pDs()`'s `return e ? _j_ : yj_`).
+pub const WATCHDOG_MAX_RETRIES: u32 = 300;
+
+/// Hard clamp applied to an explicit `LINGXI_MAX_RETRIES` when the retry
+/// watchdog is OFF. Binary `ufa = 15`: `pDs()` clamps any value `> 15` down to
+/// 15 (with a one-time `warn`) unless the watchdog lifts the cap.
+pub const MAX_RETRIES_CLAMP: u32 = 15;
+
+/// Backoff cap (ms) the retry watchdog raises the capacity-retry ladder to.
+/// Binary `TLp = 21_600_000` (6 hours) — under the watchdog a sustained 529/429
+/// capacity outage keeps retrying with the exponential ladder capped at 6h
+/// instead of the normal [`MAX_BACKOFF_MS`] (32s). `Math.min(n, TLp)`.
+pub const WATCHDOG_MAX_BACKOFF_MS: u64 = 21_600_000;
+
+/// One-time latch for the `LINGXI_MAX_RETRIES … clamped to 15` warning. Binary
+/// `bLp` (`bLp=!1` initially, set `!0` on first clamp) so the warning fires at
+/// most once per process.
+static MAX_RETRIES_CLAMP_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `ct(process.env.CLAUDE_CODE_RETRY_WATCHDOG)` truthiness, over explicit
+/// values. `lingxi` (`LINGXI_RETRY_WATCHDOG`) wins over the `claude`
+/// (`CLAUDE_CODE_RETRY_WATCHDOG`) alias, matching the dual-read convention in
+/// `stream_watchdog.rs`. Truthy = `1`/`true`/`yes`/`on` (case-insensitive);
+/// everything else (incl. absent) is OFF — the watchdog is opt-in.
+#[must_use]
+pub fn retry_watchdog_from_values(lingxi: Option<&str>, claude: Option<&str>) -> bool {
+    traits::env::is_env_truthy(lingxi.or(claude))
+}
+
+/// Read the retry-watchdog flag from the process environment
+/// (`LINGXI_RETRY_WATCHDOG` else `CLAUDE_CODE_RETRY_WATCHDOG`). Binary
+/// `oMe(){return ct(process.env.CLAUDE_CODE_RETRY_WATCHDOG)}`.
+#[must_use]
+pub fn retry_watchdog_from_env() -> bool {
+    retry_watchdog_from_values(
+        std::env::var("LINGXI_RETRY_WATCHDOG").ok().as_deref(),
+        std::env::var("CLAUDE_CODE_RETRY_WATCHDOG").ok().as_deref(),
+    )
+}
+
+/// Byte-faithful port of the binary's `pDs()` max-retries resolver.
+///
+/// ```js
+/// function pDs(){
+///   let e = oMe();                                   // watchdog on?
+///   if (process.env.CLAUDE_CODE_MAX_RETRIES) {
+///     let t = parseInt(process.env.CLAUDE_CODE_MAX_RETRIES, 10);
+///     if (Number.isFinite(t) && t >= 0) {
+///       if (t > ufa && !e) {                         // ufa = 15
+///         if (!bLp) { bLp = true; warn(`…=${t} clamped to ${ufa}`) }
+///         return ufa;                                // 15
+///       }
+///       return t;
+///     }
+///   }
+///   return e ? _j_ : yj_;                            // 300 : 10
+/// }
+/// ```
+///
+/// `env_raw` is the raw `LINGXI_MAX_RETRIES` value (lingxi's rename of
+/// `CLAUDE_CODE_MAX_RETRIES`). An empty / unparseable / negative value falls
+/// through to the `watchdog ? 300 : 10` default exactly as the JS `if
+/// (Number.isFinite(t) && t >= 0)` guard does. When the watchdog is OFF an
+/// explicit value `> 15` is clamped to 15 and warned once.
+#[must_use]
+pub fn resolve_max_retries(watchdog: bool, env_raw: Option<&str>) -> u32 {
+    if let Some(s) = env_raw {
+        // `parseInt` accepts leading digits; a `u32` parse is stricter but
+        // already covers `finite && >= 0`. A non-empty, unparseable, or
+        // negative value falls through to the default below (JS guard false).
+        if let Ok(t) = s.trim().parse::<u32>() {
+            if t > MAX_RETRIES_CLAMP && !watchdog {
+                if !MAX_RETRIES_CLAMP_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!("LINGXI_MAX_RETRIES={t} clamped to {MAX_RETRIES_CLAMP}");
+                }
+                return MAX_RETRIES_CLAMP;
+            }
+            return t;
+        }
+    }
+    if watchdog {
+        WATCHDOG_MAX_RETRIES
+    } else {
+        DEFAULT_MAX_RETRIES
+    }
+}
+
 /// Consecutive-529 threshold before the fallback / repeated-overload decision
 /// fires. Byte-locked to claude-code `withRetry.ts:54`
 /// (`const MAX_529_RETRIES = 3`).
@@ -222,6 +313,15 @@ pub struct RetryControl {
     /// `!!process.env.IS_SANDBOX` (claude-code `withRetry.ts:355`). When set,
     /// the no-fallback terminal branch is skipped (sandbox keeps retrying).
     pub is_sandbox: bool,
+    /// `oMe()` — the `CLAUDE_CODE_RETRY_WATCHDOG` retry watchdog is ON. When set,
+    /// capacity errors (529 Overloaded / 429 RateLimited) are EXEMPT from
+    /// retry-budget exhaustion: [`next_step`] keeps retrying them past
+    /// `max_retries` with the exponential ladder capped at
+    /// [`WATCHDOG_MAX_BACKOFF_MS`] (6h) instead of [`MAX_BACKOFF_MS`] (32s),
+    /// mirroring the binary's separate watchdog counter. Non-capacity errors
+    /// (transport / provider-internal / invalid-request) still honour the
+    /// budget. Default `false`.
+    pub watchdog: bool,
 }
 
 impl Default for RetryControl {
@@ -237,6 +337,7 @@ impl Default for RetryControl {
             allow_fallback: false,
             is_external: false,
             is_sandbox: false,
+            watchdog: false,
         }
     }
 }
@@ -265,9 +366,14 @@ pub struct ResolveRetryEnv {
     /// empty string) counts as sandboxed — mirrors TS `!!process.env.IS_SANDBOX`.
     pub is_sandbox_defined: bool,
     /// Raw value of `LINGXI_MAX_RETRIES`. When `Some`, parsed as `u32`;
-    /// absent or unparseable → [`DEFAULT_MAX_RETRIES`].
-    /// Mirrors `withRetry.ts:789-796` (`getMaxRetries`).
+    /// absent or unparseable → the watchdog-aware default via
+    /// [`resolve_max_retries`]. Mirrors `pDs()` (`CLAUDE_CODE_MAX_RETRIES`).
     pub max_retries: Option<String>,
+    /// `oMe()` — the `CLAUDE_CODE_RETRY_WATCHDOG` watchdog flag
+    /// (`LINGXI_RETRY_WATCHDOG` else the `CLAUDE_CODE_` alias). Drives the
+    /// max-retries default (`watchdog ? 300 : 10`), lifts the `>15` clamp, and
+    /// exempts capacity errors from retry-budget exhaustion in [`next_step`].
+    pub retry_watchdog: bool,
 }
 
 impl ResolveRetryEnv {
@@ -279,6 +385,7 @@ impl ResolveRetryEnv {
             user_type: std::env::var("USER_TYPE").ok(),
             is_sandbox_defined: std::env::var_os("IS_SANDBOX").is_some(),
             max_retries: std::env::var("LINGXI_MAX_RETRIES").ok(),
+            retry_watchdog: retry_watchdog_from_env(),
         }
     }
 }
@@ -339,13 +446,20 @@ pub fn resolve_retry_control_with_settings(
     let is_external = env.user_type.as_deref() == Some("external");
     // TS `!!process.env.IS_SANDBOX` — present (defined) is sandboxed.
     let is_sandbox = env.is_sandbox_defined;
-    // Precedence: env > settings > DEFAULT.
+    let watchdog = env.retry_watchdog;
+    // Precedence: env > settings > watchdog-aware default. When the
+    // `LINGXI_MAX_RETRIES` env is set it wins via the `pDs()` port
+    // (`resolve_max_retries`: parse, clamp `>15`→15 unless watchdog). When it is
+    // absent a lingxi `routing.retry.maxAttempts` setting wins, else the
+    // `pDs()` default `watchdog ? 300 : 10`.
     let max_retries = if env.max_retries.is_some() {
-        // Env present: it wins (parse or default).
-        max_retries_from_env_value(env.max_retries.as_deref())
+        resolve_max_retries(watchdog, env.max_retries.as_deref())
     } else {
-        // Env absent: settings value or DEFAULT.
-        settings_max_retries.unwrap_or(DEFAULT_MAX_RETRIES)
+        settings_max_retries.unwrap_or(if watchdog {
+            WATCHDOG_MAX_RETRIES
+        } else {
+            DEFAULT_MAX_RETRIES
+        })
     };
     RetryControl {
         fallback_model,
@@ -354,6 +468,7 @@ pub fn resolve_retry_control_with_settings(
         is_external,
         is_sandbox,
         max_retries,
+        watchdog,
         ..RetryControl::default()
     }
 }
@@ -452,11 +567,15 @@ pub fn next_step_with_backoff(
                 // normal budget-driven retry path.
             }
 
-            if u32::from(state.attempt) >= ctl.max_retries {
+            // Retry-watchdog (`oMe()`): a 529 capacity outage is EXEMPT from
+            // budget exhaustion — the watchdog keeps retrying via its separate
+            // counter with the ladder capped at 6h (`TLp`). Without the watchdog
+            // the normal `attempt >= max_retries` terminal applies.
+            if !ctl.watchdog && u32::from(state.attempt) >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
-            let base = scaled_base_delay_ms(state.attempt, backoff_ms);
+            let base = capacity_base_delay_ms(state.attempt, backoff_ms, ctl.watchdog);
             state.attempt = state.attempt.saturating_add(1);
             DriveStep::RetryAfter(jittered_delay(base))
         }
@@ -482,20 +601,20 @@ pub fn next_step_with_backoff(
                 return DriveStep::Terminal;
             }
 
-            if u32::from(state.attempt) >= ctl.max_retries {
+            // Retry-watchdog (`oMe()`, `SLp(e)=nMe(e)||status===429`): a 429
+            // capacity outage is EXEMPT from budget exhaustion, same as 529.
+            if !ctl.watchdog && u32::from(state.attempt) >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
+            let base = capacity_base_delay_ms(state.attempt, backoff_ms, ctl.watchdog);
             let delay = match retry_after {
                 // Binary `sle` treats the retry-after header as a FLOOR, not a
                 // verbatim value: `return Math.max(header*1000, jittered_backoff)`.
                 // So a small server delay never undercuts our own exponential
                 // backoff during sustained rate-limiting (and a large one still wins).
-                Some(d) => (*d).max(jittered_delay(scaled_base_delay_ms(
-                    state.attempt,
-                    backoff_ms,
-                ))),
-                None => jittered_delay(scaled_base_delay_ms(state.attempt, backoff_ms)),
+                Some(d) => (*d).max(jittered_delay(base)),
+                None => jittered_delay(base),
             };
             state.attempt = state.attempt.saturating_add(1);
             DriveStep::RetryAfter(delay)
@@ -591,6 +710,24 @@ pub fn scaled_base_delay_ms(attempt: u8, backoff_ms: Option<u64>) -> u64 {
             b.saturating_mul(factor).min(MAX_BACKOFF_MS).max(1)
         }
     }
+}
+
+/// Base (pre-jitter) delay for a CAPACITY error (529/429) attempt.
+///
+/// Without the watchdog this is exactly [`scaled_base_delay_ms`] (the normal
+/// ladder capped at [`MAX_BACKOFF_MS`] = 32s). With the watchdog ON the same
+/// exponential growth is re-capped at [`WATCHDOG_MAX_BACKOFF_MS`] (6h, binary
+/// `TLp`), so a sustained outage backs off far longer while the watchdog keeps
+/// retrying past the normal budget. Saturating arithmetic clamps extreme
+/// `attempt` values to the cap rather than wrapping.
+#[must_use]
+pub fn capacity_base_delay_ms(attempt: u8, backoff_ms: Option<u64>, watchdog: bool) -> u64 {
+    if !watchdog {
+        return scaled_base_delay_ms(attempt, backoff_ms);
+    }
+    let base = backoff_ms.unwrap_or(BASE_DELAY_MS);
+    let factor = 1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX);
+    base.saturating_mul(factor).min(WATCHDOG_MAX_BACKOFF_MS).max(1)
 }
 
 // ---------------------------------------------------------------------------

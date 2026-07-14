@@ -5458,9 +5458,26 @@ pub async fn build(
                 lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: main_session_uuid.clone(),
             });
-        tools_inner.register_builtin(Arc::new(tool_workflow::WorkflowTool::new(Some(
-            workflow_launcher,
-        ))));
+        // parity 2.1.207 "Dynamic workflow size": read the persisted
+        // `workflowSizeGuideline` (`/config`) once at construction and freeze it
+        // into the tool for the session — the binary's `St().workflowSizeGuideline`
+        // fed through `Jvd`. It flavors the Workflow tool's prompt appendix.
+        // Absent / unknown ⇒ `unrestricted` (no appendix), via `from_wire`.
+        let workflow_size_guideline = std::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| {
+                v.get("workflowSizeGuideline")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .map_or(tool_workflow::WorkflowSizeGuideline::Unrestricted, |s| {
+                tool_workflow::WorkflowSizeGuideline::from_wire(&s)
+            });
+        tools_inner.register_builtin(Arc::new(
+            tool_workflow::WorkflowTool::new(Some(workflow_launcher))
+                .with_size_guideline(workflow_size_guideline),
+        ));
     }
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await

@@ -1861,6 +1861,23 @@ impl ChatWidget {
                 tui_core::theme_persist::save_theme_setting(setting);
                 Ok(format!("Set theme to {value}."))
             }
+            // parity 2.1.207 "Dynamic workflow size": the `workflowSizeGuideline`
+            // enum (`unrestricted`/`small`/`medium`/`large`) that flavors the
+            // Workflow tool's prompt appendix. Persisted to settings.json and
+            // read back at startup (the Workflow tool freezes the value per
+            // session, like the binary's `Jvd` cache), so a change takes effect
+            // for the NEXT session.
+            "workflowSizeGuideline" => {
+                const CHOICES: [&str; 4] = ["unrestricted", "small", "medium", "large"];
+                if !CHOICES.contains(&value) {
+                    return Err(format!(
+                        "workflowSizeGuideline takes one of: {}",
+                        CHOICES.join(", ")
+                    ));
+                }
+                tui_core::theme_persist::save_workflow_size_guideline(value);
+                Ok(format!("Set workflowSizeGuideline to {value}."))
+            }
             other => Err(format!(
                 "{other} isn't a /config setting. Run /config to see what's available."
             )),
@@ -3695,6 +3712,26 @@ mod tests {
             cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body(),
             "Expected key=value, got \"garbage\". Run /config to see what's available."
         );
+
+        // parity 2.1.207 workflowSizeGuideline: a valid enum value confirms.
+        let mut w = widget();
+        assert!(matches!(
+            w.cmd_config("workflowSizeGuideline=small"),
+            ChatOutcome::Continue
+        ));
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(sys.body(), "Set workflowSizeGuideline to small.");
+        assert!(!sys.is_error());
+
+        // An out-of-enum value → the byte-exact choices error.
+        let mut w = widget();
+        w.cmd_config("workflowSizeGuideline=huge");
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(
+            sys.body(),
+            "workflowSizeGuideline takes one of: unrestricted, small, medium, large"
+        );
+        assert!(sys.is_error());
     }
 
     /// `/mcp` arg routing (2.1.206 `lJy`): bare `/mcp` and the `mke` menu

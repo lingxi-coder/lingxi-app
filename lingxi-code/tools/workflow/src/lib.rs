@@ -17,6 +17,9 @@
 
 #![forbid(unsafe_code)]
 
+mod size_guideline;
+pub use size_guideline::{prompt_appendix_for, WorkflowSizeGuideline};
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -159,14 +162,36 @@ pub trait WorkflowLauncher: Send + Sync {
 #[derive(Clone)]
 pub struct WorkflowTool {
     launcher: Option<Arc<dyn WorkflowLauncher>>,
+    /// The session-frozen `workflowSizeGuideline` `/config` value. Binary
+    /// `St().workflowSizeGuideline`, frozen for the session via `Jvd`'s cache;
+    /// here the composition root reads the persisted setting once and hands it
+    /// in, so the freeze is structural. Drives the [`Tool::prompt`] appendix
+    /// (`qAs + VAs(size)`). Defaults to [`WorkflowSizeGuideline::Unrestricted`]
+    /// (no appendix) when unset.
+    size_guideline: WorkflowSizeGuideline,
 }
 
 impl WorkflowTool {
     /// Construct. `launcher` is `None` when the host has not wired the workflow
     /// task seam — the model-facing surface is still served, but `call` errors.
+    /// The size guideline defaults to `unrestricted`; use
+    /// [`Self::with_size_guideline`] to feed the persisted `/config` value.
     #[must_use]
     pub fn new(launcher: Option<Arc<dyn WorkflowLauncher>>) -> Self {
-        Self { launcher }
+        Self {
+            launcher,
+            size_guideline: WorkflowSizeGuideline::Unrestricted,
+        }
+    }
+
+    /// Set the session-frozen `workflowSizeGuideline` (binary
+    /// `St().workflowSizeGuideline`). The composition root resolves the
+    /// persisted `/config` value once at startup and passes it here; the value
+    /// then flavors the [`Tool::prompt`] appendix for the whole session.
+    #[must_use]
+    pub fn with_size_guideline(mut self, size: WorkflowSizeGuideline) -> Self {
+        self.size_guideline = size;
+        self
     }
 
     fn spec_from_input(input: &Value) -> WorkflowLaunchSpec {
@@ -265,7 +290,10 @@ impl Tool for WorkflowTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        DESCRIPTION.clone()
+        // Binary: `async prompt(){ return qAs + VAs(St().workflowSizeGuideline) }`
+        // — the base description plus the (possibly-empty) size-guideline
+        // appendix for the session-frozen `/config` value.
+        format!("{}{}", *DESCRIPTION, self.size_guideline.prompt_appendix())
     }
 
     async fn validate_input(
@@ -640,6 +668,33 @@ mod tests {
         assert!(DESCRIPTION.contains("\"▸ name\" group in /workflows"));
         // No leftover raw escape sequences.
         assert!(!DESCRIPTION.contains("\\u2014"));
+    }
+
+    #[tokio::test]
+    async fn prompt_appends_size_guideline_when_configured() {
+        let opts = PromptOptions::default();
+        // Default (unrestricted): prompt is exactly the base description.
+        assert_eq!(tool(None).prompt(&opts).await, *DESCRIPTION);
+        // Each configured size appends its byte-exact `VAs` appendix
+        // (`qAs + VAs(size)`), with NO separator between description and appendix
+        // (the appendix carries its own leading newline).
+        for size in [
+            WorkflowSizeGuideline::Small,
+            WorkflowSizeGuideline::Medium,
+            WorkflowSizeGuideline::Large,
+        ] {
+            let t = WorkflowTool::new(None).with_size_guideline(size);
+            let want = format!("{}{}", *DESCRIPTION, size.prompt_appendix());
+            assert_eq!(t.prompt(&opts).await, want, "size={:?}", size);
+            // Sanity: the model-visible cap text is present.
+            assert!(t
+                .prompt(&opts)
+                .await
+                .contains("The user has configured a workflow size guideline in /config:"));
+        }
+        // Explicit unrestricted also yields no appendix.
+        let u = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Unrestricted);
+        assert_eq!(u.prompt(&opts).await, *DESCRIPTION);
     }
 
     #[test]

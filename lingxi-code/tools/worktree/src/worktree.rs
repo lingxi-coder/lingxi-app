@@ -27,7 +27,7 @@ use telemetry::tengu::tool::{
     EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED, WORKTREE_CREATED,
     WORKTREE_ENTERED_EXISTING, WORKTREE_KEPT, WORKTREE_REMOVED,
 };
-use traits::worktree::{WorktreeError, WorktreeHandle};
+use traits::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -846,6 +846,30 @@ async fn kill_worktree_tmux_session(
 /// this port matches by leaving `tmux_session_name` absent from `data` on
 /// `remove` rather than surfacing it there.
 ///
+/// MODEL-FACING MESSAGE = 206's `data.message`, NOT its TUI render (worktree
+/// 206 parity plan, Task 8 correction): 206's `wCd` React component is a
+/// TUI-ONLY renderer of the tool_use block; the string the MODEL actually
+/// receives comes from `HCd.mapToolResultToToolResultBlockParam({message:e},t)`
+/// returning `{type:"tool_result",content:e,...}` — i.e. `data.message`
+/// verbatim, byte-recovered from the 2.1.206 binary (`HCd.call`'s keep/remove
+/// branches + its `y9o(originalCwd,state)` cwd-restore-phrase helper). This
+/// port has no separate TUI render, so [`Self::call`]'s `model_content` is
+/// built to match `data.message` directly: `` `Exited worktree. Your work is
+/// preserved at ${path}${branch}. ${cwdPhrase}${tmuxSuffix}` `` on `keep`;
+/// `` `Exited and removed worktree at ${path}.${discardNote} ${cwdPhrase}` ``
+/// on a successful `remove`; `` `Exited worktree but could not remove it —
+/// kept at ${path}. ${cwdPhrase}` `` (em dash) when `remove_worktree` fails
+/// (non-fatal — see [`Self::call`]'s removal step). `cwdPhrase` is 206's
+/// `y9o`: normal branch (byte-exact) `` `Session is now back in ${cwd}.` ``.
+/// 206 also has a missing-original-cwd fallback branch
+/// (`originalCwdMissing`/`restoredCwd`/`fellBackToWorktree`, with a
+/// `Consider restarting Claude/LingXi from an existing directory.` suffix)
+/// that this port deliberately does NOT implement: `session_cwd.swap`
+/// unconditionally assumes `session.original_cwd` still exists, so there is
+/// no `restoredCwd`/`fellBackToWorktree` substrate to drive that branch
+/// faithfully — inventing one would risk a non-byte-exact guess. Documented
+/// residual, not a gap: only the normal branch is reachable.
+///
 /// ERRORCODE 4/5 OMITTED: the 206 oracle also refuses removal when the
 /// CALLING session isn't the worktree's owner (a pinned/subagent worktree
 /// entered via `EnterWorktree({path})`, or a resumed session whose liveness
@@ -905,40 +929,6 @@ impl ExitWorktreeTool {
         md.insert("tool_name".into(), verified(EXIT_TOOL_NAME));
         md.insert("_PROTO_branch_name".into(), pii_tagged(branch_name));
         self.ctx.bus.log_event(event_name, md).await;
-    }
-
-    async fn map_error(
-        &self,
-        invocation_id: &str,
-        duration_ms: u64,
-        err: WorktreeError,
-    ) -> Result<ToolCallResult, ToolError> {
-        match err {
-            WorktreeError::InvalidSlug(detail) => {
-                self.emit_failed(invocation_id, "invalid_slug", duration_ms)
-                    .await;
-                Err(ToolError::InvalidInput(format!(
-                    "ExitWorktree: invalid slug: {detail}"
-                )))
-            }
-            WorktreeError::Unsupported => {
-                self.emit_failed(invocation_id, "unsupported", duration_ms)
-                    .await;
-                Err(ToolError::Internal(
-                    "ExitWorktree: worktrees are not supported on this platform".into(),
-                ))
-            }
-            WorktreeError::Git(msg) => {
-                self.emit_failed(invocation_id, "git", duration_ms).await;
-                Err(ToolError::Internal(format!(
-                    "ExitWorktree: git error: {msg}"
-                )))
-            }
-            WorktreeError::Io(msg) => {
-                self.emit_failed(invocation_id, "io", duration_ms).await;
-                Err(ToolError::Io(format!("ExitWorktree: io error: {msg}")))
-            }
-        }
     }
 }
 
@@ -1107,52 +1097,72 @@ impl Tool for ExitWorktreeTool {
 
         // 2. `remove` without `discard_changes`: gate on the worktree's dirty
         // state (206 `RCd` change-summary + errorCode:2 / can't-verify
-        // refusal).
-        if is_remove && !discard_changes {
-            let worktree_path_display = session.worktree_path.to_string_lossy().into_owned();
-            match self.ctx.worktree.worktree_change_summary(&handle).await {
-                Ok(Some(summary)) if summary.is_dirty() => {
-                    let branch_for_phrase = if session.branch_name.is_empty() {
-                        "the worktree branch"
-                    } else {
-                        session.branch_name.as_str()
-                    };
-                    // File-then-commit order matches the oracle's push order
-                    // (`i.push(uncommitted...)` before `i.push(commit...)`).
-                    let mut parts: Vec<String> = Vec::new();
-                    if let Some(files) = summary.changed_files_phrase() {
-                        parts.push(files);
+        // refusal). The query result is retained in `discard_summary` for the
+        // "Discarded …" note in the success message built in step 7 below —
+        // 206's own change-summary query (`oUl`) is UNCONDITIONAL for
+        // `remove` (used for both this gate and the discard note), falling
+        // back to zero counts (`?? {changedFiles:0,commits:0}`) on a
+        // failed/missing query rather than blocking when `discard_changes`
+        // is set.
+        let mut discard_summary: Option<WorktreeChangeSummary> = None;
+        if is_remove {
+            if discard_changes {
+                discard_summary = self
+                    .ctx
+                    .worktree
+                    .worktree_change_summary(&handle)
+                    .await
+                    .ok()
+                    .flatten();
+            } else {
+                let worktree_path_display = session.worktree_path.to_string_lossy().into_owned();
+                match self.ctx.worktree.worktree_change_summary(&handle).await {
+                    Ok(Some(summary)) if summary.is_dirty() => {
+                        let branch_for_phrase = if session.branch_name.is_empty() {
+                            "the worktree branch"
+                        } else {
+                            session.branch_name.as_str()
+                        };
+                        // File-then-commit order matches the oracle's push order
+                        // (`i.push(uncommitted...)` before `i.push(commit...)`).
+                        let mut parts: Vec<String> = Vec::new();
+                        if let Some(files) = summary.changed_files_phrase() {
+                            parts.push(files);
+                        }
+                        if let Some(commits) = summary.commits_phrase(branch_for_phrase) {
+                            parts.push(commits);
+                        }
+                        self.emit_failed(
+                            &invocation_id,
+                            "has_changes",
+                            started_at.elapsed().as_millis() as u64,
+                        )
+                        .await;
+                        return Err(ToolError::InvalidInput(exit_has_changes_message(
+                            &parts.join(" and "),
+                        )));
                     }
-                    if let Some(commits) = summary.commits_phrase(branch_for_phrase) {
-                        parts.push(commits);
+                    Ok(Some(summary)) => {
+                        // Clean — proceed. Retained for the discard note
+                        // below, though `discard_note()` yields "" here
+                        // since nothing is dirty.
+                        discard_summary = Some(summary);
                     }
-                    self.emit_failed(
-                        &invocation_id,
-                        "has_changes",
-                        started_at.elapsed().as_millis() as u64,
-                    )
-                    .await;
-                    return Err(ToolError::InvalidInput(exit_has_changes_message(
-                        &parts.join(" and "),
-                    )));
-                }
-                Ok(Some(_)) => {
-                    // Clean — proceed.
-                }
-                Ok(None) | Err(_) => {
-                    // Fail-closed: git couldn't be queried (or no baseline
-                    // commit — `worktree_change_summary`'s documented
-                    // "unknown" contract), matching the oracle's `RCd`
-                    // returning `null`.
-                    self.emit_failed(
-                        &invocation_id,
-                        "cannot_verify",
-                        started_at.elapsed().as_millis() as u64,
-                    )
-                    .await;
-                    return Err(ToolError::InvalidInput(exit_cannot_verify_message(
-                        &worktree_path_display,
-                    )));
+                    Ok(None) | Err(_) => {
+                        // Fail-closed: git couldn't be queried (or no baseline
+                        // commit — `worktree_change_summary`'s documented
+                        // "unknown" contract), matching the oracle's `RCd`
+                        // returning `null`.
+                        self.emit_failed(
+                            &invocation_id,
+                            "cannot_verify",
+                            started_at.elapsed().as_millis() as u64,
+                        )
+                        .await;
+                        return Err(ToolError::InvalidInput(exit_cannot_verify_message(
+                            &worktree_path_display,
+                        )));
+                    }
                 }
             }
         }
@@ -1188,71 +1198,126 @@ impl Tool for ExitWorktreeTool {
             }
         }
 
-        // 5. Remove (if requested) or leave the worktree on disk (`keep`).
-        if is_remove {
-            if let Err(err) = self.ctx.worktree.remove_worktree(&handle).await {
-                return self
-                    .map_error(&invocation_id, started_at.elapsed().as_millis() as u64, err)
-                    .await;
+        // 5. Remove (if requested) or leave the worktree on disk (`keep`). A
+        // removal failure is NON-FATAL, matching 206: `HCd.call`'s `oht()`
+        // removal step returns a boolean (`d`) rather than throwing, and
+        // `d===false` still returns a normal (`is_error:false`) tool result
+        // carrying the "could not remove" message (binary-verified
+        // @222215668) — it only skips the `tengu_worktree_removed` event and
+        // the discard note below. The port's `remove_worktree`
+        // (`platforms/posix::worktree`) only ever produces
+        // `WorktreeError::Git`/`WorktreeError::Io` here (a failed `git
+        // worktree remove` invocation), both of which collapse into this one
+        // non-fatal branch, matching 206's undifferentiated boolean.
+        let remove_failed = if is_remove {
+            match self.ctx.worktree.remove_worktree(&handle).await {
+                Ok(()) => false,
+                Err(err) => {
+                    tracing::warn!(
+                        branch = %session.branch_name,
+                        error = %err,
+                        "ExitWorktree: failed to remove worktree; session still exits (206 `d===false` is non-fatal)"
+                    );
+                    true
+                }
             }
-        }
+        } else {
+            false
+        };
 
         // 6. Clear the session record — a further `ExitWorktree` call (with
-        // no intervening `EnterWorktree`) now takes the no-op path.
+        // no intervening `EnterWorktree`) now takes the no-op path. This runs
+        // regardless of `remove_failed`: 206 considers the session exited
+        // once removal is attempted, whether or not it actually succeeded.
         *self.ctx.worktree_session.lock().unwrap() = None;
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;
-        self.emit_worktree_event(
-            if is_remove {
-                WORKTREE_REMOVED
-            } else {
-                WORKTREE_KEPT
-            },
-            &session.branch_name,
-        )
-        .await;
+        // 206's `tengu_worktree_removed` event fires only when the removal
+        // actually succeeded (`d===true`, i.e. `!remove_failed`);
+        // `tengu_worktree_kept` is unconditional on `keep` (`remove_failed`
+        // is always `false` there).
+        if !remove_failed {
+            self.emit_worktree_event(
+                if is_remove {
+                    WORKTREE_REMOVED
+                } else {
+                    WORKTREE_KEPT
+                },
+                &session.branch_name,
+            )
+            .await;
+        }
 
-        // 7. 206 `wCd` success message: line 1 verb (+ branch suffix when
-        // non-empty and not the detached-HEAD sentinel), line 2
-        // `Returned to {original_cwd}`.
-        let verb = if is_remove {
-            "Removed worktree"
-        } else {
-            "Kept worktree"
-        };
+        // 7. MODEL-facing message = 206's `data.message` (see this type's
+        // module doc for why that differs from the TUI-only `wCd` render).
+        // Byte-recovered from the 2.1.206 binary (`HCd.call`'s keep/remove
+        // branches + its `y9o` cwd-restore-phrase helper).
         let branch_suffix_str =
             if !session.branch_name.is_empty() && session.branch_name != "HEAD" {
-                format!(" (branch {})", session.branch_name)
+                format!(" on branch {}", session.branch_name)
             } else {
                 String::new()
             };
         let original_cwd_display = session.original_cwd.to_string_lossy().into_owned();
-        let mut message = format!("{verb}{branch_suffix_str}\nReturned to {original_cwd_display}");
+        let worktree_path_display = session.worktree_path.to_string_lossy().into_owned();
 
-        // Tmux reattach surfacing — ADDITIVE only, on `keep` with a session
-        // name (never on `remove`: it was just killed above, and 206 itself
-        // never puts `tmuxSessionName` in `data` on that path either). The
-        // appended line is byte-recovered from 206's `HCd.call` keep branch
-        // (binary @368812): `` ` Tmux session ${s} is still running;
-        // reattach with: tmux attach -t ${s}` ``, reflowed onto its own line
-        // to fit this port's existing multi-line message shape (which
-        // predates this task and is intentionally left otherwise intact).
+        // 206 `y9o(originalCwd, state)` — normal branch only (byte-exact).
+        // The missing-cwd fallback (`originalCwdMissing`/`restoredCwd`/
+        // `fellBackToWorktree`, plus a "Consider restarting Claude/LingXi
+        // from an existing directory." suffix) is a documented-unreachable
+        // residual: this port's `session_cwd.swap` unconditionally assumes
+        // `session.original_cwd` still exists, so there is no
+        // `restoredCwd`/`fellBackToWorktree` substrate to drive that branch
+        // faithfully (see the module doc above `ExitWorktreeTool`).
+        let cwd_restored_phrase = format!("Session is now back in {original_cwd_display}.");
+
         let tmux_session_name_for_data: Option<String> = if is_remove {
             None
         } else {
             session.tmux_session_name.clone()
         };
-        if let Some(name) = tmux_session_name_for_data.as_deref() {
-            message.push_str(&format!(
-                "\nTmux session {name} is still running; reattach with: tmux attach -t {name}"
-            ));
-        }
+        // Tmux reattach surfacing — ADDITIVE only, on `keep` with a session
+        // name (never on `remove`: it was just killed above, and 206 itself
+        // never puts `tmuxSessionName` in `data` on that path either). Byte-
+        // recovered from 206's `HCd.call` keep branch: `` ` Tmux session
+        // ${s} is still running; reattach with: tmux attach -t ${s}` `` —
+        // note the LEADING SPACE, joined inline (not on its own line) into
+        // the single-string `data.message`.
+        let tmux_reattach_suffix = tmux_session_name_for_data
+            .as_deref()
+            .map(|name| {
+                format!(
+                    " Tmux session {name} is still running; reattach with: tmux attach -t {name}"
+                )
+            })
+            .unwrap_or_default();
+
+        let message = if !is_remove {
+            format!(
+                "Exited worktree. Your work is preserved at {worktree_path_display}{branch_suffix_str}. {cwd_restored_phrase}{tmux_reattach_suffix}"
+            )
+        } else if remove_failed {
+            format!(
+                "Exited worktree but could not remove it \u{2014} kept at {worktree_path_display}. {cwd_restored_phrase}"
+            )
+        } else {
+            // Commits-first, then uncommitted files (binary-verified push
+            // order: `if(u>0)f.push(commit...);if(c>0)f.push(file...)`),
+            // joined with " and ", wrapped as " Discarded <parts>." — see
+            // `WorktreeChangeSummary::discard_note`.
+            let discard_note = discard_summary
+                .map(|summary| summary.discard_note())
+                .unwrap_or_default();
+            format!(
+                "Exited and removed worktree at {worktree_path_display}.{discard_note} {cwd_restored_phrase}"
+            )
+        };
 
         let mut data = json!({
             "action": if is_remove { "remove" } else { "keep" },
             "branch_name": session.branch_name,
-            "worktree_path": session.worktree_path.to_string_lossy(),
+            "worktree_path": worktree_path_display,
             "original_cwd": original_cwd_display,
         });
         if let Some(name) = tmux_session_name_for_data {
@@ -1970,7 +2035,11 @@ mod tests {
             .expect("keep must succeed");
         assert_eq!(
             res.model_content.as_deref(),
-            Some("Kept worktree (branch worktree-feat)\nReturned to /tmp/repo-keep")
+            Some(
+                "Exited worktree. Your work is preserved at \
+                 /tmp/repo-keep/.lingxi/worktrees/feat on branch worktree-feat. \
+                 Session is now back in /tmp/repo-keep."
+            )
         );
         assert_eq!(tool.ctx.cwd(), original_cwd, "cwd must be restored");
         assert!(
@@ -2011,7 +2080,10 @@ mod tests {
             .expect("remove must succeed");
         assert_eq!(
             res.model_content.as_deref(),
-            Some("Removed worktree (branch worktree-feat)\nReturned to /tmp/repo-remove")
+            Some(
+                "Exited and removed worktree at /tmp/repo-remove/.lingxi/worktrees/feat. \
+                 Session is now back in /tmp/repo-remove."
+            )
         );
         assert_eq!(tool.ctx.cwd(), original_cwd, "cwd must be restored");
         assert!(tool.ctx.worktree_session.lock().unwrap().is_none());
@@ -2023,8 +2095,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exit_remove_failure_is_non_fatal_with_exact_message() {
+        // 206's `oht()` removal step returns a boolean rather than throwing;
+        // `d===false` still returns a NORMAL (`is_error:false`) tool result
+        // carrying the byte-exact "could not remove" message (em dash,
+        // binary-verified @222215668) — it is NOT surfaced as a `ToolError`.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-remove-fail"));
+        mock.script_remove_error(WorktreeError::Git("fatal: worktree is dirty".into()));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let original_cwd = PathBuf::from("/tmp/repo-remove-fail");
+        let worktree_path = PathBuf::from("/tmp/repo-remove-fail/.lingxi/worktrees/feat");
+        populate_session(
+            &bctx,
+            &original_cwd,
+            &worktree_path,
+            "worktree-feat",
+            None,
+        );
+        let tool = ExitWorktreeTool::new(bctx);
+        let res = tool
+            .call(
+                json!({ "action": "remove", "discard_changes": true }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("a non-fatal removal failure must still return a normal tool result");
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some(
+                "Exited worktree but could not remove it \u{2014} kept at \
+                 /tmp/repo-remove-fail/.lingxi/worktrees/feat. \
+                 Session is now back in /tmp/repo-remove-fail."
+            )
+        );
+        assert!(!res.is_error);
+        // The session still exits (cwd restored, session record cleared)
+        // even though the on-disk worktree could not be removed.
+        assert_eq!(tool.ctx.cwd(), original_cwd, "cwd must still be restored");
+        assert!(tool.ctx.worktree_session.lock().unwrap().is_none());
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&EXIT_WORKTREE_COMPLETED.to_string()));
+        // `tengu_worktree_removed` must NOT fire — the removal did not
+        // actually succeed.
+        assert!(!names.contains(&WORKTREE_REMOVED.to_string()));
+        assert!(!names.contains(&WORKTREE_KEPT.to_string()));
+    }
+
+    #[tokio::test]
     async fn exit_remove_clean_worktree_does_not_need_discard_changes() {
-        use traits::worktree::WorktreeChangeSummary;
         let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-clean"));
         mock.script_change_summary(Some(WorktreeChangeSummary {
             changed_files: 0,
@@ -2047,7 +2167,10 @@ mod tests {
             .expect("clean remove without discard_changes must succeed");
         assert_eq!(
             res.model_content.as_deref(),
-            Some("Removed worktree (branch worktree-feat)\nReturned to /tmp/repo-clean")
+            Some(
+                "Exited and removed worktree at /tmp/repo-clean/.lingxi/worktrees/feat. \
+                 Session is now back in /tmp/repo-clean."
+            )
         );
         assert_eq!(mock.removed().len(), 1);
     }
@@ -2091,7 +2214,6 @@ mod tests {
 
     #[tokio::test]
     async fn exit_remove_dirty_singular_refuses_with_exact_pluralization() {
-        use traits::worktree::WorktreeChangeSummary;
         let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-singular"));
         mock.script_change_summary(Some(WorktreeChangeSummary {
             changed_files: 1,
@@ -2128,7 +2250,6 @@ mod tests {
 
     #[tokio::test]
     async fn exit_remove_dirty_plural_both_refuses_with_files_then_commits() {
-        use traits::worktree::WorktreeChangeSummary;
         let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-plural"));
         mock.script_change_summary(Some(WorktreeChangeSummary {
             changed_files: 3,
@@ -2167,7 +2288,6 @@ mod tests {
 
     #[tokio::test]
     async fn exit_remove_with_discard_changes_true_forces_removal_despite_dirty() {
-        use traits::worktree::WorktreeChangeSummary;
         let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-force"));
         mock.script_change_summary(Some(WorktreeChangeSummary {
             changed_files: 5,
@@ -2193,7 +2313,16 @@ mod tests {
             )
             .await
             .expect("discard_changes:true must force removal despite dirty state");
-        assert!(res.model_content.unwrap().starts_with("Removed worktree"));
+        // Discard note is commits-first, then uncommitted files (binary push
+        // order), singular/plural applied independently to each count.
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some(
+                "Exited and removed worktree at /tmp/repo-force/.lingxi/worktrees/feat. \
+                 Discarded 1 commit and 5 uncommitted files. \
+                 Session is now back in /tmp/repo-force."
+            )
+        );
         assert_eq!(mock.removed().len(), 1);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&WORKTREE_REMOVED.to_string()));
@@ -2213,7 +2342,11 @@ mod tests {
             .expect("keep must succeed");
         assert_eq!(
             res.model_content.as_deref(),
-            Some("Kept worktree\nReturned to /tmp/repo-detached-exit")
+            Some(
+                "Exited worktree. Your work is preserved at \
+                 /tmp/repo-detached-exit/.lingxi/worktrees/feat. \
+                 Session is now back in /tmp/repo-detached-exit."
+            )
         );
     }
 
@@ -2337,7 +2470,10 @@ mod tests {
         assert!(res.data.get("tmux_session_name").is_none());
         assert_eq!(
             res.model_content.as_deref(),
-            Some("Removed worktree (branch worktree-feat)\nReturned to /tmp/repo-tmux-remove")
+            Some(
+                "Exited and removed worktree at /tmp/repo-tmux-remove/.lingxi/worktrees/feat. \
+                 Session is now back in /tmp/repo-tmux-remove."
+            )
         );
     }
 
@@ -2370,7 +2506,10 @@ mod tests {
         assert_eq!(mock.removed().len(), 1);
         assert_eq!(
             res.model_content.as_deref(),
-            Some("Removed worktree (branch worktree-feat)\nReturned to /tmp/repo-tmux-kill-fail")
+            Some(
+                "Exited and removed worktree at /tmp/repo-tmux-kill-fail/.lingxi/worktrees/feat. \
+                 Session is now back in /tmp/repo-tmux-kill-fail."
+            )
         );
     }
 
@@ -2395,11 +2534,15 @@ mod tests {
         assert_eq!(mock.removed().len(), 0);
         // The session name is surfaced in `data` for reattach.
         assert_eq!(res.data["tmux_session_name"], json!("wt-z"));
-        // ... and in the model-facing message, as an additive reattach line.
+        // ... and in the model-facing message, as an additive reattach
+        // clause — LEADING-SPACE-joined inline into the single-string
+        // message (206's `${g}` suffix), NOT on its own line.
         assert_eq!(
             res.model_content.as_deref(),
             Some(
-                "Kept worktree (branch worktree-feat)\nReturned to /tmp/repo-tmux-keep\n\
+                "Exited worktree. Your work is preserved at \
+                 /tmp/repo-tmux-keep/.lingxi/worktrees/feat on branch worktree-feat. \
+                 Session is now back in /tmp/repo-tmux-keep. \
                  Tmux session wt-z is still running; reattach with: tmux attach -t wt-z"
             )
         );
@@ -2537,7 +2680,9 @@ mod tests {
             exit_res.model_content.as_deref(),
             Some(
                 format!(
-                    "Kept worktree (branch worktree-roundtrip)\nReturned to {}",
+                    "Exited worktree. Your work is preserved at {} on branch worktree-roundtrip. \
+                     Session is now back in {}.",
+                    worktree_path.display(),
                     boot_cwd.display()
                 )
                 .as_str()

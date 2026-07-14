@@ -50,6 +50,15 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .ask_user_question_timeout
             .or(prev.ask_user_question_timeout),
         model: next.model.or(prev.model),
+        // Managed model-restriction keys (H-BIN-08). `availableModels` (array)
+        // and `enforceAvailableModels` (scalar) are scalar-override — CC's
+        // `settingsMergeCustomizer` returns the source array for non-concat
+        // arrays. `modelOverrides` (record) deep-merges per key (next wins).
+        available_models: next.available_models.or(prev.available_models),
+        enforce_available_models: next
+            .enforce_available_models
+            .or(prev.enforce_available_models),
+        model_overrides: merge_string_map(prev.model_overrides, next.model_overrides),
         // 2.1.198 AWS/GCP auth-refresh script keys — plain strings, scalar
         // Override (later source wins), same as `model`/`outputStyle`.
         aws_auth_refresh: next.aws_auth_refresh.or(prev.aws_auth_refresh),
@@ -74,6 +83,25 @@ fn concat_dedup(prev: Option<Vec<String>>, next: Option<Vec<String>>) -> Option<
                 }
             }
             Some(out)
+        }
+    }
+}
+
+/// Deep-merge two flat `String→String` maps (`modelOverrides`): union of keys,
+/// `next` wins on a collision. A one-level record has no nested structure, so
+/// this is CC's lodash object-merge for `modelOverrides`.
+fn merge_string_map(
+    prev: Option<std::collections::BTreeMap<String, String>>,
+    next: Option<std::collections::BTreeMap<String, String>>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    match (prev, next) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(mut p), Some(n)) => {
+            for (k, v) in n {
+                p.insert(k, v);
+            }
+            Some(p)
         }
     }
 }

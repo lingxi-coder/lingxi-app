@@ -65,6 +65,12 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // LingXi extension — deep-merge so multiple settings layers can each
     // contribute routing aliases, fallback chains, and retry policy.
     ("routing", MergeStrategy::DeepMerge),
+    // Managed model-restriction map — deep-merge (CC `settingsMergeCustomizer`
+    // leaves objects to lodash's recursive merge; only specific arrays concat).
+    // NB: `availableModels` (array) and `enforceAvailableModels` (scalar) are
+    // deliberately NOT here — they fall through to the default Override, matching
+    // CC returning the source array for non-concat arrays.
+    ("modelOverrides", MergeStrategy::DeepMerge),
 ];
 
 /// Look up the merge strategy for a field name.
@@ -195,6 +201,46 @@ pub struct SettingsJson {
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+
+    /// Array field (scalar-override merge). `availableModels`: managed allowlist
+    /// of models a user may select. CC 2.1.207 settings zod (verbatim describe):
+    /// "Allowlist of models that users can select. Accepts family aliases
+    /// (\"opus\" allows any opus version), version prefixes (\"opus-4-5\" allows
+    /// only that version), and full model IDs. If undefined, all models are
+    /// available. If empty array, only the default model is available."
+    /// Typically set in managed (`policySettings`) settings by enterprise
+    /// administrators. Consumed via [`llm_client::model::allowlist`] — matcher +
+    /// policy-provenance for the `enforceAvailableModels` gate. Absent ⇒ None
+    /// (no restriction), distinct from `Some(vec![])` (only the default model).
+    /// Scalar-override merge (CC `settingsMergeCustomizer` returns the source
+    /// array for non-concat arrays), so NOT in `MERGE_STRATEGIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<String>>,
+
+    /// Scalar field (later source wins). `enforceAvailableModels`: gate on the
+    /// managed `availableModels` allowlist. CC 2.1.207 zod (verbatim describe):
+    /// "When true and availableModels is a non-empty array, the Default model
+    /// selection is also constrained: if the default model for the user tier is
+    /// not in availableModels, Default resolves to the first allowed
+    /// availableModels entry instead. Has no effect when availableModels is unset
+    /// or an empty array. Typically set in managed settings by enterprise
+    /// administrators." The flag only binds with a POLICY-owned allowlist
+    /// (`llm_client::model::allowlist::resolve_enforcement`). Scalar-override
+    /// merge (not in `MERGE_STRATEGIES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_available_models: Option<bool>,
+
+    /// Object-merge field (deep-merge). `modelOverrides`: managed mapping from
+    /// Anthropic model ID to provider-specific model ID. CC 2.1.207 zod
+    /// (verbatim describe): "Override mapping from Anthropic model ID (e.g.
+    /// \"claude-opus-4-6\") to provider-specific model ID (e.g. a Bedrock
+    /// inference profile ARN). Typically set in managed settings by enterprise
+    /// administrators." Feeds the same `availableModels` enforcement path
+    /// (reverse-mapped in the matcher, `overridesMap`). Deep-merged across tiers
+    /// (CC's `settingsMergeCustomizer` leaves objects to lodash's recursive
+    /// merge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_overrides: Option<BTreeMap<String, String>>,
 
     /// Scalar field (later source wins). `awsAuthRefresh`: path to a script
     /// that refreshes AWS authentication (2.1.198 settings schema: "Path to a
@@ -534,6 +580,73 @@ mod tests {
         assert!(parsed.providers.is_some());
         let back = serde_json::to_string(&parsed).expect("serialize");
         assert!(back.contains("\"providers\""));
+    }
+
+    #[test]
+    fn managed_model_allowlist_keys_parse_and_roundtrip() {
+        // CC 2.1.207 managed model-restriction keys: availableModels (array),
+        // enforceAvailableModels (bool), modelOverrides (record). A managed
+        // settings.json carrying them must parse into the typed fields (unknown-
+        // key tolerance alone would strip them, so the allowlist would be
+        // silently dropped and enforcement never bind).
+        let json = r#"{
+            "availableModels": ["opus", "claude-sonnet-4-5"],
+            "enforceAvailableModels": true,
+            "modelOverrides": { "claude-opus-4-6": "arn:aws:bedrock:us-east-1::inference-profile/opus" },
+            "model": "claude-sonnet-4-5"
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("managed keys must parse");
+        assert_eq!(
+            parsed.available_models.as_deref(),
+            Some(&["opus".to_string(), "claude-sonnet-4-5".to_string()][..])
+        );
+        assert_eq!(parsed.enforce_available_models, Some(true));
+        assert_eq!(
+            parsed
+                .model_overrides
+                .as_ref()
+                .and_then(|m| m.get("claude-opus-4-6"))
+                .map(String::as_str),
+            Some("arn:aws:bedrock:us-east-1::inference-profile/opus")
+        );
+        // Sibling survives the load.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"availableModels\""), "{back}");
+        assert!(back.contains("\"enforceAvailableModels\":true"), "{back}");
+        assert!(back.contains("\"modelOverrides\""), "{back}");
+    }
+
+    #[test]
+    fn available_models_absent_vs_empty_are_distinct() {
+        // Absent ⇒ None (no restriction); explicit [] ⇒ Some(vec![]) (only the
+        // default model available) — the two must round-trip distinctly.
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"opus"}"#).unwrap();
+        assert!(absent.available_models.is_none());
+        assert!(!serde_json::to_string(&absent)
+            .unwrap()
+            .contains("availableModels"));
+        let empty: SettingsJson = serde_json::from_str(r#"{"availableModels":[]}"#).unwrap();
+        assert_eq!(empty.available_models.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn model_allowlist_merge_strategies() {
+        // modelOverrides deep-merges (CC leaves objects to lodash recursive
+        // merge); availableModels/enforceAvailableModels are scalar-override.
+        assert!(
+            matches!(strategy_for("modelOverrides"), Some(MergeStrategy::DeepMerge)),
+            "modelOverrides must deep-merge"
+        );
+        assert!(
+            strategy_for("availableModels").is_none(),
+            "availableModels must be scalar-override (source array wins)"
+        );
+        assert!(
+            strategy_for("enforceAvailableModels").is_none(),
+            "enforceAvailableModels must be scalar-override"
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 //! Provider-protocol policy moved from `orchestrator::model`.
+pub mod allowlist;
 pub mod betas;
 pub mod context_window;
 pub mod count_tokens;

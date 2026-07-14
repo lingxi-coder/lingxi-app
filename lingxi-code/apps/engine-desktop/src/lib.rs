@@ -524,6 +524,42 @@ async fn load_boot_permission_tiers(
     }
 }
 
+/// Build the MANAGED (`policySettings`) model-restriction view for the
+/// `availableModels` / `enforceAvailableModels` / `modelOverrides` enforcement
+/// (parity 2.1.207 H-BIN-08), mirroring claude-code's per-source
+/// `getSettingsForSource("policySettings")` view (`ROn`/`sl`). The managed raw
+/// tiers arrive ASCENDING (base then drop-ins); scalar/array keys take the last
+/// (highest-priority) tier, `modelOverrides` unions per key. A tier that fails
+/// to parse marks the whole policy source failed — `refusing cascade-trust
+/// mode` (fail-closed), matching the binary `try{…}catch` around the policy
+/// read. Only the MANAGED tiers are consulted: the enforce flag requires a
+/// policy-OWNED allowlist, so user/project `availableModels` are deliberately
+/// NOT folded in here.
+fn managed_model_policy_source(managed_tiers: &[String]) -> llm_client::model::allowlist::PolicySource {
+    use llm_client::model::allowlist::{PolicyModelView, PolicySource};
+    let mut view = PolicyModelView::default();
+    for raw in managed_tiers {
+        match serde_json::from_str::<engine::settings::schema::SettingsJson>(raw) {
+            Ok(s) => {
+                if s.available_models.is_some() {
+                    view.available_models = s.available_models; // last tier wins
+                }
+                if s.enforce_available_models.is_some() {
+                    view.enforce = s.enforce_available_models; // last tier wins
+                }
+                if let Some(mo) = s.model_overrides {
+                    view.model_overrides
+                        .get_or_insert_with(std::collections::BTreeMap::new)
+                        .extend(mo); // union, later tier wins per key
+                }
+            }
+            // A managed file that exists but does not parse ⇒ fail-closed.
+            Err(_) => return PolicySource::Failed,
+        }
+    }
+    PolicySource::Loaded(view)
+}
+
 /// Whether the live cron scheduler should run. Faithful to claude-code's
 /// `isKairosCronEnabled` LOCAL kill-switch (`ScheduleCronTool/prompt.ts:34/38`):
 /// the `LINGXI_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
@@ -3480,6 +3516,57 @@ pub async fn build(
             });
             default_model_id = fb.model;
             default_model_profile = Some(fb.profile);
+        }
+    }
+
+    // ── Managed availableModels / enforceAvailableModels constraint ─────────
+    // (parity 2.1.207 H-BIN-08.) When a MANAGED (`policySettings`) tier owns an
+    // `availableModels` allowlist AND sets `enforceAvailableModels: true`, the
+    // Default model selection is constrained (binary `enforceAvailableModels`
+    // describe text): "if the default model for the user tier is not in
+    // availableModels, Default resolves to the first allowed availableModels
+    // entry instead." The enforce flag is inert without a policy-OWNED
+    // allowlist, and a managed source that fails to parse refuses cascade-trust
+    // mode (fail-closed). Consumed via `llm_client::model::allowlist`.
+    {
+        use llm_client::model::allowlist;
+        let managed_model_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+        let policy_source = managed_model_policy_source(&managed_model_tiers);
+        // Deduplicate the byte-exact warnings (binary module-level `SN` set).
+        let mut seen: Vec<String> = Vec::new();
+        let enforcement = allowlist::resolve_enforcement(&policy_source, &mut |m| {
+            if !seen.iter().any(|w| w == m) {
+                seen.push(m.to_string());
+                tracing::warn!("{m}");
+            }
+        });
+        if allowlist::model_allowed_under(&enforcement, &default_model_id) == Some(false) {
+            if let allowlist::ModelEnforcement::Active {
+                allowlist: al,
+                overrides,
+            } = &enforcement
+            {
+                let candidates: Vec<String> = default_listings
+                    .iter()
+                    .map(|m| m.request_model.clone())
+                    .collect();
+                if let Some(picked) =
+                    allowlist::first_allowed_model(al, &candidates, Some(overrides))
+                {
+                    let picked_profile = default_listings
+                        .iter()
+                        .find(|m| m.request_model == picked)
+                        .map(|m| m.provider_id.clone());
+                    tracing::warn!(
+                        from = %default_model_id,
+                        to = %picked,
+                        "default model is not in the managed availableModels allowlist; \
+                         resolving Default to the first allowed availableModels entry"
+                    );
+                    default_model_id = picked;
+                    default_model_profile = picked_profile.or(default_model_profile);
+                }
+            }
         }
     }
 
@@ -8791,6 +8878,75 @@ mod tests {
         assert!(!cfg.enabled, "no tiers → sandbox disabled (opt-in default)");
 
         std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    // ── H-BIN-08 (parity 2.1.207): managed availableModels / ────────────────
+    // enforceAvailableModels policy source ──────────────────────────────────
+
+    #[test]
+    fn managed_model_policy_source_folds_managed_tiers_and_enforces() {
+        use llm_client::model::allowlist::{self, ModelEnforcement, PolicySource};
+        // Base tier sets the allowlist; a drop-in flips enforce on and adds an
+        // override — last tier wins for scalars, overrides union per key.
+        let tiers = vec![
+            r#"{"availableModels":["claude-opus-4-5"]}"#.to_string(),
+            r#"{"enforceAvailableModels":true,"modelOverrides":{"claude-opus-4-5":"arn:aws:bedrock:us-east-1::inference-profile/opus"}}"#.to_string(),
+        ];
+        let source = super::managed_model_policy_source(&tiers);
+        let enforcement = allowlist::resolve_enforcement(&source, &mut |_| {});
+        match &enforcement {
+            ModelEnforcement::Active {
+                allowlist: al,
+                overrides,
+            } => {
+                assert_eq!(al, &["claude-opus-4-5".to_string()]);
+                assert_eq!(
+                    overrides.get("claude-opus-4-5").map(String::as_str),
+                    Some("arn:aws:bedrock:us-east-1::inference-profile/opus")
+                );
+            }
+            other => panic!("expected Active enforcement, got {other:?}"),
+        }
+        // The Bedrock ARN reverse-maps to the allowlisted Anthropic id ⇒ allowed;
+        // a sonnet id is refused.
+        assert_eq!(
+            allowlist::model_allowed_under(
+                &enforcement,
+                "arn:aws:bedrock:us-east-1::inference-profile/opus"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            allowlist::model_allowed_under(&enforcement, "claude-sonnet-4-5"),
+            Some(false)
+        );
+        // A malformed managed tier fails the whole source closed.
+        let bad = vec![r#"{"availableModels": "not-an-array"}"#.to_string()];
+        assert!(matches!(
+            super::managed_model_policy_source(&bad),
+            PolicySource::Failed
+        ));
+    }
+
+    #[test]
+    fn managed_enforce_without_allowlist_is_inert() {
+        use llm_client::model::allowlist::{self, ModelEnforcement};
+        // enforce flag with NO policy-owned availableModels ⇒ inactive + warn.
+        let tiers = vec![r#"{"enforceAvailableModels":true}"#.to_string()];
+        let source = super::managed_model_policy_source(&tiers);
+        let mut warned = Vec::new();
+        let enforcement =
+            allowlist::resolve_enforcement(&source, &mut |m| warned.push(m.to_string()));
+        assert_eq!(enforcement, ModelEnforcement::Inactive);
+        assert_eq!(
+            warned,
+            vec![allowlist::warnings::ENFORCE_WITHOUT_ALLOWLIST.to_string()]
+        );
+        // Inactive ⇒ no opinion on any model.
+        assert_eq!(
+            allowlist::model_allowed_under(&enforcement, "gpt-5.5"),
+            None
+        );
     }
 
     // ── P1-10 (parity 2.1.207): managed (policySettings) PERMISSION RULES in

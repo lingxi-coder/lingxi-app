@@ -16,12 +16,14 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+pub mod artifact;
 pub mod ask_user_question;
 pub mod brief;
 pub mod push_notification;
 pub mod send_message;
 pub mod sleep;
 pub mod synthetic_output;
+pub use artifact::ArtifactTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
 pub use push_notification::PushNotificationTool;
@@ -83,4 +85,10 @@ fn register_with_options(
     // shipped binary.
     reg.register_builtin(Arc::new(PushNotificationTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
+    // NOTE: `ArtifactTool` lives in this crate but is registered by the DESKTOP
+    // composition root (`engine_desktop::register_desktop_tools`), not here — it
+    // is a first-party/claude.ai feature gated on `tengu_cobalt_plinth` +
+    // first-party auth, so it is desktop-only (and stays out of the mobile tool
+    // set). Its `is_enabled` (CC `dY()`) keeps it invisible to the model until
+    // the Statsig gate is available.
 }

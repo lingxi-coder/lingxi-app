@@ -233,6 +233,28 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_web_fetch_preflight: Option<bool>,
 
+    /// Scalar field (later source wins). `disableArtifact`: opt out of the
+    /// `Artifact` tool (parity 2.1.207 H-BIN-03). CC 2.1.207 settings zod
+    /// (verbatim): `disableArtifact:E.boolean().optional().describe("Disable the
+    /// Artifact tool (also via CLAUDE_CODE_DISABLE_ARTIFACT).")`. The env half
+    /// (`CLAUDE_CODE_DISABLE_ARTIFACT`) is wired in `tool_api::artifact_gate`
+    /// (binary `R9i()`); threading this settings value into that gate lands with
+    /// the Stage-2 publish pipeline. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_artifact: Option<bool>,
+
+    /// Scalar field (later source wins). `enableArtifact`: explicitly enable /
+    /// disable the `Artifact` tool for this user (parity 2.1.207 H-BIN-03). CC
+    /// 2.1.207 settings zod (verbatim): `enableArtifact:E.boolean().optional()
+    /// .describe("Enable or disable the Artifact tool for this user. Unset
+    /// defaults to enabled once the feature is available.")`. Read by the tool
+    /// gate's `P7t() ?? L7t()` tail (binary): when set it wins over the default,
+    /// when unset the tool is enabled once the `tengu_cobalt_plinth` gate is
+    /// available. Schema-only today (the gate's live settings read is Stage-2);
+    /// the key round-trips so it is ACCESSIBLE. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_artifact: Option<bool>,
+
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -459,6 +481,20 @@ pub struct SettingsJson {
     /// Scalar-override merge (not in `MERGE_STRATEGIES`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_helper: Option<String>,
+
+    /// Scalar field (later source wins). `otelHeadersHelper`: path to (or shell
+    /// command for) a script whose stdout is a JSON object of OTLP export header
+    /// `k:v` strings — used to inject short-lived bearer tokens into the
+    /// OpenTelemetry monitoring exporters (parity 2.1.207 H-BIN-06). Read by the
+    /// binary `otelHeadersHelper` runner (`RRi()`/`wRi()`), which validates the
+    /// output ("must return a JSON object with string key-value pairs"), caches
+    /// it, and re-invokes at most once per
+    /// `CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS` window. The validation +
+    /// debounce state machine lives in `telemetry::otel::headers_helper`; wiring
+    /// this value into the live export path is the H-BIN-06 egress remainder.
+    /// The key round-trips so it is ACCESSIBLE. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel_headers_helper: Option<String>,
 
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
@@ -774,6 +810,26 @@ mod tests {
                 "{key} must be scalar-override (later source wins)"
             );
         }
+    }
+
+    #[test]
+    fn otel_headers_helper_key_parses_and_roundtrips() {
+        // 2.1.207 Monitoring schema (H-BIN-06): otelHeadersHelper is a plain
+        // string key (script path / shell command). camelCase on the wire.
+        let json = r#"{ "otelHeadersHelper": "/opt/otel/get-headers.sh" }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            parsed.otel_headers_helper.as_deref(),
+            Some("/opt/otel/get-headers.sh")
+        );
+        // Round-trips under the exact camelCase wire key CC emits/reads.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(
+            back.contains("\"otelHeadersHelper\""),
+            "must serialize back to the byte-exact camelCase key"
+        );
+        // Scalar-override merge (later source wins; not in MERGE_STRATEGIES).
+        assert!(strategy_for("otelHeadersHelper").is_none());
     }
 
     #[test]

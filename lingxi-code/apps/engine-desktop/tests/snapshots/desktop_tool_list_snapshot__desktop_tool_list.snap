@@ -4,6 +4,7 @@ assertion_line: 32
 expression: names
 ---
 - Agent
+- Artifact
 - AskUserQuestion
 - Bash
 - Config

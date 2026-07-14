@@ -49,6 +49,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         skip_web_fetch_preflight: next
             .skip_web_fetch_preflight
             .or(prev.skip_web_fetch_preflight),
+        // Scalar Override (later source wins) — `disableArtifact`/`enableArtifact`
+        // (parity 2.1.207 H-BIN-03), same as `skipWebFetchPreflight`.
+        disable_artifact: next.disable_artifact.or(prev.disable_artifact),
+        enable_artifact: next.enable_artifact.or(prev.enable_artifact),
         // Scalar Override — `askUserQuestionTimeout` (enum 60s|5m|10m|never).
         ask_user_question_timeout: next
             .ask_user_question_timeout
@@ -113,6 +117,8 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // same as `model`/`outputStyle`.
         plans_directory: next.plans_directory.or(prev.plans_directory),
         api_key_helper: next.api_key_helper.or(prev.api_key_helper),
+        // 2.1.207 `otelHeadersHelper` (H-BIN-06) — plain string, scalar Override.
+        otel_headers_helper: next.otel_headers_helper.or(prev.otel_headers_helper),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
     }

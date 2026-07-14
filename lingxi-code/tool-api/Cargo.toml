@@ -21,12 +21,6 @@ telemetry = { path = "../telemetry" }
 sandbox = { path = "../sandbox" }
 mcp = { path = "../mcp" }
 lsp = { path = "../lsp" }
-# Shell-expansion seams (`ShellRunner` / `ShellPermissionGate` /
-# `ShellExpansionCtx` / `ShellExpansionProvider`) consumed by
-# `prompt_shell.rs`, which owns the real host runner + policy-backed gate that
-# `command-api`'s dispatcher (and the skill/TUI paths) inject. Acyclic:
-# `command-api` depends only on protocol/traits/hooks — never on `tool-api`.
-command-api = { path = "../command-api" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

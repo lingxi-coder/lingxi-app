@@ -904,11 +904,32 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
         }
     }
 
-    // (1) Every parentUuid that is actually referenced.
-    let parent_uuids: HashSet<&str> = by_uuid
-        .values()
-        .filter_map(|m| m.parent_uuid.as_deref())
-        .collect();
+    // (0b) Reparent-aware graph (claude 2.1.207 `E$_`): a `compact_boundary`'s
+    // `compactMetadata.preservedMessages` re-parents the verbatim kept tail onto
+    // the summary anchor. claude mutates the loaded messages IN PLACE before the
+    // leaf computation runs, so the summary line stops being a graph terminal
+    // (its first preserved child now points at it) and the SOLE tip is the
+    // post-compact leaf. We mirror that here by resolving each message's
+    // EFFECTIVE parent through the same overlay when computing terminals/leaves
+    // below. Without it the summary competes as an independent leaf and, on a
+    // same-millisecond timestamp tie with the real post-compact tip, can win the
+    // (randomized-`HashSet`-order) selection — truncating the resumed chain to
+    // just the summary and dropping the preserved tail. Empty (zero-cost) on any
+    // transcript without a preserved-tail compaction.
+    let reparent = preserved_tail_reparents(loaded);
+
+    // (1) Every EFFECTIVE parentUuid that is actually referenced (overlay first,
+    // else the on-disk parent).
+    let mut parent_uuids: HashSet<&str> = HashSet::new();
+    for m in by_uuid.values() {
+        if let Some(p) = reparent
+            .get(m.uuid.as_str())
+            .map(String::as_str)
+            .or(m.parent_uuid.as_deref())
+        {
+            parent_uuids.insert(p);
+        }
+    }
 
     // (2) Terminals = messages no other message points at.
     // (3) From each terminal, walk up to the nearest user/assistant leaf.
@@ -933,7 +954,11 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
                 leaf_uuids.insert(node.uuid.clone());
                 break;
             }
-            current = node.parent_uuid.as_deref().and_then(|p| by_uuid.get(p));
+            current = reparent
+                .get(node.uuid.as_str())
+                .map(String::as_str)
+                .or(node.parent_uuid.as_deref())
+                .and_then(|p| by_uuid.get(p));
         }
     }
 

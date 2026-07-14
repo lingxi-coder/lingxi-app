@@ -111,6 +111,9 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         cli_agent: None,
         cli_plugin_dirs: Vec::new(),
         initial_effort: None,
+        plans_directory: None,
+        default_model_env_pinned: false,
+        session_thinking: Default::default(),
     };
     (tmp, cfg)
 }

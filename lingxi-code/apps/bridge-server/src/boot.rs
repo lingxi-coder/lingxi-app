@@ -244,6 +244,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // both stay unset (unbounded), matching the CLI defaults.
         max_turns: None,
         plan_mode_instructions: None,
+        plans_directory: None,
         max_budget_usd: None,
         // The bridge has no structured-output flag; unconstrained turns.
         json_schema: None,
@@ -274,6 +275,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         cli_agent: None,
         cli_plugin_dirs: Vec::new(),
         initial_effort: None,
+        // The Electron bridge (accepted divergence) keeps the byte-identical
+        // defaults for the ANTHROPIC_MODEL env-pin exemption + boot thinking
+        // config; the CLI `resolve_desktop_config` is the parity surface.
+        default_model_env_pinned: false,
+        session_thinking: Default::default(),
     }
 }
 
@@ -611,6 +617,7 @@ mod tests {
             connect_prompt: None,
             max_turns: None,
             plan_mode_instructions: None,
+            plans_directory: None,
             max_budget_usd: None,
             json_schema: None,
             system_prompt_override: None,
@@ -627,6 +634,8 @@ mod tests {
             cli_agent: None,
             cli_plugin_dirs: Vec::new(),
             initial_effort: None,
+            default_model_env_pinned: false,
+            session_thinking: Default::default(),
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

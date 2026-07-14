@@ -352,6 +352,25 @@ pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
         .and_then(|eff| eff.settings.ax_screen_reader)
 }
 
+/// Load the merged `settings.alwaysThinkingEnabled` (project + user + env
+/// layers) — claude-code `qIe()`'s `if(e.alwaysThinkingEnabled===!1)return!1`.
+/// Folded into the boot session `ThinkingConfig` by
+/// [`llm_client::model::thinking::session_thinking_from_env`] (a `MAX_THINKING_TOKENS`
+/// env var / `--max-thinking-tokens` flag budget pre-empts it). `None` when
+/// unset / on any load failure → the resolver keeps thinking on (adaptive).
+fn load_always_thinking_enabled(include_user: bool, include_project: bool) -> Option<bool> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.always_thinking_enabled)
+}
+
 /// Load the persisted `settings.model` (the `/model` picker writes it via
 /// `tui_core::recent_models::record_default_model`, wired in `mode.rs`'s
 /// `on_switch_model`). Used as the default model when
@@ -369,6 +388,23 @@ fn load_settings_model(include_user: bool, include_project: bool) -> Option<Stri
         .ok()
         .and_then(|eff| eff.settings.model)
         .filter(|m| !m.trim().is_empty())
+}
+
+/// Load the merged `settings.plansDirectory` (project + user + env layers) —
+/// the custom plan-file directory (206 `iT`). `None` when unset/blank; the
+/// orchestrator resolves + containment-checks it against the project root.
+fn load_settings_plans_directory(include_user: bool, include_project: bool) -> Option<String> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.plans_directory)
+        .filter(|d| !d.trim().is_empty())
 }
 
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
@@ -490,8 +526,24 @@ pub(crate) fn resolve_desktop_config(
     let mut default_model = DesktopConfig::default().default_model;
     // Persisted `model` from settings.json (written by the `/model` picker) so the
     // last choice survives a restart. `--model` still wins below.
+    //
+    // Precedence mirrors claude-code's D4 main-model resolution
+    // (`e = r !== void 0 ? r : process.env.ANTHROPIC_MODEL ?? Mi()?.model`):
+    // `--model` > `ANTHROPIC_MODEL` env > settings-derived model. The
+    // settings-derived value already folds the `LINGXI_MODEL` settings-env layer
+    // (kept — deliberate lingxi design); the literal `ANTHROPIC_MODEL` name is
+    // added here because this repo keeps `ANTHROPIC_*` env names verbatim
+    // (ANTHROPIC_API_KEY, ANTHROPIC_DEFAULT_*_MODEL) and CC honors it directly.
     if let Some(persisted) = load_settings_model(incl_user, incl_project) {
         default_model = persisted;
+    }
+    let mut default_model_env_pinned = false;
+    if let Some(env_model) = std::env::var("ANTHROPIC_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+    {
+        default_model = env_model;
+        default_model_env_pinned = true;
     }
     if let Some(m) = &argv.model {
         default_model.clone_from(m);
@@ -539,7 +591,10 @@ pub(crate) fn resolve_desktop_config(
         default_model,
         // Only a `--model` flag is an EXPLICIT choice; the persisted
         // `settings.model` and the built-in default remain eligible for the
-        // engine's boot-time connected-provider fallback.
+        // engine's boot-time connected-provider fallback. (An `ANTHROPIC_MODEL`
+        // env pin is exempted from the fallback via `default_model_env_pinned`
+        // below — NOT by widening this flag-only field, which the `--agent`
+        // model-override gate keys on as claude-code's `userSpecifiedModel`.)
         default_model_explicit: argv.model.is_some(),
         // Prior `/model` picks (settings `recentModels`, most-recent-first) —
         // the fallback's first-preference pass. Best-effort read; empty on any
@@ -582,6 +637,10 @@ pub(crate) fn resolve_desktop_config(
         } else {
             None
         },
+        // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory
+        // threaded to `OrchestratorConfig::plans_directory`, resolved against the
+        // project root with a within-root containment check by the orchestrator.
+        plans_directory: load_settings_plans_directory(incl_user, incl_project),
         max_budget_usd,
         // `--json-schema` structured output (print-gated above): `build()` forces
         // the StructuredOutput tool + surfaces a capture slot when this is `Some`.
@@ -683,6 +742,17 @@ pub(crate) fn resolve_desktop_config(
         // (`u4i` port; an invalid value already warned on stderr in `run_cli`
         // and normalizes to `None` here) → main-loop `output_config.effort`.
         initial_effort: argv.normalized_effort().0,
+        // `ANTHROPIC_MODEL` env pin (resolved above) — exempts the model from the
+        // boot connected-provider fallback without counting as `userSpecifiedModel`.
+        default_model_env_pinned,
+        // Boot SESSION thinking config (claude-code `qIe()` + the `wn` arm):
+        // `MAX_THINKING_TOKENS` env > `--max-thinking-tokens` flag > the
+        // `alwaysThinkingEnabled` setting; a fixed budget pre-empts adaptive, `0`
+        // disables. Resolved host-side (F2-01: `build()` must not read env).
+        session_thinking: llm_client::model::thinking::session_thinking_from_env(
+            argv.max_thinking_tokens,
+            load_always_thinking_enabled(incl_user, incl_project),
+        ),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It
@@ -1068,5 +1138,93 @@ mod tests {
         if let Some(v) = prior {
             std::env::set_var("LINGXI_API_BASE_URL", v);
         }
+    }
+
+    // ---- ANTHROPIC_MODEL env-pin resolution (claude-code D4) ----------------
+    //
+    // `resolve_desktop_config` reads the process-global `ANTHROPIC_MODEL`; the
+    // tests serialize on one lock and restore the prior value.
+    use std::sync::Mutex;
+    static MODEL_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ModelEnvGuard {
+        prev: Option<String>,
+    }
+    impl ModelEnvGuard {
+        fn set(val: &str) -> Self {
+            let prev = std::env::var("ANTHROPIC_MODEL").ok();
+            std::env::set_var("ANTHROPIC_MODEL", val);
+            Self { prev }
+        }
+        fn unset() -> Self {
+            let prev = std::env::var("ANTHROPIC_MODEL").ok();
+            std::env::remove_var("ANTHROPIC_MODEL");
+            Self { prev }
+        }
+    }
+    impl Drop for ModelEnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("ANTHROPIC_MODEL", v),
+                None => std::env::remove_var("ANTHROPIC_MODEL"),
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_model_env_pins_default_model() {
+        let _lock = MODEL_ENV_LOCK.lock().unwrap();
+        // A non-empty ANTHROPIC_MODEL overrides the settings-derived / built-in
+        // default (it is applied ABOVE load_settings_model), and marks the model
+        // env-pinned so the boot connected-provider fallback is exempt.
+        let _g = ModelEnvGuard::set("claude-opus-4-1-20250805");
+        let argv = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&argv, permission::PermissionMode::Default);
+        assert_eq!(cfg.default_model, "claude-opus-4-1-20250805");
+        assert!(cfg.default_model_env_pinned);
+        // Kept SEPARATE from `--model` explicitness (no `--model` flag here).
+        assert!(!cfg.default_model_explicit);
+    }
+
+    #[test]
+    fn model_flag_beats_anthropic_model_env() {
+        let _lock = MODEL_ENV_LOCK.lock().unwrap();
+        // claude-code D4: `--model` (`r`) wins over `process.env.ANTHROPIC_MODEL`.
+        let _g = ModelEnvGuard::set("claude-opus-4-1-20250805");
+        let argv =
+            Argv::from_iter(["lingxi-cli", "--model", "claude-sonnet-4-5-20250929", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&argv, permission::PermissionMode::Default);
+        assert_eq!(cfg.default_model, "claude-sonnet-4-5-20250929");
+        // `--model` is the explicit user choice.
+        assert!(cfg.default_model_explicit);
+    }
+
+    #[test]
+    fn empty_or_blank_anthropic_model_env_ignored() {
+        let _lock = MODEL_ENV_LOCK.lock().unwrap();
+        // Empty string ⟶ not a pin (claude-code `?? Mi()?.model` falls through).
+        let _g = ModelEnvGuard::set("");
+        let argv = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&argv, permission::PermissionMode::Default);
+        assert!(
+            !cfg.default_model_env_pinned,
+            "empty ANTHROPIC_MODEL must not pin the model"
+        );
+        // Whitespace-only is likewise ignored (trimmed-empty).
+        let _g2 = ModelEnvGuard::set("   ");
+        let cfg = resolve_desktop_config(&argv, permission::PermissionMode::Default);
+        assert!(
+            !cfg.default_model_env_pinned,
+            "blank ANTHROPIC_MODEL must not pin the model"
+        );
+    }
+
+    #[test]
+    fn absent_anthropic_model_env_leaves_model_unpinned() {
+        let _lock = MODEL_ENV_LOCK.lock().unwrap();
+        let _g = ModelEnvGuard::unset();
+        let argv = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        let cfg = resolve_desktop_config(&argv, permission::PermissionMode::Default);
+        assert!(!cfg.default_model_env_pinned);
     }
 }

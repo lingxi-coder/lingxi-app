@@ -1097,6 +1097,181 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_EXTRA_METADATA");
     }
 
+    // ── CLAUDE_CODE_EXTRA_BODY merge (claude-code B0t; parity 2.1.207) ────────
+
+    /// Prepare `request` on `adapter` and run the header injectors (which now also
+    /// run the `CLAUDE_CODE_EXTRA_BODY` merge), returning the outgoing body.
+    async fn body_after_inject(adapter: &ApiService, request: &LlmRequest) -> serde_json::Value {
+        let mut prepared = adapter.client.prepare(request).await.expect("prepare");
+        adapter.inject_headers(&mut prepared, "req_test");
+        prepared.provider_request.body_json
+    }
+
+    #[tokio::test]
+    async fn extra_body_merges_into_anthropic_body() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+
+        // (8) unset env → body byte-identical to a no-merge prepare.
+        let raw = adapter.client.prepare(&request).await.expect("prepare");
+        let raw_body = raw.provider_request.body_json.clone();
+        let unset = body_after_inject(&adapter, &request).await;
+        assert_eq!(raw_body, unset, "unset env leaves the body byte-identical");
+
+        // (1) valid object → new key appended at the tail; (2) a colliding key
+        // (`max_tokens`) keeps its original body position but takes the extra value.
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"foo":"bar","max_tokens":99}"#);
+        let merged = body_after_inject(&adapter, &request).await;
+        assert_eq!(merged["foo"], serde_json::json!("bar"));
+        assert_eq!(merged["max_tokens"], serde_json::json!(99));
+        let keys: Vec<&String> = merged.as_object().unwrap().keys().collect();
+        let mt = keys.iter().position(|k| *k == "max_tokens").expect("max_tokens");
+        let foo = keys.iter().position(|k| *k == "foo").expect("foo");
+        assert!(
+            mt < foo,
+            "colliding key keeps its position; new key appends at the tail: {keys:?}"
+        );
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+        clear_thinking_env();
+    }
+
+    #[tokio::test]
+    async fn extra_body_non_object_or_invalid_is_ignored() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+        let baseline = adapter
+            .client
+            .prepare(&request)
+            .await
+            .expect("prepare")
+            .provider_request
+            .body_json;
+
+        // (3) non-object JSON values are ignored (error logged, body unchanged).
+        for val in ["[1]", "\"x\"", "5", "true", "null"] {
+            std::env::set_var("CLAUDE_CODE_EXTRA_BODY", val);
+            let body = body_after_inject(&adapter, &request).await;
+            assert_eq!(body, baseline, "non-object extra body ignored: {val}");
+        }
+        // (4) unparseable JSON is ignored (parse-error logged, body unchanged).
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", "{not json");
+        let body = body_after_inject(&adapter, &request).await;
+        assert_eq!(body, baseline, "invalid JSON ignored");
+        // Empty string is falsy → silent no-op.
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", "");
+        let body = body_after_inject(&adapter, &request).await;
+        assert_eq!(body, baseline, "empty env value ignored");
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+        clear_thinking_env();
+    }
+
+    #[tokio::test]
+    async fn extra_body_output_config_merges_computed_wins() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        // The encoder emits a computed `output_config.effort` from request.effort.
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+        request.effort = Some(serde_json::json!("high"));
+
+        // (5) extra body's output_config is peeled and the computed one layered on
+        // top: colliding `effort` → computed wins; extra's `format` is merged in.
+        std::env::set_var(
+            "CLAUDE_CODE_EXTRA_BODY",
+            r#"{"output_config":{"effort":"low","format":"json"}}"#,
+        );
+        let body = body_after_inject(&adapter, &request).await;
+        assert_eq!(
+            body["output_config"]["effort"],
+            serde_json::json!("high"),
+            "computed output_config keys win over the extra body"
+        );
+        assert_eq!(
+            body["output_config"]["format"],
+            serde_json::json!("json"),
+            "extra-body-only output_config keys are merged in"
+        );
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+        clear_thinking_env();
+    }
+
+    #[test]
+    fn extra_body_anthropic_beta_append_dedupe() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+
+        // (6) pre-existing array → keeps its entries, appends only missing betas.
+        std::env::set_var(
+            "CLAUDE_CODE_EXTRA_BODY",
+            r#"{"anthropic_beta":["keep-1","dup"]}"#,
+        );
+        let r = ApiService::parse_extra_body(&["dup".to_string(), "new-1".to_string()]);
+        assert_eq!(
+            r["anthropic_beta"],
+            serde_json::json!(["keep-1", "dup", "new-1"]),
+            "existing entries kept in order; only missing betas appended"
+        );
+
+        // No pre-existing array → set to the beta list; other keys untouched.
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"x":1}"#);
+        let r2 = ApiService::parse_extra_body(&["a".to_string(), "b".to_string()]);
+        assert_eq!(r2["anthropic_beta"], serde_json::json!(["a", "b"]));
+        assert_eq!(r2["x"], serde_json::json!(1));
+
+        // Empty betas arg → anthropic_beta is never synthesized.
+        let r3 = ApiService::parse_extra_body(&[]);
+        assert!(r3.get("anthropic_beta").is_none());
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+    }
+
+    #[tokio::test]
+    async fn extra_body_not_applied_to_non_anthropic_route() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"foo":"bar"}"#);
+
+        // (7) OpenAI route: the body must be untouched by the extra-body merge.
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::OpenAiChat,
+            ProviderId::OpenAICompatible {
+                name: "openai".to_string(),
+            },
+            "https://api.openai.com/v1",
+        );
+        let request = LlmRequest::new("model").with_user_text("hi");
+        let body = body_after_inject(&adapter, &request).await;
+        assert!(
+            body.get("foo").is_none(),
+            "extra body must not touch non-Anthropic routes: {body}"
+        );
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+        clear_thinking_env();
+    }
+
     // ── effective_subscriber (batch-5 Task 3: live SharedSubscription) ───────
 
     fn shared_slot(

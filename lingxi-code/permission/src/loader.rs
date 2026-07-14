@@ -111,11 +111,19 @@ pub fn permission_rules_from_settings_json(
 /// names: `default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`).
 /// Returns `None` when the block, the field, or the value is absent/unrecognized
 /// (the caller falls back to [`PermissionMode::Default`]).
+///
+/// `"manual"` is accepted as an alias for `"default"` (parity 2.1.207): the
+/// binary's zod schema declares `defaultMode:
+/// E.preprocess(ZS, E.enum([...]))` where `ZS(e)=e==="manual"?"default":e`
+/// normalizes the value BEFORE the enum validation, and the field's `.describe`
+/// text reads "'manual' is accepted as an alias for 'default'". Without this
+/// arm a tier whose `defaultMode` is `"manual"` returns `None` and is skipped
+/// by the multi-tier reader, letting a lower-priority tier win.
 #[must_use]
 pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
     let top: SettingsTop = serde_json::from_str(raw).ok()?;
     match top.permissions?.default_mode?.as_str() {
-        "default" => Some(PermissionMode::Default),
+        "default" | "manual" => Some(PermissionMode::Default),
         "plan" => Some(PermissionMode::Plan),
         "acceptEdits" => Some(PermissionMode::AcceptEdits),
         "bypassPermissions" => Some(PermissionMode::BypassPermissions),
@@ -358,10 +366,40 @@ mod tests {
             m(r#"{ "permissions": { "defaultMode": "auto" } }"#),
             Some(PermissionMode::Auto)
         ));
+        // parity 2.1.207: "manual" is an alias for "default" (ZS preprocess).
+        // Must map to Default (NOT None) so the tier is not skipped.
+        assert!(matches!(
+            m(r#"{ "permissions": { "defaultMode": "manual" } }"#),
+            Some(PermissionMode::Default)
+        ));
         // Absent / no block / unknown → None (caller defaults to Default).
         assert!(m(r#"{ "permissions": {} }"#).is_none());
         assert!(m("{}").is_none());
         assert!(m(r#"{ "permissions": { "defaultMode": "bogus" } }"#).is_none());
+    }
+
+    /// Regression for the parity-2.1.207 `manual`-alias tier bug: the CLI's
+    /// multi-tier reader (`read_cli_mode_settings`) applies `if let Some(m) =
+    /// default_mode_from_settings_json(..)` per tier, project last (highest
+    /// priority). Before the fix a project `defaultMode:"manual"` returned
+    /// `None`, so it was SKIPPED and a lower-priority user tier (`plan`) won.
+    /// After the fix `manual` → `Some(Default)`, so the project tier wins.
+    #[test]
+    fn manual_project_tier_beats_lower_priority_user_tier() {
+        let user = r#"{ "permissions": { "defaultMode": "plan" } }"#;
+        let project = r#"{ "permissions": { "defaultMode": "manual" } }"#;
+        // Mirror the reader loop: user first, then project (project last wins).
+        let mut default_mode: Option<PermissionMode> = None;
+        for raw in [user, project] {
+            if let Some(m) = default_mode_from_settings_json(raw) {
+                default_mode = Some(m);
+            }
+        }
+        assert_eq!(
+            default_mode,
+            Some(PermissionMode::Default),
+            "project defaultMode:manual must beat user defaultMode:plan"
+        );
     }
 
     #[test]

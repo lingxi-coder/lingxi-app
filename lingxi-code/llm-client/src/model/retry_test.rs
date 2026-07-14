@@ -310,6 +310,7 @@ mod next_step_tests {
             is_sandbox: false,
             max_529_retries: MAX_529_RETRIES,
             max_retries: DEFAULT_MAX_RETRIES,
+            watchdog: false,
         };
         // Drive consecutive_overloaded up to max_529_retries.
         // Attempts 1 and 2: below threshold, should still retry.
@@ -364,6 +365,7 @@ mod next_step_tests {
             is_sandbox: true,
             max_529_retries: MAX_529_RETRIES,
             max_retries: DEFAULT_MAX_RETRIES,
+            watchdog: false,
         };
         // Drive through the threshold — sandbox must NOT terminate early.
         next_step(
@@ -403,6 +405,7 @@ mod next_step_tests {
             is_sandbox: false,
             max_529_retries: MAX_529_RETRIES,
             max_retries: DEFAULT_MAX_RETRIES,
+            watchdog: false,
         };
         next_step(
             &mut state,
@@ -1041,6 +1044,7 @@ mod resolve_retry_control_tests {
             user_type: user_type.map(str::to_string),
             is_sandbox_defined: is_sandbox,
             max_retries: None,
+            retry_watchdog: false,
         }
     }
 
@@ -1387,5 +1391,188 @@ mod ssl_fast_fail_tests {
         );
         assert!(shown.contains("NODE_EXTRA_CA_CERTS"));
         assert!(shown.contains("/doctor"));
+    }
+}
+
+/// Retry-watchdog (`CLAUDE_CODE_RETRY_WATCHDOG`) — pDs port + capacity exemption
+/// (parity 2.1.207 H-CHG-P3B).
+#[cfg(test)]
+mod retry_watchdog_tests {
+    use super::*;
+    use crate::LlmError;
+
+    // ── oMe(): CLAUDE_CODE_RETRY_WATCHDOG truthiness (dual-read) ──
+
+    #[test]
+    fn watchdog_flag_truthiness_and_dual_read() {
+        // Truthy values enable.
+        assert!(retry_watchdog_from_values(Some("1"), None));
+        assert!(retry_watchdog_from_values(Some("true"), None));
+        assert!(retry_watchdog_from_values(Some("YES"), None));
+        assert!(retry_watchdog_from_values(Some("on"), None));
+        // The CLAUDE_CODE_ alias is honored when LINGXI_ is absent.
+        assert!(retry_watchdog_from_values(None, Some("true")));
+        // LINGXI_ wins over the CLAUDE_ alias.
+        assert!(!retry_watchdog_from_values(Some("0"), Some("1")));
+        assert!(retry_watchdog_from_values(Some("1"), Some("0")));
+        // Opt-in: absent / falsy → OFF.
+        assert!(!retry_watchdog_from_values(None, None));
+        assert!(!retry_watchdog_from_values(Some("0"), None));
+        assert!(!retry_watchdog_from_values(Some("false"), None));
+        assert!(!retry_watchdog_from_values(Some(""), None));
+    }
+
+    // ── pDs(): resolve_max_retries matrix ──
+
+    #[test]
+    fn pds_default_no_env() {
+        // {env unset, watchdog off} → 10 ; {watchdog on} → 300.
+        assert_eq!(resolve_max_retries(false, None), DEFAULT_MAX_RETRIES);
+        assert_eq!(resolve_max_retries(true, None), WATCHDOG_MAX_RETRIES);
+        assert_eq!(WATCHDOG_MAX_RETRIES, 300);
+    }
+
+    #[test]
+    fn pds_explicit_within_cap_passes_through() {
+        assert_eq!(resolve_max_retries(false, Some("5")), 5);
+        assert_eq!(resolve_max_retries(true, Some("5")), 5);
+        // Exactly at the clamp boundary (15) is not clamped.
+        assert_eq!(resolve_max_retries(false, Some("15")), 15);
+    }
+
+    #[test]
+    fn pds_clamps_over_15_when_watchdog_off() {
+        // {MAX_RETRIES=50, watchdog off} → 15 (clamped).
+        assert_eq!(resolve_max_retries(false, Some("50")), MAX_RETRIES_CLAMP);
+        assert_eq!(MAX_RETRIES_CLAMP, 15);
+    }
+
+    #[test]
+    fn pds_watchdog_lifts_the_clamp() {
+        // {MAX_RETRIES=50, watchdog on} → 50 (uncapped).
+        assert_eq!(resolve_max_retries(true, Some("50")), 50);
+        assert_eq!(resolve_max_retries(true, Some("100000")), 100_000);
+    }
+
+    #[test]
+    fn pds_unparseable_falls_to_default() {
+        // JS `if(Number.isFinite(t)&&t>=0)` false → `return e?_j_:yj_`.
+        assert_eq!(resolve_max_retries(false, Some("notanint")), DEFAULT_MAX_RETRIES);
+        assert_eq!(resolve_max_retries(true, Some("notanint")), WATCHDOG_MAX_RETRIES);
+        // Empty string is falsy in JS (`if(process.env.X)` false) → default.
+        assert_eq!(resolve_max_retries(false, Some("")), DEFAULT_MAX_RETRIES);
+    }
+
+    // ── resolve_retry_control threads the watchdog ──
+
+    #[test]
+    fn resolve_control_sets_watchdog_and_default_300() {
+        let env = ResolveRetryEnv {
+            retry_watchdog: true,
+            ..ResolveRetryEnv::default()
+        };
+        let ctl = resolve_retry_control("claude-sonnet-4-20250514", None, false, &env);
+        assert!(ctl.watchdog, "ctl.watchdog must be set from env");
+        assert_eq!(
+            ctl.max_retries, WATCHDOG_MAX_RETRIES,
+            "watchdog default budget is 300"
+        );
+    }
+
+    #[test]
+    fn resolve_control_watchdog_lifts_env_clamp() {
+        let env = ResolveRetryEnv {
+            retry_watchdog: true,
+            max_retries: Some("50".to_string()),
+            ..ResolveRetryEnv::default()
+        };
+        let ctl = resolve_retry_control("claude-sonnet-4-20250514", None, false, &env);
+        assert_eq!(ctl.max_retries, 50, "watchdog lifts the >15 clamp");
+    }
+
+    #[test]
+    fn resolve_control_clamps_env_without_watchdog() {
+        let env = ResolveRetryEnv {
+            retry_watchdog: false,
+            max_retries: Some("50".to_string()),
+            ..ResolveRetryEnv::default()
+        };
+        let ctl = resolve_retry_control("claude-sonnet-4-20250514", None, false, &env);
+        assert_eq!(ctl.max_retries, MAX_RETRIES_CLAMP, "no watchdog → clamp to 15");
+    }
+
+    // ── next_step: capacity errors are exempt from budget under watchdog ──
+
+    fn watchdog_ctl() -> RetryControl {
+        RetryControl {
+            max_retries: 3, // tiny budget to prove the exemption
+            watchdog: true,
+            ..RetryControl::default()
+        }
+    }
+
+    #[test]
+    fn watchdog_overloaded_never_exhausts_budget() {
+        let ctl = watchdog_ctl();
+        let mut state = RetryState::default();
+        // Far past max_retries (3): every 529 still retries under the watchdog.
+        for i in 0..40u32 {
+            let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "iter {i}: 529 under watchdog must retry, got {step:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn watchdog_rate_limited_never_exhausts_budget() {
+        let ctl = watchdog_ctl();
+        let mut state = RetryState::default();
+        for i in 0..40u32 {
+            let step = next_step(
+                &mut state,
+                &ctl,
+                &LlmError::RateLimited { retry_after: None, scope: None },
+                0,
+            );
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "iter {i}: 429 under watchdog must retry, got {step:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn watchdog_without_flag_still_exhausts() {
+        // Sanity: with watchdog OFF the same tiny budget DOES terminate.
+        let ctl = RetryControl {
+            max_retries: 3,
+            watchdog: false,
+            ..RetryControl::default()
+        };
+        let mut state = RetryState::default();
+        let mut saw_terminal = false;
+        for _ in 0..10u32 {
+            let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+            if step == DriveStep::Terminal {
+                saw_terminal = true;
+                break;
+            }
+        }
+        assert!(saw_terminal, "without watchdog the budget must eventually exhaust");
+    }
+
+    #[test]
+    fn watchdog_capacity_backoff_caps_at_six_hours() {
+        // The watchdog ladder caps at TLp=21_600_000ms, not the 32s MAX_BACKOFF_MS.
+        // A large attempt saturates to the 6h cap (pre-jitter base).
+        assert_eq!(
+            capacity_base_delay_ms(60, None, true),
+            WATCHDOG_MAX_BACKOFF_MS
+        );
+        assert_eq!(WATCHDOG_MAX_BACKOFF_MS, 21_600_000);
+        // Without the watchdog the same attempt caps at the normal 32s.
+        assert_eq!(capacity_base_delay_ms(60, None, false), MAX_BACKOFF_MS);
     }
 }

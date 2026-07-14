@@ -251,6 +251,16 @@ pub struct OrchestratorConfig {
     /// init.rs). `None` = the default 5-phase workflow.
     #[serde(default)]
     pub plan_mode_instructions: Option<String>,
+
+    /// `settings.json` `plansDirectory` (206 `iT`): custom directory for
+    /// plan-mode plan files, relative to the project root. Threaded here from the
+    /// merged settings at the composition root. When `Some(_)`,
+    /// [`crate::ConversationOrchestrator::plans_dir`] resolves it against the
+    /// session's project root with a within-root containment check (falling back
+    /// to the default `<config-home>/plans/` on rejection). `None` (the default)
+    /// keeps the byte-identical default plans directory.
+    #[serde(default)]
+    pub plans_directory: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -275,6 +285,7 @@ impl Default for OrchestratorConfig {
             refusal_fallback_model: None,
             user_email: None,
             plan_mode_instructions: None,
+            plans_directory: None,
         }
     }
 }
@@ -325,6 +336,7 @@ mod tests {
             refusal_fallback_model: Some("claude-sonnet-4-6".into()),
             user_email: Some("u@example.com".into()),
             plan_mode_instructions: Some("MY BODY".into()),
+            plans_directory: Some("docs/plans".into()),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -352,6 +364,7 @@ mod tests {
         );
         assert_eq!(back.user_email.as_deref(), Some("u@example.com"));
         assert_eq!(back.plan_mode_instructions.as_deref(), Some("MY BODY"));
+        assert_eq!(back.plans_directory.as_deref(), Some("docs/plans"));
     }
 
     #[test]

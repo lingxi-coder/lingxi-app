@@ -46,6 +46,7 @@ pub mod pdf_read;
 mod pdf_render;
 pub mod quotes;
 pub mod read;
+pub mod ripgrep_mode;
 pub mod shared;
 pub mod structured_patch;
 pub mod write;

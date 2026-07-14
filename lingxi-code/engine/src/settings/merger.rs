@@ -41,6 +41,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         // Scalar Override (later source wins), same as `telemetryEnabled`.
         ax_screen_reader: next.ax_screen_reader.or(prev.ax_screen_reader),
+        // Scalar Override (later source wins) — `alwaysThinkingEnabled`.
+        always_thinking_enabled: next
+            .always_thinking_enabled
+            .or(prev.always_thinking_enabled),
         // Scalar Override (later source wins) — `skipWebFetchPreflight` (P2-14).
         skip_web_fetch_preflight: next
             .skip_web_fetch_preflight
@@ -97,6 +101,16 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         force_remote_settings_refresh: next
             .force_remote_settings_refresh
             .or(prev.force_remote_settings_refresh),
+        // `companyAnnouncements` — array-merge (concat-dedup), matching CC's
+        // `settingsMergeCustomizer` array customizer.
+        company_announcements: concat_dedup(
+            prev.company_announcements,
+            next.company_announcements,
+        ),
+        // `plansDirectory` / `apiKeyHelper` — scalar Override (later source wins),
+        // same as `model`/`outputStyle`.
+        plans_directory: next.plans_directory.or(prev.plans_directory),
+        api_key_helper: next.api_key_helper.or(prev.api_key_helper),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
     }

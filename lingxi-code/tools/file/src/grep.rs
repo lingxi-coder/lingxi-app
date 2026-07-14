@@ -583,6 +583,22 @@ impl Tool for GrepTool {
         let files_mode = output_mode == "files_with_matches";
         let count_mode = output_mode == "count";
 
+        // `USE_BUILTIN_RIPGREP` opt-out surface (binary `A3r`): an explicitly
+        // falsy env value + a system `rg` on `$PATH` makes claude-code shell to
+        // that binary. LingXi's in-process `grep-*` engine IS the embedded
+        // default; resolve + record the mode DECISION here so the env var is
+        // consumed faithfully. The system-`rg` SUBPROCESS execution backend is a
+        // documented residual (`crate::ripgrep_mode`), so the in-process engine
+        // remains the executor for both modes.
+        if let crate::ripgrep_mode::RipgrepMode::System { command } =
+            crate::ripgrep_mode::resolve_ripgrep_mode()
+        {
+            tracing::debug!(
+                rg = %command.display(),
+                "USE_BUILTIN_RIPGREP opt-out selected system rg; in-process engine used (subprocess backend is a residual)"
+            );
+        }
+
         let started = Instant::now();
 
         let canon_base = match canonicalize_and_validate(&base, &self.ctx.trusted_dirs) {

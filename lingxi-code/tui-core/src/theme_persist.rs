@@ -169,6 +169,38 @@ pub fn save_editor_mode(vim: bool) {
     }
 }
 
+/// The `workflowSizeGuideline` config field (parity 2.1.207): the `/config`
+/// "Dynamic workflow size" setting — one of `unrestricted` / `small` / `medium`
+/// / `large`. Persisted by `/config workflowSizeGuideline=…`; read back at
+/// startup so the Workflow tool's prompt appendix survives restarts.
+const WORKFLOW_SIZE_GUIDELINE_KEY: &str = "workflowSizeGuideline";
+
+/// Read the stored `workflowSizeGuideline` wire string. `None` on any error /
+/// absent key (caller treats absence as `unrestricted`).
+#[must_use]
+pub fn load_workflow_size_guideline() -> Option<String> {
+    load_workflow_size_guideline_from(&settings_path()?)
+}
+
+/// Test seam: read the guideline from an explicit path.
+#[must_use]
+pub fn load_workflow_size_guideline_from(path: &Path) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
+    Some(obj.get(WORKFLOW_SIZE_GUIDELINE_KEY)?.as_str()?.to_string())
+}
+
+/// Best-effort save of `workflowSizeGuideline`. Logs + swallows errors
+/// (session-only on failure).
+pub fn save_workflow_size_guideline(value: &str) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    if let Err(e) = save_string_field_to(&path, WORKFLOW_SIZE_GUIDELINE_KEY, value) {
+        tracing::debug!(error = %e, "workflowSizeGuideline persist failed (session-only)");
+    }
+}
+
 /// Shared read: a top-level bool field at an explicit path.
 #[must_use]
 fn load_bool_field_from(path: &Path, key: &str) -> Option<bool> {
@@ -253,6 +285,30 @@ mod tests {
 
         // Absent key → None.
         assert_eq!(load_bool_field_from(&path, "nope"), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn workflow_size_guideline_round_trips_preserving_other_keys() {
+        let dir =
+            std::env::temp_dir().join(format!("lingxi_wsg_persist_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_file(&path);
+
+        // Absent → None (treated as unrestricted by the caller).
+        assert_eq!(load_workflow_size_guideline_from(&path), None);
+
+        // Seed another key, then round-trip the guideline; the earlier key survives.
+        save_string_field_to(&path, EDITOR_MODE_KEY, "vim").unwrap();
+        for want in ["small", "medium", "large", "unrestricted"] {
+            save_string_field_to(&path, WORKFLOW_SIZE_GUIDELINE_KEY, want).unwrap();
+            assert_eq!(
+                load_workflow_size_guideline_from(&path).as_deref(),
+                Some(want)
+            );
+        }
+        assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
         let _ = std::fs::remove_file(&path);
     }
 }

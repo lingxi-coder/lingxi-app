@@ -18,6 +18,7 @@
 // `--cfg loom`. Loom doesn't model network primitives anyway — the loom test
 // only exercises the single-flight invariant on synthetic atomics — so we
 // exclude this module from loom builds. Normal builds are unaffected.
+pub mod api_key_helper;
 #[cfg(not(loom))]
 pub mod callback;
 pub mod client;
@@ -48,6 +49,11 @@ pub use profile::{
     OAuthOrganization, OAuthProfileResponse, UserRolesResponse,
 };
 pub use refresh::{AuthState, RefreshDriver};
+pub use api_key_helper::{
+    api_key_helper_ttl_ms, fetch_api_key, resolve_ttl_ms, run_api_key_helper,
+    run_api_key_helper_with_timeout, ApiKeyHelperCache, API_KEY_HELPER_TIMEOUT,
+    API_KEY_HELPER_TTL_ENV, DEFAULT_API_KEY_HELPER_TTL_MS,
+};
 pub use resolver::{resolve, AuthSource, ResolverContext};
 pub use scope_upgrade::{
     parse_scope_upgrade, run_scope_upgrade, PkceRunResult, PkceRunner, ScopeUpgradeRequired,

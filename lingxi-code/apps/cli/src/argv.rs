@@ -365,7 +365,12 @@ pub struct Argv {
     pub thinking_display: Option<String>,
 
     /// [DEPRECATED. Use --thinking instead for newer models] (hidden flag)
-    // TODO(max-thinking-tokens): wire into thinking token budget (deprecated, use --thinking)
+    //
+    // Wired: `init::resolve_desktop_config` threads this into the boot session
+    // `ThinkingConfig` via `llm_client::model::thinking::session_thinking_from_env`
+    // as claude-code's `a.maxThinkingTokens` (the `wn` request-build arm) — used
+    // when `MAX_THINKING_TOKENS` env is unset; a value `> 0` pins a fixed budget
+    // (pre-empting adaptive), `0` disables thinking.
     #[arg(long = "max-thinking-tokens", value_name = "tokens", hide = true)]
     pub max_thinking_tokens: Option<u32>,
 
@@ -432,17 +437,29 @@ pub struct Argv {
     pub dangerously_skip_permissions: bool,
 
     /// Initial permission mode (`--permission-mode <mode>`).
-    // claude-code 2.1.191 commander `.choices(['acceptEdits','auto',
-    // 'bypassPermissions','default','dontAsk','plan'])` — an out-of-choices value
-    // is HARD-REJECTED at parse time (exit 1 with an allowed-choices message), so
-    // the `value_parser` below mirrors that. `auto` is a real choice and resolves
-    // to `PermissionMode::Auto` downstream.
+    // claude-code 2.1.207 commander `.choices(bha)` where `bha=WB.map(e=>
+    // e==="default"?"manual":e)` DISPLAYS `manual` in place of `default`, while
+    // the accepted set `$7_=[...WB,"manual"]` keeps BOTH spellings (the shared
+    // `ZS(e)=e==="manual"?"default":e` preprocess normalizes `manual`→`default`).
+    // An out-of-set value is HARD-REJECTED at parse time. We mirror that with a
+    // `PossibleValuesParser`: `manual` sits in the `default` slot (visible) and
+    // `default` is a hidden-but-accepted alias, so help/errors show `manual` yet
+    // `--permission-mode default` still parses. `auto` resolves to
+    // `PermissionMode::Auto` and `manual`/`default` to `Default` downstream.
     #[arg(
         long = "permission-mode",
         // lowercase placeholder so the help line and the commander-style
         // invalid-value error read `--permission-mode <mode>` (not `<MODE>`).
         value_name = "mode",
-        value_parser = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]
+        value_parser = clap::builder::PossibleValuesParser::new([
+            clap::builder::PossibleValue::new("acceptEdits"),
+            clap::builder::PossibleValue::new("auto"),
+            clap::builder::PossibleValue::new("bypassPermissions"),
+            clap::builder::PossibleValue::new("manual"),
+            clap::builder::PossibleValue::new("default").hide(true),
+            clap::builder::PossibleValue::new("dontAsk"),
+            clap::builder::PossibleValue::new("plan"),
+        ])
     )]
     pub permission_mode: Option<String>,
 

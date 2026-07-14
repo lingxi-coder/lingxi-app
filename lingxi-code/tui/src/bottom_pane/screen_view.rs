@@ -593,11 +593,17 @@ fn settings_lines(
     lingxi_home: &str,
     cwd: &str,
 ) -> Vec<Line<'static>> {
+    // parity 2.1.207 "Dynamic workflow size" (`workflowSizeGuideline`): the
+    // persisted `/config` enum, shown read-only here (set via
+    // `/config workflowSizeGuideline=…`). Absent ⇒ `unrestricted`.
+    let workflow_size = tui_core::theme_persist::load_workflow_size_guideline()
+        .unwrap_or_else(|| "unrestricted".to_string());
     let mut out = vec![
         header("Session settings"),
         row("└ Theme", theme.as_wire()),
         row("└ Vim mode", on_off(vim)),
         row("└ Verbose", on_off(verbose)),
+        row("└ Dynamic workflow size", &workflow_size),
         Line::from(""),
         header("Settings files"),
     ];

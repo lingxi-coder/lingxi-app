@@ -65,6 +65,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         connect_prompt: None,
         max_turns: None,
         plan_mode_instructions: None,
+        plans_directory: None,
         max_budget_usd: None,
         json_schema: None,
         // CLI headless system-prompt flags (715adc4e); None for this e2e fixture.
@@ -82,6 +83,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         cli_agent: None,
         cli_plugin_dirs: Vec::new(),
         initial_effort: None,
+        default_model_env_pinned: false,
+        session_thinking: Default::default(),
     };
     (tmp, cfg)
 }

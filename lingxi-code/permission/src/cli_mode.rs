@@ -40,10 +40,18 @@ pub struct CliModeSettings {
 /// `permissionModeFromString` (`PermissionMode.ts:117-121`): the valid set is
 /// the five external modes plus `auto`; anything else (incl. internal `bubble`)
 /// → `Default`.
+///
+/// `"manual"` maps to [`PermissionMode::Default`] (parity 2.1.207): the CLI's
+/// commander `.choices` display swaps `default`→`manual` (`bha=WB.map(e=>
+/// e==="default"?"manual":e)`) and the accepted set (`$7_=[...WB,"manual"]`)
+/// keeps both spellings, while the shared `ZS(e)=e==="manual"?"default":e`
+/// preprocess normalizes `manual`→`default`. The catch-all below already
+/// yields `Default`, but the explicit arm documents the alias and keeps this
+/// in lockstep with [`crate::default_mode_from_settings_json`].
 #[must_use]
 pub fn permission_mode_from_cli_string(s: &str) -> PermissionMode {
     match s {
-        "default" => PermissionMode::Default,
+        "default" | "manual" => PermissionMode::Default,
         "plan" => PermissionMode::Plan,
         "acceptEdits" => PermissionMode::AcceptEdits,
         "bypassPermissions" => PermissionMode::BypassPermissions,
@@ -141,6 +149,15 @@ mod tests {
         assert_eq!(
             permission_mode_from_cli_string("auto"),
             PermissionMode::Auto
+        );
+    }
+
+    #[test]
+    fn from_string_accepts_manual_as_default_alias() {
+        // parity 2.1.207: `manual` is the CLI-facing alias for `default`.
+        assert_eq!(
+            permission_mode_from_cli_string("manual"),
+            PermissionMode::Default
         );
     }
 

@@ -62,7 +62,7 @@ fn absolutize(cwd: &Path, raw: &str) -> PathBuf {
 /// Collapse `.` and `..` segments without touching the filesystem, mirroring
 /// Node's `path.normalize`/`resolve` (used by `expandPath`). A `..` pops the
 /// previous normal component; a leading `..` with nothing to pop is kept.
-fn normalize_lexically(path: &Path) -> PathBuf {
+pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {

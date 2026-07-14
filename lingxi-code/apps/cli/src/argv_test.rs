@@ -6,6 +6,25 @@ use super::*;
 mod tests {
     use super::*;
 
+    // parity 2.1.207: `--permission-mode manual` is ACCEPTED (was hard-rejected
+    // by the old fixed value_parser list). `manual` is the CLI alias for
+    // `default`; both spellings parse.
+    #[test]
+    fn permission_mode_accepts_manual_alias() {
+        let a = Argv::from_iter(["lingxi-cli", "--permission-mode", "manual"]).unwrap();
+        assert_eq!(a.permission_mode.as_deref(), Some("manual"));
+        // The hidden `default` alias still parses too.
+        let b = Argv::from_iter(["lingxi-cli", "--permission-mode", "default"]).unwrap();
+        assert_eq!(b.permission_mode.as_deref(), Some("default"));
+        // Every other real mode still parses.
+        for mode in ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"] {
+            let p = Argv::from_iter(["lingxi-cli", "--permission-mode", mode]).unwrap();
+            assert_eq!(p.permission_mode.as_deref(), Some(mode));
+        }
+        // An out-of-set value is still hard-rejected.
+        assert!(Argv::from_iter(["lingxi-cli", "--permission-mode", "banana"]).is_err());
+    }
+
     #[test]
     fn no_args_is_repl_mode() {
         let a = Argv::from_iter(["lingxi-cli"]).unwrap();

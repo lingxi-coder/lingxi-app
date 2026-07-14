@@ -264,7 +264,9 @@ fn check_telemetry_schema() -> DoctorCheck {
     // cc 2.1.198 M2: +2 AWS auth-refresh trust-gate events
     //        (tengu_awsAuthRefresh_missing_trust /
     //        tengu_awsCredentialExport_missing_trust) → 343.
-    let expected = 343;
+    // 2.1.206 worktree lifecycle (merged from main): +4 tengu_worktree_ events
+    //        (created / entered_existing / kept / removed) → 347.
+    let expected = 347;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

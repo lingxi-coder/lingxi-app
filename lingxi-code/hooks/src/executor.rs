@@ -33,7 +33,7 @@ use crate::hook_payload::{
     TaskCreatedPayload, TeammateIdlePayload, UserPromptExpansionPayload, UserPromptSubmitPayload,
     WorktreeCreatePayload, WorktreeRemovePayload,
 };
-use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
+use crate::http_executor::{HttpExecutionSignal, HttpExecutor, HttpHookPolicy};
 use crate::prompt_executor::{
     HookPromptRunner, PromptExecutionSignal, PromptExecutor, HOOK_PROMPT_TIMEOUT_MS,
 };
@@ -239,6 +239,12 @@ pub struct HookExecutorImpl {
     /// with a reliable "before" frame. Attached via
     /// [`Self::with_hook_observer`]; `None` by default (no-op, zero cost).
     hook_observer: Option<Arc<dyn OutputStream>>,
+    /// H-BIN-12: CC 2.1.207 HTTP-hook security policy sourced from the
+    /// `allowedHttpHookUrls` / `httpHookAllowedEnvVars` settings. Attached via
+    /// [`Self::with_http_hook_policy`] at the composition root; the default
+    /// (both `None` = no restriction) is behavior-neutral, so an engine that
+    /// declares neither setting dispatches HTTP hooks exactly as before.
+    http_hook_policy: HttpHookPolicy,
 }
 
 impl HookExecutorImpl {
@@ -266,6 +272,7 @@ impl HookExecutorImpl {
             async_registry: None,
             policy_disable_all_hooks: false,
             hook_observer: None,
+            http_hook_policy: HttpHookPolicy::default(),
         }
     }
 
@@ -279,6 +286,33 @@ impl HookExecutorImpl {
     #[must_use]
     pub fn with_policy_disable_all_hooks(mut self, disable_all_hooks: bool) -> Self {
         self.policy_disable_all_hooks = disable_all_hooks;
+        self
+    }
+
+    /// Attach the H-BIN-12 HTTP-hook security policy (CC 2.1.207
+    /// `allowedHttpHookUrls` / `httpHookAllowedEnvVars`, byte-faithful `PFy()`).
+    ///
+    /// - `allowed_urls`: `None` ⇒ all URLs allowed (default); `Some(empty)` ⇒
+    ///   block ALL HTTP hooks; `Some(patterns)` ⇒ the hook URL must match ≥1
+    ///   wildcard pattern (CC `NBr`) or the request is blocked before dispatch
+    ///   with the byte-exact `HTTP hook blocked: …` warn line.
+    /// - `allowed_env_vars`: `None` ⇒ the per-hook `allowedEnvVars` is used
+    ///   as-is (default); `Some(list)` ⇒ each hook's effective allowlist is its
+    ///   own `allowedEnvVars` intersected with this global list.
+    ///
+    /// Both `None` (the default) is behavior-neutral. Sourced at the composition
+    /// root from the merged settings; primitives (not the private policy type)
+    /// so external callers need no crate-internal imports.
+    #[must_use]
+    pub fn with_http_hook_policy(
+        mut self,
+        allowed_urls: Option<Vec<String>>,
+        allowed_env_vars: Option<Vec<String>>,
+    ) -> Self {
+        self.http_hook_policy = HttpHookPolicy {
+            allowed_urls,
+            allowed_env_vars,
+        };
         self
     }
 
@@ -361,6 +395,7 @@ impl HookExecutorImpl {
         Dispatcher {
             http: self.http.clone(),
             ssrf_guard: self.ssrf_guard.clone(),
+            http_hook_policy: self.http_hook_policy.clone(),
             builtin_handlers: self.builtin_handlers.clone(),
             agent_spawner: self.agent_spawner.clone(),
             prompt_runner: self.prompt_runner.clone(),
@@ -826,6 +861,9 @@ impl HookExecutorImpl {
 struct Dispatcher {
     http: Arc<dyn HttpTransport>,
     ssrf_guard: SsrfGuard,
+    /// H-BIN-12 HTTP-hook security policy, snapshotted alongside the transport
+    /// so the async (B5) and synchronous dispatch paths share one policy.
+    http_hook_policy: HttpHookPolicy,
     builtin_handlers: HashMap<String, Arc<dyn BuiltinHookHandler>>,
     agent_spawner: Option<Arc<dyn SubagentSpawner>>,
     prompt_runner: Option<Arc<dyn HookPromptRunner>>,
@@ -885,6 +923,7 @@ impl Dispatcher {
                     http: self.http.clone(),
                     ssrf_guard: self.ssrf_guard.clone(),
                     timeout: effective,
+                    policy: self.http_hook_policy.clone(),
                 };
                 let outcome = exec
                     .execute(hook, url, headers, &body, expected_event)
@@ -2243,6 +2282,9 @@ fn emit_http_signal(hook: &HookDefinition, signal: &HttpExecutionSignal, timeout
                 timeout_ms = timeout_ms,
             );
         }
+        // H-BIN-12: CC's `allowedHttpHookUrls` block emits NO telemetry event —
+        // only the byte-exact warn line (fired in `HttpExecutor::execute`).
+        HttpExecutionSignal::UrlBlocked => {}
         HttpExecutionSignal::Ok => {}
     }
 }

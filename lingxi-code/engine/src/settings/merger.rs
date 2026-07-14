@@ -50,11 +50,53 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .ask_user_question_timeout
             .or(prev.ask_user_question_timeout),
         model: next.model.or(prev.model),
+        // Managed model-restriction keys (H-BIN-08). `availableModels` (array)
+        // and `enforceAvailableModels` (scalar) are scalar-override — CC's
+        // `settingsMergeCustomizer` returns the source array for non-concat
+        // arrays. `modelOverrides` (record) deep-merges per key (next wins).
+        available_models: next.available_models.or(prev.available_models),
+        enforce_available_models: next
+            .enforce_available_models
+            .or(prev.enforce_available_models),
+        model_overrides: merge_string_map(prev.model_overrides, next.model_overrides),
         // 2.1.198 AWS/GCP auth-refresh script keys — plain strings, scalar
         // Override (later source wins), same as `model`/`outputStyle`.
         aws_auth_refresh: next.aws_auth_refresh.or(prev.aws_auth_refresh),
         aws_credential_export: next.aws_credential_export.or(prev.aws_credential_export),
         gcp_auth_refresh: next.gcp_auth_refresh.or(prev.gcp_auth_refresh),
+        // HTTP-hook security allowlists (H-BIN-12) — both array-merge
+        // (concat-dedup): CC `settingsMergeCustomizer` (`ipe`) concat-dedups
+        // every array except `fallbackModel`, and both describe strings say
+        // "Arrays merge across settings sources (same semantics as
+        // allowedMcpServers)."
+        allowed_http_hook_urls: concat_dedup(
+            prev.allowed_http_hook_urls,
+            next.allowed_http_hook_urls,
+        ),
+        http_hook_allowed_env_vars: concat_dedup(
+            prev.http_hook_allowed_env_vars,
+            next.http_hook_allowed_env_vars,
+        ),
+        // Enterprise login/version managed-policy keys (H-BIN-09) — all
+        // scalar-override (later source wins); none is a concat/deep-merge
+        // field (CC `settingsMergeCustomizer` special-cases only specific
+        // arrays/objects, and none of these is one).
+        force_login_method: next.force_login_method.or(prev.force_login_method),
+        force_login_gateway_url: next.force_login_gateway_url.or(prev.force_login_gateway_url),
+        force_login_org_uuid: next.force_login_org_uuid.or(prev.force_login_org_uuid),
+        parent_settings_behavior: next
+            .parent_settings_behavior
+            .or(prev.parent_settings_behavior),
+        minimum_version: next.minimum_version.or(prev.minimum_version),
+        required_minimum_version: next
+            .required_minimum_version
+            .or(prev.required_minimum_version),
+        required_maximum_version: next
+            .required_maximum_version
+            .or(prev.required_maximum_version),
+        force_remote_settings_refresh: next
+            .force_remote_settings_refresh
+            .or(prev.force_remote_settings_refresh),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
     }
@@ -74,6 +116,25 @@ fn concat_dedup(prev: Option<Vec<String>>, next: Option<Vec<String>>) -> Option<
                 }
             }
             Some(out)
+        }
+    }
+}
+
+/// Deep-merge two flat `String→String` maps (`modelOverrides`): union of keys,
+/// `next` wins on a collision. A one-level record has no nested structure, so
+/// this is CC's lodash object-merge for `modelOverrides`.
+fn merge_string_map(
+    prev: Option<std::collections::BTreeMap<String, String>>,
+    next: Option<std::collections::BTreeMap<String, String>>,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    match (prev, next) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(mut p), Some(n)) => {
+            for (k, v) in n {
+                p.insert(k, v);
+            }
+            Some(p)
         }
     }
 }
@@ -303,6 +364,74 @@ mod tests {
             merged.telemetry_enabled,
             Some(false),
             "next is None, so prev survives"
+        );
+    }
+
+    #[test]
+    fn enterprise_login_version_keys_scalar_override() {
+        // H-BIN-09: all enterprise login/version keys are scalar-override —
+        // the higher-priority (`next`) layer wins when it sets the key, else the
+        // lower layer survives. Models the 4-layer stack folding a base managed
+        // tier under a higher-priority drop-in.
+        use serde_json::json;
+        let prev = SettingsJson {
+            force_login_method: Some("claudeai".into()),
+            required_minimum_version: Some("2.0.0".into()),
+            force_login_org_uuid: Some(json!("org-base")),
+            parent_settings_behavior: Some("first-wins".into()),
+            force_remote_settings_refresh: Some(false),
+            ..Default::default()
+        };
+        let next = SettingsJson {
+            // next overrides method + min + org pin; leaves the rest unset.
+            force_login_method: Some("gateway".into()),
+            required_minimum_version: Some("2.1.207".into()),
+            force_login_org_uuid: Some(json!(["org-a", "org-b"])),
+            ..Default::default()
+        };
+        let merged = merge(prev, next);
+        assert_eq!(merged.force_login_method.as_deref(), Some("gateway"));
+        assert_eq!(merged.required_minimum_version.as_deref(), Some("2.1.207"));
+        assert_eq!(
+            merged.force_login_org_uuid,
+            Some(json!(["org-a", "org-b"])),
+            "org pin is scalar-override (source array wins, not concat)"
+        );
+        // Keys next left unset survive from prev.
+        assert_eq!(merged.parent_settings_behavior.as_deref(), Some("first-wins"));
+        assert_eq!(merged.force_remote_settings_refresh, Some(false));
+    }
+
+    #[test]
+    fn http_hook_security_keys_concat_dedup_across_tiers() {
+        // H-BIN-12: both HTTP-hook allowlists concat-dedup across settings
+        // sources (CC `settingsMergeCustomizer` concat-dedups every array except
+        // `fallbackModel`). A pattern/env-var declared in the lower tier survives
+        // and the higher tier's entries append (deduped).
+        let prev = SettingsJson {
+            allowed_http_hook_urls: Some(vec![s("https://a.example.com/*"), s("https://shared/*")]),
+            http_hook_allowed_env_vars: Some(vec![s("TOKEN_A"), s("SHARED")]),
+            ..Default::default()
+        };
+        let next = SettingsJson {
+            allowed_http_hook_urls: Some(vec![s("https://shared/*"), s("https://b.example.com/*")]),
+            http_hook_allowed_env_vars: Some(vec![s("SHARED"), s("TOKEN_B")]),
+            ..Default::default()
+        };
+        let merged = merge(prev, next);
+        assert_eq!(
+            merged.allowed_http_hook_urls.as_deref(),
+            Some(
+                &[
+                    s("https://a.example.com/*"),
+                    s("https://shared/*"),
+                    s("https://b.example.com/*")
+                ][..]
+            )
+        );
+        assert_eq!(
+            merged.http_hook_allowed_env_vars.as_deref(),
+            Some(&[s("TOKEN_A"), s("SHARED"), s("TOKEN_B")][..])
         );
     }
 

@@ -28,6 +28,13 @@ pub struct CliModeSettings {
     /// `settings.permissions.disableBypassPermissionsMode === "disable"` — the
     /// bypass-permissions killswitch.
     pub bypass_disabled: bool,
+    /// `disableAutoMode === "disable"` at either settings position — the
+    /// auto-mode killswitch (`Bpa()`). Sticky across tiers like
+    /// [`Self::bypass_disabled`]. Fed to
+    /// [`crate::auto_gate::apply_auto_mode_gate`] at boot so a requested `auto`
+    /// (CLI flag or settings `defaultMode: auto`) is downgraded to `default`
+    /// when set.
+    pub auto_mode_disabled: bool,
 }
 
 /// `permissionModeFromString` (`PermissionMode.ts:117-121`): the valid set is
@@ -89,6 +96,7 @@ mod tests {
         CliModeSettings {
             default_mode: None,
             bypass_disabled: false,
+            auto_mode_disabled: false,
         }
     }
 
@@ -161,6 +169,7 @@ mod tests {
         let s = CliModeSettings {
             default_mode: Some(PermissionMode::AcceptEdits),
             bypass_disabled: false,
+            auto_mode_disabled: false,
         };
         let (mode, _) = initial_permission_mode_from_cli(None, false, &s);
         assert_eq!(mode, PermissionMode::AcceptEdits);
@@ -171,6 +180,7 @@ mod tests {
         let s = CliModeSettings {
             default_mode: None,
             bypass_disabled: true,
+            auto_mode_disabled: false,
         };
         let (mode, notice) = initial_permission_mode_from_cli(None, true, &s);
         assert_eq!(mode, PermissionMode::Default);
@@ -187,6 +197,7 @@ mod tests {
         let s = CliModeSettings {
             default_mode: None,
             bypass_disabled: true,
+            auto_mode_disabled: false,
         };
         let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, &s);
         assert_eq!(mode, PermissionMode::Plan);

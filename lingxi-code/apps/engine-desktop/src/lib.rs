@@ -383,6 +383,10 @@ struct BootPermissionTiers {
     /// Sticky `disableBypassPermissionsMode: "disable"` killswitch — true when
     /// ANY tier (managed included) disables `BypassPermissions` mode.
     bypass_disabled: bool,
+    /// Sticky `disableAutoMode: "disable"` killswitch (claude-code `Bpa()`) —
+    /// true when ANY tier disables auto mode at either settings position. Set on
+    /// the boot policy and applied at mode-load (auto → default downgrade).
+    auto_mode_disabled: bool,
     /// Union of every tier's `permissions.additionalDirectories` (raw paths;
     /// `authorize` resolves them against the policy roots via `expand_path`).
     additional_working_dirs: Vec<std::path::PathBuf>,
@@ -426,6 +430,7 @@ async fn load_boot_permission_tiers(
     let mut rules = Vec::new();
     let mut mode = permission::PermissionMode::Default;
     let mut bypass_disabled = false;
+    let mut auto_mode_disabled = false;
     let mut additional_working_dirs: Vec<std::path::PathBuf> = Vec::new();
     // Retain each tier's raw text (in ascending priority) so the
     // sandbox-auto-allow config can be derived from the SAME settings.
@@ -466,6 +471,9 @@ async fn load_boot_permission_tiers(
             if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                 bypass_disabled = true; // sticky: any tier disabling wins
             }
+            if permission::auto_mode_disabled_from_settings_json(&raw) {
+                auto_mode_disabled = true; // sticky: any tier disabling wins (Bpa)
+            }
             // (#34) Union this tier's additionalDirectories into the
             // working-dir set (claude-code merges across SETTING_SOURCES).
             additional_working_dirs
@@ -493,6 +501,9 @@ async fn load_boot_permission_tiers(
         if permission::bypass_permissions_disabled_from_settings_json(raw) {
             bypass_disabled = true; // managed killswitch binds (sticky)
         }
+        if permission::auto_mode_disabled_from_settings_json(raw) {
+            auto_mode_disabled = true; // managed auto-mode killswitch binds (sticky)
+        }
         additional_working_dirs
             .extend(permission::additional_directories_from_settings_json(raw));
     }
@@ -507,9 +518,46 @@ async fn load_boot_permission_tiers(
         rules,
         mode,
         bypass_disabled,
+        auto_mode_disabled,
         additional_working_dirs,
         raw_tiers,
     }
+}
+
+/// Build the MANAGED (`policySettings`) model-restriction view for the
+/// `availableModels` / `enforceAvailableModels` / `modelOverrides` enforcement
+/// (parity 2.1.207 H-BIN-08), mirroring claude-code's per-source
+/// `getSettingsForSource("policySettings")` view (`ROn`/`sl`). The managed raw
+/// tiers arrive ASCENDING (base then drop-ins); scalar/array keys take the last
+/// (highest-priority) tier, `modelOverrides` unions per key. A tier that fails
+/// to parse marks the whole policy source failed — `refusing cascade-trust
+/// mode` (fail-closed), matching the binary `try{…}catch` around the policy
+/// read. Only the MANAGED tiers are consulted: the enforce flag requires a
+/// policy-OWNED allowlist, so user/project `availableModels` are deliberately
+/// NOT folded in here.
+fn managed_model_policy_source(managed_tiers: &[String]) -> llm_client::model::allowlist::PolicySource {
+    use llm_client::model::allowlist::{PolicyModelView, PolicySource};
+    let mut view = PolicyModelView::default();
+    for raw in managed_tiers {
+        match serde_json::from_str::<engine::settings::schema::SettingsJson>(raw) {
+            Ok(s) => {
+                if s.available_models.is_some() {
+                    view.available_models = s.available_models; // last tier wins
+                }
+                if s.enforce_available_models.is_some() {
+                    view.enforce = s.enforce_available_models; // last tier wins
+                }
+                if let Some(mo) = s.model_overrides {
+                    view.model_overrides
+                        .get_or_insert_with(std::collections::BTreeMap::new)
+                        .extend(mo); // union, later tier wins per key
+                }
+            }
+            // A managed file that exists but does not parse ⇒ fail-closed.
+            Err(_) => return PolicySource::Failed,
+        }
+    }
+    PolicySource::Loaded(view)
 }
 
 /// Whether the live cron scheduler should run. Faithful to claude-code's
@@ -2538,6 +2586,32 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Load the merged HTTP-hook security policy (H-BIN-12) — `allowedHttpHookUrls`
+/// and `httpHookAllowedEnvVars` — across the project + user + env settings
+/// layers. Both are array-merge (concat-dedup) via the same
+/// `engine::settings::Settings::load` seam. `(None, None)` on any load failure or
+/// when neither key is set (⇒ no restriction; the HTTP hook executor behaves
+/// exactly as before). Threaded into the executor via
+/// [`hooks::HookExecutorImpl::with_http_hook_policy`], mirroring CC's live
+/// `PFy()=Wn()` read (lingxi sources once at boot).
+fn load_merged_http_hook_policy(
+    project_dir: &std::path::Path,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    match engine::settings::Settings::load(inputs) {
+        Ok(eff) => (
+            eff.settings.allowed_http_hook_urls,
+            eff.settings.http_hook_allowed_env_vars,
+        ),
+        Err(_) => (None, None),
+    }
+}
+
 /// (M4 cc2.1.198) Merge the `--agents <json>` flag agents into the dir-loaded
 /// catalog. The flag payload is an EXPLICIT request: it survives `--bare` but
 /// not safe mode (binary @223080769 `if(r&&!Hc("agents",{explicitlyRequested:
@@ -3471,6 +3545,57 @@ pub async fn build(
         }
     }
 
+    // ── Managed availableModels / enforceAvailableModels constraint ─────────
+    // (parity 2.1.207 H-BIN-08.) When a MANAGED (`policySettings`) tier owns an
+    // `availableModels` allowlist AND sets `enforceAvailableModels: true`, the
+    // Default model selection is constrained (binary `enforceAvailableModels`
+    // describe text): "if the default model for the user tier is not in
+    // availableModels, Default resolves to the first allowed availableModels
+    // entry instead." The enforce flag is inert without a policy-OWNED
+    // allowlist, and a managed source that fails to parse refuses cascade-trust
+    // mode (fail-closed). Consumed via `llm_client::model::allowlist`.
+    {
+        use llm_client::model::allowlist;
+        let managed_model_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+        let policy_source = managed_model_policy_source(&managed_model_tiers);
+        // Deduplicate the byte-exact warnings (binary module-level `SN` set).
+        let mut seen: Vec<String> = Vec::new();
+        let enforcement = allowlist::resolve_enforcement(&policy_source, &mut |m| {
+            if !seen.iter().any(|w| w == m) {
+                seen.push(m.to_string());
+                tracing::warn!("{m}");
+            }
+        });
+        if allowlist::model_allowed_under(&enforcement, &default_model_id) == Some(false) {
+            if let allowlist::ModelEnforcement::Active {
+                allowlist: al,
+                overrides,
+            } = &enforcement
+            {
+                let candidates: Vec<String> = default_listings
+                    .iter()
+                    .map(|m| m.request_model.clone())
+                    .collect();
+                if let Some(picked) =
+                    allowlist::first_allowed_model(al, &candidates, Some(overrides))
+                {
+                    let picked_profile = default_listings
+                        .iter()
+                        .find(|m| m.request_model == picked)
+                        .map(|m| m.provider_id.clone());
+                    tracing::warn!(
+                        from = %default_model_id,
+                        to = %picked,
+                        "default model is not in the managed availableModels allowlist; \
+                         resolving Default to the first allowed availableModels entry"
+                    );
+                    default_model_id = picked;
+                    default_model_profile = picked_profile.or(default_model_profile);
+                }
+            }
+        }
+    }
+
     // The raw "user model setting" seam (the opusplan/haiku plan-mode swap
     // anchor threaded into subagent/teammate model resolution). When the
     // fallback rerouted the session, the persisted alias no longer describes
@@ -4186,6 +4311,7 @@ pub async fn build(
             rules,
             mut mode,
             bypass_disabled,
+            auto_mode_disabled,
             mut additional_working_dirs,
             raw_tiers,
         } = load_boot_permission_tiers(&cfg.lingxi_home, &cwd, cfg.setting_source_scope).await;
@@ -4231,6 +4357,27 @@ pub async fn build(
         if cfg.permission_mode != permission::PermissionMode::Default {
             mode = cfg.permission_mode;
         }
+        // Auto-mode availability gate — claude-code `xms` mode-load downgrade
+        // (`if(t==="auto"&&!P0())return"default"`). When the resolved mode is
+        // `auto` but auto mode is unavailable (the `disableAutoMode` settings
+        // killswitch, or the boot model does not support it), silently downgrade
+        // to `default` so the session never boots INTO an unavailable auto mode.
+        // The local denial circuit-breaker is fresh at boot; Statsig
+        // remote-disable is a documented omission; provider is resolved as
+        // `"firstParty"` (multi-provider mapping deferred — see
+        // `permission::auto_gate`).
+        if mode == permission::PermissionMode::Auto {
+            let (gated, _reason) = permission::apply_auto_mode_gate(
+                mode,
+                &permission::AutoGateInputs {
+                    disabled_by_settings: auto_mode_disabled,
+                    circuit_broken: false,
+                    model: cfg.default_model.clone(),
+                    provider: "firstParty".to_string(),
+                },
+            );
+            mode = gated;
+        }
         let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
@@ -4243,6 +4390,9 @@ pub async fn build(
                 permission::powershell_parse::SystemPwshParser,
             ));
         policy.bypass_killswitch_active = bypass_disabled;
+        // Auto-mode killswitch (`Bpa()`): the live `set_permission_mode` gate
+        // refuses `auto` when any tier set `disableAutoMode: "disable"`.
+        policy.auto_mode_disabled = auto_mode_disabled;
         // Resolve the active Read(deny) rules to search-exclude globs while
         // the policy is still in scope (before it moves into the gate).
         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
@@ -4350,12 +4500,18 @@ pub async fn build(
             }
         }
     });
+    // H-BIN-12: source the CC 2.1.207 HTTP-hook security policy
+    // (`allowedHttpHookUrls` / `httpHookAllowedEnvVars`) from the merged settings
+    // so the HTTP hook executor gates outbound URLs + intersects the per-hook
+    // env-var allowlist. `(None, None)` = no restriction (behavior-neutral).
+    let (http_hook_urls, http_hook_env_vars) = load_merged_http_hook_policy(&cwd);
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
             http.clone(),
             hook_runtime as Arc<dyn traits::RuntimeSpawner>,
         )
+        .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
             Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
             Arc::new(PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
@@ -8754,6 +8910,75 @@ mod tests {
         assert!(!cfg.enabled, "no tiers → sandbox disabled (opt-in default)");
 
         std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV);
+    }
+
+    // ── H-BIN-08 (parity 2.1.207): managed availableModels / ────────────────
+    // enforceAvailableModels policy source ──────────────────────────────────
+
+    #[test]
+    fn managed_model_policy_source_folds_managed_tiers_and_enforces() {
+        use llm_client::model::allowlist::{self, ModelEnforcement, PolicySource};
+        // Base tier sets the allowlist; a drop-in flips enforce on and adds an
+        // override — last tier wins for scalars, overrides union per key.
+        let tiers = vec![
+            r#"{"availableModels":["claude-opus-4-5"]}"#.to_string(),
+            r#"{"enforceAvailableModels":true,"modelOverrides":{"claude-opus-4-5":"arn:aws:bedrock:us-east-1::inference-profile/opus"}}"#.to_string(),
+        ];
+        let source = super::managed_model_policy_source(&tiers);
+        let enforcement = allowlist::resolve_enforcement(&source, &mut |_| {});
+        match &enforcement {
+            ModelEnforcement::Active {
+                allowlist: al,
+                overrides,
+            } => {
+                assert_eq!(al, &["claude-opus-4-5".to_string()]);
+                assert_eq!(
+                    overrides.get("claude-opus-4-5").map(String::as_str),
+                    Some("arn:aws:bedrock:us-east-1::inference-profile/opus")
+                );
+            }
+            other => panic!("expected Active enforcement, got {other:?}"),
+        }
+        // The Bedrock ARN reverse-maps to the allowlisted Anthropic id ⇒ allowed;
+        // a sonnet id is refused.
+        assert_eq!(
+            allowlist::model_allowed_under(
+                &enforcement,
+                "arn:aws:bedrock:us-east-1::inference-profile/opus"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            allowlist::model_allowed_under(&enforcement, "claude-sonnet-4-5"),
+            Some(false)
+        );
+        // A malformed managed tier fails the whole source closed.
+        let bad = vec![r#"{"availableModels": "not-an-array"}"#.to_string()];
+        assert!(matches!(
+            super::managed_model_policy_source(&bad),
+            PolicySource::Failed
+        ));
+    }
+
+    #[test]
+    fn managed_enforce_without_allowlist_is_inert() {
+        use llm_client::model::allowlist::{self, ModelEnforcement};
+        // enforce flag with NO policy-owned availableModels ⇒ inactive + warn.
+        let tiers = vec![r#"{"enforceAvailableModels":true}"#.to_string()];
+        let source = super::managed_model_policy_source(&tiers);
+        let mut warned = Vec::new();
+        let enforcement =
+            allowlist::resolve_enforcement(&source, &mut |m| warned.push(m.to_string()));
+        assert_eq!(enforcement, ModelEnforcement::Inactive);
+        assert_eq!(
+            warned,
+            vec![allowlist::warnings::ENFORCE_WITHOUT_ALLOWLIST.to_string()]
+        );
+        // Inactive ⇒ no opinion on any model.
+        assert_eq!(
+            allowlist::model_allowed_under(&enforcement, "gpt-5.5"),
+            None
+        );
     }
 
     // ── P1-10 (parity 2.1.207): managed (policySettings) PERMISSION RULES in

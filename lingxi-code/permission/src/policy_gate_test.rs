@@ -880,6 +880,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_mode_session_transcript_deny_feeds_denial_tracking() {
+        // A transcript-tamper edit denies with the CC "Session Transcript
+        // Tampering" category and increments the denial breaker exactly like any
+        // other auto-mode BLOCK category (record_auto_deny).
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy.clone(), RecordingInner::new(PermissionDecision::Allow));
+
+        match gate
+            .resolve_detailed(
+                "Edit",
+                &serde_json::json!({ "file_path": "/Users/x/.lingxi/projects/p/s.jsonl" }),
+            )
+            .await
+        {
+            PermissionResolution::Deny { source, reason, .. } => {
+                assert_eq!(source, PermissionDecisionSource::Classifier);
+                assert!(
+                    reason.contains("Session Transcript Tampering"),
+                    "reason names the CC category: {reason}"
+                );
+            }
+            other => panic!("expected transcript-tamper deny, got {other:?}"),
+        }
+
+        let tracking = policy.denial_tracking.lock().unwrap();
+        assert_eq!(tracking.total_denials, 1, "deny must feed denial tracking");
+        assert_eq!(tracking.consecutive_denials, 1);
+    }
+
+    #[tokio::test]
     async fn auto_mode_explicit_ask_rule_still_prompts() {
         let policy = policy_with(
             r#"{ "permissions": { "ask": ["Bash"] } }"#,
@@ -1007,6 +1041,78 @@ mod tests {
             gate.set_permission_mode("bypassPermissions").await.unwrap_err(),
             "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"
         );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_rejects_auto_when_disabled_by_settings() {
+        // `Nle`: auto is gated by `!P0()`; the `disableAutoMode` killswitch
+        // (auto_mode_disabled) makes `One()` return "settings".
+        let mut policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        policy.auto_mode_disabled = true;
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        assert_eq!(
+            gate.set_permission_mode("auto").await.unwrap_err(),
+            "Cannot set permission mode to auto: auto mode disabled by settings"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_rejects_auto_when_circuit_broken() {
+        // Killswitch off but the local denial breaker has tripped → "circuit-breaker".
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        {
+            let mut t = policy.denial_tracking.lock().unwrap();
+            t.record_auto_deny();
+            t.record_auto_deny();
+            t.record_auto_deny(); // 3 consecutive ≥ maxConsecutive → broken
+            assert!(t.is_circuit_broken());
+        }
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        assert_eq!(
+            gate.set_permission_mode("auto").await.unwrap_err(),
+            "Cannot set permission mode to auto: auto mode is unavailable for your plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_auto_settings_precedes_circuit_breaker() {
+        // Both closed → `One()` reports "settings" first.
+        let mut policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        policy.auto_mode_disabled = true;
+        {
+            let mut t = policy.denial_tracking.lock().unwrap();
+            t.record_auto_deny();
+            t.record_auto_deny();
+            t.record_auto_deny();
+        }
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        assert_eq!(
+            gate.set_permission_mode("auto").await.unwrap_err(),
+            "Cannot set permission mode to auto: auto mode disabled by settings"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_accepts_auto_when_gate_open() {
+        // Killswitch off, breaker not tripped → auto is accepted (the model gate
+        // is enforced at boot, not this live surface — see the fn doc).
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        gate.set_permission_mode("auto")
+            .await
+            .expect("auto accepted when the gate is open");
     }
 
     #[test]

@@ -2733,4 +2733,159 @@ mod tests {
             }
         ));
     }
+
+    // ── 1e: possibly-empty `$VAR` removal forced-ask (claude-code 2.1.205 GIu) ──
+
+    /// The byte-locked GIu message for a given command name + target.
+    #[cfg(feature = "bash-ast")]
+    fn giu_message(cmd: &str, target: &str) -> String {
+        format!(
+            "Dangerous {cmd} operation detected: '{target}'\n\nThis target is a shell variable expansion that points at the filesystem root (or a top-level directory) when the variable is unset or empty — e.g. `rm -rf $UNSET/*` becomes `rm -rf /*`. This requires explicit approval and cannot be auto-allowed by permission rules."
+        )
+    }
+
+    /// `rm -rf $UNSET/*` (too-complex, possibly-empty variable path) force-asks
+    /// with the byte-exact GIu message + reason + `classifier_approvable=false`,
+    /// EVEN with a permissive prefix allow rule `Bash(rm -rf:*)`.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn giu_prefix_allow_forces_possibly_empty_ask() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rm -rf:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("rm -rf $UNSET/*")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck {
+                    reason,
+                    classifier_approvable,
+                },
+                prompt,
+                ..
+            } => {
+                assert!(!classifier_approvable, "must not be classifier-approvable");
+                assert_eq!(
+                    reason,
+                    "Dangerous rm operation on possibly-empty variable path: $UNSET/*"
+                );
+                assert_eq!(prompt.message, giu_message("rm", "$UNSET/*"));
+            }
+            other => panic!("expected possibly-empty SafetyCheck ask, got {other:?}"),
+        }
+    }
+
+    /// An EXACT allow rule `Bash(rm -rf $UNSET/*)` still cannot bypass the
+    /// forced-ask (GIu precedes the exact-match allow short-circuit, mirroring
+    /// `hHg` running `GIu` before honoring exact allows).
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn giu_exact_allow_cannot_bypass() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rm -rf $UNSET/*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("rm -rf $UNSET/*")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck {
+                    reason,
+                    classifier_approvable,
+                },
+                ..
+            } => {
+                assert!(!classifier_approvable);
+                assert!(reason.contains("possibly-empty variable path: $UNSET/*"));
+            }
+            other => panic!("exact allow must NOT bypass forced-ask, got {other:?}"),
+        }
+    }
+
+    /// Quoted `"$VAR"/*`, braced `${VAR}/*`, and `$VAR/$OTHER` all force-ask.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn giu_quoted_and_braced_variants_ask() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        for (cmd, target) in [
+            ("rm -rf \"$VAR\"/*", "\"$VAR\"/*"),
+            ("rm -rf ${VAR}/*", "${VAR}/*"),
+            ("rm -rf $VAR/$OTHER", "$VAR/$OTHER"),
+        ] {
+            match p.authorize("Bash", &bash(cmd)) {
+                PermissionResult::Ask {
+                    reason: PermissionDecisionReason::SafetyCheck { reason, classifier_approvable },
+                    prompt,
+                    ..
+                } => {
+                    assert!(!classifier_approvable, "{cmd}");
+                    assert_eq!(
+                        reason,
+                        format!("Dangerous rm operation on possibly-empty variable path: {target}"),
+                        "{cmd}"
+                    );
+                    assert_eq!(prompt.message, giu_message("rm", target), "{cmd}");
+                }
+                other => panic!("expected forced-ask for {cmd:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The `rmdir` form reports `rmdir` in both message and reason.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn giu_rmdir_form_reports_rmdir() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        match p.authorize("Bash", &bash("rmdir $DIR/*")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { reason, classifier_approvable },
+                prompt,
+                ..
+            } => {
+                assert!(!classifier_approvable);
+                assert_eq!(
+                    reason,
+                    "Dangerous rmdir operation on possibly-empty variable path: $DIR/*"
+                );
+                assert_eq!(prompt.message, giu_message("rmdir", "$DIR/*"));
+            }
+            other => panic!("expected rmdir forced-ask, got {other:?}"),
+        }
+    }
+
+    /// A RESOLVABLE variable (`A=/tmp && rm -rf $A/subdir`) is parseable (not
+    /// too-complex), so the possibly-empty forced-ask must NOT fire — CC only
+    /// runs GIu on the too-complex branch.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn giu_resolvable_var_does_not_force_ask() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let reason_text = match p.authorize("Bash", &bash("A=/tmp && rm -rf $A/subdir")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                ..
+            } => reason,
+            _ => String::new(),
+        };
+        assert!(
+            !reason_text.contains("possibly-empty variable path"),
+            "resolvable var must not trigger the GIu forced-ask; reason: {reason_text}"
+        );
+    }
+
+    /// A single-quoted target (`rm -rf '$VAR/*'`) is a literal string — parseable
+    /// and skipped by GIu's `'`-leading arg guard — so no possibly-empty ask.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn giu_single_quoted_target_not_flagged() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let reason_text = match p.authorize("Bash", &bash("rm -rf '$VAR/*'")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                ..
+            } => reason,
+            _ => String::new(),
+        };
+        assert!(
+            !reason_text.contains("possibly-empty variable path"),
+            "single-quoted literal must not trigger the forced-ask; reason: {reason_text}"
+        );
+    }
 }

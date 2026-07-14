@@ -65,6 +65,19 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // LingXi extension — deep-merge so multiple settings layers can each
     // contribute routing aliases, fallback chains, and retry policy.
     ("routing", MergeStrategy::DeepMerge),
+    // Managed model-restriction map — deep-merge (CC `settingsMergeCustomizer`
+    // leaves objects to lodash's recursive merge; only specific arrays concat).
+    // NB: `availableModels` (array) and `enforceAvailableModels` (scalar) are
+    // deliberately NOT here — they fall through to the default Override, matching
+    // CC returning the source array for non-concat arrays.
+    ("modelOverrides", MergeStrategy::DeepMerge),
+    // HTTP-hook security allowlists (H-BIN-12). Both are arrays, and CC's
+    // `settingsMergeCustomizer` (`ipe`) concat-dedups EVERY array except
+    // `fallbackModel` (`WSm(e,t)=Mo([...e,...t])`); both describe strings say
+    // verbatim "Arrays merge across settings sources (same semantics as
+    // allowedMcpServers)." So both are ConcatDedup.
+    ("allowedHttpHookUrls", MergeStrategy::ConcatDedup),
+    ("httpHookAllowedEnvVars", MergeStrategy::ConcatDedup),
 ];
 
 /// Look up the merge strategy for a field name.
@@ -196,6 +209,46 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Array field (scalar-override merge). `availableModels`: managed allowlist
+    /// of models a user may select. CC 2.1.207 settings zod (verbatim describe):
+    /// "Allowlist of models that users can select. Accepts family aliases
+    /// (\"opus\" allows any opus version), version prefixes (\"opus-4-5\" allows
+    /// only that version), and full model IDs. If undefined, all models are
+    /// available. If empty array, only the default model is available."
+    /// Typically set in managed (`policySettings`) settings by enterprise
+    /// administrators. Consumed via [`llm_client::model::allowlist`] — matcher +
+    /// policy-provenance for the `enforceAvailableModels` gate. Absent ⇒ None
+    /// (no restriction), distinct from `Some(vec![])` (only the default model).
+    /// Scalar-override merge (CC `settingsMergeCustomizer` returns the source
+    /// array for non-concat arrays), so NOT in `MERGE_STRATEGIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<String>>,
+
+    /// Scalar field (later source wins). `enforceAvailableModels`: gate on the
+    /// managed `availableModels` allowlist. CC 2.1.207 zod (verbatim describe):
+    /// "When true and availableModels is a non-empty array, the Default model
+    /// selection is also constrained: if the default model for the user tier is
+    /// not in availableModels, Default resolves to the first allowed
+    /// availableModels entry instead. Has no effect when availableModels is unset
+    /// or an empty array. Typically set in managed settings by enterprise
+    /// administrators." The flag only binds with a POLICY-owned allowlist
+    /// (`llm_client::model::allowlist::resolve_enforcement`). Scalar-override
+    /// merge (not in `MERGE_STRATEGIES`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_available_models: Option<bool>,
+
+    /// Object-merge field (deep-merge). `modelOverrides`: managed mapping from
+    /// Anthropic model ID to provider-specific model ID. CC 2.1.207 zod
+    /// (verbatim describe): "Override mapping from Anthropic model ID (e.g.
+    /// \"claude-opus-4-6\") to provider-specific model ID (e.g. a Bedrock
+    /// inference profile ARN). Typically set in managed settings by enterprise
+    /// administrators." Feeds the same `availableModels` enforcement path
+    /// (reverse-mapped in the matcher, `overridesMap`). Deep-merged across tiers
+    /// (CC's `settingsMergeCustomizer` leaves objects to lodash's recursive
+    /// merge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_overrides: Option<BTreeMap<String, String>>,
+
     /// Scalar field (later source wins). `awsAuthRefresh`: path to a script
     /// that refreshes AWS authentication (2.1.198 settings schema: "Path to a
     /// script that refreshes AWS authentication"). Consumed by the llm-client
@@ -220,6 +273,128 @@ pub struct SettingsJson {
     /// Vertex flow lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcp_auth_refresh: Option<String>,
+
+    // ── HTTP-hook security allowlists (H-BIN-12) ─────────────────────────────
+    // Two CC 2.1.207 settings keys the HTTP hook executor reads live per
+    // execution (`PFy()=Wn()`), consumed by `hooks::HttpExecutor` — the URL
+    // allowlist gate + the per-hook env-var intersection. Both are array-merge
+    // (ConcatDedup, see `MERGE_STRATEGIES`).
+    /// Array-merge field (concat-dedup). `allowedHttpHookUrls`: allowlist of URL
+    /// patterns HTTP hooks may target. CC 2.1.207 zod (verbatim describe):
+    /// "Allowlist of URL patterns that HTTP hooks may target. Supports * as a
+    /// wildcard (e.g. \"https://hooks.example.com/*\"). When set, HTTP hooks with
+    /// non-matching URLs are blocked. If undefined, all URLs are allowed. If
+    /// empty array, no HTTP hooks are allowed. Arrays merge across settings
+    /// sources (same semantics as allowedMcpServers)." Consumed by the HTTP hook
+    /// executor via [`crate::settings::schema`] → the `hooks` crate's
+    /// `HttpExecutor`: `None` ⇒ all URLs allowed; `Some(empty)` ⇒ block ALL HTTP
+    /// hooks; `Some(patterns)` ⇒ the hook URL must match ≥1 pattern (CC `NBr`
+    /// wildcard matcher) or the request is blocked before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_http_hook_urls: Option<Vec<String>>,
+
+    /// Array-merge field (concat-dedup). `httpHookAllowedEnvVars`: allowlist of
+    /// environment variable names HTTP hooks may interpolate into headers. CC
+    /// 2.1.207 zod (verbatim describe): "Allowlist of environment variable names
+    /// HTTP hooks may interpolate into headers. When set, each hook's effective
+    /// allowedEnvVars is the intersection with this list. If undefined, no
+    /// restriction is applied. Arrays merge across settings sources (same
+    /// semantics as allowedMcpServers)." Consumed by the HTTP hook executor:
+    /// `None` ⇒ per-hook `allowedEnvVars` used as-is; `Some(list)` ⇒ each hook's
+    /// effective allowlist is its own `allowedEnvVars` ∩ this global list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_hook_allowed_env_vars: Option<Vec<String>>,
+
+    // ── Enterprise login / version managed-policy keys (H-BIN-09) ────────────
+    // Six admin-provisioned `managed-settings.json` keys CC 2.1.207 both schemas
+    // AND enforces; consumed via [`crate::settings::enterprise`]. All scalar-
+    // override merge (none in `MERGE_STRATEGIES`). See that module for wiring
+    // status (version gate LIVE; login-flow method-lock/org-pin DORMANT).
+    /// Scalar field (later source wins). `forceLoginMethod`: force a specific
+    /// OAuth login method. CC 2.1.207 zod (verbatim describe): "Force a specific
+    /// login method: \"claudeai\" for Claude Pro/Max, \"console\" for Console
+    /// billing, \"gateway\" for the Cloud gateway OIDC device flow". Enum
+    /// `claudeai|console|gateway` with `.catch(void 0)` — an out-of-set value
+    /// degrades to "no forced method". Typed `Option<String>` (like
+    /// `askUserQuestionTimeout`); the enum + `.catch` degrade live in the typed
+    /// accessor [`SettingsJson::force_login_method_parsed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_login_method: Option<String>,
+
+    /// Scalar field (later source wins). `forceLoginGatewayUrl`: Cloud gateway
+    /// URL to pre-fill and auto-connect to during login. CC 2.1.207 zod:
+    /// `forceLoginGatewayUrl:E.string().url().optional().catch(void 0)`
+    /// ("@internal Cloud gateway URL to pre-fill and auto-connect to during
+    /// login. Typically set in local managed settings alongside forceLoginMethod:
+    /// \"gateway\" so users never type the URL."). Pre-filled into the OAuth
+    /// screen by the login flow (DORMANT wiring — see `enterprise`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_login_gateway_url: Option<String>,
+
+    /// Scalar field (later source wins). `forceLoginOrgUUID`: pin OAuth login to
+    /// an organization (or list). CC 2.1.207 zod:
+    /// `forceLoginOrgUUID:E.union([E.string(),E.array(E.string())]).optional()`
+    /// ("Organization UUID to require for OAuth login. Accepts a single UUID
+    /// string or an array of UUIDs (any one is permitted). When set in managed
+    /// settings, login fails if the authenticated account does not belong to a
+    /// listed organization."). Kept as opaque `Value` (string | string[]) so a
+    /// malformed value is TOLERATED at load and degraded at the consumer
+    /// ([`SettingsJson::force_login_org_pin`]) rather than failing the whole
+    /// settings file.
+    ///
+    /// NB explicit `rename`: serde's `camelCase` rule would emit `forceLoginOrgUuid`,
+    /// but the CC wire key is the all-caps `forceLoginOrgUUID`.
+    #[serde(
+        rename = "forceLoginOrgUUID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub force_login_org_uuid: Option<Value>,
+
+    /// Scalar field (later source wins). `parentSettingsBehavior`: whether the
+    /// SDK parent managed-settings tier (`Options.managedSettings` /
+    /// `--managed-settings`) layers under this admin tier. CC 2.1.207 zod enum
+    /// `first-wins|merge` ("first-wins (default): parent is dropped … merge:
+    /// parent's restrictive-only-filtered settings union under the admin
+    /// winner."). Consumed by [`crate::settings::enterprise::should_merge_parent_settings`]
+    /// (the SDK parent tier itself is not yet modeled in lingxi).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_settings_behavior: Option<String>,
+
+    /// Scalar field (later source wins). `minimumVersion`: USER setting — CC
+    /// 2.1.207 zod: "Minimum version to stay on - prevents downgrades when
+    /// switching to stable channel". Consumed ONLY by CC's auto-updater
+    /// channel-downgrade guard (`Zlo`/`Wn()`); lingxi has no auto-updater, so
+    /// this is schema-only (dead-by-missing-subsystem) — do NOT confuse with the
+    /// managed startup gate `requiredMinimumVersion`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_version: Option<String>,
+
+    /// Scalar field (later source wins). `requiredMinimumVersion`: managed
+    /// startup exit gate — CC 2.1.207 zod: "Minimum Claude Code version required
+    /// to start. If the running version is older, Claude Code exits at startup
+    /// with instructions to update. Only enforced from managed (policy)
+    /// settings." Consumed by [`crate::settings::enterprise::version_gate`]
+    /// (LIVE, wired at CLI boot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_minimum_version: Option<String>,
+
+    /// Scalar field (later source wins). `requiredMaximumVersion`: managed
+    /// startup exit gate — CC 2.1.207 zod: "Maximum Claude Code version allowed
+    /// to start. If the running version is newer, Claude Code exits at startup
+    /// with instructions to install an approved version. Only enforced from
+    /// managed (policy) settings." Ships with `requiredMinimumVersion` in the
+    /// same `version_gate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_maximum_version: Option<String>,
+
+    /// Scalar field (later source wins). `forceRemoteSettingsRefresh`: CC 2.1.207
+    /// zod: "When set in managed settings, the CLI blocks startup until remote
+    /// managed settings are freshly fetched, and exits if the fetch fails."
+    /// Schema-only — lingxi has no remote managed-settings fetcher; the key is
+    /// typed so it round-trips and is ACCESSIBLE when that subsystem lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_remote_settings_refresh: Option<bool>,
 
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
@@ -534,6 +709,209 @@ mod tests {
         assert!(parsed.providers.is_some());
         let back = serde_json::to_string(&parsed).expect("serialize");
         assert!(back.contains("\"providers\""));
+    }
+
+    #[test]
+    fn managed_model_allowlist_keys_parse_and_roundtrip() {
+        // CC 2.1.207 managed model-restriction keys: availableModels (array),
+        // enforceAvailableModels (bool), modelOverrides (record). A managed
+        // settings.json carrying them must parse into the typed fields (unknown-
+        // key tolerance alone would strip them, so the allowlist would be
+        // silently dropped and enforcement never bind).
+        let json = r#"{
+            "availableModels": ["opus", "claude-sonnet-4-5"],
+            "enforceAvailableModels": true,
+            "modelOverrides": { "claude-opus-4-6": "arn:aws:bedrock:us-east-1::inference-profile/opus" },
+            "model": "claude-sonnet-4-5"
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("managed keys must parse");
+        assert_eq!(
+            parsed.available_models.as_deref(),
+            Some(&["opus".to_string(), "claude-sonnet-4-5".to_string()][..])
+        );
+        assert_eq!(parsed.enforce_available_models, Some(true));
+        assert_eq!(
+            parsed
+                .model_overrides
+                .as_ref()
+                .and_then(|m| m.get("claude-opus-4-6"))
+                .map(String::as_str),
+            Some("arn:aws:bedrock:us-east-1::inference-profile/opus")
+        );
+        // Sibling survives the load.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"availableModels\""), "{back}");
+        assert!(back.contains("\"enforceAvailableModels\":true"), "{back}");
+        assert!(back.contains("\"modelOverrides\""), "{back}");
+    }
+
+    #[test]
+    fn available_models_absent_vs_empty_are_distinct() {
+        // Absent ⇒ None (no restriction); explicit [] ⇒ Some(vec![]) (only the
+        // default model available) — the two must round-trip distinctly.
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"opus"}"#).unwrap();
+        assert!(absent.available_models.is_none());
+        assert!(!serde_json::to_string(&absent)
+            .unwrap()
+            .contains("availableModels"));
+        let empty: SettingsJson = serde_json::from_str(r#"{"availableModels":[]}"#).unwrap();
+        assert_eq!(empty.available_models.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn model_allowlist_merge_strategies() {
+        // modelOverrides deep-merges (CC leaves objects to lodash recursive
+        // merge); availableModels/enforceAvailableModels are scalar-override.
+        assert!(
+            matches!(strategy_for("modelOverrides"), Some(MergeStrategy::DeepMerge)),
+            "modelOverrides must deep-merge"
+        );
+        assert!(
+            strategy_for("availableModels").is_none(),
+            "availableModels must be scalar-override (source array wins)"
+        );
+        assert!(
+            strategy_for("enforceAvailableModels").is_none(),
+            "enforceAvailableModels must be scalar-override"
+        );
+    }
+
+    #[test]
+    fn enterprise_login_version_keys_parse_and_roundtrip() {
+        // CC 2.1.207 enterprise login/version managed-policy keys (H-BIN-09). A
+        // managed settings.json carrying them must parse into the typed fields
+        // (unknown-key tolerance alone would strip them, so the version gate /
+        // login policy would never see them).
+        let json = r#"{
+            "forceLoginMethod": "gateway",
+            "forceLoginGatewayUrl": "https://gw.example.com/oidc",
+            "forceLoginOrgUUID": ["11111111-2222-3333-4444-555555555555"],
+            "parentSettingsBehavior": "merge",
+            "minimumVersion": "2.1.0",
+            "requiredMinimumVersion": "2.1.207",
+            "requiredMaximumVersion": "3.0.0",
+            "forceRemoteSettingsRefresh": true,
+            "model": "claude-sonnet-4-5"
+        }"#;
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("enterprise policy keys must parse");
+        assert_eq!(parsed.force_login_method.as_deref(), Some("gateway"));
+        assert_eq!(
+            parsed.force_login_gateway_url.as_deref(),
+            Some("https://gw.example.com/oidc")
+        );
+        assert_eq!(
+            parsed.force_login_org_uuid,
+            Some(Value::Array(vec![Value::String(
+                "11111111-2222-3333-4444-555555555555".to_string()
+            )]))
+        );
+        assert_eq!(parsed.parent_settings_behavior.as_deref(), Some("merge"));
+        assert_eq!(parsed.minimum_version.as_deref(), Some("2.1.0"));
+        assert_eq!(parsed.required_minimum_version.as_deref(), Some("2.1.207"));
+        assert_eq!(parsed.required_maximum_version.as_deref(), Some("3.0.0"));
+        assert_eq!(parsed.force_remote_settings_refresh, Some(true));
+        // Sibling survives the load.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        for key in [
+            "forceLoginMethod",
+            "forceLoginGatewayUrl",
+            "forceLoginOrgUUID",
+            "parentSettingsBehavior",
+            "minimumVersion",
+            "requiredMinimumVersion",
+            "requiredMaximumVersion",
+            "forceRemoteSettingsRefresh",
+        ] {
+            assert!(back.contains(&format!("\"{key}\"")), "{key} missing in {back}");
+            // All scalar-override merge (later source wins).
+            assert!(
+                strategy_for(key).is_none(),
+                "{key} must be scalar-override (later source wins)"
+            );
+        }
+    }
+
+    #[test]
+    fn force_login_org_uuid_accepts_single_string() {
+        // The union (string | string[]) — a single string form must parse and
+        // NOT fail the load.
+        let json = r#"{"forceLoginOrgUUID": "org-abc"}"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("single-string form parses");
+        assert_eq!(
+            parsed.force_login_org_uuid,
+            Some(Value::String("org-abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn enterprise_keys_absent_are_none_and_not_emitted() {
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert!(absent.force_login_method.is_none());
+        assert!(absent.required_minimum_version.is_none());
+        assert!(absent.force_remote_settings_refresh.is_none());
+        let back = serde_json::to_string(&absent).unwrap();
+        for key in [
+            "forceLoginMethod",
+            "requiredMinimumVersion",
+            "forceRemoteSettingsRefresh",
+        ] {
+            assert!(!back.contains(key), "{key} must not be emitted when absent");
+        }
+    }
+
+    #[test]
+    fn http_hook_security_keys_parse_roundtrip_and_are_concat_dedup() {
+        // H-BIN-12: CC 2.1.207 HTTP-hook security allowlists. A settings.json
+        // carrying them must parse into the typed fields (unknown-key tolerance
+        // alone would strip them, so the HTTP hook executor would never see the
+        // policy). Both are array-merge (ConcatDedup) — CC `settingsMergeCustomizer`
+        // concat-dedups every array except `fallbackModel`.
+        let json = r#"{
+            "allowedHttpHookUrls": ["https://hooks.example.com/*"],
+            "httpHookAllowedEnvVars": ["HOOK_TOKEN", "TEAM_ID"],
+            "model": "claude-sonnet-4-5"
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("http-hook keys must parse");
+        assert_eq!(
+            parsed.allowed_http_hook_urls.as_deref(),
+            Some(&["https://hooks.example.com/*".to_string()][..])
+        );
+        assert_eq!(
+            parsed.http_hook_allowed_env_vars.as_deref(),
+            Some(&["HOOK_TOKEN".to_string(), "TEAM_ID".to_string()][..])
+        );
+        // Sibling survives the load.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"allowedHttpHookUrls\""), "{back}");
+        assert!(back.contains("\"httpHookAllowedEnvVars\""), "{back}");
+        // Both concat-dedup (arrays merge across settings sources).
+        for key in ["allowedHttpHookUrls", "httpHookAllowedEnvVars"] {
+            assert!(
+                matches!(strategy_for(key), Some(MergeStrategy::ConcatDedup)),
+                "{key} must be ConcatDedup"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_http_hook_urls_absent_vs_empty_are_distinct() {
+        // Absent ⇒ None (all URLs allowed); explicit [] ⇒ Some(vec![]) (block ALL
+        // HTTP hooks) — the two must round-trip distinctly.
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"opus"}"#).unwrap();
+        assert!(absent.allowed_http_hook_urls.is_none());
+        assert!(!serde_json::to_string(&absent)
+            .unwrap()
+            .contains("allowedHttpHookUrls"));
+        let empty: SettingsJson =
+            serde_json::from_str(r#"{"allowedHttpHookUrls":[]}"#).unwrap();
+        assert_eq!(empty.allowed_http_hook_urls.as_deref(), Some(&[][..]));
     }
 
     #[test]

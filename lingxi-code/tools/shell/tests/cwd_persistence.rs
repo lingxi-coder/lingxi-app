@@ -514,7 +514,8 @@ fn tool_with_live_cwd(
         exit_code: 0,
         timed_out: false,
     });
-    ctx.workspace = workspace.to_path_buf();
+    ctx.session_cwd
+        .swap(workspace.to_path_buf(), ctx.trusted_dirs());
     ctx.process = runner;
     BashTool::new(ctx).with_live_cwd(cell)
 }

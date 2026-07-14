@@ -2586,6 +2586,32 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Load the merged HTTP-hook security policy (H-BIN-12) — `allowedHttpHookUrls`
+/// and `httpHookAllowedEnvVars` — across the project + user + env settings
+/// layers. Both are array-merge (concat-dedup) via the same
+/// `engine::settings::Settings::load` seam. `(None, None)` on any load failure or
+/// when neither key is set (⇒ no restriction; the HTTP hook executor behaves
+/// exactly as before). Threaded into the executor via
+/// [`hooks::HookExecutorImpl::with_http_hook_policy`], mirroring CC's live
+/// `PFy()=Wn()` read (lingxi sources once at boot).
+fn load_merged_http_hook_policy(
+    project_dir: &std::path::Path,
+) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    match engine::settings::Settings::load(inputs) {
+        Ok(eff) => (
+            eff.settings.allowed_http_hook_urls,
+            eff.settings.http_hook_allowed_env_vars,
+        ),
+        Err(_) => (None, None),
+    }
+}
+
 /// (M4 cc2.1.198) Merge the `--agents <json>` flag agents into the dir-loaded
 /// catalog. The flag payload is an EXPLICIT request: it survives `--bare` but
 /// not safe mode (binary @223080769 `if(r&&!Hc("agents",{explicitlyRequested:
@@ -4474,12 +4500,18 @@ pub async fn build(
             }
         }
     });
+    // H-BIN-12: source the CC 2.1.207 HTTP-hook security policy
+    // (`allowedHttpHookUrls` / `httpHookAllowedEnvVars`) from the merged settings
+    // so the HTTP hook executor gates outbound URLs + intersects the per-hook
+    // env-var allowlist. `(None, None)` = no restriction (behavior-neutral).
+    let (http_hook_urls, http_hook_env_vars) = load_merged_http_hook_policy(&cwd);
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
             http.clone(),
             hook_runtime as Arc<dyn traits::RuntimeSpawner>,
         )
+        .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
             Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
             Arc::new(PosixSandbox::new()) as Arc<dyn traits::Sandbox>,

@@ -71,6 +71,13 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // deliberately NOT here — they fall through to the default Override, matching
     // CC returning the source array for non-concat arrays.
     ("modelOverrides", MergeStrategy::DeepMerge),
+    // HTTP-hook security allowlists (H-BIN-12). Both are arrays, and CC's
+    // `settingsMergeCustomizer` (`ipe`) concat-dedups EVERY array except
+    // `fallbackModel` (`WSm(e,t)=Mo([...e,...t])`); both describe strings say
+    // verbatim "Arrays merge across settings sources (same semantics as
+    // allowedMcpServers)." So both are ConcatDedup.
+    ("allowedHttpHookUrls", MergeStrategy::ConcatDedup),
+    ("httpHookAllowedEnvVars", MergeStrategy::ConcatDedup),
 ];
 
 /// Look up the merge strategy for a field name.
@@ -266,6 +273,37 @@ pub struct SettingsJson {
     /// Vertex flow lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcp_auth_refresh: Option<String>,
+
+    // ── HTTP-hook security allowlists (H-BIN-12) ─────────────────────────────
+    // Two CC 2.1.207 settings keys the HTTP hook executor reads live per
+    // execution (`PFy()=Wn()`), consumed by `hooks::HttpExecutor` — the URL
+    // allowlist gate + the per-hook env-var intersection. Both are array-merge
+    // (ConcatDedup, see `MERGE_STRATEGIES`).
+    /// Array-merge field (concat-dedup). `allowedHttpHookUrls`: allowlist of URL
+    /// patterns HTTP hooks may target. CC 2.1.207 zod (verbatim describe):
+    /// "Allowlist of URL patterns that HTTP hooks may target. Supports * as a
+    /// wildcard (e.g. \"https://hooks.example.com/*\"). When set, HTTP hooks with
+    /// non-matching URLs are blocked. If undefined, all URLs are allowed. If
+    /// empty array, no HTTP hooks are allowed. Arrays merge across settings
+    /// sources (same semantics as allowedMcpServers)." Consumed by the HTTP hook
+    /// executor via [`crate::settings::schema`] → the `hooks` crate's
+    /// `HttpExecutor`: `None` ⇒ all URLs allowed; `Some(empty)` ⇒ block ALL HTTP
+    /// hooks; `Some(patterns)` ⇒ the hook URL must match ≥1 pattern (CC `NBr`
+    /// wildcard matcher) or the request is blocked before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_http_hook_urls: Option<Vec<String>>,
+
+    /// Array-merge field (concat-dedup). `httpHookAllowedEnvVars`: allowlist of
+    /// environment variable names HTTP hooks may interpolate into headers. CC
+    /// 2.1.207 zod (verbatim describe): "Allowlist of environment variable names
+    /// HTTP hooks may interpolate into headers. When set, each hook's effective
+    /// allowedEnvVars is the intersection with this list. If undefined, no
+    /// restriction is applied. Arrays merge across settings sources (same
+    /// semantics as allowedMcpServers)." Consumed by the HTTP hook executor:
+    /// `None` ⇒ per-hook `allowedEnvVars` used as-is; `Some(list)` ⇒ each hook's
+    /// effective allowlist is its own `allowedEnvVars` ∩ this global list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_hook_allowed_env_vars: Option<Vec<String>>,
 
     // ── Enterprise login / version managed-policy keys (H-BIN-09) ────────────
     // Six admin-provisioned `managed-settings.json` keys CC 2.1.207 both schemas
@@ -824,6 +862,56 @@ mod tests {
         ] {
             assert!(!back.contains(key), "{key} must not be emitted when absent");
         }
+    }
+
+    #[test]
+    fn http_hook_security_keys_parse_roundtrip_and_are_concat_dedup() {
+        // H-BIN-12: CC 2.1.207 HTTP-hook security allowlists. A settings.json
+        // carrying them must parse into the typed fields (unknown-key tolerance
+        // alone would strip them, so the HTTP hook executor would never see the
+        // policy). Both are array-merge (ConcatDedup) — CC `settingsMergeCustomizer`
+        // concat-dedups every array except `fallbackModel`.
+        let json = r#"{
+            "allowedHttpHookUrls": ["https://hooks.example.com/*"],
+            "httpHookAllowedEnvVars": ["HOOK_TOKEN", "TEAM_ID"],
+            "model": "claude-sonnet-4-5"
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("http-hook keys must parse");
+        assert_eq!(
+            parsed.allowed_http_hook_urls.as_deref(),
+            Some(&["https://hooks.example.com/*".to_string()][..])
+        );
+        assert_eq!(
+            parsed.http_hook_allowed_env_vars.as_deref(),
+            Some(&["HOOK_TOKEN".to_string(), "TEAM_ID".to_string()][..])
+        );
+        // Sibling survives the load.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"allowedHttpHookUrls\""), "{back}");
+        assert!(back.contains("\"httpHookAllowedEnvVars\""), "{back}");
+        // Both concat-dedup (arrays merge across settings sources).
+        for key in ["allowedHttpHookUrls", "httpHookAllowedEnvVars"] {
+            assert!(
+                matches!(strategy_for(key), Some(MergeStrategy::ConcatDedup)),
+                "{key} must be ConcatDedup"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_http_hook_urls_absent_vs_empty_are_distinct() {
+        // Absent ⇒ None (all URLs allowed); explicit [] ⇒ Some(vec![]) (block ALL
+        // HTTP hooks) — the two must round-trip distinctly.
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"opus"}"#).unwrap();
+        assert!(absent.allowed_http_hook_urls.is_none());
+        assert!(!serde_json::to_string(&absent)
+            .unwrap()
+            .contains("allowedHttpHookUrls"));
+        let empty: SettingsJson =
+            serde_json::from_str(r#"{"allowedHttpHookUrls":[]}"#).unwrap();
+        assert_eq!(empty.allowed_http_hook_urls.as_deref(), Some(&[][..]));
     }
 
     #[test]

@@ -854,6 +854,26 @@ pub async fn build_mobile_inner(
         project_settings_path,
         hooks::definition::HookSource::Project,
     ));
+    // (H-BIN-12) Accumulate the CC 2.1.207 HTTP-hook security allowlists across
+    // the SAME settings tiers, concat-deduped (CC merges these arrays across
+    // sources). Stay `None` until a tier declares the key (⇒ no restriction); an
+    // explicit `[]` sets `Some(empty)` (⇒ block ALL HTTP hooks for
+    // allowedHttpHookUrls). Mobile has no `engine::settings::Settings::load`
+    // seam, so read the keys directly like the `skipWebFetchPreflight` path.
+    let mut allowed_http_hook_urls: Option<Vec<String>> = None;
+    let mut http_hook_allowed_env_vars: Option<Vec<String>> = None;
+    let concat_dedup_str_array =
+        |acc: &mut Option<Vec<String>>, val: Option<&serde_json::Value>| {
+            let Some(arr) = val.and_then(serde_json::Value::as_array) else {
+                return;
+            };
+            let out = acc.get_or_insert_with(Vec::new);
+            for s in arr.iter().filter_map(|x| x.as_str().map(String::from)) {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        };
     for (path, source) in settings_sources {
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
             match hooks::parse_hooks_from_settings_json(&raw, source) {
@@ -867,6 +887,13 @@ pub async fn build_mobile_inner(
                     path = %path.display(),
                     "engine-mobile: skipping malformed settings hooks"
                 ),
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                concat_dedup_str_array(&mut allowed_http_hook_urls, v.get("allowedHttpHookUrls"));
+                concat_dedup_str_array(
+                    &mut http_hook_allowed_env_vars,
+                    v.get("httpHookAllowedEnvVars"),
+                );
             }
         }
     }
@@ -898,7 +925,10 @@ pub async fn build_mobile_inner(
         .with_process_runner(process.clone(), sandbox.clone())
         .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
             api_client.clone(),
-        ))),
+        )))
+        // (H-BIN-12) Gate outbound HTTP-hook URLs + intersect the per-hook env
+        // allowlist from the merged settings; `(None, None)` = no restriction.
+        .with_http_hook_policy(allowed_http_hook_urls, http_hook_allowed_env_vars),
     );
 
     // P0.2: the production FFI entry points inject

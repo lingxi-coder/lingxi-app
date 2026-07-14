@@ -240,6 +240,10 @@ impl NotificationWatcher {
             }
         }
         let armed = registry.has_hooks_for(&hooks::events::HookEventType::Notification);
+        // H-BIN-12: no `.with_http_hook_policy(...)` here — this executor only
+        // fires `Notification` hooks, and the HTTP arm supports PreToolUse /
+        // PostToolUse only (`build_envelope_body`), so it never dispatches an
+        // HTTP request. The default (no-restriction) policy is therefore correct.
         let executor = armed.then(|| {
             Arc::new(
                 hooks::HookExecutorImpl::new(

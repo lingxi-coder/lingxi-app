@@ -64,6 +64,19 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         aws_auth_refresh: next.aws_auth_refresh.or(prev.aws_auth_refresh),
         aws_credential_export: next.aws_credential_export.or(prev.aws_credential_export),
         gcp_auth_refresh: next.gcp_auth_refresh.or(prev.gcp_auth_refresh),
+        // HTTP-hook security allowlists (H-BIN-12) — both array-merge
+        // (concat-dedup): CC `settingsMergeCustomizer` (`ipe`) concat-dedups
+        // every array except `fallbackModel`, and both describe strings say
+        // "Arrays merge across settings sources (same semantics as
+        // allowedMcpServers)."
+        allowed_http_hook_urls: concat_dedup(
+            prev.allowed_http_hook_urls,
+            next.allowed_http_hook_urls,
+        ),
+        http_hook_allowed_env_vars: concat_dedup(
+            prev.http_hook_allowed_env_vars,
+            next.http_hook_allowed_env_vars,
+        ),
         // Enterprise login/version managed-policy keys (H-BIN-09) — all
         // scalar-override (later source wins); none is a concat/deep-merge
         // field (CC `settingsMergeCustomizer` special-cases only specific
@@ -387,6 +400,39 @@ mod tests {
         // Keys next left unset survive from prev.
         assert_eq!(merged.parent_settings_behavior.as_deref(), Some("first-wins"));
         assert_eq!(merged.force_remote_settings_refresh, Some(false));
+    }
+
+    #[test]
+    fn http_hook_security_keys_concat_dedup_across_tiers() {
+        // H-BIN-12: both HTTP-hook allowlists concat-dedup across settings
+        // sources (CC `settingsMergeCustomizer` concat-dedups every array except
+        // `fallbackModel`). A pattern/env-var declared in the lower tier survives
+        // and the higher tier's entries append (deduped).
+        let prev = SettingsJson {
+            allowed_http_hook_urls: Some(vec![s("https://a.example.com/*"), s("https://shared/*")]),
+            http_hook_allowed_env_vars: Some(vec![s("TOKEN_A"), s("SHARED")]),
+            ..Default::default()
+        };
+        let next = SettingsJson {
+            allowed_http_hook_urls: Some(vec![s("https://shared/*"), s("https://b.example.com/*")]),
+            http_hook_allowed_env_vars: Some(vec![s("SHARED"), s("TOKEN_B")]),
+            ..Default::default()
+        };
+        let merged = merge(prev, next);
+        assert_eq!(
+            merged.allowed_http_hook_urls.as_deref(),
+            Some(
+                &[
+                    s("https://a.example.com/*"),
+                    s("https://shared/*"),
+                    s("https://b.example.com/*")
+                ][..]
+            )
+        );
+        assert_eq!(
+            merged.http_hook_allowed_env_vars.as_deref(),
+            Some(&[s("TOKEN_A"), s("SHARED"), s("TOKEN_B")][..])
+        );
     }
 
     #[test]

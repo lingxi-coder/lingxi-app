@@ -68,6 +68,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tool_api::AnthropicRequestBuilder;
 use tool_api::BuiltinToolContext;
+use tool_api::SessionCwd;
 use traits::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
@@ -951,6 +952,13 @@ pub async fn build_mobile_inner(
     // note) — cloned into the file tools' `BuiltinToolContext` and the SAME
     // `Arc` handed to the orchestrator via `.with_read_state_map(...)` below.
     let read_state_map = tool_api::read_file_state::new_read_file_state_map();
+    // Bound (not inlined) so the SAME `Arc<SessionCwd>` can also be handed to
+    // the orchestrator below via `.with_session_cwd(...)` (Task 5 — worktree
+    // 206 session-cwd plumbing). Mobile never registers the worktree tool
+    // (see above), so this cell never actually swaps today; wiring it keeps
+    // the orchestrator's cwd source consistent with desktop and future-proofs
+    // a mobile worktree tool without a second staleness bug to fix later.
+    let session_cwd = SessionCwd::new(cwd.clone(), vec![cwd.clone()]);
     let tool_ctx = BuiltinToolContext {
         // FILE.B / P1-06: file tools share the ONE per-session read-state map
         // (see engine-desktop note).
@@ -961,7 +969,6 @@ pub async fn build_mobile_inner(
         read_deny_exclude_globs,
         fs,
         bus: analytics_bus.clone(),
-        trusted_dirs: vec![cwd.clone()],
         process,
         sandbox,
         clock: clock.clone(),
@@ -993,7 +1000,12 @@ pub async fn build_mobile_inner(
             .clone()
             .expect("boot permission policy is built unconditionally above"),
         sandbox_available: false,
-        workspace: cwd.clone(),
+        session_cwd: session_cwd.clone(),
+        // Worktree 206 parity (Task 8): a fresh, empty (`None`) session
+        // record. Mobile never registers the worktree tool (see the
+        // `session_cwd` note above), so this cell stays inert in production —
+        // wired for shape-consistency with desktop.
+        worktree_session: tool_api::worktree_session::new_worktree_session_cell(),
         platform: if cfg!(target_os = "macos") {
             SandboxPlatform::Mac
         } else {
@@ -1177,7 +1189,14 @@ pub async fn build_mobile_inner(
     // P1-06: share the ONE `readFileState` map with the file tools (created
     // above) so post-compact file restore + staleness consumers see a tool's
     // `readFileState.set` — mirror of desktop.
-    .with_read_state_map(read_state_map);
+    .with_read_state_map(read_state_map)
+    // Task 5 (worktree 206 session-cwd plumbing): share the SAME
+    // `Arc<SessionCwd>` the tool context reads, so the system prompt's env
+    // block and the conditional-rules memory cache stay consistent with the
+    // tool-facing cwd source (mobile mirror of desktop's
+    // `.with_session_cwd(session_cwd)`; inert today — see the binding note
+    // above).
+    .with_session_cwd(session_cwd);
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);

@@ -27,11 +27,13 @@ pub mod progress;
 pub mod read_file_state;
 pub mod registry;
 pub mod sandbox_runner;
+pub mod session_cwd;
 pub mod tool_invoker_impl;
 pub mod tool_search_view;
 pub mod tool_trait;
 pub mod util;
 pub mod wire;
+pub mod worktree_session;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -54,5 +56,7 @@ pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolPro
 pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;
 pub use sandbox_runner::{default_sandbox_runner, LegacyWrapRunner, SandboxRunner};
+pub use session_cwd::SessionCwd;
 pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_trait::*;
+pub use worktree_session::{new_worktree_session_cell, WorktreeSession, WorktreeSessionCell};

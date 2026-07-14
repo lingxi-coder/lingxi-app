@@ -239,7 +239,7 @@ impl Tool for CronListTool {
         // (`ctx ? allTasks.filter(t => t.agentId === ctx.agentId) : allTasks`).
         // There is no teammate context in this Rust seam, so every persisted
         // job is listed.
-        let jobs = read_all_jobs(&self.ctx.workspace).await;
+        let jobs = read_all_jobs(&self.ctx.cwd()).await;
         let content = render_result(&jobs);
 
         let mut md: LogEventMetadata = HashMap::new();

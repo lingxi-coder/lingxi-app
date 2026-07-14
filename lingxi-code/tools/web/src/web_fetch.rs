@@ -48,11 +48,13 @@ use traits::http::HttpError;
 /// separately capped at [`WEBFETCH_MAX_MARKDOWN_LEN`].
 pub const WEBFETCH_MAX_TRANSFER_BYTES: usize = 10 * 1024 * 1024;
 
-/// Maximum length (in chars) of the converted markdown before it is truncated
-/// with [`WEBFETCH_TRUNCATION_SUFFIX`] — byte-locked to claude-code
-/// `MAX_MARKDOWN_LENGTH` (`WebFetchTool/utils.ts:128`). TS slices the markdown
-/// string by UTF-16 code units (`String.prototype.slice`); this port slices by
-/// Unicode scalar (`char`) — identical for the BMP text WebFetch returns.
+/// Maximum length of the converted markdown, in UTF-16 code units, before it is
+/// truncated with [`WEBFETCH_TRUNCATION_SUFFIX`] — byte-locked to claude-code
+/// `MAX_MARKDOWN_LENGTH` (`WebFetchTool/utils.ts:128`). TS measures/slices the
+/// markdown by UTF-16 code units (`String.prototype.length`/`.slice`); this port
+/// matches that via `encode_utf16().count()` at every site (the raw fast-path
+/// below, [`body_exceeds_markdown_cap`], and `markdown::truncate_markdown`) — NOT
+/// `char` count, which diverges for astral (emoji) / multibyte content.
 pub const WEBFETCH_MAX_MARKDOWN_LEN: usize = 100_000;
 
 /// Maximum same-host redirect hops before erroring — byte-locked to claude-code
@@ -510,10 +512,12 @@ impl WebFetchTool {
         content: &str,
         prompt: Option<&str>,
     ) -> String {
-        // Raw fast-path: preapproved + text/markdown + under the 100k char cap.
+        // Raw fast-path: preapproved + text/markdown + under the 100k-UTF-16-unit
+        // cap. Measured by `encode_utf16().count()` to match TS `content.length <
+        // Cut` (UTF-16), consistent with the truncation cap below.
         if is_preapproved
             && content_type.contains("text/markdown")
-            && content.chars().count() < WEBFETCH_MAX_MARKDOWN_LEN
+            && content.encode_utf16().count() < WEBFETCH_MAX_MARKDOWN_LEN
         {
             return content.to_string();
         }
@@ -575,7 +579,7 @@ impl WebFetchTool {
         let stem = crate::persist::persisted_filename(unix_ms, seed);
         let output_dir = self
             .ctx
-            .workspace
+            .cwd()
             .join(branding::DOT_DIR)
             .join("tool-results");
         match crate::persist::persist_binary_content(body, content_type, &stem, &output_dir) {

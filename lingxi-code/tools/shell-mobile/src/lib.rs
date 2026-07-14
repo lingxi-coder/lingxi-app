@@ -281,7 +281,7 @@ impl Tool for ShellMobileTool {
         let pcmd = ProcessCommand {
             command: ANDROID_SHELL.to_string(),
             args: vec!["-c".to_string(), command],
-            cwd: Some(self.ctx.workspace.clone()),
+            cwd: Some(self.ctx.cwd()),
             env: HashMap::new(),
             timeout: Some(Duration::from_millis(effective_timeout)),
             stdin: None,

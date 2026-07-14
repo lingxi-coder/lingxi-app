@@ -280,6 +280,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // config; the CLI `resolve_desktop_config` is the parity surface.
         default_model_env_pinned: false,
         session_thinking: Default::default(),
+        // The Electron bridge has no `-w`/`--worktree` flag; inert boot (no
+        // worktree launch).
+        worktree_launch: None,
+        // The Electron bridge has no `--tmux` flag; inert (no tmux session).
+        tmux_launch: None,
     }
 }
 
@@ -636,6 +641,8 @@ mod tests {
             initial_effort: None,
             default_model_env_pinned: false,
             session_thinking: Default::default(),
+            worktree_launch: None,
+            tmux_launch: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

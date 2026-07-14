@@ -296,13 +296,17 @@ impl Tool for PowerShellTool {
             .get("dangerouslyDisableSandbox")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // Resolve the session cwd ONCE for this command (worktree parity
+        // plan, Task 2) — reused below for the sandbox wrap and the spawned
+        // process's `cwd`, so both read the same swap generation.
+        let workspace = self.ctx.cwd();
         let decision = should_use_sandbox(
             &cmd_str,
             self.ctx.sandbox_available && cfg!(not(target_os = "windows")),
             dangerously_disable_sandbox,
             sandbox_runtime.are_unsandboxed_commands_allowed(),
             &sandbox_runtime,
-            self.ctx.workspace.clone(),
+            workspace.clone(),
         );
         let final_cmd = match decision {
             SandboxDecision::NoSandbox => cmd_str.clone(),
@@ -320,7 +324,7 @@ impl Tool for PowerShellTool {
                         &sandbox_runtime,
                         self.ctx.platform,
                         Some(&bin_shell),
-                        Some(self.ctx.workspace.as_path()),
+                        Some(workspace.as_path()),
                     )
                     .await
                 {
@@ -338,7 +342,7 @@ impl Tool for PowerShellTool {
         let pcmd = SbxCommand {
             command: bin.display().to_string(),
             args: vec!["-Command".into(), final_cmd],
-            cwd: Some(self.ctx.workspace.clone()),
+            cwd: Some(workspace.clone()),
             env: HashMap::new(),
             timeout: Some(Duration::from_millis(timeout_ms)),
             stdin: None,
@@ -637,7 +641,8 @@ mod tests {
         // Force the Sandbox branch: available sandbox + no excluded commands.
         ctx.sandbox_available = true;
         ctx.sandbox_runtime.excluded_commands = vec![];
-        ctx.workspace = std::path::PathBuf::from("/tmp");
+        ctx.session_cwd
+            .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
         ctx.sandbox_runner = runner.clone();
         let tool = PowerShellTool::new(ctx);
 

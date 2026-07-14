@@ -137,12 +137,39 @@ pub const ENTER_WORKTREE_COMPLETED: &str = "tengu_tool_enter_worktree_completed"
 /// `tengu_tool_enter_worktree_failed` — `EnterWorktreeTool` errored (bad slug, git, IO) (M4-04).
 pub const ENTER_WORKTREE_FAILED: &str = "tengu_tool_enter_worktree_failed";
 
+/// `tengu_worktree_created` — 2.1.206 `EnterWorktree` byte-exact success event
+/// fired when a NEW worktree was created (`SCd.call`'s
+/// `N(e.path?"tengu_worktree_entered_existing":"tengu_worktree_created",{mid_session:true})`,
+/// the `!e.path` branch). Distinct from the M4-04 lifecycle triad above
+/// (`ENTER_WORKTREE_STARTED`/`COMPLETED`/`FAILED`), which the port keeps for its
+/// own started/completed/failed bookkeeping; this is the extra byte-exact
+/// single event the 206 oracle actually emits, fired ADDITIONALLY on success.
+pub const WORKTREE_CREATED: &str = "tengu_worktree_created";
+/// `tengu_worktree_entered_existing` — 2.1.206 `EnterWorktree` byte-exact
+/// success event fired when switching into an ALREADY-EXISTING worktree (the
+/// `e.path` branch, both the pinned-cwd/subagent-isolation path and the normal
+/// mid-session path in `SCd.call`).
+pub const WORKTREE_ENTERED_EXISTING: &str = "tengu_worktree_entered_existing";
+
 /// `tengu_tool_exit_worktree_started` — `ExitWorktreeTool` began (M4-04).
 pub const EXIT_WORKTREE_STARTED: &str = "tengu_tool_exit_worktree_started";
 /// `tengu_tool_exit_worktree_completed` — `ExitWorktreeTool` removed a worktree (M4-04).
 pub const EXIT_WORKTREE_COMPLETED: &str = "tengu_tool_exit_worktree_completed";
 /// `tengu_tool_exit_worktree_failed` — `ExitWorktreeTool` errored (M4-04).
 pub const EXIT_WORKTREE_FAILED: &str = "tengu_tool_exit_worktree_failed";
+
+/// `tengu_worktree_kept` — 2.1.206 `ExitWorktree` byte-exact success event
+/// fired when `action:"keep"` succeeded (the worktree + branch are left on
+/// disk). Distinct from the M4-04 lifecycle triad above
+/// (`EXIT_WORKTREE_STARTED`/`COMPLETED`/`FAILED`), which the port keeps for
+/// its own started/completed/failed bookkeeping; this is the extra
+/// byte-exact single event the 206 oracle actually emits, fired ADDITIONALLY
+/// on success.
+pub const WORKTREE_KEPT: &str = "tengu_worktree_kept";
+/// `tengu_worktree_removed` — 2.1.206 `ExitWorktree` byte-exact success event
+/// fired when `action:"remove"` succeeded (the worktree + branch were
+/// deleted).
+pub const WORKTREE_REMOVED: &str = "tengu_worktree_removed";
 
 // ===== M4-05 Agent + Task tools (24 events, 8 tools × 3 lifecycle stages) =====
 
@@ -423,9 +450,13 @@ pub(crate) const NAMES: &[&str] = &[
     ENTER_WORKTREE_STARTED,
     ENTER_WORKTREE_COMPLETED,
     ENTER_WORKTREE_FAILED,
+    WORKTREE_CREATED,
+    WORKTREE_ENTERED_EXISTING,
     EXIT_WORKTREE_STARTED,
     EXIT_WORKTREE_COMPLETED,
     EXIT_WORKTREE_FAILED,
+    WORKTREE_KEPT,
+    WORKTREE_REMOVED,
     // M4-05 Agent + Task tools (24 events, 8 tools × 3 lifecycle stages)
     AGENT_STARTED,
     AGENT_COMPLETED_M4_05,
@@ -559,6 +590,12 @@ mod m4_04_workflow_event_tests {
     }
 
     #[test]
+    fn worktree_206_byte_exact_events_are_locked() {
+        assert_eq!(WORKTREE_CREATED, "tengu_worktree_created");
+        assert_eq!(WORKTREE_ENTERED_EXISTING, "tengu_worktree_entered_existing");
+    }
+
+    #[test]
     fn exit_worktree_constants_are_locked() {
         assert_eq!(EXIT_WORKTREE_STARTED, "tengu_tool_exit_worktree_started");
         assert_eq!(
@@ -566,6 +603,12 @@ mod m4_04_workflow_event_tests {
             "tengu_tool_exit_worktree_completed"
         );
         assert_eq!(EXIT_WORKTREE_FAILED, "tengu_tool_exit_worktree_failed");
+    }
+
+    #[test]
+    fn exit_worktree_206_byte_exact_events_are_locked() {
+        assert_eq!(WORKTREE_KEPT, "tengu_worktree_kept");
+        assert_eq!(WORKTREE_REMOVED, "tengu_worktree_removed");
     }
 
     #[test]
@@ -580,9 +623,13 @@ mod m4_04_workflow_event_tests {
             ENTER_WORKTREE_STARTED,
             ENTER_WORKTREE_COMPLETED,
             ENTER_WORKTREE_FAILED,
+            WORKTREE_CREATED,
+            WORKTREE_ENTERED_EXISTING,
             EXIT_WORKTREE_STARTED,
             EXIT_WORKTREE_COMPLETED,
             EXIT_WORKTREE_FAILED,
+            WORKTREE_KEPT,
+            WORKTREE_REMOVED,
         ];
         for name in workflow {
             assert!(
@@ -592,8 +639,8 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            131,
-            "M3-06 34 (40 baseline − 6 grep/glob removed to match claude-code) + M4-02 9 + M4-03 3 + M4-04 12 (TodoWrite 3 removed for 2.1.195 parity) + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 131 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
+            135,
+            "M3-06 34 (40 baseline − 6 grep/glob removed to match claude-code) + M4-02 9 + M4-03 3 + M4-04 12 (TodoWrite 3 removed for 2.1.195 parity) + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 + worktree-206-parity 2 (WORKTREE_CREATED/WORKTREE_ENTERED_EXISTING) + exit-worktree-206-parity 2 (WORKTREE_KEPT/WORKTREE_REMOVED) = 135 (FileReadTool analytics 4 live in FILE_READ_ANALYTICS_NAMES, concatenated at the registry tail)"
         );
     }
 }

@@ -66,6 +66,33 @@ pub fn canonicalize_and_validate(
     }
 }
 
+/// Resolve `path` against `cwd` when it is relative, leaving an already
+/// absolute path untouched.
+///
+/// `std::fs::canonicalize` (used internally by
+/// [`canonicalize_and_validate`]) resolves a RELATIVE path against the
+/// process's actual `current_dir()` — the real OS working directory, which
+/// is set once at process boot and is NOT what `EnterWorktree`/`ExitWorktree`
+/// swap. Callers that want a relative `file_path`/`path` tool argument to
+/// track the session's CURRENT [`crate::session_cwd::SessionCwd`] (so it
+/// lands under a worktree after a swap, not the frozen boot cwd) must
+/// resolve it through this function — using `ctx.cwd()` — BEFORE handing the
+/// path to [`canonicalize_and_validate`] or any other OS-relative-resolving
+/// call.
+///
+/// An absolute input is returned unchanged, so this is a no-op for every
+/// existing absolute-path caller (Read/Write/Edit document `file_path` as
+/// "must be an absolute path"; this only changes behavior for the relative
+/// case those docs advise against but do not enforce).
+#[must_use]
+pub fn resolve_against_cwd(path: PathBuf, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
 fn canonicalize_with_fallback(path: &Path) -> Result<PathBuf, PathValidationError> {
     if let Ok(p) = std::fs::canonicalize(path) {
         Ok(p)
@@ -180,6 +207,23 @@ mod tests {
         let trusted_canon = std::fs::canonicalize(tmp.path()).unwrap();
         assert!(canon.starts_with(&trusted_canon));
         assert!(canon.ends_with("future.txt"));
+    }
+
+    #[test]
+    fn resolve_against_cwd_leaves_absolute_path_untouched() {
+        let cwd = PathBuf::from("/some/worktree");
+        let abs = PathBuf::from("/etc/passwd");
+        assert_eq!(resolve_against_cwd(abs.clone(), &cwd), abs);
+    }
+
+    #[test]
+    fn resolve_against_cwd_joins_relative_path_onto_cwd() {
+        let cwd = PathBuf::from("/some/worktree");
+        let rel = PathBuf::from("src/main.rs");
+        assert_eq!(
+            resolve_against_cwd(rel, &cwd),
+            PathBuf::from("/some/worktree/src/main.rs")
+        );
     }
 
     #[tokio::test]

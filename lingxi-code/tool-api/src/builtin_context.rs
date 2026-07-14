@@ -10,6 +10,8 @@
 use crate::anthropic_request::AnthropicRequestBuilder;
 use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
+use crate::session_cwd::SessionCwd;
+use crate::worktree_session::WorktreeSessionCell;
 use permission::PermissionMode;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
@@ -60,8 +62,6 @@ pub struct BuiltinToolContext {
     pub fs: Arc<dyn FileSystem>,
     /// Telemetry bus (M3-06).
     pub bus: Arc<AnalyticsBus>,
-    /// Canonicalised root directories the agent is allowed to read/write.
-    pub trusted_dirs: Vec<PathBuf>,
     /// Process runner — backs BashTool/PowerShellTool/REPLTool (M4-02).
     pub process: Arc<dyn ProcessRunner>,
     /// Sandbox seam — provides the `prepare`/`bypass_with_audit` constructors
@@ -95,8 +95,28 @@ pub struct BuiltinToolContext {
     pub permission_policy: Arc<permission::PermissionPolicy>,
     /// Whether the host has a working sandbox backend right now (M4-02).
     pub sandbox_available: bool,
-    /// Project workspace path (M4-02).
-    pub workspace: PathBuf,
+    /// Switchable session cwd + trusted-directory set (worktree parity plan,
+    /// Task 2). Replaces the former frozen `workspace: PathBuf` +
+    /// `trusted_dirs: Vec<PathBuf>` fields — every tool now reads the current
+    /// cwd/trusted set through [`Self::cwd`] / [`Self::trusted_dirs`] /
+    /// [`Self::cwd_and_trusted`] instead of a frozen field, so a later
+    /// `EnterWorktree`/`ExitWorktree` swap (not yet wired) is observed by
+    /// every tool without re-plumbing. Until something calls
+    /// `session_cwd.swap(..)`, `cwd()`/`trusted_dirs()` return exactly the
+    /// boot values this was constructed with — byte-identical to the old
+    /// frozen fields.
+    pub session_cwd: Arc<SessionCwd>,
+    /// Shared record of the single active worktree the session entered via
+    /// `EnterWorktree` (worktree 206 parity plan, Task 8). `None` when no
+    /// worktree is active — the INERT default at every construction site.
+    /// `EnterWorktreeTool` writes `Some(WorktreeSession { .. })` here on a
+    /// successful create/enter (capturing the pre-swap cwd alongside the new
+    /// worktree's path/branch/base-commit); `ExitWorktreeTool` reads it to
+    /// restore [`crate::worktree_session::WorktreeSession::original_cwd`] and
+    /// decide keep/remove, then clears it back to `None`. Shared behind an
+    /// `Arc<Mutex<..>>` (not `ArcSwap`, unlike [`Self::session_cwd`]) because
+    /// both tools need the WHOLE record, not a hot-path single-field read.
+    pub worktree_session: WorktreeSessionCell,
     /// Detected platform — drives `wrap_with_sandbox` branch (M4-02).
     pub platform: Platform,
     /// HTTP transport for web tools (WebFetch + WebSearch) (M4-03). M1 trait;
@@ -282,6 +302,34 @@ pub struct BuiltinToolContext {
 }
 
 impl BuiltinToolContext {
+    /// Current session cwd (worktree parity plan, Task 2). Reads through
+    /// [`SessionCwd::cwd`] — byte-identical to the old frozen `workspace`
+    /// field until a worktree tool calls `session_cwd.swap(..)`.
+    #[must_use]
+    pub fn cwd(&self) -> PathBuf {
+        self.session_cwd.cwd()
+    }
+
+    /// Current trusted-directory set (worktree parity plan, Task 2). Reads
+    /// through [`SessionCwd::trusted_dirs`] — byte-identical to the old
+    /// frozen `trusted_dirs` field until a worktree tool calls
+    /// `session_cwd.swap(..)`.
+    #[must_use]
+    pub fn trusted_dirs(&self) -> Vec<PathBuf> {
+        self.session_cwd.trusted_dirs()
+    }
+
+    /// Current `(cwd, trusted_dirs)` pair from a SINGLE `load()` of the
+    /// shared [`SessionCwd`] cell (worktree parity plan, Task 2). Prefer this
+    /// over calling [`Self::cwd`] and [`Self::trusted_dirs`] back to back at
+    /// any call site that needs BOTH in the same operation — it guarantees
+    /// the pair comes from the same swap generation, never straddling a
+    /// concurrent swap.
+    #[must_use]
+    pub fn cwd_and_trusted(&self) -> (PathBuf, Vec<PathBuf>) {
+        self.session_cwd.snapshot()
+    }
+
     /// The sandbox config the shell tools should actually use: the frozen
     /// [`Self::sandbox_runtime`] with its `enabled` flag overridden live by the
     /// `/sandbox` toggle cell when one is wired.

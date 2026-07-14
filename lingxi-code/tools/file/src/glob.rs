@@ -145,13 +145,16 @@ impl GlobTool {
         self
     }
 
-    /// The effective live cwd: the injected cell's value if present, else the
-    /// static `ctx.workspace` (claude-code `Ct()` fallback for the no-cell case).
+    /// The effective live cwd: the injected cell's value if present (OURS
+    /// P2-08 — tracks a foreground Bash `cd`), else the session cwd
+    /// [`BuiltinToolContext::cwd`] (THEIRS worktree-206 — the boot cwd until an
+    /// `EnterWorktree`/`ExitWorktree` swaps `session_cwd`). Both are the
+    /// claude-code `Ct()` fallback; they coincide at boot with no cell injected.
     fn cwd_now(&self) -> std::path::PathBuf {
         self.live_cwd
             .as_ref()
             .map(|c| c.lock().unwrap().clone())
-            .unwrap_or_else(|| self.ctx.workspace.clone())
+            .unwrap_or_else(|| self.ctx.cwd())
     }
 }
 
@@ -241,6 +244,12 @@ impl Tool for GlobTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // `trusted_dirs` snapshot for this whole call (canonicalize gate). The
+        // effective cwd (base fallback + relativize) comes from `cwd_now()`,
+        // which prefers the injected live-cwd cell (OURS P2-08, tracks Bash
+        // `cd`) and otherwise falls back to `ctx.cwd()` (THEIRS session_cwd).
+        let trusted = self.ctx.trusted_dirs();
+
         let pattern = input
             .get("pattern")
             .and_then(Value::as_str)
@@ -275,7 +284,7 @@ impl Tool for GlobTool {
         };
         let pattern = pattern.as_str();
 
-        let canon_base = match canonicalize_and_validate(&base, &self.ctx.trusted_dirs) {
+        let canon_base = match canonicalize_and_validate(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
@@ -556,6 +565,41 @@ mod tests {
         assert_eq!(result.data["countIsComplete"], true);
         // `durationMs` is always present (a non-negative integer).
         assert!(result.data["durationMs"].is_u64());
+    }
+
+    /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
+    /// now carries `session_cwd: Arc<SessionCwd>` instead of frozen
+    /// `workspace`/`trusted_dirs` fields. With nothing ever calling
+    /// `session_cwd.swap(..)` (no `EnterWorktree` in this test), `ctx.cwd()`
+    /// must equal the boot cwd it was constructed with, and `Glob` must
+    /// return the SAME result it did before the migration — proving the
+    /// accessor indirection is byte-identical when inert.
+    #[tokio::test]
+    async fn no_swap_is_identical() {
+        let _env = lock_and_clear_glob_env().await;
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("c.txt"), "x").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+
+        // No `session_cwd.swap(..)` call anywhere in this test — `cwd()` must
+        // still read back exactly the boot value `make_ctx` constructed.
+        assert_eq!(ctx.cwd(), tmp.path());
+        assert_eq!(ctx.trusted_dirs(), vec![tmp.path().to_path_buf()]);
+
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        // Byte-identical to `matches_rs_files` above (pre-migration behavior).
+        let matches = result.data["filenames"].as_array().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(result.data["numFiles"], 2);
+        assert_eq!(result.data["truncated"], false);
+        assert_eq!(result.data["totalMatches"], 2);
+        assert_eq!(result.data["countIsComplete"], true);
     }
 
     /// Read(deny) exclude globs (`glob.ts` `lLa()`): a populated

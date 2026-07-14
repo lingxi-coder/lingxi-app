@@ -426,13 +426,16 @@ impl GrepTool {
         self
     }
 
-    /// The effective live cwd: the injected cell's value if present, else the
-    /// static `ctx.workspace` (claude-code `Ct()` fallback for the no-cell case).
+    /// The effective live cwd: the injected cell's value if present (OURS
+    /// P2-08 — tracks a foreground Bash `cd`), else the session cwd
+    /// [`BuiltinToolContext::cwd`] (THEIRS worktree-206 — the boot cwd until an
+    /// `EnterWorktree`/`ExitWorktree` swaps `session_cwd`). Both are the
+    /// claude-code `Ct()` fallback; they coincide at boot with no cell injected.
     fn cwd_now(&self) -> std::path::PathBuf {
         self.live_cwd
             .as_ref()
             .map(|c| c.lock().unwrap().clone())
-            .unwrap_or_else(|| self.ctx.workspace.clone())
+            .unwrap_or_else(|| self.ctx.cwd())
     }
 }
 
@@ -541,6 +544,12 @@ impl Tool for GrepTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // `trusted_dirs` snapshot for this whole call (canonicalize gate). The
+        // effective cwd (base fallback + relativize) comes from `cwd_now()`,
+        // which prefers the injected live-cwd cell (OURS P2-08, tracks Bash
+        // `cd`) and otherwise falls back to `ctx.cwd()` (THEIRS session_cwd).
+        let trusted = self.ctx.trusted_dirs();
+
         // --- Arg parsing (GrepTool.ts:310-326) ---
         let pattern = input
             .get("pattern")
@@ -601,7 +610,7 @@ impl Tool for GrepTool {
 
         let started = Instant::now();
 
-        let canon_base = match canonicalize_and_validate(&base, &self.ctx.trusted_dirs) {
+        let canon_base = match canonicalize_and_validate(&base, &trusted) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &base).await;
@@ -1050,6 +1059,36 @@ mod tests {
         assert!(short.contains("\"function\\s+\\w+\""));
         assert!(short.contains("escape literal braces (`interface\\{\\}`)."));
         assert!(short.ends_with("- `multiline: true` for patterns that span lines."));
+    }
+
+    /// Worktree parity plan (Task 2) INERT INVARIANT: `BuiltinToolContext`
+    /// now carries `session_cwd: Arc<SessionCwd>` instead of frozen
+    /// `workspace`/`trusted_dirs` fields. With nothing ever calling
+    /// `session_cwd.swap(..)` (no `EnterWorktree` in this test), `ctx.cwd()`
+    /// must equal the boot cwd it was constructed with, and `Grep` must
+    /// return the SAME result it did before the migration.
+    #[tokio::test]
+    async fn no_swap_is_identical() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn foo() {}\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+
+        // No `session_cwd.swap(..)` call anywhere in this test — `cwd()` must
+        // still read back exactly the boot value `make_ctx` constructed.
+        assert_eq!(ctx.cwd(), tmp.path());
+        assert_eq!(ctx.trusted_dirs(), vec![tmp.path().to_path_buf()]);
+
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "fn", "output_mode": "count" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["numMatches"], 1);
+        assert_eq!(result.data["numFiles"], 1);
     }
 
     /// Count mode must report the TRUE per-file + total count, with NO per-file

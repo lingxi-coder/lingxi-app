@@ -23,7 +23,9 @@ use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
-use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
+use tool_api::util::path_validation::{
+    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd,
+};
 use tool_api::BuiltinToolContext;
 
 /// Tool name byte-lock — matches claude-code tool registry.
@@ -466,13 +468,18 @@ impl Tool for FileEditTool {
         // sandbox normalization.
         let is_unc = file_path.starts_with("\\\\") || file_path.starts_with("//");
 
-        let path = PathBuf::from(file_path);
+        // Worktree parity plan (Task 3): a RELATIVE `file_path` resolves
+        // against the CURRENT session cwd (`ctx.cwd()`, switchable by
+        // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
+        // `std::fs::canonicalize` would otherwise consult below. An absolute
+        // `file_path` (the documented/expected case) is unaffected.
+        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
         // `canonicalize_and_validate` tolerates a nonexistent target (it
         // canonicalizes the parent) so an empty `old_string` can create a file.
-        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
+        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs()) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;

@@ -699,7 +699,7 @@ impl Tool for MCPTool {
 
                 let output_dir = self
                     .ctx
-                    .workspace
+                    .cwd()
                     .join(branding::DOT_DIR)
                     .join("tool-results");
                 let (now_millis, rand_tag) = persist_id_seed();
@@ -1347,7 +1347,7 @@ impl Tool for ReadMcpResourceTool {
         // `blobSavedTo` paths. Mirrors `ReadMcpResourceTool.ts:95-143`.
         let output_dir = self
             .ctx
-            .workspace
+            .cwd()
             .join(branding::DOT_DIR)
             .join("tool-results");
         match client.read_resource_rich(&uri, &output_dir).await {

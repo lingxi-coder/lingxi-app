@@ -1766,7 +1766,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             vec![workspace.clone()],
         );
         ctx.http = http.clone() as Arc<dyn HttpTransport>;
-        ctx.workspace = workspace;
+        ctx.session_cwd.swap(workspace, ctx.trusted_dirs());
         (ctx, http, sink)
     }
 

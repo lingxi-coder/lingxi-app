@@ -266,7 +266,7 @@ Usage:\n\
             ));
         }
 
-        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
+        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs()) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;

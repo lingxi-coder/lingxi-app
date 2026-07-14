@@ -366,7 +366,7 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
         let runner = Arc::new(PromptShellRunner {
             process: self.ctx.process.clone(),
             sandbox: self.ctx.sandbox.clone(),
-            workspace: self.ctx.workspace.clone(),
+            workspace: self.ctx.cwd(),
             sandbox_available: self.ctx.sandbox_available,
             sandbox_runtime: self.ctx.sandbox_runtime.clone(),
             platform: self.ctx.platform,

@@ -29,7 +29,9 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use tool_api::util::ids::ulid_or_uuid;
-use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
+use tool_api::util::path_validation::{
+    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd,
+};
 use tool_api::BuiltinToolContext;
 
 /// Maximum file size FileReadTool will load. Spec §7 lock (256 KB).
@@ -893,13 +895,16 @@ impl FileReadTool {
         self
     }
 
-    /// The effective live cwd: the injected cell's value if present, else the
-    /// static `ctx.workspace` (claude-code `Ct()` fallback for the no-cell case).
+    /// The effective live cwd: the injected cell's value if present (OURS
+    /// P2-08 — tracks a foreground Bash `cd`), else the session cwd
+    /// [`BuiltinToolContext::cwd`] (THEIRS worktree-206 — the boot cwd until an
+    /// `EnterWorktree`/`ExitWorktree` swaps `session_cwd`). Both are the
+    /// claude-code `Ct()` fallback; they coincide at boot with no cell injected.
     fn cwd_now(&self) -> std::path::PathBuf {
         self.live_cwd
             .as_ref()
             .map(|c| c.lock().unwrap().clone())
-            .unwrap_or_else(|| self.ctx.workspace.clone())
+            .unwrap_or_else(|| self.ctx.cwd())
     }
 
     async fn emit_started(&self, invocation_id: &str, path: &std::path::Path) {
@@ -1545,7 +1550,12 @@ impl Tool for FileReadTool {
         let limit = input_limit;
 
         let started = Instant::now();
-        let path = PathBuf::from(file_path);
+        // Worktree parity plan (Task 3): a RELATIVE `file_path` resolves
+        // against the CURRENT session cwd (`ctx.cwd()`, switchable by
+        // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
+        // `std::fs::canonicalize` would otherwise consult below. An absolute
+        // `file_path` (the documented/expected case) is unaffected.
+        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
         self.emit_started(&invocation_id, &path).await;
 
         // #11: refuse blocking device/special files (claude-code `$3p` in
@@ -1567,7 +1577,12 @@ impl Tool for FileReadTool {
         // branch; the event NAME is still registered). `None` => never fires.
         self.emit_file_read_limits_override(None).await;
 
-        let mut canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
+        // One snapshot of trusted_dirs for both containment checks below (the
+        // primary path and the macOS screenshot alt-path retry), so they
+        // can't straddle a swap between the two calls.
+        let trusted_dirs = self.ctx.trusted_dirs();
+
+        let mut canon = match canonicalize_and_validate(&path, &trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -1593,9 +1608,7 @@ impl Tool for FileReadTool {
                     // normal read — equivalent to TS retrying `callInner(altPath)`,
                     // since existence was the only thing that failed.
                     if let Some(alt) = get_alternate_screenshot_path(&canon) {
-                        if let Ok(alt_canon) =
-                            canonicalize_and_validate(&alt, &self.ctx.trusted_dirs)
-                        {
+                        if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
                             if let Ok(m) = tokio::fs::metadata(&alt_canon).await {
                                 canon = alt_canon;
                                 m
@@ -2282,6 +2295,67 @@ mod tests {
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_read_started"));
         assert!(names.contains(&"tengu_tool_read_completed"));
+    }
+
+    /// Worktree parity plan (Task 3): a RELATIVE `file_path` must resolve
+    /// against the CURRENT `session_cwd` — so after `EnterWorktree` swaps the
+    /// cwd into a worktree, a relative-path `Read` lands under the worktree,
+    /// NOT the boot cwd (which is what `std::fs::canonicalize` would
+    /// otherwise resolve a relative path against, since it consults the
+    /// frozen OS process cwd, not the switchable session cwd).
+    #[tokio::test]
+    async fn relative_path_read_follows_session_cwd_swap_into_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        let target = wt.join("rel.txt");
+        std::fs::write(&target, "in the worktree\n").unwrap();
+        // A DIFFERENT file with the same relative name at the boot cwd root —
+        // proves the read comes from the worktree, not this one.
+        std::fs::write(tmp.path().join("rel.txt"), "at the boot cwd\n").unwrap();
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        // Swap the session cwd into the worktree subdir (trusting it too),
+        // the way `EnterWorktree` does.
+        ctx.session_cwd.swap(wt.clone(), vec![wt.clone()]);
+        assert_eq!(ctx.cwd(), wt);
+
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": "rel.txt" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.data["file"]["content"], "in the worktree\n",
+            "relative file_path must resolve under the SWAPPED worktree cwd"
+        );
+    }
+
+    /// INERT INVARIANT companion: with no `session_cwd.swap(..)` call, a
+    /// relative `file_path` resolves under the boot cwd exactly as it did
+    /// before this task's fix.
+    #[tokio::test]
+    async fn relative_path_read_resolves_under_boot_cwd_without_swap() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("rel.txt"), "at the boot cwd\n").unwrap();
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        assert_eq!(ctx.cwd(), tmp.path(), "no swap happened in this test");
+
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": "rel.txt" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["file"]["content"], "at the boot cwd\n");
     }
 
     #[tokio::test]
@@ -4042,12 +4116,14 @@ mod tests {
         // at base/repo.
         let fs = make_dummy_fs();
         let bus = Arc::new(AnalyticsBus::new());
-        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+        let ctx = tool_api::test_support::ctx_for_file_tools(
             fs,
             bus,
             vec![base.path().to_path_buf(), repo.clone()],
         );
-        ctx.workspace = repo.clone();
+        // Point the cwd (the `getCwd` analog) at base/repo, keeping BOTH
+        // base and base/repo trusted (so the request under base validates).
+        ctx.session_cwd.swap(repo.clone(), ctx.trusted_dirs());
         let tool = FileReadTool::new(ctx);
 
         let err = tool

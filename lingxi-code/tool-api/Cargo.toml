@@ -21,6 +21,12 @@ telemetry = { path = "../telemetry" }
 sandbox = { path = "../sandbox" }
 mcp = { path = "../mcp" }
 lsp = { path = "../lsp" }
+# SessionCwd (worktree 206 parity): lock-free-read switchable cwd/trusted-dirs
+# cell. Not yet pinned at the workspace level — no other crate uses it.
+# NOTE: `command-api` was intentionally dropped here (§8.1 layering fix) — the
+# shell-expansion seams' real host runner + policy gate live in
+# `tools/skill/src/prompt_shell.rs`, so `tool-api` no longer depends on it.
+arc-swap = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

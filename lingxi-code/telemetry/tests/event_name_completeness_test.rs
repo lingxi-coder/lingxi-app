@@ -69,7 +69,17 @@ fn registry_is_exactly_347_entries() {
     // global-tail block (oauth::AWS_AUTH_NAMES —
     // tengu_awsAuthRefresh_missing_trust,
     // tengu_awsCredentialExport_missing_trust): 341 + 2 = 343.
-    assert_eq!(ALL_EVENT_NAMES.len(), 343);
+    // Worktree 2.1.206 parity added 2 byte-exact single-success events to the
+    // tool block (WORKTREE_CREATED = tengu_worktree_created,
+    // WORKTREE_ENTERED_EXISTING = tengu_worktree_entered_existing — the
+    // `EnterWorktree` byte-exact events ADDITIONAL to the port's own
+    // started/completed/failed lifecycle triad): tool block 131 → 133,
+    // 343 + 2 = 345.
+    // ExitWorktree 2.1.206 parity added 2 more byte-exact single-success
+    // events to the tool block (WORKTREE_KEPT = tengu_worktree_kept,
+    // WORKTREE_REMOVED = tengu_worktree_removed): tool block 133 → 135,
+    // 345 + 2 = 347.
+    assert_eq!(ALL_EVENT_NAMES.len(), 347);
 }
 
 #[test]
@@ -199,20 +209,26 @@ fn category_ordering_preserved() {
     // tengu_tool_grep_* / tengu_tool_glob_* names are dropped, so the tool
     // block is 134 (not 140) and every downstream offset shifts back by -6.
     // D1 strict-parity dropped tengu_tool_todo_write_* (3): tool block 134 -> 131.
-    for n in &ALL_EVENT_NAMES[73..204] {
-        assert!(n.starts_with("tengu_tool_"), "tool block: {n}");
+    // Worktree 2.1.206 parity added 2 byte-exact events (tengu_worktree_created,
+    // tengu_worktree_entered_existing) to the tool block: 131 -> 133, shifting
+    // every downstream offset by +2.
+    // ExitWorktree 2.1.206 parity added 2 more byte-exact events
+    // (tengu_worktree_kept, tengu_worktree_removed) to the tool block:
+    // 133 -> 135, shifting every downstream offset by another +2.
+    for n in &ALL_EVENT_NAMES[73..208] {
+        assert!(n.starts_with("tengu_tool_") || n.starts_with("tengu_worktree_"), "tool block: {n}");
     }
     // D2 strict-parity dropped tengu_cost_recorded: cost block 10 -> 9.
-    for n in &ALL_EVENT_NAMES[204..213] {
+    for n in &ALL_EVENT_NAMES[208..217] {
         assert!(n.starts_with("tengu_cost_"), "cost block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[213..221] {
+    for n in &ALL_EVENT_NAMES[217..225] {
         assert!(n.starts_with("tengu_oauth_"), "oauth block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[221..233] {
+    for n in &ALL_EVENT_NAMES[225..237] {
         assert!(n.starts_with("tengu_memory_"), "memory block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[233..236] {
+    for n in &ALL_EVENT_NAMES[237..240] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
     // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
@@ -222,7 +238,7 @@ fn category_ordering_preserved() {
     // Block size is now 17; release marker still trails. Walk order is
     // fixed by tengu::mod.rs's concat_all (settings → orchestrator →
     // release).
-    for n in &ALL_EVENT_NAMES[236..253] {
+    for n in &ALL_EVENT_NAMES[240..257] {
         assert!(
             n.starts_with("tengu_orchestrator_") || n.starts_with("tengu_repl_"),
             "orchestrator block: {n}"
@@ -233,14 +249,14 @@ fn category_ordering_preserved() {
     // M7-16 grew it from 3 to 4 (+lingxi_core_v0_8_0_released).
     // Grep/Glob telemetry removed shifts the start back by -6 (tool block
     // 140→134): 259..263.
-    for n in &ALL_EVENT_NAMES[253..257] {
+    for n in &ALL_EVENT_NAMES[257..261] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
     // the release markers. Walk order (per tengu::mod.rs concat_all):
     // … → release → command. Grep/Glob telemetry removed shifts it back by -6
     // (tool block 140→134): 263..317.
-    for n in &ALL_EVENT_NAMES[257..311] {
+    for n in &ALL_EVENT_NAMES[261..315] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
     // M6-01: tui block (4 events) trails command.
@@ -251,7 +267,7 @@ fn category_ordering_preserved() {
     //        (+screen_opened/screen_closed/search_opened). Block shifted by +2
     //        total vs M6-09 (release 2→3→4). Grep/Glob telemetry removed shifts
     //        it back by -6 (tool block 140→134): 317..330.
-    for n in &ALL_EVENT_NAMES[311..324] {
+    for n in &ALL_EVENT_NAMES[315..328] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
     // FileReadTool analytics block (4 events, #13 added the 4th) appended at the
@@ -259,7 +275,7 @@ fn category_ordering_preserved() {
     // (NOT `tengu_tool_*`), kept after the tui block so every per-block prefix
     // slice above stays valid.
     assert_eq!(
-        &ALL_EVENT_NAMES[324..328],
+        &ALL_EVENT_NAMES[328..332],
         &[
             "tengu_file_read_dedup",
             "tengu_session_file_read",
@@ -270,32 +286,34 @@ fn category_ordering_preserved() {
     );
     // Config-migration block (9 events) appended after the FileRead block —
     // order matches TS runMigrations execution order (main.tsx:328-336).
-    // Positions 334..343 (shifted -6 by the Grep/Glob telemetry removal).
+    // Positions 334..343 (shifted -6 by the Grep/Glob telemetry removal, +2 by
+    // the worktree-206-parity tool-block growth, +2 by the
+    // exit-worktree-206-parity tool-block growth).
     assert_eq!(
-        &ALL_EVENT_NAMES[328..337],
+        &ALL_EVENT_NAMES[332..341],
         &telemetry::tengu::migration::NAMES,
         "config-migration tail block",
     );
     // Permission-flow block (1 event) appended after the config-migration
     // block — bypass dialog accept (BypassPermissionsModeDialog.tsx).
-    // Position 343..344.
+    // Position 341..342.
     assert_eq!(
-        &ALL_EVENT_NAMES[337..338],
+        &ALL_EVENT_NAMES[341..342],
         &telemetry::tengu::permission::NAMES,
         "permission-flow tail block",
     );
     // Coordinator swarm block (3 events) appended after the permission block —
-    // tengu_team_created/_deleted/coordinator_mode_switched. Positions 344..347.
+    // tengu_team_created/_deleted/coordinator_mode_switched. Positions 342..345.
     assert_eq!(
-        &ALL_EVENT_NAMES[338..341],
+        &ALL_EVENT_NAMES[342..345],
         &telemetry::tengu::coordinator::NAMES,
         "coordinator swarm tail block",
     );
     // AWS auth-refresh trust-gate block (2 events, 2.1.198 M2) appended after
     // the coordinator block — tengu_awsAuthRefresh_missing_trust /
-    // tengu_awsCredentialExport_missing_trust. Positions 341..343.
+    // tengu_awsCredentialExport_missing_trust. Positions 345..347.
     assert_eq!(
-        &ALL_EVENT_NAMES[341..343],
+        &ALL_EVENT_NAMES[345..347],
         telemetry::tengu::oauth::AWS_AUTH_NAMES,
         "AWS auth-refresh trust-gate tail block",
     );

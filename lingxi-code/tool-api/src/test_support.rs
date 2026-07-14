@@ -339,9 +339,18 @@ pub struct MockWorktreeManager {
 struct MockWtInner {
     created: Vec<(String, WorktreeHandle)>,
     removed: Vec<WorktreeHandle>,
+    entered_existing: Vec<PathBuf>,
     next_path_root: Option<PathBuf>,
     scripted_create_error: Option<WorktreeError>,
     scripted_remove_error: Option<WorktreeError>,
+    scripted_enter_existing_error: Option<WorktreeError>,
+    /// When set, `enter_existing` returns this EXACT handle (branch name
+    /// verbatim, not derived from the path's final component) instead of the
+    /// default synthesized one. Lets tests reproduce cases the derivation
+    /// can't — e.g. a detached-HEAD worktree, whose `branch_name` is the
+    /// literal `"HEAD"` (no `worktree-` prefix). Drained (`.take()`), like the
+    /// scripted errors above.
+    scripted_enter_existing_handle: Option<WorktreeHandle>,
     /// Deterministic dirty-state to return from `worktree_change_summary`.
     /// `None` (the default) → the trait default behavior (`Ok(None)`,
     /// fail-closed "unknown"). `Some(Some(..))` → that summary; `Some(None)`
@@ -380,6 +389,20 @@ impl MockWorktreeManager {
         self.inner.lock().unwrap().scripted_remove_error = Some(err);
     }
 
+    /// Force the next `enter_existing` call to return `err`.
+    #[allow(dead_code)]
+    pub fn script_enter_existing_error(&self, err: WorktreeError) {
+        self.inner.lock().unwrap().scripted_enter_existing_error = Some(err);
+    }
+
+    /// Force the next `enter_existing` call to return `handle` verbatim
+    /// (bypassing the default filename-derived branch name). Use this to
+    /// reproduce a detached-HEAD worktree (`branch_name: "HEAD".into()`).
+    #[allow(dead_code)]
+    pub fn script_enter_existing_handle(&self, handle: WorktreeHandle) {
+        self.inner.lock().unwrap().scripted_enter_existing_handle = Some(handle);
+    }
+
     /// Script the dirty-state `worktree_change_summary` returns. Pass
     /// `Some(summary)` for a known state or `None` for fail-closed "unknown".
     /// Persistent (not drained) so a test can query before and after removal.
@@ -398,6 +421,12 @@ impl MockWorktreeManager {
     #[must_use]
     pub fn removed(&self) -> Vec<WorktreeHandle> {
         self.inner.lock().unwrap().removed.clone()
+    }
+
+    /// Inspect paths passed to `enter_existing`.
+    #[must_use]
+    pub fn entered_existing(&self) -> Vec<PathBuf> {
+        self.inner.lock().unwrap().entered_existing.clone()
     }
 }
 
@@ -473,6 +502,48 @@ impl WorktreeManager for MockWorktreeManager {
             .scripted_change_summary
             .unwrap_or(None))
     }
+
+    async fn enter_existing(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        if let Some(err) = self
+            .inner
+            .lock()
+            .unwrap()
+            .scripted_enter_existing_error
+            .take()
+        {
+            return Err(err);
+        }
+        self.inner
+            .lock()
+            .unwrap()
+            .entered_existing
+            .push(path.to_path_buf());
+        if let Some(handle) = self
+            .inner
+            .lock()
+            .unwrap()
+            .scripted_enter_existing_handle
+            .take()
+        {
+            return Ok(handle);
+        }
+        // Deterministic handle: derive a stable branch name from the final
+        // path component so tests can assert on it without depending on git.
+        let branch_name = format!(
+            "worktree-{}",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        );
+        Ok(WorktreeHandle {
+            path: path.to_path_buf(),
+            branch_name,
+            base_commit: None,
+        })
+    }
 }
 
 /// Convenience: wrap a fresh `MockWorktreeManager` in `Arc<dyn WorktreeManager>`.
@@ -535,7 +606,6 @@ pub fn ctx_for_file_tools(
     super::BuiltinToolContext {
         fs,
         bus,
-        trusted_dirs,
         process: make_stub_process(ProcessOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -551,7 +621,8 @@ pub fn ctx_for_file_tools(
         permission_mode: PermissionMode::Default,
         permission_policy: Arc::new(permission::PermissionPolicy::new(PermissionMode::Default)),
         sandbox_available: false,
-        workspace,
+        session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted_dirs),
+        worktree_session: crate::worktree_session::new_worktree_session_cell(),
         platform: if cfg!(target_os = "macos") {
             Platform::Mac
         } else {
@@ -602,7 +673,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
     super::BuiltinToolContext {
         fs: make_dummy_fs(),
         bus: Arc::new(AnalyticsBus::new()),
-        trusted_dirs: vec![PathBuf::from("/tmp")],
         process: make_stub_process(out),
         sandbox: make_bypass_sandbox(),
         clock: make_stub_clock(),
@@ -613,7 +683,11 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         permission_mode: PermissionMode::Default,
         permission_policy: Arc::new(permission::PermissionPolicy::new(PermissionMode::Default)),
         sandbox_available: false,
-        workspace: PathBuf::from("/tmp"),
+        session_cwd: crate::session_cwd::SessionCwd::new(
+            PathBuf::from("/tmp"),
+            vec![PathBuf::from("/tmp")],
+        ),
+        worktree_session: crate::worktree_session::new_worktree_session_cell(),
         platform: if cfg!(target_os = "macos") {
             Platform::Mac
         } else {
@@ -662,8 +736,45 @@ pub fn shell_test_ctx_in(
     out: ProcessOutput,
     workspace: std::path::PathBuf,
 ) -> super::BuiltinToolContext {
+    let ctx = shell_test_ctx(out);
+    let trusted = ctx.trusted_dirs();
     super::BuiltinToolContext {
-        workspace,
-        ..shell_test_ctx(out)
+        session_cwd: crate::session_cwd::SessionCwd::new(workspace, trusted),
+        ..ctx
+    }
+}
+
+#[cfg(test)]
+mod enter_existing_mock_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn enter_existing_records_path_and_returns_deterministic_handle() {
+        let mgr = MockWorktreeManager::new();
+        let path = PathBuf::from("/tmp/mock-repo/.lingxi/worktrees/feature");
+        let handle = mgr.enter_existing(&path).await.unwrap();
+        assert_eq!(handle.path, path);
+        assert_eq!(handle.branch_name, "worktree-feature");
+        assert_eq!(handle.base_commit, None);
+        assert_eq!(mgr.entered_existing(), vec![path]);
+    }
+
+    #[tokio::test]
+    async fn enter_existing_honors_scripted_error() {
+        let mgr = MockWorktreeManager::new();
+        mgr.script_enter_existing_error(WorktreeError::Git("not a worktree".into()));
+        let err = mgr
+            .enter_existing(&PathBuf::from("/tmp/mock-repo/nope"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorktreeError::Git(msg) if msg == "not a worktree"));
+        // Scripted error is drained: no path recorded, and the next call
+        // succeeds.
+        assert!(mgr.entered_existing().is_empty());
+        let path = PathBuf::from("/tmp/mock-repo/.lingxi/worktrees/again");
+        let handle = mgr.enter_existing(&path).await.unwrap();
+        assert_eq!(handle.path, path);
+        assert_eq!(mgr.entered_existing(), vec![path]);
     }
 }

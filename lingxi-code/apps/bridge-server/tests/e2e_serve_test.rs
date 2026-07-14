@@ -85,6 +85,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         initial_effort: None,
         default_model_env_pinned: false,
         session_thinking: Default::default(),
+        worktree_launch: None,
+        tmux_launch: None,
     };
     (tmp, cfg)
 }

@@ -212,7 +212,7 @@ impl Tool for REPLTool {
         let pcmd = SbxCommand {
             command: exe.into(),
             args,
-            cwd: Some(self.ctx.workspace.clone()),
+            cwd: Some(self.ctx.cwd()),
             env: HashMap::new(),
             timeout: Some(Duration::from_millis(REPL_DEFAULT_TIMEOUT_MS)),
             stdin: stdin_payload,

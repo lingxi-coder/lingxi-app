@@ -76,6 +76,23 @@ pub trait WorktreeManager: Send + Sync {
         let _ = handle;
         Ok(None)
     }
+
+    /// Enter an already-existing git worktree at `path` (206 `EnterWorktree`
+    /// `e.path` branch). Resolves the worktree's current branch. Returns a
+    /// handle pointing at the existing worktree; does NOT create anything
+    /// (contrast [`Self::create_worktree`], which always makes a new one).
+    ///
+    /// The default implementation returns [`WorktreeError::Unsupported`] so
+    /// platforms/mocks predating this method compile unchanged and degrade
+    /// gracefully — mirrors [`Self::worktree_change_summary`]'s degradation
+    /// policy.
+    async fn enter_existing(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        let _ = path;
+        Err(WorktreeError::Unsupported)
+    }
 }
 
 /// Dirty-state summary of a worktree returned by

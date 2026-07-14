@@ -267,6 +267,97 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcp_auth_refresh: Option<String>,
 
+    // ── Enterprise login / version managed-policy keys (H-BIN-09) ────────────
+    // Six admin-provisioned `managed-settings.json` keys CC 2.1.207 both schemas
+    // AND enforces; consumed via [`crate::settings::enterprise`]. All scalar-
+    // override merge (none in `MERGE_STRATEGIES`). See that module for wiring
+    // status (version gate LIVE; login-flow method-lock/org-pin DORMANT).
+    /// Scalar field (later source wins). `forceLoginMethod`: force a specific
+    /// OAuth login method. CC 2.1.207 zod (verbatim describe): "Force a specific
+    /// login method: \"claudeai\" for Claude Pro/Max, \"console\" for Console
+    /// billing, \"gateway\" for the Cloud gateway OIDC device flow". Enum
+    /// `claudeai|console|gateway` with `.catch(void 0)` — an out-of-set value
+    /// degrades to "no forced method". Typed `Option<String>` (like
+    /// `askUserQuestionTimeout`); the enum + `.catch` degrade live in the typed
+    /// accessor [`SettingsJson::force_login_method_parsed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_login_method: Option<String>,
+
+    /// Scalar field (later source wins). `forceLoginGatewayUrl`: Cloud gateway
+    /// URL to pre-fill and auto-connect to during login. CC 2.1.207 zod:
+    /// `forceLoginGatewayUrl:E.string().url().optional().catch(void 0)`
+    /// ("@internal Cloud gateway URL to pre-fill and auto-connect to during
+    /// login. Typically set in local managed settings alongside forceLoginMethod:
+    /// \"gateway\" so users never type the URL."). Pre-filled into the OAuth
+    /// screen by the login flow (DORMANT wiring — see `enterprise`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_login_gateway_url: Option<String>,
+
+    /// Scalar field (later source wins). `forceLoginOrgUUID`: pin OAuth login to
+    /// an organization (or list). CC 2.1.207 zod:
+    /// `forceLoginOrgUUID:E.union([E.string(),E.array(E.string())]).optional()`
+    /// ("Organization UUID to require for OAuth login. Accepts a single UUID
+    /// string or an array of UUIDs (any one is permitted). When set in managed
+    /// settings, login fails if the authenticated account does not belong to a
+    /// listed organization."). Kept as opaque `Value` (string | string[]) so a
+    /// malformed value is TOLERATED at load and degraded at the consumer
+    /// ([`SettingsJson::force_login_org_pin`]) rather than failing the whole
+    /// settings file.
+    ///
+    /// NB explicit `rename`: serde's `camelCase` rule would emit `forceLoginOrgUuid`,
+    /// but the CC wire key is the all-caps `forceLoginOrgUUID`.
+    #[serde(
+        rename = "forceLoginOrgUUID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub force_login_org_uuid: Option<Value>,
+
+    /// Scalar field (later source wins). `parentSettingsBehavior`: whether the
+    /// SDK parent managed-settings tier (`Options.managedSettings` /
+    /// `--managed-settings`) layers under this admin tier. CC 2.1.207 zod enum
+    /// `first-wins|merge` ("first-wins (default): parent is dropped … merge:
+    /// parent's restrictive-only-filtered settings union under the admin
+    /// winner."). Consumed by [`crate::settings::enterprise::should_merge_parent_settings`]
+    /// (the SDK parent tier itself is not yet modeled in lingxi).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_settings_behavior: Option<String>,
+
+    /// Scalar field (later source wins). `minimumVersion`: USER setting — CC
+    /// 2.1.207 zod: "Minimum version to stay on - prevents downgrades when
+    /// switching to stable channel". Consumed ONLY by CC's auto-updater
+    /// channel-downgrade guard (`Zlo`/`Wn()`); lingxi has no auto-updater, so
+    /// this is schema-only (dead-by-missing-subsystem) — do NOT confuse with the
+    /// managed startup gate `requiredMinimumVersion`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_version: Option<String>,
+
+    /// Scalar field (later source wins). `requiredMinimumVersion`: managed
+    /// startup exit gate — CC 2.1.207 zod: "Minimum Claude Code version required
+    /// to start. If the running version is older, Claude Code exits at startup
+    /// with instructions to update. Only enforced from managed (policy)
+    /// settings." Consumed by [`crate::settings::enterprise::version_gate`]
+    /// (LIVE, wired at CLI boot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_minimum_version: Option<String>,
+
+    /// Scalar field (later source wins). `requiredMaximumVersion`: managed
+    /// startup exit gate — CC 2.1.207 zod: "Maximum Claude Code version allowed
+    /// to start. If the running version is newer, Claude Code exits at startup
+    /// with instructions to install an approved version. Only enforced from
+    /// managed (policy) settings." Ships with `requiredMinimumVersion` in the
+    /// same `version_gate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_maximum_version: Option<String>,
+
+    /// Scalar field (later source wins). `forceRemoteSettingsRefresh`: CC 2.1.207
+    /// zod: "When set in managed settings, the CLI blocks startup until remote
+    /// managed settings are freshly fetched, and exits if the fetch fails."
+    /// Schema-only — lingxi has no remote managed-settings fetcher; the key is
+    /// typed so it round-trips and is ACCESSIBLE when that subsystem lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_remote_settings_refresh: Option<bool>,
+
     /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
     /// such key): named LLM provider profiles. Each entry has the shape:
     /// `{ "type": "openai"|"openai-responses"|"anthropic"|"gemini"|"azure-openai"
@@ -647,6 +738,92 @@ mod tests {
             strategy_for("enforceAvailableModels").is_none(),
             "enforceAvailableModels must be scalar-override"
         );
+    }
+
+    #[test]
+    fn enterprise_login_version_keys_parse_and_roundtrip() {
+        // CC 2.1.207 enterprise login/version managed-policy keys (H-BIN-09). A
+        // managed settings.json carrying them must parse into the typed fields
+        // (unknown-key tolerance alone would strip them, so the version gate /
+        // login policy would never see them).
+        let json = r#"{
+            "forceLoginMethod": "gateway",
+            "forceLoginGatewayUrl": "https://gw.example.com/oidc",
+            "forceLoginOrgUUID": ["11111111-2222-3333-4444-555555555555"],
+            "parentSettingsBehavior": "merge",
+            "minimumVersion": "2.1.0",
+            "requiredMinimumVersion": "2.1.207",
+            "requiredMaximumVersion": "3.0.0",
+            "forceRemoteSettingsRefresh": true,
+            "model": "claude-sonnet-4-5"
+        }"#;
+        let parsed: SettingsJson =
+            serde_json::from_str(json).expect("enterprise policy keys must parse");
+        assert_eq!(parsed.force_login_method.as_deref(), Some("gateway"));
+        assert_eq!(
+            parsed.force_login_gateway_url.as_deref(),
+            Some("https://gw.example.com/oidc")
+        );
+        assert_eq!(
+            parsed.force_login_org_uuid,
+            Some(Value::Array(vec![Value::String(
+                "11111111-2222-3333-4444-555555555555".to_string()
+            )]))
+        );
+        assert_eq!(parsed.parent_settings_behavior.as_deref(), Some("merge"));
+        assert_eq!(parsed.minimum_version.as_deref(), Some("2.1.0"));
+        assert_eq!(parsed.required_minimum_version.as_deref(), Some("2.1.207"));
+        assert_eq!(parsed.required_maximum_version.as_deref(), Some("3.0.0"));
+        assert_eq!(parsed.force_remote_settings_refresh, Some(true));
+        // Sibling survives the load.
+        assert!(parsed.model.is_some());
+        // camelCase on the wire; round-trips.
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        for key in [
+            "forceLoginMethod",
+            "forceLoginGatewayUrl",
+            "forceLoginOrgUUID",
+            "parentSettingsBehavior",
+            "minimumVersion",
+            "requiredMinimumVersion",
+            "requiredMaximumVersion",
+            "forceRemoteSettingsRefresh",
+        ] {
+            assert!(back.contains(&format!("\"{key}\"")), "{key} missing in {back}");
+            // All scalar-override merge (later source wins).
+            assert!(
+                strategy_for(key).is_none(),
+                "{key} must be scalar-override (later source wins)"
+            );
+        }
+    }
+
+    #[test]
+    fn force_login_org_uuid_accepts_single_string() {
+        // The union (string | string[]) — a single string form must parse and
+        // NOT fail the load.
+        let json = r#"{"forceLoginOrgUUID": "org-abc"}"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("single-string form parses");
+        assert_eq!(
+            parsed.force_login_org_uuid,
+            Some(Value::String("org-abc".to_string()))
+        );
+    }
+
+    #[test]
+    fn enterprise_keys_absent_are_none_and_not_emitted() {
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert!(absent.force_login_method.is_none());
+        assert!(absent.required_minimum_version.is_none());
+        assert!(absent.force_remote_settings_refresh.is_none());
+        let back = serde_json::to_string(&absent).unwrap();
+        for key in [
+            "forceLoginMethod",
+            "requiredMinimumVersion",
+            "forceRemoteSettingsRefresh",
+        ] {
+            assert!(!back.contains(key), "{key} must not be emitted when absent");
+        }
     }
 
     #[test]

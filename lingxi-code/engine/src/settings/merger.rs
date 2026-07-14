@@ -64,6 +64,26 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         aws_auth_refresh: next.aws_auth_refresh.or(prev.aws_auth_refresh),
         aws_credential_export: next.aws_credential_export.or(prev.aws_credential_export),
         gcp_auth_refresh: next.gcp_auth_refresh.or(prev.gcp_auth_refresh),
+        // Enterprise login/version managed-policy keys (H-BIN-09) — all
+        // scalar-override (later source wins); none is a concat/deep-merge
+        // field (CC `settingsMergeCustomizer` special-cases only specific
+        // arrays/objects, and none of these is one).
+        force_login_method: next.force_login_method.or(prev.force_login_method),
+        force_login_gateway_url: next.force_login_gateway_url.or(prev.force_login_gateway_url),
+        force_login_org_uuid: next.force_login_org_uuid.or(prev.force_login_org_uuid),
+        parent_settings_behavior: next
+            .parent_settings_behavior
+            .or(prev.parent_settings_behavior),
+        minimum_version: next.minimum_version.or(prev.minimum_version),
+        required_minimum_version: next
+            .required_minimum_version
+            .or(prev.required_minimum_version),
+        required_maximum_version: next
+            .required_maximum_version
+            .or(prev.required_maximum_version),
+        force_remote_settings_refresh: next
+            .force_remote_settings_refresh
+            .or(prev.force_remote_settings_refresh),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
     }
@@ -332,6 +352,41 @@ mod tests {
             Some(false),
             "next is None, so prev survives"
         );
+    }
+
+    #[test]
+    fn enterprise_login_version_keys_scalar_override() {
+        // H-BIN-09: all enterprise login/version keys are scalar-override —
+        // the higher-priority (`next`) layer wins when it sets the key, else the
+        // lower layer survives. Models the 4-layer stack folding a base managed
+        // tier under a higher-priority drop-in.
+        use serde_json::json;
+        let prev = SettingsJson {
+            force_login_method: Some("claudeai".into()),
+            required_minimum_version: Some("2.0.0".into()),
+            force_login_org_uuid: Some(json!("org-base")),
+            parent_settings_behavior: Some("first-wins".into()),
+            force_remote_settings_refresh: Some(false),
+            ..Default::default()
+        };
+        let next = SettingsJson {
+            // next overrides method + min + org pin; leaves the rest unset.
+            force_login_method: Some("gateway".into()),
+            required_minimum_version: Some("2.1.207".into()),
+            force_login_org_uuid: Some(json!(["org-a", "org-b"])),
+            ..Default::default()
+        };
+        let merged = merge(prev, next);
+        assert_eq!(merged.force_login_method.as_deref(), Some("gateway"));
+        assert_eq!(merged.required_minimum_version.as_deref(), Some("2.1.207"));
+        assert_eq!(
+            merged.force_login_org_uuid,
+            Some(json!(["org-a", "org-b"])),
+            "org pin is scalar-override (source array wins, not concat)"
+        );
+        // Keys next left unset survive from prev.
+        assert_eq!(merged.parent_settings_behavior.as_deref(), Some("first-wins"));
+        assert_eq!(merged.force_remote_settings_refresh, Some(false));
     }
 
     #[test]

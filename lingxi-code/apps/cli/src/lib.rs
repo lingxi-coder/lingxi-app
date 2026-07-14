@@ -356,6 +356,34 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::RUNTIME_ERROR;
     }
 
+    // Managed enterprise startup version gate (parity 2.1.207 H-BIN-09,
+    // CC `c1p`/`a1p` on the fast startup path). If a managed (`policySettings`)
+    // tier pins `requiredMinimumVersion`/`requiredMaximumVersion` and this
+    // binary's version is outside the org-approved range, print the byte-exact
+    // instruction message to stderr and exit 1 — BEFORE any subcommand dispatch
+    // or session build. `update`/`install`/`doctor` are exempt (a pinned-out
+    // user must be able to fix their install); a bare session (no command) is
+    // gated. Reads the OS-level managed dir (cwd-independent, already-applied
+    // `--cwd` is irrelevant). Fail-open on an unreadable/malformed policy.
+    {
+        let top_level = parsed
+            .command
+            .as_ref()
+            .map(crate::commands::Commands::top_level_name);
+        let managed_tiers = engine_desktop::settings_watch::managed_settings_raw_tiers().await;
+        let policy = engine::settings::enterprise::managed_version_policy(&managed_tiers);
+        if let Some(msg) = engine::settings::enterprise::version_gate(
+            env!("CARGO_PKG_VERSION"),
+            policy.required_minimum_version.as_deref(),
+            policy.required_maximum_version.as_deref(),
+            top_level,
+            &mut |m| tracing::error!("{m}"),
+        ) {
+            eprintln!("{msg}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    }
+
     // Top-level subcommand dispatch (mcp/auth/plugin/project/setup-token/agents/
     // install/update/doctor/auto-mode/ultrareview). When clap matched a leading
     // command token, run that family and exit — this is what stops a bare `mcp`/

@@ -87,6 +87,17 @@ pub fn remove_decoration(_theme: ThemeName) -> StyleColor {
     StyleColor::Rgb(220, 90, 90)
 }
 
+/// Foreground color for removed-line content text. The diff line bg is a
+/// locked dark-red (`#400000`), so the terminal-default fg (often dark/black)
+/// produces unreadable contrast. An explicit near-white foreground matches
+/// claude-code's visual result where the default terminal fg is light.
+/// This is texture-only (not a claude-code `theme` token) and stays locked
+/// independent of the active theme, like `remove_bg`.
+#[must_use]
+pub fn remove_text_fg(_theme: ThemeName) -> StyleColor {
+    StyleColor::Rgb(0xEE, 0xEE, 0xEE)
+}
+
 /// claude-code CHANGE_THRESHOLD: above this changed-fraction, word diffing is
 /// abandoned for whole-line coloring (lines too dissimilar to align words).
 const CHANGE_THRESHOLD: f64 = 0.4;
@@ -236,6 +247,7 @@ fn word_diff_spans(
     } else {
         remove_word_bg(theme)
     };
+    let text_fg = if !is_add { Some(remove_text_fg(theme)) } else { None };
     let mut spans = Vec::new();
     for ch in wd.iter_all_changes() {
         let show = matches!(ch.tag(), ChangeTag::Equal)
@@ -245,10 +257,12 @@ fn word_diff_spans(
             continue;
         }
         let emphasized = !matches!(ch.tag(), ChangeTag::Equal);
+        let fg = text_fg.unwrap_or(StyleColor::Default);
         spans.push(StyledSpan::styled(
             ch.value(),
             SpanStyle {
                 bg: if emphasized { emph_bg } else { line_bg },
+                fg,
                 ..SpanStyle::default()
             },
         ));
@@ -279,6 +293,7 @@ fn plain_row(
             row.text.clone(),
             SpanStyle {
                 bg,
+                fg: remove_text_fg(theme),
                 ..SpanStyle::default()
             },
         ));

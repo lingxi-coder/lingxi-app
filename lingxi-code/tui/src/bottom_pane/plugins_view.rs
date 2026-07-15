@@ -266,7 +266,10 @@ mod tests {
             ViewOutcome::RunPluginAction(PluginAction::Disable { id }) => {
                 assert_eq!(id, "weather");
             }
-            other => panic!("expected Disable, got a different outcome: {:?}", matches!(other, ViewOutcome::Pending)),
+            other => panic!(
+                "expected Disable, got a different outcome: {:?}",
+                matches!(other, ViewOutcome::Pending)
+            ),
         }
     }
 
@@ -302,13 +305,19 @@ mod tests {
     #[test]
     fn esc_cancels() {
         let mut v = view(vec![row("a", true)]);
-        assert!(matches!(v.handle_key(press(KeyCode::Esc)), ViewOutcome::Cancelled));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
     }
 
     #[test]
     fn empty_list_toggle_is_pending() {
         let mut v = view(vec![]);
-        assert!(matches!(v.handle_key(press(KeyCode::Enter)), ViewOutcome::Pending));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Pending
+        ));
     }
 
     #[test]
@@ -337,4 +346,3 @@ mod tests {
         assert!(text.contains("Manage Plugins"), "{text}");
     }
 }
-

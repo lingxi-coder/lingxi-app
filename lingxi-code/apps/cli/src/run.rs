@@ -20,7 +20,7 @@ use crate::stream_json_input::{
 };
 use command_api::format_description_with_source;
 use permission;
-use serde_json::json;
+use serde_json::{json, Value};
 use session::jsonl::loader::{
     list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
 };
@@ -232,11 +232,13 @@ pub async fn run_stream_json_print(
                 &betas,
             )
             .await;
+        stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
             .emit_result_success(&result_text, "end_turn", &cost, &model, "off", &betas)
             .await;
+        stream.flush().await;
         exit_codes::SUCCESS
     }
 }
@@ -288,7 +290,14 @@ async fn dispatch_control_request(
             // default model and APPLIES it — so a client can revert a prior
             // `set_model` override (claude-code re-resolves via
             // getDefaultMainLoopModel() and calls setMainLoopModelOverride).
-            let requested = field("model").and_then(|v| v.as_str()).unwrap_or("default");
+            let requested = match field("model") {
+                Some(Value::String(model)) => model.as_str(),
+                Some(_) => {
+                    writer.reply_error(request_id, "Invalid model: expected string");
+                    return;
+                }
+                None => "default",
+            };
             let default_model = orchestrator.default_model();
             let target = if requested == "default" {
                 default_model.as_str()
@@ -1014,6 +1023,7 @@ pub async fn run_stream_json_input_loop(
         stream
             .emit_result_success("", "end_turn", &cost, &model_str, "off", &betas)
             .await;
+        stream.flush().await;
         return exit_codes::SUCCESS;
     }
 
@@ -1037,11 +1047,13 @@ pub async fn run_stream_json_input_loop(
                 &betas,
             )
             .await;
+        stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
         stream
             .emit_result_success(&result_text, "end_turn", &cost, &model, "off", &betas)
             .await;
+        stream.flush().await;
         exit_codes::SUCCESS
     }
 }
@@ -1064,15 +1076,12 @@ pub async fn run_stream_json_input_loop(
 /// shared exclusion list in all four predicates → all-false. Unknown /
 /// non-Anthropic models keep all-false / empty defaults (multi-provider
 /// divergence: the binary's `RN(Fh(e))` non-1P fallback has no lingxi seam).
-fn model_capabilities(
-    request_model: &str,
-) -> (bool, Vec<&'static str>, bool, bool, bool) {
+fn model_capabilities(request_model: &str) -> (bool, Vec<&'static str>, bool, bool, bool) {
     /// `UR` — the full effort ladder (binary: `UR=["low","medium","high",
     /// "xhigh","max"]`).
     const LEVELS_WITH_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max"];
     /// `UR` minus `xhigh` (`Zne` excludes opus-4-6 / sonnet-4-6 by name).
     const LEVELS_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
-
 
     let rm = request_model.to_lowercase();
 
@@ -1588,42 +1597,43 @@ pub(crate) async fn drive_tui_switch_loop(
     loop {
         match outcome {
             crate::mode::RunOutcome::Exit(code) => return code,
-            crate::mode::RunOutcome::SwitchTo { target, state } => match load_resume_session(target).await {
-                Ok(messages) => {
-                    current = Some(target);
-                    outcome = mount_resumed_tui(argv, target, messages, state).await;
-                }
-                Err(e) => {
-                    // The outgoing runtime is already unwound, so we cannot just
-                    // continue it — but we CAN re-mount the session it was, which
-                    // reloads cleanly. Never exit on a single failed switch when a
-                    // working session was in progress.
-                    eprintln!("lingxi-cli: couldn't resume {target}: {e}");
-                    match recover_from_failed_switch(current) {
-                        SwitchRecovery::Remount(fallback) => {
-                            eprintln!(
-                                "lingxi-cli: staying in current session {fallback}"
-                            );
-                            match load_resume_session(fallback).await {
-                                Ok(messages) => {
-                                    outcome =
-                                        mount_resumed_tui(argv, fallback, messages, state).await;
-                                }
-                                Err(e2) => {
-                                    // Double failure: even the known-good session
-                                    // won't reload. Genuinely unrecoverable.
-                                    eprintln!(
-                                        "lingxi-cli: failed to re-mount current session \
+            crate::mode::RunOutcome::SwitchTo { target, state } => {
+                match load_resume_session(target).await {
+                    Ok(messages) => {
+                        current = Some(target);
+                        outcome = mount_resumed_tui(argv, target, messages, state).await;
+                    }
+                    Err(e) => {
+                        // The outgoing runtime is already unwound, so we cannot just
+                        // continue it — but we CAN re-mount the session it was, which
+                        // reloads cleanly. Never exit on a single failed switch when a
+                        // working session was in progress.
+                        eprintln!("lingxi-cli: couldn't resume {target}: {e}");
+                        match recover_from_failed_switch(current) {
+                            SwitchRecovery::Remount(fallback) => {
+                                eprintln!("lingxi-cli: staying in current session {fallback}");
+                                match load_resume_session(fallback).await {
+                                    Ok(messages) => {
+                                        outcome =
+                                            mount_resumed_tui(argv, fallback, messages, state)
+                                                .await;
+                                    }
+                                    Err(e2) => {
+                                        // Double failure: even the known-good session
+                                        // won't reload. Genuinely unrecoverable.
+                                        eprintln!(
+                                            "lingxi-cli: failed to re-mount current session \
                                          {fallback}: {e2}"
-                                    );
-                                    return exit_codes::RUNTIME_ERROR;
+                                        );
+                                        return exit_codes::RUNTIME_ERROR;
+                                    }
                                 }
                             }
+                            SwitchRecovery::Exit(code) => return code,
                         }
-                        SwitchRecovery::Exit(code) => return code,
                     }
                 }
-            },
+            }
             crate::mode::RunOutcome::BranchFrom { title, state } => {
                 let Some(source) = current else {
                     eprintln!("lingxi-cli: cannot branch — no active session");
@@ -1698,7 +1708,9 @@ pub(crate) async fn drive_tui_switch_loop(
                             SwitchRecovery::Remount(fallback) => {
                                 match load_resume_session(fallback).await {
                                     Ok(messages) => {
-                                        outcome = mount_resumed_tui(argv, fallback, messages, state).await;
+                                        outcome =
+                                            mount_resumed_tui(argv, fallback, messages, state)
+                                                .await;
                                     }
                                     Err(e2) => {
                                         eprintln!(
@@ -1714,7 +1726,11 @@ pub(crate) async fn drive_tui_switch_loop(
                     }
                 }
             }
-            crate::mode::RunOutcome::RewindTo { message, scope, state } => {
+            crate::mode::RunOutcome::RewindTo {
+                message,
+                scope,
+                state,
+            } => {
                 use tui::bottom_pane::view::RewindScope;
                 let Some(source) = current else {
                     eprintln!("lingxi-cli: cannot rewind — no active session");
@@ -1742,7 +1758,8 @@ pub(crate) async fn drive_tui_switch_loop(
                 // 2. Conversation truncation (unless code-only): truncate the
                 //    live transcript in place up to `message`, re-mount same id.
                 let mount_target = if scope != RewindScope::CodeOnly {
-                    match session::rewind_conversation(&lingxi_home, &cwd_str, source, message).await
+                    match session::rewind_conversation(&lingxi_home, &cwd_str, source, message)
+                        .await
                     {
                         Ok(()) => source,
                         Err(e) => {
@@ -1778,7 +1795,9 @@ pub(crate) async fn drive_tui_switch_loop(
                             SwitchRecovery::Remount(fallback) => {
                                 match load_resume_session(fallback).await {
                                     Ok(messages) => {
-                                        outcome = mount_resumed_tui(argv, fallback, messages, state).await;
+                                        outcome =
+                                            mount_resumed_tui(argv, fallback, messages, state)
+                                                .await;
                                     }
                                     Err(e2) => {
                                         eprintln!(
@@ -2750,11 +2769,9 @@ mod tests {
         assert!(filter_rows_by_pr(rows.clone(), Some("")).is_empty());
         // Parseable PR number/URL → prNumber === n (none yet).
         assert!(filter_rows_by_pr(rows.clone(), Some("123")).is_empty());
-        assert!(filter_rows_by_pr(
-            rows.clone(),
-            Some("https://github.com/foo/bar/pull/9")
-        )
-        .is_empty());
+        assert!(
+            filter_rows_by_pr(rows.clone(), Some("https://github.com/foo/bar/pull/9")).is_empty()
+        );
         // Unparseable value → no narrowing (binary behavior).
         assert_eq!(filter_rows_by_pr(rows, Some("login bug")).len(), 1);
     }

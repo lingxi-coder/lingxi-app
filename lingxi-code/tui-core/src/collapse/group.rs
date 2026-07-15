@@ -169,7 +169,11 @@ pub fn search_read_summary_text(
 
     if search_count > 0 {
         let verb = pick_verb(is_active, parts.is_empty(), "Searching for", "Searched for");
-        let noun = if search_count == 1 { "pattern" } else { "patterns" };
+        let noun = if search_count == 1 {
+            "pattern"
+        } else {
+            "patterns"
+        };
         parts.push(format!("{verb} {search_count} {noun}"));
     }
     if read_count > 0 {
@@ -263,4 +267,3 @@ mod tests {
         );
     }
 }
-

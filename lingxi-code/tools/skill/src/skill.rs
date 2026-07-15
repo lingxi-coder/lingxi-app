@@ -626,8 +626,8 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
             // claude-code building a fresh `toolPermissionContext` before
             // `executeShellCommandsInPrompt`. The `shell` selector drives both the
             // gate's tool-name choice and the runner's routing.
-            let shell_ctx =
-                crate::build_prompt_shell_provider(&self.ctx).build(&desc.allowed_tools, desc.shell);
+            let shell_ctx = crate::build_prompt_shell_provider(&self.ctx)
+                .build(&desc.allowed_tools, desc.shell);
             match command_api::execute_shell_commands_in_prompt(
                 &expanded_prompt,
                 &shell_ctx,

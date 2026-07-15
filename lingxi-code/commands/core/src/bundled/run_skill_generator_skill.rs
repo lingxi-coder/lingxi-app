@@ -52,7 +52,10 @@ mod tests {
 
     #[test]
     fn build_empty_returns_body_and_arg_appends_user_request() {
-        assert_eq!(RunSkillGeneratorPromptFn.build(""), RUN_SKILL_GENERATOR_BODY);
+        assert_eq!(
+            RunSkillGeneratorPromptFn.build(""),
+            RUN_SKILL_GENERATOR_BODY
+        );
         assert_eq!(
             RunSkillGeneratorPromptFn.build("for the billing app"),
             format!("{RUN_SKILL_GENERATOR_BODY}\n\n## User Request\n\nfor the billing app")

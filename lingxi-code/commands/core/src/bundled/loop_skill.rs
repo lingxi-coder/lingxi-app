@@ -146,12 +146,12 @@ fn build_prompt(args: &str) -> String {
 
 use std::sync::OnceLock;
 
-use regex::Regex;
 use cron::{
     get_autonomous_loop_preamble, is_loop_default_prompt_enabled, is_loop_dynamic_enabled,
     log_autonomous_loop_activation, read_loop_file, LoopFile, AUTONOMOUS_LOOP_DYNAMIC_SENTINEL,
     AUTONOMOUS_LOOP_SENTINEL, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL,
 };
+use regex::Regex;
 
 // Tool-name interpolations (binary `Kh`/`IA`/`AI`/`eP`/`xw`/`t9`).
 const SCHEDULE_WAKEUP: &str = "ScheduleWakeup"; // Kh

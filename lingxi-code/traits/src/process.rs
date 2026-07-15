@@ -73,9 +73,13 @@ pub enum HookRunOutcome {
     /// The hook ran to completion; carries its buffered output.
     Completed(ProcessOutput),
     /// The hook's first stdout line was `{"async": true, …}`; it has been
-    /// backgrounded (detached, bounded by its async timeout) and produced no
-    /// synchronous result for this turn.
-    Backgrounded,
+    /// backgrounded (detached, bounded by its async timeout). Platform runners
+    /// may retain eventual stdout/stderr in `output_path`; the file can still be
+    /// growing when this outcome is returned.
+    Backgrounded {
+        /// Path of the eventual stdout/stderr capture, when retained.
+        output_path: Option<String>,
+    },
 }
 
 /// Collected output of a completed process.

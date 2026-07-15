@@ -223,9 +223,7 @@ pub(crate) fn url_matches_pattern(url: &str, pattern: &str) -> bool {
     }
 
     // Port: a wildcard host with no explicit port also wildcards the port.
-    if pat.port().is_none()
-        && pat.host_str().unwrap_or("").contains(WILDCARD_PLACEHOLDER)
-    {
+    if pat.port().is_none() && pat.host_str().unwrap_or("").contains(WILDCARD_PLACEHOLDER) {
         port_wildcarded = true;
     }
     if !port_wildcarded && pat.port() != target.port() {
@@ -327,8 +325,9 @@ impl HttpExecutor {
         //    (as the SSRF / http-error / timeout arms already do).
         if let Some(patterns) = &self.policy.allowed_urls {
             if !patterns.iter().any(|p| url_matches_pattern(url, p)) {
-                let msg =
-                    format!("HTTP hook blocked: {url} does not match any pattern in allowedHttpHookUrls");
+                let msg = format!(
+                    "HTTP hook blocked: {url} does not match any pattern in allowedHttpHookUrls"
+                );
                 tracing::warn!("{msg}");
                 return HttpExecutionOutcome {
                     result: HookResult {
@@ -670,7 +669,10 @@ mod tests {
     #[test]
     fn nbr_unparseable_target_never_matches() {
         // A target URL that does not parse returns false for any non-`*` pattern.
-        assert!(!url_matches_pattern("not a url", "https://hooks.example.com/*"));
+        assert!(!url_matches_pattern(
+            "not a url",
+            "https://hooks.example.com/*"
+        ));
         // ...but bare `*` short-circuits before parsing.
         assert!(url_matches_pattern("not a url", "*"));
     }
@@ -715,7 +717,10 @@ mod tests {
         let p = "https://hooks.example.com/*";
         // `/*` in the path expands to `.*` (crosses `/`, spans query).
         assert!(url_matches_pattern("https://hooks.example.com/webhook", p));
-        assert!(url_matches_pattern("https://hooks.example.com/deep/path?q=1", p));
+        assert!(url_matches_pattern(
+            "https://hooks.example.com/deep/path?q=1",
+            p
+        ));
         assert!(url_matches_pattern("https://hooks.example.com/", p));
         // Host / scheme still bind exactly.
         assert!(!url_matches_pattern("https://evil.example.com/x", p));
@@ -743,8 +748,14 @@ mod tests {
     #[test]
     fn nbr_port_wildcard() {
         let p = "https://hooks.example.com:*/webhook";
-        assert!(url_matches_pattern("https://hooks.example.com:8443/webhook", p));
-        assert!(url_matches_pattern("https://hooks.example.com:1234/webhook", p));
+        assert!(url_matches_pattern(
+            "https://hooks.example.com:8443/webhook",
+            p
+        ));
+        assert!(url_matches_pattern(
+            "https://hooks.example.com:1234/webhook",
+            p
+        ));
         // Wildcard port also matches the default (absent) port.
         assert!(url_matches_pattern("https://hooks.example.com/webhook", p));
         // An explicit non-wildcard port must match exactly.
@@ -827,7 +838,10 @@ mod tests {
 
         assert_eq!(outcome.signal, HttpExecutionSignal::UrlBlocked);
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
-        assert!(outcome.result.stdout.is_empty(), "blocked body must be empty");
+        assert!(
+            outcome.result.stdout.is_empty(),
+            "blocked body must be empty"
+        );
         // Byte-exact CC block message embedded in stderr.
         assert!(
             outcome.result.stderr.contains(
@@ -942,7 +956,10 @@ mod tests {
             status_message: None,
         };
         let mut headers = HashMap::new();
-        headers.insert("X-Auth".to_string(), "$LX_HBIN12_A-$LX_HBIN12_B".to_string());
+        headers.insert(
+            "X-Auth".to_string(),
+            "$LX_HBIN12_A-$LX_HBIN12_B".to_string(),
+        );
 
         // Global Some([A]) — B is intersected OUT and blanks.
         let http = mock_http();
@@ -993,7 +1010,10 @@ mod tests {
             .find(|(k, _)| k == "X-Auth")
             .map(|(_, v)| v.as_str())
             .unwrap();
-        assert_eq!(auth2, "valA-valB", "no global restriction ⇒ both interpolate");
+        assert_eq!(
+            auth2, "valA-valB",
+            "no global restriction ⇒ both interpolate"
+        );
         drop(recorded2);
 
         std::env::remove_var("LX_HBIN12_A");

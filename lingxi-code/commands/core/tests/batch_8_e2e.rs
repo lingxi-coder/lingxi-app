@@ -34,7 +34,13 @@ fn tmp_root(tag: &str) -> PathBuf {
 /// empty temp skill tree so `/reload-skills` and `/skill-doctor` render their
 /// deterministic "nothing here" states. Returns the dispatcher, the mock
 /// handle, and the temp root (kept alive so the caller can clean it up).
-fn fresh(tag: &str) -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>, PathBuf) {
+fn fresh(
+    tag: &str,
+) -> (
+    RegistrySlashDispatcher,
+    Arc<MockOrchestratorHandle>,
+    PathBuf,
+) {
     let root = tmp_root(tag);
     let cwd = root.join("repo");
     let home = root.join("home");

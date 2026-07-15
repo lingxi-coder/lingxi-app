@@ -381,7 +381,10 @@ mod tests {
             Vec::new(),
             false,
         );
-        assert_eq!(run(&h).await, "Reloaded skills: 0 skills available (no changes)");
+        assert_eq!(
+            run(&h).await,
+            "Reloaded skills: 0 skills available (no changes)"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -404,7 +407,10 @@ mod tests {
             Vec::new(),
             false,
         );
-        assert_eq!(run(&h).await, "Reloaded skills: 1 skill available (1 added)");
+        assert_eq!(
+            run(&h).await,
+            "Reloaded skills: 1 skill available (1 added)"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -427,10 +433,16 @@ mod tests {
             Vec::new(),
             false,
         );
-        assert_eq!(run(&h).await, "Reloaded skills: 1 skill available (1 added)");
+        assert_eq!(
+            run(&h).await,
+            "Reloaded skills: 1 skill available (1 added)"
+        );
         // Nothing changed on disk between calls -> the second reload sees the
         // same name in `before` and `after`.
-        assert_eq!(run(&h).await, "Reloaded skills: 1 skill available (no changes)");
+        assert_eq!(
+            run(&h).await,
+            "Reloaded skills: 1 skill available (no changes)"
+        );
         fs::remove_dir_all(root).ok();
     }
 

@@ -196,11 +196,8 @@ mod tests {
     /// A unique scratch dir under the OS temp root (session has no `tempfile`
     /// dev-dep; the writer tests use the same pattern).
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lingxi-branch-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lingxi-branch-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
@@ -248,7 +245,9 @@ mod tests {
         tokio::fs::write(&path, body).await.unwrap();
 
         let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(std::path::PathBuf::from(cwd)));
-        let result = create_branch(&home, cwd, src, None, fs).await.expect("branch");
+        let result = create_branch(&home, cwd, src, None, fs)
+            .await
+            .expect("branch");
         assert_eq!(result.message_count, 2);
         assert_ne!(result.new_session_id, src);
         assert!(result.title.contains("(Branch)"), "got {}", result.title);

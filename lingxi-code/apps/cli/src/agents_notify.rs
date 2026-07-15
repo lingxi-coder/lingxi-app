@@ -266,15 +266,17 @@ pub fn job_label(job: &JobState, is_current: bool) -> String {
         .or(job.intent.as_deref())
         .unwrap_or("");
     let cleaned_intent = clean(intent);
-    let words: Vec<&str> = cleaned_intent.split(' ').filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = cleaned_intent
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .collect();
     if words.is_empty() {
         if is_current {
             return "current session".to_string();
         }
         // `Iie.name` — the FleetView default template's agentType is
         // `"claude"` (binary `YXt` @217235865).
-        if matches!(job.template.as_deref(), Some("bg") | Some("claude"))
-            && job.state == "working"
+        if matches!(job.template.as_deref(), Some("bg") | Some("claude")) && job.state == "working"
         {
             return "new session".to_string();
         }
@@ -334,9 +336,18 @@ mod tests {
     #[test]
     fn derive_band_matches_fhe_without_peer_status() {
         // Fhe(state) — no live status arg at the FleetView call site.
-        assert_eq!(derive_band(&job("working", Some("active"))), AgentBand::Active);
-        assert_eq!(derive_band(&job("working", Some("blocked"))), AgentBand::Blocked);
-        assert_eq!(derive_band(&job("done", Some("idle"))), AgentBand::Completed);
+        assert_eq!(
+            derive_band(&job("working", Some("active"))),
+            AgentBand::Active
+        );
+        assert_eq!(
+            derive_band(&job("working", Some("blocked"))),
+            AgentBand::Blocked
+        );
+        assert_eq!(
+            derive_band(&job("done", Some("idle"))),
+            AgentBand::Completed
+        );
         assert_eq!(derive_band(&job("failed", None)), AgentBand::Completed);
         // Terminal state with a still-active tempo is not terminal (Xg).
         assert_eq!(derive_band(&job("done", Some("active"))), AgentBand::Active);
@@ -350,8 +361,7 @@ mod tests {
     fn first_observation_never_notifies() {
         // $1f: `s === void 0` → record the band, no notification (a view
         // opening onto an ALREADY-blocked job stays quiet).
-        let (next, notes) =
-            detect_transitions(&HashMap::new(), &[row("a", AgentBand::Blocked)]);
+        let (next, notes) = detect_transitions(&HashMap::new(), &[row("a", AgentBand::Blocked)]);
         assert!(notes.is_empty());
         assert_eq!(next["a"], AgentBand::Blocked);
     }

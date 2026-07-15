@@ -1116,7 +1116,10 @@ async fn enable_substitutes_user_config_into_scoped_mcp_env() {
     let discovered = plugin::discover_installed_plugins(tmp.path()).await;
     let (id, manifest, dir) = discovered.into_iter().next().unwrap();
     // The manifest actually carried the parsed userConfig schema.
-    assert!(manifest.user_config.is_some(), "userConfig parsed from plugin.json");
+    assert!(
+        manifest.user_config.is_some(),
+        "userConfig parsed from plugin.json"
+    );
 
     manager.enable(&id, manifest, dir).await.expect("enable");
 
@@ -1128,7 +1131,10 @@ async fn enable_substitutes_user_config_into_scoped_mcp_env() {
         .expect("scoped MCP server materialized");
     let cfg = serde_json::to_value(state.config()).unwrap();
     let stdio = &cfg["spec"]["Stdio"];
-    assert_eq!(stdio["env"]["TOKEN"], "sk-live-secret", "sensitive from secure storage");
+    assert_eq!(
+        stdio["env"]["TOKEN"], "sk-live-secret",
+        "sensitive from secure storage"
+    );
     assert_eq!(stdio["env"]["R"], "us-east", "non-sensitive from default");
     assert_eq!(stdio["args"][1], "us-east", "arg substituted");
     // The literal template must NOT survive anywhere.

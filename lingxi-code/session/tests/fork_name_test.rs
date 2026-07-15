@@ -25,8 +25,7 @@ fn user(content: serde_json::Value) -> JsonlMessage {
 
 fn compact_summary(content: serde_json::Value) -> JsonlMessage {
     let mut m = user(content);
-    m.extra
-        .insert("isCompactSummary".to_string(), json!(true));
+    m.extra.insert("isCompactSummary".to_string(), json!(true));
     m
 }
 
@@ -41,7 +40,9 @@ fn meta(content: serde_json::Value) -> JsonlMessage {
 #[test]
 fn compaction_summary_is_skipped_for_fork_name() {
     let messages = vec![
-        compact_summary(json!("This is a long compacted history summary of prior work")),
+        compact_summary(json!(
+            "This is a long compacted history summary of prior work"
+        )),
         user(json!("fix the login bug")),
     ];
     assert_eq!(derive_fork_name(&messages), "fix the login bug");
@@ -83,8 +84,5 @@ fn caps_at_100_chars_and_collapses_whitespace() {
 /// A normal first prompt is returned verbatim (short case).
 #[test]
 fn short_prompt_returned_verbatim() {
-    assert_eq!(
-        derive_fork_name(&[user(json!("just do it"))]),
-        "just do it"
-    );
+    assert_eq!(derive_fork_name(&[user(json!("just do it"))]), "just do it");
 }

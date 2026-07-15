@@ -1088,7 +1088,10 @@ mod tests {
             allowed_tools: &[String],
             _shell: Option<crate::FrontmatterShell>,
         ) -> ShellExpansionCtx {
-            self.seen_allowed.lock().unwrap().push(allowed_tools.to_vec());
+            self.seen_allowed
+                .lock()
+                .unwrap()
+                .push(allowed_tools.to_vec());
             let permission_gate: Arc<dyn ShellPermissionGate> = if self.deny {
                 Arc::new(DenyGate)
             } else {
@@ -1122,7 +1125,11 @@ mod tests {
         }
     }
 
-    fn markdown_with(source: CommandSource, body: &str, allowed: Option<Vec<String>>) -> CommandRegistry {
+    fn markdown_with(
+        source: CommandSource,
+        body: &str,
+        allowed: Option<Vec<String>>,
+    ) -> CommandRegistry {
         use crate::model::CommandFrontmatter;
         let mut reg = CommandRegistry::new();
         reg.register_command(SlashCommand {
@@ -1179,8 +1186,8 @@ mod tests {
             deny: true,
             seen_allowed: std::sync::Mutex::new(Vec::new()),
         });
-        let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
-            .with_shell_expansion(provider);
+        let d =
+            RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg))).with_shell_expansion(provider);
         match d.dispatch("/demo").await {
             SlashDispatchResult::Handled { display } => assert_eq!(
                 display,

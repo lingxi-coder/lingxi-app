@@ -525,8 +525,12 @@ impl McpClient {
         full_name: &str,
         input: serde_json::Value,
     ) -> Result<McpToolResultDto, McpClientError> {
-        self.call_tool_with_timeout(full_name, input, mcp_tool_timeout_for(self.config_timeout_ms))
-            .await
+        self.call_tool_with_timeout(
+            full_name,
+            input,
+            mcp_tool_timeout_for(self.config_timeout_ms),
+        )
+        .await
     }
 
     /// `call_tool` with a custom timeout — used by tests to exercise the
@@ -1037,7 +1041,11 @@ fn resolve_tool_timeout_bhs(
 ) -> std::time::Duration {
     let n = config_timeout_ms
         .filter(|&ms| ms >= MCP_TOOL_TIMEOUT_MIN_MS)
-        .or_else(|| env_value.and_then(parse_int_base10_prefix).filter(|&ms| ms > 0))
+        .or_else(|| {
+            env_value
+                .and_then(parse_int_base10_prefix)
+                .filter(|&ms| ms > 0)
+        })
         .unwrap_or(DEFAULT_CALL_TOOL_TIMEOUT_MS);
     std::time::Duration::from_millis(n.clamp(MCP_TOOL_TIMEOUT_MIN_MS, MCP_TOOL_TIMEOUT_MAX_MS))
 }
@@ -1273,8 +1281,7 @@ mod constructor_tests {
         // The client can notify the server its roots changed — the wire frame
         // is a JSON-RPC notification (no id) for `notifications/roots/list_changed`.
         let (conn, _peer_tx, mut peer_rx) = paired_connection();
-        let client =
-            McpClient::new("filesystem", std::path::PathBuf::from("/proj"), conn).await;
+        let client = McpClient::new("filesystem", std::path::PathBuf::from("/proj"), conn).await;
         client.send_roots_list_changed();
 
         let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
@@ -1625,7 +1632,10 @@ mod constructor_tests {
         });
         let mut bytes = serde_json::to_vec(&resp).expect("encode response");
         bytes.push(b'\n');
-        peer_tx.send(Bytes::from(bytes)).await.expect("send response");
+        peer_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("send response");
         handle.await.expect("join").expect("list_tools ok")
     }
 

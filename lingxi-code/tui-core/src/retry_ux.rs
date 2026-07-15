@@ -104,14 +104,8 @@ mod tests {
 
     #[test]
     fn error_reason_generic_before_then_concrete() {
-        assert_eq!(
-            retry_error_reason(1, 10, "529 Overloaded"),
-            "API error"
-        );
-        assert_eq!(
-            retry_error_reason(2, 10, "529 Overloaded"),
-            "API error"
-        );
+        assert_eq!(retry_error_reason(1, 10, "529 Overloaded"), "API error");
+        assert_eq!(retry_error_reason(2, 10, "529 Overloaded"), "API error");
         assert_eq!(
             retry_error_reason(3, 10, "529 Overloaded"),
             "529 Overloaded"

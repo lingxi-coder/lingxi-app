@@ -162,8 +162,7 @@ pub struct TuiBuild {
     pub runtime: Runtime,
     /// Bridge receiver — the TUI render loop drains this into
     /// `tui::streaming::apply_event`.
-    pub bridge_rx:
-        tokio::sync::mpsc::UnboundedReceiver<tui_core::orchestrator_bridge::TurnEvent>,
+    pub bridge_rx: tokio::sync::mpsc::UnboundedReceiver<tui_core::orchestrator_bridge::TurnEvent>,
     /// (MULTIMODAL.1) A clone of the bridge SENDER, handed to the TUI so its
     /// live-key turn-spawn pump (`tui::root::pump_turn`) can emit `TurnStarted`
     /// / `TurnEnded` on the SAME channel the orchestrator's `BridgeOutputStream`
@@ -182,8 +181,7 @@ pub struct TuiBuild {
     /// bucket the "always allow" dialog appends to
     /// (`TuiPermissionGate::session_allow_rules`). Deny/ask rules have no live
     /// bucket, so they are effective-next-load.
-    pub session_allow_rules:
-        std::sync::Arc<tokio::sync::Mutex<Vec<permission::PermissionRule>>>,
+    pub session_allow_rules: std::sync::Arc<tokio::sync::Mutex<Vec<permission::PermissionRule>>>,
     /// (/permissions) The resolved settings-file roots for the interactive
     /// editor's disk writes (`permissions.{allow,ask,deny}` in
     /// user/project/local settings) and its snapshot preload — the SAME paths
@@ -419,6 +417,23 @@ fn load_settings_plans_directory(include_user: bool, include_project: bool) -> O
         .filter(|d| !d.trim().is_empty())
 }
 
+/// Load merged `settings.apiKeyHelper` (project + user + env layers), blank
+/// filtered. The live credential provider invokes the helper only when no
+/// higher-priority Anthropic credential was configured.
+fn load_settings_api_key_helper(include_user: bool, include_project: bool) -> Option<String> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.api_key_helper)
+        .filter(|d| !d.trim().is_empty())
+}
+
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
 /// glob patterns / absolute paths of `LINGXI.md` files to exclude from the
 /// system prompt (claude-code `isLingxiMdExcluded`). Empty when unset.
@@ -598,6 +613,7 @@ pub(crate) fn resolve_desktop_config(
     DesktopConfig {
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+        api_key_helper: load_settings_api_key_helper(incl_user, incl_project),
         cwd,
         lingxi_home,
         default_model,
@@ -888,7 +904,9 @@ pub async fn build_runtime_for_tui_inner(
     // `BridgeOutputStream` so the TUI's turn-spawn pump can emit
     // `TurnStarted`/`TurnEnded` on the same channel the orchestrator streams on.
     let turn_tx = bridge_tx.clone();
-    let bridge: Arc<dyn OutputStream> = Arc::new(tui_core::orchestrator_bridge::BridgeOutputStream::new(bridge_tx));
+    let bridge: Arc<dyn OutputStream> = Arc::new(
+        tui_core::orchestrator_bridge::BridgeOutputStream::new(bridge_tx),
+    );
     // (Task 8) Thread the CLI-resolved mode through the interactive TUI path.
     // The guard already ran in `run_cli` (notice already printed there too), so
     // this drops the notice and takes only the mode.
@@ -1102,9 +1120,14 @@ mod tests {
         let safe = Argv::from_iter(["lingxi-cli", "--safe-mode", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&safe, permission::PermissionMode::Default);
         assert!(cfg.customization_gates.safe_mode);
-        assert!(cfg.memory_provider.is_none(), "safe mode disables LINGXI.md");
         assert!(
-            cfg.mcp_paths.iter().all(|p| p == std::path::Path::new("/dev/null")),
+            cfg.memory_provider.is_none(),
+            "safe mode disables LINGXI.md"
+        );
+        assert!(
+            cfg.mcp_paths
+                .iter()
+                .all(|p| p == std::path::Path::new("/dev/null")),
             "safe mode nulls discovered MCP paths: {:?}",
             cfg.mcp_paths
         );
@@ -1113,21 +1136,30 @@ mod tests {
         let safe_dir =
             Argv::from_iter(["lingxi-cli", "--safe-mode", "--add-dir", "/tmp", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&safe_dir, permission::PermissionMode::Default);
-        assert!(cfg.memory_provider.is_none(), "--add-dir does not re-enable in safe mode");
+        assert!(
+            cfg.memory_provider.is_none(),
+            "--add-dir does not re-enable in safe mode"
+        );
 
         // Bare: gates set, memory off, but MCP discovery KEPT (bare's help
         // never lists MCP among the skips; `V5d.mcpAutoDiscovered:!1`).
         let bare = Argv::from_iter(["lingxi-cli", "--bare", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&bare, permission::PermissionMode::Default);
         assert!(cfg.customization_gates.bare);
-        assert!(cfg.memory_provider.is_none(), "bare skips CLAUDE.md auto-discovery");
+        assert!(
+            cfg.memory_provider.is_none(),
+            "bare skips CLAUDE.md auto-discovery"
+        );
         assert!(cfg.mcp_paths.iter().any(|p| p.ends_with(".mcp.json")));
 
         // Bare + --add-dir: explicit request re-enables the memory hierarchy.
         let bare_dir =
             Argv::from_iter(["lingxi-cli", "--bare", "--add-dir", "/tmp", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&bare_dir, permission::PermissionMode::Default);
-        assert!(cfg.memory_provider.is_some(), "--add-dir re-enables LINGXI.md in bare");
+        assert!(
+            cfg.memory_provider.is_some(),
+            "--add-dir re-enables LINGXI.md in bare"
+        );
     }
 
     /// (M3 cc2.1.198) `--no-session-persistence` threads into
@@ -1147,7 +1179,8 @@ mod tests {
 
         // Interactive misuse never reaches here (run_cli hard-errors), but a
         // direct caller stays faithful: non-print keeps persistence on.
-        let interactive = Argv::from_iter(["lingxi-cli", "--no-session-persistence", "hi"]).unwrap();
+        let interactive =
+            Argv::from_iter(["lingxi-cli", "--no-session-persistence", "hi"]).unwrap();
         let cfg = resolve_desktop_config(&interactive, permission::PermissionMode::Default);
         assert!(cfg.session_persistence);
     }

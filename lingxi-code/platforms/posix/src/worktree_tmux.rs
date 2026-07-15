@@ -64,10 +64,7 @@ pub async fn create_worktree_tmux_session(
         stdin: None,
     };
     let sandboxed = sandbox.bypass_with_audit(pcmd, WORKTREE_TMUX_AUDIT_REASON);
-    let output = runner
-        .run(&sandboxed)
-        .await
-        .map_err(|e| e.to_string())?;
+    let output = runner.run(&sandboxed).await.map_err(|e| e.to_string())?;
     if output.exit_code != 0 {
         return Err(output.stderr);
     }
@@ -110,10 +107,7 @@ pub async fn create_worktree_tmux_session(
 /// treats `:` and whitespace specially in `-t`/`-s` target syntax.
 #[must_use]
 pub fn worktree_tmux_session_name(repo_root: &Path, worktree_name: &str) -> String {
-    let base = repo_root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let base = repo_root.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let branch = format!("worktree-{}", worktree_name.replace('/', "+"));
     let combined = format!("{base}_{branch}");
     combined
@@ -139,10 +133,7 @@ mod tests {
 
     #[test]
     fn build_worktree_tmux_argv_shape_is_exact() {
-        let argv = build_worktree_tmux_argv(
-            "wt-feat",
-            Path::new("/repo/.lingxi/worktrees/feat"),
-        );
+        let argv = build_worktree_tmux_argv("wt-feat", Path::new("/repo/.lingxi/worktrees/feat"));
         assert_eq!(
             argv,
             vec![
@@ -247,7 +238,9 @@ mod tests {
         for input in ["feature/x", "release/1.2.3", "pr 123", "weird:name", ""] {
             let name = worktree_tmux_session_name(repo, input);
             assert!(
-                !name.contains('.') && !name.contains(':') && !name.chars().any(char::is_whitespace),
+                !name.contains('.')
+                    && !name.contains(':')
+                    && !name.chars().any(char::is_whitespace),
                 "session name {name:?} (from {input:?}) is not tmux -s legal"
             );
         }

@@ -242,7 +242,10 @@ mod tests {
             marketing_name_for_model("claude-sonnet-4-5"),
             Some("Sonnet 4.5")
         );
-        assert_eq!(marketing_name_for_model("claude-sonnet-5"), Some("Sonnet 5"));
+        assert_eq!(
+            marketing_name_for_model("claude-sonnet-5"),
+            Some("Sonnet 5")
+        );
         assert_eq!(
             marketing_name_for_model("claude-sonnet-5[1m]"),
             Some("Sonnet 5 (1M context)")

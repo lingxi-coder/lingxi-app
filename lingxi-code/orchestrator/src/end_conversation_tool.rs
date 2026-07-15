@@ -249,7 +249,12 @@ mod tests {
     async fn description_and_prompt_are_the_full_g2r() {
         let t = tool();
         let d = t
-            .description(&json!({}), &DescriptionOptions { is_non_interactive_session: false })
+            .description(
+                &json!({}),
+                &DescriptionOptions {
+                    is_non_interactive_session: false,
+                },
+            )
             .await;
         assert!(t.is_enabled(&ToolStaticContext::default()));
         assert!(d.starts_with("End the current conversation. Use only for sustained user abuse"));
@@ -272,7 +277,10 @@ mod tests {
             .as_deref()
             .unwrap()
             .starts_with("Re-read the EndConversation tool guidance below."));
-        assert!(!t.end_requested.load(Ordering::SeqCst), "must NOT end on 1st call");
+        assert!(
+            !t.end_requested.load(Ordering::SeqCst),
+            "must NOT end on 1st call"
+        );
     }
 
     #[tokio::test]
@@ -281,16 +289,19 @@ mod tests {
         let t = tool();
         let (tx, _rx) = tool_api::progress::progress_channel();
         let msgs = vec![
-            asst_calling_endconv(),                                  // prior turn
+            asst_calling_endconv(), // prior turn
             ConversationMessage::user(MessageId::new(), "reminder ack".into()),
-            asst_calling_endconv(),                                  // current turn
+            asst_calling_endconv(), // current turn
         ];
         let r = t.call(json!({}), ctx_with(msgs), tx).await.expect("ok");
         assert_eq!(r.data["ended"], true);
         // Tool RESULT (MWn), returned to the model — NOT the user-facing
         // finalMessage (k4i, emitted separately by the turn loop).
         assert_eq!(r.data["message"], "Claude has ended this chat.");
-        assert!(t.end_requested.load(Ordering::SeqCst), "slot raised on 2nd call");
+        assert!(
+            t.end_requested.load(Ordering::SeqCst),
+            "slot raised on 2nd call"
+        );
     }
 
     #[tokio::test]
@@ -306,11 +317,17 @@ mod tests {
         ]);
         ctx.agent_id = Some(protocol::AgentId::new());
         let r = t.call(json!({}), ctx, tx).await.expect("ok");
-        assert_eq!(r.data["ended"], false, "a fork can never end the conversation");
+        assert_eq!(
+            r.data["ended"], false,
+            "a fork can never end the conversation"
+        );
         assert!(r.data["message"]
             .as_str()
             .unwrap()
             .starts_with("You are running as a background fork"));
-        assert!(!t.end_requested.load(Ordering::SeqCst), "fork must NOT raise the slot");
+        assert!(
+            !t.end_requested.load(Ordering::SeqCst),
+            "fork must NOT raise the slot"
+        );
     }
 }

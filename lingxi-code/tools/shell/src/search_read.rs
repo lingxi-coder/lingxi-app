@@ -30,8 +30,9 @@ impl ReadSearchKind {
 }
 
 /// `BashTool.tsx:60` — search commands.
-const BASH_SEARCH_COMMANDS: &[&str] =
-    &["find", "grep", "rg", "ag", "ack", "locate", "which", "whereis"];
+const BASH_SEARCH_COMMANDS: &[&str] = &[
+    "find", "grep", "rg", "ag", "ack", "locate", "which", "whereis",
+];
 /// `BashTool.tsx:63` — read/view/analysis/data-processing commands.
 const BASH_READ_COMMANDS: &[&str] = &[
     "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk", "cut",
@@ -106,7 +107,9 @@ pub fn is_search_or_read_command(tool: &str, command: Option<&str>) -> ReadSearc
             is_search: true,
             ..Default::default()
         },
-        "Bash" => command.map(is_search_or_read_bash_command).unwrap_or_default(),
+        "Bash" => command
+            .map(is_search_or_read_bash_command)
+            .unwrap_or_default(),
         _ => ReadSearchKind::default(),
     }
 }
@@ -152,4 +155,3 @@ mod tests {
         assert!(is_search_or_read_bash_command("cat a > out").is_read);
     }
 }
-

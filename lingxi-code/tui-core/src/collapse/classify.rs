@@ -97,4 +97,3 @@ mod tests {
         assert!(!classify("Write", &json!({"file_path": "a"})).is_collapsible);
     }
 }
-

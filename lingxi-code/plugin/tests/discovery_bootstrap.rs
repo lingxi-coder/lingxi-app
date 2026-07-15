@@ -214,7 +214,11 @@ async fn cli_plugin_dir_loads_a_zip_with_wrapper_dir() {
     fs::write(&zip_path, &buf).unwrap();
 
     let discovered = plugin::discover_cli_plugin_dirs(&[zip_path]).await;
-    assert_eq!(discovered.len(), 1, "zip extracts + wrapper unwraps + loads");
+    assert_eq!(
+        discovered.len(),
+        1,
+        "zip extracts + wrapper unwraps + loads"
+    );
     assert_eq!(discovered[0].1.name, "myplugin");
     // The returned dir is the UNWRAPPED plugin root (holds the manifest dir).
     assert!(discovered[0].2.join(".lingxi-plugin").is_dir());

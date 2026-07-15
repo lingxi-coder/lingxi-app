@@ -248,7 +248,10 @@ mod tests {
         // Other git subcommands keep the default semantic.
         let s = interpret_command_result("git status", 1);
         assert!(s.is_error);
-        assert_eq!(s.message.as_deref(), Some("Command failed with exit code 1"));
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Command failed with exit code 1")
+        );
     }
 
     /// 2.1.196 "quoted | patterns": a pipe INSIDE quotes must not split the

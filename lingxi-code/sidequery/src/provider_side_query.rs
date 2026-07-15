@@ -853,7 +853,8 @@ mod tests {
             "id": "msg_think", "model": "claude-opus-4-6",
             "content": [{ "type": "text", "text": "ok" }],
             "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 }
-        }).to_string();
+        })
+        .to_string();
         let transport = Arc::new(StubTransport::new(body));
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
         let mut r = req(None);
@@ -880,7 +881,8 @@ mod tests {
             "id": "msg_legacy", "model": "claude-haiku-4-5",
             "content": [{ "type": "text", "text": "ok" }],
             "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 }
-        }).to_string();
+        })
+        .to_string();
         let transport = Arc::new(StubTransport::new(body));
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
         client.query(req(None)).await.expect("query ok");

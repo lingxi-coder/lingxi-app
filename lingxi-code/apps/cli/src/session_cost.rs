@@ -121,7 +121,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn later_save_overwrites_the_projects_last_cost() {
         let (_dir, cfg) = tmp_config();

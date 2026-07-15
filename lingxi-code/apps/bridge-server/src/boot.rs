@@ -134,7 +134,7 @@ pub fn resolve_api_base() -> String {
     std::env::var(API_BASE_ENV).unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
-/// Load the merged settings `providers` / `routing` blocks from the layered
+/// Load the merged settings `providers` / `routing` / `apiKeyHelper` blocks from the layered
 /// settings (project + user + env), rooted at the *current* working directory
 /// (the process has already `chdir`'d into any `--cwd`). Returns `(None, None)`
 /// on any load failure — callers then fall back to built-in profiles + the
@@ -144,6 +144,7 @@ pub fn resolve_api_base() -> String {
 fn load_settings_blocks() -> (
     Option<BTreeMap<String, serde_json::Value>>,
     Option<serde_json::Value>,
+    Option<String>,
 ) {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let env: BTreeMap<String, String> = std::env::vars().collect();
@@ -153,8 +154,14 @@ fn load_settings_blocks() -> (
         defaults: engine::settings::schema::SettingsJson::default(),
     };
     match engine::settings::Settings::load(inputs) {
-        Ok(eff) => (eff.settings.providers, eff.settings.routing),
-        Err(_) => (None, None),
+        Ok(eff) => (
+            eff.settings.providers,
+            eff.settings.routing,
+            eff.settings
+                .api_key_helper
+                .filter(|helper| !helper.trim().is_empty()),
+        ),
+        Err(_) => (None, None, None),
     }
 }
 
@@ -200,11 +207,12 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         default_model.clone_from(m);
     }
 
-    let (provider_profiles, routing) = load_settings_blocks();
+    let (provider_profiles, routing, api_key_helper) = load_settings_blocks();
 
     DesktopConfig {
         api_base: resolve_api_base(),
         api_key: std::env::var(API_KEY_ENV).unwrap_or_default(),
+        api_key_helper,
         cwd,
         lingxi_home,
         default_model,
@@ -288,13 +296,17 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     }
 }
 
-/// True iff the config has neither an API key NOR any settings-configured
-/// provider profile — i.e. no way to authenticate a live turn. The server still
-/// boots (transport testing is valuable), but the caller logs a clear,
-/// NON-SECRET warning so the operator knows turns will 401.
+/// True iff the config has neither an API key/apiKeyHelper NOR any
+/// settings-configured provider profile — i.e. no way to authenticate a live
+/// turn. The server still boots (transport testing is valuable), but the caller
+/// logs a clear, NON-SECRET warning so the operator knows turns will 401.
 #[must_use]
 pub fn has_no_credential_source(cfg: &DesktopConfig) -> bool {
     cfg.api_key.is_empty()
+        && cfg
+            .api_key_helper
+            .as_deref()
+            .is_none_or(|helper| helper.trim().is_empty())
         && cfg
             .provider_profiles
             .as_ref()
@@ -579,6 +591,10 @@ mod tests {
         assert!(!has_no_credential_source(&cfg));
 
         cfg.api_key = String::new();
+        cfg.api_key_helper = Some("printf sk-test".to_string());
+        assert!(!has_no_credential_source(&cfg));
+
+        cfg.api_key_helper = None;
         cfg.provider_profiles = Some(BTreeMap::new());
         assert!(
             has_no_credential_source(&cfg),
@@ -601,6 +617,7 @@ mod tests {
         let cfg = DesktopConfig {
             api_base: DEFAULT_API_BASE.to_string(),
             api_key: String::new(),
+            api_key_helper: None,
             cwd: cwd.clone(),
             lingxi_home: cwd.join(".lingxi"),
             default_model: "claude-sonnet-4-20250514".to_string(),

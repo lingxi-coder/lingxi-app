@@ -24,7 +24,8 @@ pub mod model_override;
 pub mod prompt_shell;
 pub mod skill;
 pub use prompt_shell::{
-    build_prompt_shell_provider, resolve_shell_path, PromptShellExpansionProvider, PromptShellRunner,
+    build_prompt_shell_provider, resolve_shell_path, PromptShellExpansionProvider,
+    PromptShellRunner,
 };
 pub use skill::SkillTool;
 /// Register the skill-management tool against `reg`.

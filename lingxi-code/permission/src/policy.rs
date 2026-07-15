@@ -185,7 +185,8 @@ impl PermissionPolicy {
             is_windows: cfg!(target_os = "windows"),
             is_macos: cfg!(target_os = "macos"),
         };
-        match crate::powershell_containment::validate_ps_statements(&parse.statements, &ctx, false) {
+        match crate::powershell_containment::validate_ps_statements(&parse.statements, &ctx, false)
+        {
             crate::powershell_containment::PsContainmentResult::Passthrough => None,
             crate::powershell_containment::PsContainmentResult::Ask { message, reason } => {
                 Some(ask_powershell_containment(message, reason))
@@ -492,6 +493,28 @@ impl PermissionPolicy {
         if let Some(ask) = Self::shell_dangerous_rm_variable_ask(tool_name, input) {
             return ask;
         }
+        // 1f. CATASTROPHIC REMOVAL FORCED-ASK. This must run before every
+        // allow-like shortcut, including sandbox auto-allow and exact allow:
+        // removing `/`, `$HOME`, a root child, or the workspace is destructive
+        // even if the command is hidden inside `$()`, backticks, or process
+        // substitution.
+        if let Some(roots) = self.roots.as_ref() {
+            if shell_command::is_shell_tool(tool_name) {
+                if let Some(command) = shell_command::command_from_input(input) {
+                    let home = roots
+                        .home
+                        .as_deref()
+                        .map(|p| p.to_string_lossy().into_owned());
+                    if let Some(danger) = crate::dangerous_removal::check_dangerous_removal(
+                        command,
+                        &roots.cwd,
+                        home.as_deref(),
+                    ) {
+                        return ask_dangerous_removal(tool_name, danger);
+                    }
+                }
+            }
+        }
         // 1d. SANDBOX AUTO-ALLOW (claude-code `bashToolHasPermission`'s
         //     sandbox branch, `bashPermissions.ts:1829-1843` + `checkSandboxAutoAllow`).
         //     When sandboxing is enabled AND `autoAllowBashIfSandboxed` (default
@@ -501,26 +524,17 @@ impl PermissionPolicy {
         //     runs AFTER the deny/ask walks (so explicit deny/ask rules still
         //     win — TS `checkSandboxAutoAllow` itself re-checks deny/ask on the
         //     full command + every subcommand before allowing; here those rules
-        //     already short-circuited above) and BEFORE the path-constraint /
-        //     dangerous-removal guards (1:1 with TS, where the sandbox branch
-        //     precedes `bashToolCheckPermission`'s path-constraint step). Gated
+        //     already short-circuited above) and AFTER the catastrophic removal
+        //     guard above so a sandbox cannot auto-approve destructive deletes.
+        //     Gated
         //     on [`Self::sandbox_runtime`]: `None` (the default) ⇒ no-op, so
         //     behavior is unchanged when absent.
         if self.shell_sandbox_auto_allows(tool_name, input) {
             return allow_sandbox_auto();
         }
-        // 2. Dangerous-removal-path guard (claude-code `checkDangerousRemovalPaths`
-        //    via `createPathChecker`, `BashTool/pathValidation.ts:728-737`). An
-        //    `rm`/`rmdir` whose target resolves to a critical system path (`/`,
-        //    `/etc`, the home dir, a trailing `/*` glob, …) ALWAYS asks — and this
-        //    must OVERRIDE a matching allow rule (`Bash(rm:*)`), matching the TS
-        //    note that the operation "cannot be auto-allowed by permission rules".
-        //    Placed AFTER the deny/ask walks (explicit deny/ask rules still win,
-        //    mirroring TS where an explicit deny short-circuits the check) and
-        //    BEFORE the allow walk so it pre-empts any allow grant. Requires
-        //    [`Self::roots`] (cwd + home); without roots the guard is skipped
-        //    (preserves pre-guard behavior), consistent with shell content
-        //    matching being roots-gated.
+        // 2. Path containment guards. The catastrophic removal guard used to
+        //    live here; it now runs before sandbox auto-allow so substitutions
+        //    and direct `rm` receive the same forced-ask protection.
         if let Some(roots) = self.roots.as_ref() {
             // PowerShell path containment (claude-code `validatePowerShellCommandPaths`
             // via a `pwsh` parse). Runs INSTEAD of the bash guards below — those
@@ -535,17 +549,6 @@ impl PermissionPolicy {
                 }
             } else if shell_command::is_shell_tool(tool_name) {
                 if let Some(command) = shell_command::command_from_input(input) {
-                    let home = roots
-                        .home
-                        .as_deref()
-                        .map(|p| p.to_string_lossy().into_owned());
-                    if let Some(danger) = crate::dangerous_removal::check_dangerous_removal(
-                        command,
-                        &roots.cwd,
-                        home.as_deref(),
-                    ) {
-                        return ask_dangerous_removal(tool_name, danger);
-                    }
                     // 2b. Bash path-constraint guard (claude-code `checkPathConstraints`,
                     //     `BashTool/pathValidation.ts:1013`). A bash command that writes
                     //     (output redirection), `cd`s, or uses process substitution to
@@ -1284,8 +1287,7 @@ impl PermissionPolicy {
         ) {
             return None;
         }
-        let (cmd, target) =
-            crate::dangerous_removal::dangerous_rm_on_variable_path(command)?;
+        let (cmd, target) = crate::dangerous_removal::dangerous_rm_on_variable_path(command)?;
         // NOTE(telemetry): CC emits `tengu_bash_dangerous_rm_too_complex` here
         // (`hHg`). The permission crate emits no AST-branch tengu events yet —
         // same as the sibling `tengu_bash_ast_too_complex`, which is likewise
@@ -1635,7 +1637,27 @@ fn domain_wildcard_matches(pattern: &str, candidate: &str) -> bool {
         format!("^domain:{}$", escape_domain_wildcard(rest))
     };
     // `(?i)` mirrors `bRp`'s `new RegExp(n, "i")` (inputs are already lowercased).
-    regex::Regex::new(&format!("(?i){regex_str}")).is_ok_and(|re| re.is_match(candidate))
+    cached_domain_regex(&format!("(?i){regex_str}")).is_some_and(|re| re.is_match(candidate))
+}
+
+fn cached_domain_regex(pattern: &str) -> Option<regex::Regex> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .expect("domain regex cache")
+        .get(pattern)
+        .cloned()
+    {
+        return cached;
+    }
+    let compiled = regex::Regex::new(pattern).ok();
+    cache
+        .lock()
+        .expect("domain regex cache")
+        .insert(pattern.to_string(), compiled.clone());
+    compiled
 }
 
 /// Escape regex metacharacters and turn each `*` into `[^.:]*` — claude-code

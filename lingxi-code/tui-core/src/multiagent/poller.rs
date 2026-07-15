@@ -219,9 +219,9 @@ mod tests {
         };
         let mut rows = vec![
             mk("wc", Some(100)),
-            mk("wa", None),        // never-started -> last
-            mk("wb", Some(300)),   // newest
-            mk("wd", Some(300)),   // tie with wb -> id breaks it (wb < wd)
+            mk("wa", None),      // never-started -> last
+            mk("wb", Some(300)), // newest
+            mk("wd", Some(300)), // tie with wb -> id breaks it (wb < wd)
         ];
         sort_workflows_newest_first(&mut rows);
         let ids: Vec<&str> = rows.iter().map(|r| r.task_id.as_str()).collect();

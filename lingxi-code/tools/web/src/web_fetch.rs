@@ -577,11 +577,7 @@ impl WebFetchTool {
             ns ^ (body.len() as u64).rotate_left(17) ^ (body.as_ptr() as u64)
         };
         let stem = crate::persist::persisted_filename(unix_ms, seed);
-        let output_dir = self
-            .ctx
-            .cwd()
-            .join(branding::DOT_DIR)
-            .join("tool-results");
+        let output_dir = self.ctx.cwd().join(branding::DOT_DIR).join("tool-results");
         match crate::persist::persist_binary_content(body, content_type, &stem, &output_dir) {
             crate::persist::PersistResult::Ok { filepath, size } => (Some(filepath), Some(size)),
             crate::persist::PersistResult::Err { .. } => (None, None),
@@ -1211,8 +1207,7 @@ Usage notes:\n\
                 } else {
                     &resp.body_bytes
                 };
-                let (persisted_path, persisted_size) =
-                    self.persist_binary(&content_type, raw_body);
+                let (persisted_path, persisted_size) = self.persist_binary(&content_type, raw_body);
 
                 // HTML->markdown (claude-code converts HTML; non-HTML is used as-is).
                 // Behind `web-markdown`; feature off => content is the raw body.

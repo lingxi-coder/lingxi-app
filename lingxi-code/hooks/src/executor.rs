@@ -1076,10 +1076,12 @@ impl Dispatcher {
                     .run_hook_with_async_detection(&sandboxed, default_async_timeout)
                     .await
                 {
-                    Ok(traits::HookRunOutcome::Backgrounded) => (
+                    Ok(traits::HookRunOutcome::Backgrounded { output_path }) => (
                         HookResult {
                             outcome: HookOutcome::Success,
-                            stdout: String::new(),
+                            stdout: output_path
+                                .map(|p| format!("async hook output: {p}"))
+                                .unwrap_or_default(),
                             stderr: String::new(),
                             exit_code: None,
                             response: None,

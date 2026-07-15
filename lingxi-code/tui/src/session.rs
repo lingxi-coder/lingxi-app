@@ -277,9 +277,24 @@ mod tests {
             row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", false), // curated
             row("Claude 2 legacy", "claude-2-legacy", "anthropic", false), // NON-curated anthropic
             row("OpenRouter Auto", "openrouter/auto", "openrouter", false), // meta-router — kept
-            row("Llama 3.3 Free", "meta-llama/llama-3.3-70b-instruct:free", "openrouter", false), // FREE
-            row("Claude Opus 4.5 (latest)", "anthropic/claude-opus-4.5", "openrouter", false), // VERSIONED latest — kept
-            row("Claude Opus Latest", "~anthropic/claude-opus-latest", "openrouter", false), // version-less ~alias — HIDDEN
+            row(
+                "Llama 3.3 Free",
+                "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter",
+                false,
+            ), // FREE
+            row(
+                "Claude Opus 4.5 (latest)",
+                "anthropic/claude-opus-4.5",
+                "openrouter",
+                false,
+            ), // VERSIONED latest — kept
+            row(
+                "Claude Opus Latest",
+                "~anthropic/claude-opus-latest",
+                "openrouter",
+                false,
+            ), // version-less ~alias — HIDDEN
             row("OR GPT passthrough", "openai/gpt-4o", "openrouter", false), // paid non-alias — HIDDEN
             row("DeepSeek Chat", "deepseek-chat", "deepseek", false), // curated but UNCONNECTED
         ];
@@ -297,7 +312,10 @@ mod tests {
         // Curated anthropic model kept; NON-curated anthropic model dropped
         // (anthropic HAS a curated shortlist).
         assert!(ids.contains(&"claude-sonnet-5"));
-        assert!(!ids.contains(&"claude-2-legacy"), "non-curated curated-provider model hidden");
+        assert!(
+            !ids.contains(&"claude-2-legacy"),
+            "non-curated curated-provider model hidden"
+        );
         // OpenRouter curation: FREE model kept + labeled; the meta-router and the
         // VERSIONED "(latest)" model are kept; the version-less `~`-alias and the
         // paid non-alias passthrough are hidden (300+-model tail trimmed).
@@ -311,15 +329,28 @@ mod tests {
             !ids.contains(&"~anthropic/claude-opus-latest"),
             "version-less ~vendor/x-latest alias hidden"
         );
-        assert!(!ids.contains(&"openai/gpt-4o"), "paid non-alias OpenRouter model hidden");
+        assert!(
+            !ids.contains(&"openai/gpt-4o"),
+            "paid non-alias OpenRouter model hidden"
+        );
         // Free comes BEFORE the alias, and carries the 免费 tag.
         let free_pos = ids.iter().position(|id| id.contains(":free")).unwrap();
         let alias_pos = ids.iter().position(|id| *id == "openrouter/auto").unwrap();
         assert!(free_pos < alias_pos, "free models are listed first");
-        let free_row = shown.iter().find(|m| m.request_model.contains(":free")).unwrap();
-        assert!(free_row.display.contains("免费"), "free row is tagged: {}", free_row.display);
+        let free_row = shown
+            .iter()
+            .find(|m| m.request_model.contains(":free"))
+            .unwrap();
+        assert!(
+            free_row.display.contains("免费"),
+            "free row is tagged: {}",
+            free_row.display
+        );
         // DeepSeek is unconnected → hidden entirely, even though curated.
-        assert!(!ids.contains(&"deepseek-chat"), "unconnected provider hidden");
+        assert!(
+            !ids.contains(&"deepseek-chat"),
+            "unconnected provider hidden"
+        );
     }
 
     #[test]
@@ -352,8 +383,17 @@ mod tests {
         let shown = connected_model_rows(&all, &BTreeMap::new());
         let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
         assert!(ids.contains(&"claude-opus-4-8"), "current kept");
-        assert!(ids.contains(&"claude-sonnet-5"), "curated peer of current provider shown");
-        assert!(!ids.contains(&"claude-2-legacy"), "non-curated still trimmed");
-        assert!(!ids.contains(&"openrouter/auto"), "unrelated unconnected provider hidden");
+        assert!(
+            ids.contains(&"claude-sonnet-5"),
+            "curated peer of current provider shown"
+        );
+        assert!(
+            !ids.contains(&"claude-2-legacy"),
+            "non-curated still trimmed"
+        );
+        assert!(
+            !ids.contains(&"openrouter/auto"),
+            "unrelated unconnected provider hidden"
+        );
     }
 }

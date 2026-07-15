@@ -128,7 +128,9 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = SideQuestionHandler::new(mock);
         match h.handle(&args("   ")).await {
-            CommandResult::Done { display: Some(s) } => assert_eq!(s, "Usage: /btw <your question>"),
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "Usage: /btw <your question>")
+            }
             other => panic!("expected Done, got {other:?}"),
         }
     }

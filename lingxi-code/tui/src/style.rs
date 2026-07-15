@@ -11,7 +11,11 @@ use ratatui::style::{Color, Style};
 /// Matches codex's truncating `as u8` cast exactly (no rounding).
 fn blend(top: (u8, u8, u8), bottom: (u8, u8, u8), alpha: f32) -> (u8, u8, u8) {
     let mix = |t: u8, b: u8| ((f32::from(t) * alpha) + (f32::from(b) * (1.0 - alpha))) as u8;
-    (mix(top.0, bottom.0), mix(top.1, bottom.1), mix(top.2, bottom.2))
+    (
+        mix(top.0, bottom.0),
+        mix(top.1, bottom.1),
+        mix(top.2, bottom.2),
+    )
 }
 
 /// BT.601 luma > 128 ⇒ light (codex `color.rs::is_light`).

@@ -246,7 +246,11 @@ async fn stream_ended_without_stop_after_completed_block_finalizes_partial() {
 
     let expected_notice =
         "API Error: Connection closed mid-response. The response above may be incomplete.";
-    assert!(output.text_events().await.iter().any(|t| t == expected_notice));
+    assert!(output
+        .text_events()
+        .await
+        .iter()
+        .any(|t| t == expected_notice));
     let events = sink.events().await;
     let finalized = events
         .iter()

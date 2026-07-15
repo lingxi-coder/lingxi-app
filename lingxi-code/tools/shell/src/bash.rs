@@ -1832,7 +1832,10 @@ mod tests {
         );
         // A plain interrupt (no timeout) carries NO duration annotation.
         let plain = build_interrupted_result("out", "boom", "cmd", None);
-        assert!(!plain.model_content.unwrap().contains("Command timed out after"));
+        assert!(!plain
+            .model_content
+            .unwrap()
+            .contains("Command timed out after"));
     }
 
     #[test]
@@ -2162,10 +2165,8 @@ mod tests {
 
         let last_cwd = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut ctx = shell_test_ctx(ok_output());
-        ctx.session_cwd = tool_api::session_cwd::SessionCwd::new(
-            origin_path.clone(),
-            vec![origin_path.clone()],
-        );
+        ctx.session_cwd =
+            tool_api::session_cwd::SessionCwd::new(origin_path.clone(), vec![origin_path.clone()]);
         ctx.process = std::sync::Arc::new(CwdCapturingRunner {
             out: ok_output(),
             last_cwd: last_cwd.clone(),

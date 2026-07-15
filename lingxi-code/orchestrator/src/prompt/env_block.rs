@@ -306,7 +306,9 @@ capture your entry's SHA via `git stash list --format='%H %gs'`, restore with `g
         // Notice sits between the two fixed lines; the stash bullet follows it.
         let i_pwd = out.find("Primary working directory:").expect("pwd line");
         let i_notice = out.find("This is a git worktree").expect("notice present");
-        let i_stash = out.find("The git stash stack is shared").expect("stash bullet");
+        let i_stash = out
+            .find("The git stash stack is shared")
+            .expect("stash bullet");
         let i_git = out.find("Is a git repository:").expect("git line");
         assert!(i_pwd < i_notice);
         assert!(i_notice < i_stash);

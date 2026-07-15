@@ -49,17 +49,17 @@ pub use aws_auth::{
     ShellAwsAuthProcess,
 };
 pub use catalog::{builtin_presets, BuiltinCatalog};
-pub use cloud_provider_env::{
-    bedrock_base_url_override, foundry_base_host, foundry_base_host_from_env, foundry_credential_from_env,
-    foundry_messages_base_url, foundry_messages_base_url_from_env, select_foundry_credential,
-    skip_bedrock_auth, skip_foundry_auth, skip_vertex_auth, small_fast_model_aws_region,
-    vertex_base_host, vertex_base_host_url, vertex_codec_base_url, vertex_codec_base_url_from_env,
-    vertex_default_region, vertex_region_env_var_for_model, vertex_region_for_model,
-    vertex_region_for_model_from_env, FoundryCredential,
-};
 pub use client::{
     DefaultLlmClient, FileActivationPoll, LlmEventStream, PreparedLlmCall,
     ResponsesWebSocketRequestSnapshot, ResponsesWebSocketSession,
+};
+pub use cloud_provider_env::{
+    bedrock_base_url_override, foundry_base_host, foundry_base_host_from_env,
+    foundry_credential_from_env, foundry_messages_base_url, foundry_messages_base_url_from_env,
+    select_foundry_credential, skip_bedrock_auth, skip_foundry_auth, skip_vertex_auth,
+    small_fast_model_aws_region, vertex_base_host, vertex_base_host_url, vertex_codec_base_url,
+    vertex_codec_base_url_from_env, vertex_default_region, vertex_region_env_var_for_model,
+    vertex_region_for_model, vertex_region_for_model_from_env, FoundryCredential,
 };
 pub use config::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, CredentialConfig, ModelProfile,

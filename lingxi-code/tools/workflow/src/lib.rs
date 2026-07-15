@@ -20,6 +20,7 @@
 mod size_guideline;
 pub use size_guideline::{prompt_appendix_for, WorkflowSizeGuideline};
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -41,6 +42,8 @@ pub const MAX_SCRIPT_BYTES: usize = 524288;
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Workflow";
+
+const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
 /// The long-form tool description (claude-code v2.1.185 `prompt`), reproduced
 /// byte-for-byte. A trailing newline (should an editor add one to the data file)
@@ -112,11 +115,63 @@ impl std::fmt::Display for WorkflowLaunchError {
 }
 impl std::error::Error for WorkflowLaunchError {}
 
+fn user_config_home_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .map(|home| home.join(branding::DOT_DIR))
+}
+
+fn saved_workflow_dirs() -> Vec<PathBuf> {
+    let project = PathBuf::from(branding::DOT_DIR).join("workflows");
+    let mut dirs = vec![project.clone()];
+    if let Some(user) = user_config_home_dir().map(|home| home.join("workflows")) {
+        if user != project {
+            dirs.push(user);
+        }
+    }
+    dirs
+}
+
+fn saved_workflow_candidates(name: &str) -> Vec<PathBuf> {
+    saved_workflow_dirs()
+        .into_iter()
+        .flat_map(|dir| {
+            WORKFLOW_EXTENSIONS
+                .iter()
+                .map(move |ext| dir.join(format!("{name}{ext}")))
+        })
+        .collect()
+}
+
+fn path_for_read(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn saved_workflow_dirs_display() -> String {
+    saved_workflow_dirs()
+        .into_iter()
+        .map(|dir| {
+            let mut s = dir.to_string_lossy().into_owned();
+            if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                s.push(std::path::MAIN_SEPARATOR);
+            }
+            s
+        })
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
 /// Resolve a launch spec to a script source. Precedence follows claude-code:
 /// `scriptPath` over `script` over `name` (the schema marks `scriptPath` as
 /// "Takes precedence over `script` and `name`"). `read` loads a file's contents
-/// (the host provides real I/O); `name` resolution looks under
-/// `.lingxi/workflows/<name>` with common script extensions. (LingXi ships no
+/// (the host provides real I/O); `name` resolution looks first under the
+/// project saved-workflow directory (`.lingxi/workflows/<name>`) and then under
+/// the user config directory (`$LINGXI_CONFIG_DIR/workflows/<name>` or
+/// `~/.lingxi/workflows/<name>`) with common script extensions. (LingXi ships no
 /// built-in workflow library, so a `name` that isn't a saved file is an error.)
 pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, WorkflowLaunchError>
 where
@@ -131,14 +186,14 @@ where
         return Ok(script);
     }
     if let Some(name) = nonempty(&spec.name) {
-        for ext in [".js", ".mjs", ".ts", ""] {
-            if let Ok(src) = read(&format!("{}/workflows/{name}{ext}", branding::DOT_DIR)) {
+        for candidate in saved_workflow_candidates(&name) {
+            if let Ok(src) = read(&path_for_read(&candidate)) {
                 return Ok(src);
             }
         }
         return Err(WorkflowLaunchError(format!(
-            "no saved workflow named '{name}' under {}/workflows/",
-            branding::DOT_DIR
+            "no saved workflow named '{name}' under {}",
+            saved_workflow_dirs_display()
         )));
     }
     Err(WorkflowLaunchError(
@@ -205,14 +260,19 @@ impl WorkflowTool {
         }
     }
 
-    /// List saved workflow names from `.lingxi/workflows/`. Returns a
-    /// comma-joined string for the errorCode-1b message, or `None` on I/O error.
+    /// List saved workflow names from project and user workflow directories.
+    /// Returns a comma-joined string for the errorCode-1b message. Missing
+    /// directories are ignored.
     fn list_available_workflow_names() -> Option<String> {
-        let dir = std::fs::read_dir(format!("{}/workflows", branding::DOT_DIR)).ok()?;
-        let mut names: Vec<String> = dir
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let fname = e.file_name();
+        let mut saw_dir = false;
+        let mut names: Vec<String> = Vec::new();
+        for dir in saved_workflow_dirs() {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            saw_dir = true;
+            names.extend(entries.filter_map(|e| {
+                let fname = e.ok()?.file_name();
                 let fname = fname.to_string_lossy();
                 // Strip known extensions to get the bare name.
                 for ext in [".js", ".mjs", ".ts"] {
@@ -221,8 +281,11 @@ impl WorkflowTool {
                     }
                 }
                 Some(fname.into_owned())
-            })
-            .collect();
+            }));
+        }
+        if !saw_dir {
+            return None;
+        }
         names.sort();
         names.dedup();
         Some(names.join(", "))
@@ -398,10 +461,9 @@ impl Tool for WorkflowTool {
         } else if let Some(ref inline) = script {
             resolved_script = inline.clone();
         } else if let Some(ref wf_name) = name {
-            // Try to resolve from saved workflows (.lingxi/workflows/<name>{.js,.mjs,.ts,""}).
+            // Try to resolve from saved workflows (project first, then user).
             let mut found: Option<String> = None;
-            for ext in [".js", ".mjs", ".ts", ""] {
-                let candidate = format!("{}/workflows/{wf_name}{ext}", branding::DOT_DIR);
+            for candidate in saved_workflow_candidates(wf_name) {
                 match std::fs::read_to_string(&candidate) {
                     Ok(src) => {
                         found = Some(src);
@@ -601,6 +663,28 @@ mod tests {
         WorkflowTool::new(launcher)
     }
 
+    fn unique_temp_path(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "lingxi-workflow-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn with_config_dir_env<T>(path: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let old = std::env::var_os(branding::CONFIG_DIR_ENV);
+        std::env::set_var(branding::CONFIG_DIR_ENV, path);
+        let out = f();
+        match old {
+            Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+        }
+        out
+    }
+
     #[test]
     fn name_is_workflow() {
         assert_eq!(tool(None).name(), "Workflow");
@@ -654,6 +738,38 @@ mod tests {
         };
         assert!(resolve_script(&spec, &read).is_err());
         assert!(resolve_script(&WorkflowLaunchSpec::default(), &read).is_err());
+    }
+
+    #[test]
+    fn resolve_script_name_falls_back_to_user_workflows_dir() {
+        use std::collections::HashMap;
+        let _g = ENV_LOCK.lock().unwrap();
+        let config_dir = unique_temp_path("resolve-user");
+        let user_workflow = config_dir.join("workflows").join("review.mjs");
+        let mut files: HashMap<String, String> = HashMap::new();
+        files.insert(
+            user_workflow.to_string_lossy().into_owned(),
+            "FROM_USER".into(),
+        );
+        let read = |p: &str| {
+            files
+                .get(p)
+                .cloned()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "nope"))
+        };
+
+        let got = with_config_dir_env(&config_dir, || {
+            resolve_script(
+                &WorkflowLaunchSpec {
+                    name: Some("review".into()),
+                    ..Default::default()
+                },
+                &read,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(got, "FROM_USER");
     }
 
     #[test]
@@ -826,6 +942,33 @@ mod tests {
 
         result
             .expect("name-resolved workflow with Date.now() must NOT be rejected for determinism");
+    }
+
+    #[tokio::test]
+    async fn validate_name_resolves_user_workflow_dir() {
+        let t = tool(None);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let config_dir = unique_temp_path("validate-user");
+        let workflows_dir = config_dir.join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        let wf_path = workflows_dir.join("user-only-wf.js");
+        std::fs::write(&wf_path, VALID_SCRIPT).unwrap();
+
+        let old_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
+        std::env::set_var(branding::CONFIG_DIR_ENV, &config_dir);
+        let result = t
+            .validate_input(&json!({ "name": "user-only-wf" }), &ctx)
+            .await;
+        match old_config_dir {
+            Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+        }
+
+        let _ = std::fs::remove_file(&wf_path);
+        let _ = std::fs::remove_dir_all(&config_dir);
+        result.expect("name-resolved workflow must fall back to user workflow dir");
     }
 
     #[tokio::test]

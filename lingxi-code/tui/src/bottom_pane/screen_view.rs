@@ -252,14 +252,20 @@ impl ScreenView {
         const GRID_ROWS: usize = 5;
         const CELLS: usize = GRID_COLS * GRID_ROWS;
 
-        let pct = if max == 0 { 0 } else { ((used * 100) / max).min(100) };
+        let pct = if max == 0 {
+            0
+        } else {
+            ((used * 100) / max).min(100)
+        };
         let free = max.saturating_sub(used);
         let free_pct = 100u64.saturating_sub(pct);
         // Round the filled-cell count to the nearest cell.
         let filled = if max == 0 {
             0
         } else {
-            usize::try_from((used * CELLS as u64 + max / 2) / max).unwrap_or(CELLS).min(CELLS)
+            usize::try_from((used * CELLS as u64 + max / 2) / max)
+                .unwrap_or(CELLS)
+                .min(CELLS)
         };
 
         let used_style = Style::default().fg(ratatui::style::Color::Cyan);
@@ -286,10 +292,7 @@ impl ScreenView {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("■ ", used_style),
-            Span::raw(format!(
-                "Messages: {} tokens ({pct}%)",
-                fmt_tokens(used)
-            )),
+            Span::raw(format!("Messages: {} tokens ({pct}%)", fmt_tokens(used))),
         ]));
         lines.push(Line::from(vec![
             Span::styled("□ ", free_style),

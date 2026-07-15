@@ -32,9 +32,7 @@
 use crate::agents_registry::{self, JobStateWrite};
 use crate::argv::Argv;
 use crate::daemon_lock::{self, LockProbe, SystemLockProbe};
-use crate::daemon_roster::{
-    self, Dispatch, DispatchSource, Isolation, Launch, Seed, WorkerRecord,
-};
+use crate::daemon_roster::{self, Dispatch, DispatchSource, Isolation, Launch, Seed, WorkerRecord};
 use crate::exit_codes;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -197,7 +195,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
             launch: Launch::Prompt {
                 args: reconstruct_launch_args(argv),
             },
-            env: BTreeMap::new(),
+            env: dispatch_env(),
             reattach_env: None,
             worktree: None,
             isolation: Isolation::None,
@@ -245,12 +243,34 @@ fn ensure_daemon<LP: LockProbe, S: DaemonSpawner>(
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "lingxi-cli".to_string());
-    let argv = vec![exe, daemon_lock::DAEMON_SUBCOMMAND.to_string()];
+    let argv =
+        crate::process_wrapper::wrap_argv(vec![exe, daemon_lock::DAEMON_SUBCOMMAND.to_string()]);
     if let Err(e) = spawner.spawn(&argv) {
         // Best-effort: a failed spawn leaves the job/roster durable on disk; a
         // later `--bg` or a manually-launched daemon still adopts them.
         tracing::warn!("lingxi-cli: could not spawn background daemon: {e}");
     }
+}
+
+fn dispatch_env() -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    for key in [
+        "LINGXI_CODE_PROCESS_WRAPPER",
+        "CLAUDE_CODE_PROCESS_WRAPPER",
+        "LINGXI_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    env
 }
 
 #[cfg(test)]
@@ -260,6 +280,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, OnceLock};
 
     fn tmpdir() -> PathBuf {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -306,6 +327,11 @@ mod tests {
         }
     }
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn writes_job_and_roster_and_spawns_daemon() {
         let home = tmpdir();
@@ -325,7 +351,10 @@ mod tests {
         assert_eq!(jobs[0].1.template.as_deref(), Some("bg"));
         assert_eq!(jobs[0].1.backend.as_deref(), Some("daemon"));
         // Intent = first prompt line only.
-        assert_eq!(jobs[0].1.intent.as_deref(), Some("port the daemon supervisor"));
+        assert_eq!(
+            jobs[0].1.intent.as_deref(),
+            Some("port the daemon supervisor")
+        );
 
         assert!(roster_path(&home).exists());
         let roster = read_roster(&home, 0, false).into_roster();
@@ -338,7 +367,10 @@ mod tests {
             }
             other => panic!("expected Prompt launch, got {other:?}"),
         }
-        assert_eq!(rec.dispatch.seed.as_ref().unwrap().intent, "port the daemon supervisor");
+        assert_eq!(
+            rec.dispatch.seed.as_ref().unwrap().intent,
+            "port the daemon supervisor"
+        );
 
         // (b) The captured spawn argv carries the literal `daemon` token in
         //     argv[1..4] (classify_cmdline's recognition window).
@@ -370,13 +402,52 @@ mod tests {
             agents_registry::read_jobs(&agents_registry::jobs_dir(&home)).len(),
             1
         );
-        assert!(spawner.spawns.is_empty(), "no spawn when a live daemon holds the lock");
+        assert!(
+            spawner.spawns.is_empty(),
+            "no spawn when a live daemon holds the lock"
+        );
+    }
+
+    #[test]
+    fn dispatch_records_env_and_wraps_daemon_spawn() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("LINGXI_CODE_PROCESS_WRAPPER", "/tmp/wrap --trace");
+
+        let home = tmpdir();
+        let mut spawner = CaptureSpawner::default();
+        let lockp = FakeLockProbe {
+            live: HashMap::new(),
+        };
+        let code = dispatch_background_inner(&bg_argv("hello"), &home, &home, &lockp, &mut spawner);
+
+        std::env::remove_var("LINGXI_CODE_PROCESS_WRAPPER");
+
+        assert_eq!(code, exit_codes::SUCCESS);
+        let roster = read_roster(&home, 0, false).into_roster();
+        let rec = roster.workers.values().next().expect("worker record");
+        assert_eq!(
+            rec.dispatch
+                .env
+                .get("LINGXI_CODE_PROCESS_WRAPPER")
+                .map(String::as_str),
+            Some("/tmp/wrap --trace")
+        );
+
+        let spawned = spawner.spawns.first().expect("daemon spawn");
+        assert_eq!(spawned.first().map(String::as_str), Some("/tmp/wrap"));
+        assert!(
+            spawned.iter().skip(1).take(4).any(|t| t == "daemon"),
+            "daemon token preserved after wrapper: {spawned:?}"
+        );
     }
 
     #[test]
     fn empty_prompt_yields_no_intent() {
         assert_eq!(intent_from_prompt(Some("   ")), None);
         assert_eq!(intent_from_prompt(None), None);
-        assert_eq!(intent_from_prompt(Some("first\nsecond")).as_deref(), Some("first"));
+        assert_eq!(
+            intent_from_prompt(Some("first\nsecond")).as_deref(),
+            Some("first")
+        );
     }
 }

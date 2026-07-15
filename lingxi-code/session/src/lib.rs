@@ -8,11 +8,11 @@
 pub mod agent_color;
 pub mod branch;
 pub mod file_history;
-pub mod rewind;
 pub mod filestate;
 pub mod jsonl;
 pub mod metadata;
 pub mod resumer;
+pub mod rewind;
 pub mod rollout;
 pub mod storage;
 pub mod transcript;
@@ -22,12 +22,12 @@ pub use jsonl::{read_recover, RecoveryResult, StorageError};
 
 // `/color` persistence (claude-code `saveAgentColor`).
 pub use agent_color::{agent_color_entry, last_agent_color, save_agent_color};
-pub use metadata::SessionMetadata;
-pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
-pub use storage::{LoadedSession, SessionStorage};
 pub use branch::{create_branch, BranchError, BranchResult};
 pub use file_history::{FileHistory, FileHistoryBackup, SnapshotRecord};
+pub use metadata::SessionMetadata;
+pub use resumer::{ResumeError, ResumedRollout, ResumedSession, SessionResumer};
 pub use rewind::rewind_conversation;
+pub use storage::{LoadedSession, SessionStorage};
 pub use transcript::TranscriptEntry;
 
 // New M5-07 surface — distinct name (`JsonlSessionMetadata`) so it does NOT

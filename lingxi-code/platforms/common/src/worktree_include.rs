@@ -155,13 +155,18 @@ pub async fn copy_worktree_include_files(repo_root: &Path, worktree_path: &Path)
             "--directory",
         ],
     )
-    .await else {
+    .await
+    else {
         return Vec::new();
     };
     if code != 0 || stdout.trim().is_empty() {
         return Vec::new();
     }
-    let entries: Vec<&str> = stdout.trim().split('\n').filter(|l| !l.is_empty()).collect();
+    let entries: Vec<&str> = stdout
+        .trim()
+        .split('\n')
+        .filter(|l| !l.is_empty())
+        .collect();
 
     // (4) matcher over the RAW content (comments/blanks are no-ops).
     let matcher = build_matcher(repo_root, &raw);
@@ -273,7 +278,10 @@ pub async fn copy_worktree_include_files(repo_root: &Path, worktree_path: &Path)
             .map(|p| p.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(", ");
-        tracing::info!("Copied {} files from .worktreeinclude: {list}", copied.len());
+        tracing::info!(
+            "Copied {} files from .worktreeinclude: {list}",
+            copied.len()
+        );
     }
     copied
 }
@@ -301,7 +309,9 @@ mod tests {
         tokio::fs::write(dir.join(".gitignore"), ".env\nsecrets/\nbuild/\n")
             .await
             .unwrap();
-        tokio::fs::write(dir.join("seed.txt"), "seed").await.unwrap();
+        tokio::fs::write(dir.join("seed.txt"), "seed")
+            .await
+            .unwrap();
         git(dir, &["add", ".gitignore", "seed.txt"]).await;
         git(dir, &["commit", "-qm", "seed"]).await;
     }
@@ -310,7 +320,9 @@ mod tests {
     /// and escape checks operate on a genuine checkout.
     async fn add_worktree(repo: &Path, name: &str) -> PathBuf {
         let wt = repo.join(".lingxi/worktrees").join(name);
-        tokio::fs::create_dir_all(wt.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(wt.parent().unwrap())
+            .await
+            .unwrap();
         git(
             repo,
             &[
@@ -437,7 +449,10 @@ mod tests {
         copied.sort();
         assert_eq!(
             copied,
-            vec![PathBuf::from("secrets/a.key"), PathBuf::from("secrets/b.key")]
+            vec![
+                PathBuf::from("secrets/a.key"),
+                PathBuf::from("secrets/b.key")
+            ]
         );
         assert_eq!(
             tokio::fs::read_to_string(wt.join("secrets/a.key"))

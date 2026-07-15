@@ -697,11 +697,7 @@ impl Tool for MCPTool {
                     });
                 }
 
-                let output_dir = self
-                    .ctx
-                    .cwd()
-                    .join(branding::DOT_DIR)
-                    .join("tool-results");
+                let output_dir = self.ctx.cwd().join(branding::DOT_DIR).join("tool-results");
                 let (now_millis, rand_tag) = persist_id_seed();
                 // MCP.2: structuredContent takes PRIORITY over `content` for the
                 // model (transformMCPResult, `client.ts:2675-2684`): when the
@@ -1345,11 +1341,7 @@ impl Tool for ReadMcpResourceTool {
         // `mimeType`, distinguishing text from base64 blobs, persisting decoded
         // blobs to disk under a project-local tool-results dir, and surfacing
         // `blobSavedTo` paths. Mirrors `ReadMcpResourceTool.ts:95-143`.
-        let output_dir = self
-            .ctx
-            .cwd()
-            .join(branding::DOT_DIR)
-            .join("tool-results");
+        let output_dir = self.ctx.cwd().join(branding::DOT_DIR).join("tool-results");
         match client.read_resource_rich(&uri, &output_dir).await {
             Ok(contents) => {
                 let bytes_approx = serde_json::to_vec(&contents)

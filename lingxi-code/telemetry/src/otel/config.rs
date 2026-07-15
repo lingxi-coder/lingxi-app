@@ -422,13 +422,10 @@ impl OtlpExporterConfig {
             .as_deref(),
         );
 
-        let protocol = OtlpProtocol::parse(
-            per_then_generic("PROTOCOL", ENV_OTLP_PROTOCOL).as_deref(),
-        );
+        let protocol =
+            OtlpProtocol::parse(per_then_generic("PROTOCOL", ENV_OTLP_PROTOCOL).as_deref());
 
-        let headers = parse_otlp_headers(
-            per_then_generic("HEADERS", ENV_OTLP_HEADERS).as_deref(),
-        );
+        let headers = parse_otlp_headers(per_then_generic("HEADERS", ENV_OTLP_HEADERS).as_deref());
 
         let export_interval_ms = match signal {
             Signal::Metrics => Some(int_env(
@@ -591,7 +588,10 @@ mod tests {
         assert!(!cfg.enabled, "master gate must be OFF when unset");
         // Defaults still resolve so downstream never panics on absent env.
         assert_eq!(cfg.timeouts.flush_timeout_ms, DEFAULT_FLUSH_TIMEOUT_MS);
-        assert_eq!(cfg.timeouts.shutdown_timeout_ms, DEFAULT_SHUTDOWN_TIMEOUT_MS);
+        assert_eq!(
+            cfg.timeouts.shutdown_timeout_ms,
+            DEFAULT_SHUTDOWN_TIMEOUT_MS
+        );
         assert_eq!(
             cfg.timeouts.headers_helper_debounce_ms,
             DEFAULT_HEADERS_HELPER_DEBOUNCE_MS
@@ -626,7 +626,10 @@ mod tests {
             (ENV_OTLP_ENDPOINT, "http://generic:4318"),
             ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://traces:4317"),
             (ENV_OTLP_HEADERS, "authorization=Bearer g,x-tenant=acme"),
-            ("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "authorization=Bearer logs"),
+            (
+                "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+                "authorization=Bearer logs",
+            ),
         ]));
         assert_eq!(cfg.traces.endpoint.as_deref(), Some("http://traces:4317"));
         assert_eq!(cfg.metrics.endpoint.as_deref(), Some("http://generic:4318"));

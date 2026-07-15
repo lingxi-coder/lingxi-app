@@ -95,7 +95,10 @@ impl WorkflowSizeGuideline {
     #[must_use]
     pub fn guideline_line(self) -> String {
         match self.agent_cap() {
-            Some(cap) => format!("{} \u{2014} keep workflows under {cap} agents", self.as_wire()),
+            Some(cap) => format!(
+                "{} \u{2014} keep workflows under {cap} agents",
+                self.as_wire()
+            ),
             None => self.as_wire().to_string(),
         }
     }
@@ -134,9 +137,18 @@ mod tests {
 
     #[test]
     fn from_wire_normalizes_like_xat() {
-        assert_eq!(WorkflowSizeGuideline::from_wire("small"), WorkflowSizeGuideline::Small);
-        assert_eq!(WorkflowSizeGuideline::from_wire("medium"), WorkflowSizeGuideline::Medium);
-        assert_eq!(WorkflowSizeGuideline::from_wire("large"), WorkflowSizeGuideline::Large);
+        assert_eq!(
+            WorkflowSizeGuideline::from_wire("small"),
+            WorkflowSizeGuideline::Small
+        );
+        assert_eq!(
+            WorkflowSizeGuideline::from_wire("medium"),
+            WorkflowSizeGuideline::Medium
+        );
+        assert_eq!(
+            WorkflowSizeGuideline::from_wire("large"),
+            WorkflowSizeGuideline::Large
+        );
         // unrestricted + any unknown → Unrestricted.
         assert_eq!(
             WorkflowSizeGuideline::from_wire("unrestricted"),
@@ -202,7 +214,9 @@ mod tests {
 
     #[test]
     fn prompt_appendix_unrestricted_is_empty() {
-        assert!(WorkflowSizeGuideline::Unrestricted.prompt_appendix().is_empty());
+        assert!(WorkflowSizeGuideline::Unrestricted
+            .prompt_appendix()
+            .is_empty());
         // The free helper agrees for unrestricted + unknown.
         assert!(prompt_appendix_for("unrestricted").is_empty());
         assert!(prompt_appendix_for("bogus").is_empty());

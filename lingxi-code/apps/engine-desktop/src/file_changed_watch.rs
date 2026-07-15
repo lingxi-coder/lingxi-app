@@ -596,7 +596,10 @@ mod tests {
         let firer = RecordingFirer::responding_with(added.clone());
 
         let got = handle_event(&ev("/work/.env", FileEventKind::Modified), &watch, &firer).await;
-        assert_eq!(got, added, "fired-hook watchPaths flow through handle_event");
+        assert_eq!(
+            got, added,
+            "fired-hook watchPaths flow through handle_event"
+        );
 
         let none = handle_event(
             &ev("/work/unwatched.txt", FileEventKind::Modified),
@@ -604,7 +607,10 @@ mod tests {
             &firer,
         )
         .await;
-        assert!(none.is_empty(), "non-watched path fires nothing, adds nothing");
+        assert!(
+            none.is_empty(),
+            "non-watched path fires nothing, adds nothing"
+        );
     }
 
     #[tokio::test]
@@ -614,8 +620,7 @@ mod tests {
         let watch: Arc<BTreeSet<PathBuf>> =
             Arc::new([PathBuf::from("/work/.env")].into_iter().collect());
         let added = vec![PathBuf::from("/work/added.cfg")];
-        let firer: Arc<RecordingFirer> =
-            Arc::new(RecordingFirer::responding_with(added.clone()));
+        let firer: Arc<RecordingFirer> = Arc::new(RecordingFirer::responding_with(added.clone()));
         let stream = tokio_stream::iter(vec![ev("/work/.env", FileEventKind::Modified)]);
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         run_watch_loop(Box::pin(stream), watch, firer, control_tx).await;
@@ -643,8 +648,7 @@ mod tests {
 
         // Watch a file in dir A initially.
         let a_env = dir_a.join(".env");
-        let watcher =
-            FileChangedWatcher::new(&[a_env.to_str().unwrap()], root.path(), firer);
+        let watcher = FileChangedWatcher::new(&[a_env.to_str().unwrap()], root.path(), firer);
         let handle = watcher.spawn(fs as Arc<dyn FileSystem>).await;
 
         // Wait for the initial watch of dir A.

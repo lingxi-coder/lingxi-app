@@ -15,6 +15,8 @@
 //! [`crate::shell_command`]; this module is the pure per-pattern matcher.
 
 use regex::Regex;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// Null-byte sentinels for escaped wildcard/backslash, mirroring the TS
 /// `ESCAPED_STAR_PLACEHOLDER` / `ESCAPED_BACKSLASH_PLACEHOLDER`. Null bytes can
@@ -162,7 +164,7 @@ pub fn match_wildcard_pattern(pattern: &str, command: &str, case_insensitive: bo
     // Phase 6: anchor + dotAll (+ optional case-insensitive) and test.
     let flags = if case_insensitive { "(?si)" } else { "(?s)" };
     let full = format!("^{flags}{regex_pattern}$");
-    match Regex::new(&full) {
+    match cached_wildcard_regex(&full) {
         Ok(re) => re.is_match(command),
         Err(e) => {
             // A malformed user pattern must not crash the permission check; a
@@ -171,6 +173,26 @@ pub fn match_wildcard_pattern(pattern: &str, command: &str, case_insensitive: bo
             false
         }
     }
+}
+
+fn cached_wildcard_regex(pattern: &str) -> Result<Regex, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Result<Regex, String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .expect("shell wildcard regex cache")
+        .get(pattern)
+        .cloned()
+    {
+        return cached;
+    }
+
+    let compiled = Regex::new(pattern).map_err(|e| e.to_string());
+    cache
+        .lock()
+        .expect("shell wildcard regex cache")
+        .insert(pattern.to_string(), compiled.clone());
+    compiled
 }
 
 #[cfg(test)]

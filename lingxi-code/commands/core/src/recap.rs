@@ -259,7 +259,9 @@ mod tests {
         async fn current_should_exit(&self) -> bool {
             false
         }
-        async fn open_memory_editor(&self) -> Result<traits::MemoryEditorOutcome, traits::HandleError> {
+        async fn open_memory_editor(
+            &self,
+        ) -> Result<traits::MemoryEditorOutcome, traits::HandleError> {
             Err(traits::HandleError::Unimplemented("stub".into()))
         }
         async fn list_mcp_servers(&self) -> Vec<traits::McpServerInfo> {
@@ -277,7 +279,9 @@ mod tests {
         async fn get_status_snapshot(&self) -> traits::StatusSnapshot {
             traits::StatusSnapshot::default()
         }
-        async fn edit_config_file(&self) -> Result<traits::MemoryEditorOutcome, traits::HandleError> {
+        async fn edit_config_file(
+            &self,
+        ) -> Result<traits::MemoryEditorOutcome, traits::HandleError> {
             Err(traits::HandleError::Unimplemented("stub".into()))
         }
         async fn edit_permissions_file(
@@ -340,7 +344,10 @@ mod tests {
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Couldn't generate a recap. Run with --debug for details.");
+                assert_eq!(
+                    s,
+                    "Couldn't generate a recap. Run with --debug for details."
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -352,14 +359,16 @@ mod tests {
         // assistant turn yet) also qualifies — recap should attempt to run
         // (and, pending the GAP, fall back to the generic failure) rather
         // than claim "nothing to recap".
-        let summary_text = format!(
-            "{COMPACT_SUMMARY_PREFIX}\n\nSummary:\nWe were mid-refactor of the parser."
-        );
+        let summary_text =
+            format!("{COMPACT_SUMMARY_PREFIX}\n\nSummary:\nWe were mid-refactor of the parser.");
         let handle = Arc::new(TranscriptStub::new(vec![user_text(&summary_text)]));
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Couldn't generate a recap. Run with --debug for details.");
+                assert_eq!(
+                    s,
+                    "Couldn't generate a recap. Run with --debug for details."
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -371,7 +380,9 @@ mod tests {
         // trimmed text verbatim (spec items 3+4).
         let handle = Arc::new(TranscriptStub::with_recap(
             vec![user_text("please fix the bug"), assistant_text("Fixed it.")],
-            Ok(RecapOutcome::Text("Fixing the parser; next, run the tests.".to_string())),
+            Ok(RecapOutcome::Text(
+                "Fixing the parser; next, run the tests.".to_string(),
+            )),
         ));
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
@@ -409,7 +420,10 @@ mod tests {
         let h = RecapHandler::new(handle);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Couldn't generate a recap. Run with --debug for details.");
+                assert_eq!(
+                    s,
+                    "Couldn't generate a recap. Run with --debug for details."
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }

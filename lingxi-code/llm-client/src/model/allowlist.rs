@@ -71,10 +71,7 @@ const ALL_ALIASES: &[&str] = &["sonnet", "opus", "haiku", "fable", "best", "opus
 #[must_use]
 pub fn normalize(s: &str) -> String {
     let lowered = s.trim().to_lowercase();
-    lowered
-        .strip_suffix("[1m]")
-        .unwrap_or(&lowered)
-        .to_string()
+    lowered.strip_suffix("[1m]").unwrap_or(&lowered).to_string()
 }
 
 /// Whether a normalized token is a bare family alias (binary `XB`→`vxr`).
@@ -183,7 +180,7 @@ pub fn is_model_allowed(
     overrides: Option<&BTreeMap<String, String>>,
 ) -> bool {
     let entries = match allowlist {
-        None => return true,             // `if(!n)return!0`
+        None => return true,                     // `if(!n)return!0`
         Some(a) if a.is_empty() => return false, // `if(n.length===0)return!1`
         Some(a) => a,
     };
@@ -386,8 +383,14 @@ mod tests {
 
     #[test]
     fn full_model_id_exact_match() {
-        assert!(sl("claude-opus-4-5-20990101", &["claude-opus-4-5-20990101"]));
-        assert!(!sl("claude-sonnet-4-5-20990101", &["claude-opus-4-5-20990101"]));
+        assert!(sl(
+            "claude-opus-4-5-20990101",
+            &["claude-opus-4-5-20990101"]
+        ));
+        assert!(!sl(
+            "claude-sonnet-4-5-20990101",
+            &["claude-opus-4-5-20990101"]
+        ));
     }
 
     #[test]
@@ -491,8 +494,9 @@ mod tests {
 
     fn resolve(view: PolicyModelView) -> (ModelEnforcement, Vec<String>) {
         let mut msgs = Vec::new();
-        let out =
-            resolve_enforcement(&PolicySource::Loaded(view), &mut |m| msgs.push(m.to_string()));
+        let out = resolve_enforcement(&PolicySource::Loaded(view), &mut |m| {
+            msgs.push(m.to_string())
+        });
         (out, msgs)
     }
 

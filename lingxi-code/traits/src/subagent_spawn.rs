@@ -79,8 +79,11 @@ pub struct SubagentSpawnRequest {
     /// path leaves it `None`.
     #[serde(default)]
     pub mode: Option<String>,
-    /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). Carried
-    /// through; worktree/remote isolation behavior is deferred.
+    /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). `worktree`
+    /// is realized by the Agent/workflow spawn entrypoints before dispatch so
+    /// both sync and async children run in the resolved cwd. `remote` is carried
+    /// through for callers that understand it; local runners currently treat it
+    /// as non-worktree execution.
     #[serde(default)]
     pub isolation: Option<String>,
     /// Absolute path to run the agent in (TS `cwd`). Carried through; the
@@ -330,6 +333,12 @@ pub struct SelectedAgentMeta {
     /// even when the caller omits `run_in_background`. Defaults to `false`.
     #[serde(default)]
     pub background: bool,
+    /// The agent definition's `isolation` frontmatter, surfaced before spawn so
+    /// `AgentTool` can realize the same worktree/cwd setup whether isolation was
+    /// requested inline (`Agent({... isolation })`) or declared on the resolved
+    /// agent definition. `None` means no definition-level isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
 }
 
 /// Result of an ASYNC spawn (claude `AgentTool.tsx:754-764` `async_launched`
@@ -367,7 +376,8 @@ impl std::fmt::Debug for SubagentInheritance {
         // The trait-object handles intentionally have no Debug contract. Keep
         // task-input diagnostics useful without exposing or fabricating their
         // concrete implementations.
-        f.debug_struct("SubagentInheritance").finish_non_exhaustive()
+        f.debug_struct("SubagentInheritance")
+            .finish_non_exhaustive()
     }
 }
 

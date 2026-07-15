@@ -20,10 +20,10 @@ pub mod mcp_ws;
 pub mod worktree_include;
 
 pub use http::ReqwestHttp;
-pub use worktree_include::copy_worktree_include_files;
 pub use llm_client::LlmTransportBridge;
 pub use llm_config::{
     apply_settings_providers, builtin_anthropic_config, parse_routing_overrides, RoutingOverrides,
 };
 pub use mcp_http::{connect_http, HttpConnectError};
 pub use mcp_sse::{connect_sse, SseConnectError, IDE_AUTH_HEADER};
+pub use worktree_include::copy_worktree_include_files;

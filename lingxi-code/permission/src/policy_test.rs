@@ -692,6 +692,36 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_rm_inside_substitution_exact_allow_still_asks() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo `rm -rf /`)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo `rm -rf /`")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dangerous_rm_inside_substitution_asks_even_with_allow_rule() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo $(rm -rf /))"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo $(rm -rf /)")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn dangerous_removal_skipped_without_roots() {
         // Without roots the guard cannot resolve cwd/home, so it is skipped and
         // the allow rule applies (preserves pre-guard behavior).
@@ -965,8 +995,7 @@ mod tests {
                     "Plan-mutation ask must be tagged with Plan mode"
                 );
                 assert_eq!(
-                    prompt.message,
-                    "Cannot write to /proj/src/x.rs while in plan mode.",
+                    prompt.message, "Cannot write to /proj/src/x.rs while in plan mode.",
                     "Editor-tool plan-mode ask is the byte-exact 206 write message"
                 );
             }
@@ -2191,7 +2220,10 @@ mod tests {
         // The literal embedded body from commit_push_pr.rs:75 — a rule-allowed
         // `gh pr view …` compounded with a read-only `true`.
         assert!(matches!(
-            p.authorize("Bash", &bash("gh pr view --json number 2>/dev/null || true")),
+            p.authorize(
+                "Bash",
+                &bash("gh pr view --json number 2>/dev/null || true")
+            ),
             PermissionResult::Allow { .. }
         ));
         // Each half in isolation is already allowed (rule-allow / read-only),
@@ -2230,7 +2262,10 @@ mod tests {
             PermissionMode::Default,
         );
         assert!(matches!(
-            p.authorize("Bash", &bash("gh pr view --json number || curl https://evil.test")),
+            p.authorize(
+                "Bash",
+                &bash("gh pr view --json number || curl https://evil.test")
+            ),
             PermissionResult::Ask { .. }
         ));
     }
@@ -2374,6 +2409,19 @@ mod tests {
             ),
             other => panic!("expected sandbox Allow, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sandbox_auto_allow_does_not_bypass_dangerous_rm_in_substitution() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo $(rm -rf /)")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2670,6 +2718,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exact_allow_rule_does_not_bypass_substitution_dangerous_rm() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo $(rm -rf /))"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("echo $(rm -rf /)")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { reason },
+                ..
+            } => assert!(reason.contains("Dangerous rm operation")),
+            other => panic!("expected dangerous-removal ask despite exact allow, got {other:?}"),
+        }
+    }
+
     /// An EXACT DENY rule still wins over an exact-allow command shape: the exact
     /// short-circuit is ALLOW-only and runs AFTER the deny walk, so an explicit
     /// deny of a dangerous command is unaffected by the new bypass.
@@ -2756,10 +2819,11 @@ mod tests {
         );
         match p.authorize("Bash", &bash("rm -rf $UNSET/*")) {
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck {
-                    reason,
-                    classifier_approvable,
-                },
+                reason:
+                    PermissionDecisionReason::SafetyCheck {
+                        reason,
+                        classifier_approvable,
+                    },
                 prompt,
                 ..
             } => {
@@ -2786,10 +2850,11 @@ mod tests {
         );
         match p.authorize("Bash", &bash("rm -rf $UNSET/*")) {
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck {
-                    reason,
-                    classifier_approvable,
-                },
+                reason:
+                    PermissionDecisionReason::SafetyCheck {
+                        reason,
+                        classifier_approvable,
+                    },
                 ..
             } => {
                 assert!(!classifier_approvable);
@@ -2811,7 +2876,11 @@ mod tests {
         ] {
             match p.authorize("Bash", &bash(cmd)) {
                 PermissionResult::Ask {
-                    reason: PermissionDecisionReason::SafetyCheck { reason, classifier_approvable },
+                    reason:
+                        PermissionDecisionReason::SafetyCheck {
+                            reason,
+                            classifier_approvable,
+                        },
                     prompt,
                     ..
                 } => {
@@ -2835,7 +2904,11 @@ mod tests {
         let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
         match p.authorize("Bash", &bash("rmdir $DIR/*")) {
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck { reason, classifier_approvable },
+                reason:
+                    PermissionDecisionReason::SafetyCheck {
+                        reason,
+                        classifier_approvable,
+                    },
                 prompt,
                 ..
             } => {

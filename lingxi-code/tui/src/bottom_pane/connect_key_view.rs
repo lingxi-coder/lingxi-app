@@ -99,7 +99,10 @@ impl Renderable for ConnectKeyView {
 
         let lines = vec![
             Line::from(key_line),
-            Line::from(Span::styled(footer, Style::default().add_modifier(Modifier::DIM))),
+            Line::from(Span::styled(
+                footer,
+                Style::default().add_modifier(Modifier::DIM),
+            )),
         ];
         Paragraph::new(lines).render(inner, buf);
     }
@@ -112,7 +115,9 @@ impl Renderable for ConnectKeyView {
     /// after `"Key: "`), so the field reads like an editable input rather than
     /// a static line. Clamped inside the box.
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let inner = Block::new().borders(Borders::ALL).inner(self.block_rect(area));
+        let inner = Block::new()
+            .borders(Borders::ALL)
+            .inner(self.block_rect(area));
         if inner.width == 0 || inner.height == 0 {
             return None;
         }
@@ -258,6 +263,9 @@ mod tests {
             .join("\n");
         assert!(text.contains("Connect DeepSeek"), "{text}");
         assert!(text.contains("\u{2022}\u{2022}\u{2022}"), "{text}");
-        assert!(!text.contains("sk-secret"), "raw key must never render: {text}");
+        assert!(
+            !text.contains("sk-secret"),
+            "raw key must never render: {text}"
+        );
     }
 }

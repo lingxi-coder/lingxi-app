@@ -826,7 +826,8 @@ async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
         "rejected payload must not leak into the surfaced result: {result}"
     );
     assert!(
-        !evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Failed { .. })),
         "a recovered retry is not a failure; got: {evs:?}"
     );
 }
@@ -2650,7 +2651,8 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
 
     // No Failed event — the partial was preserved as a completion.
     assert!(
-        !evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Failed { .. })),
         "a recoverable mid-stream 429 must NOT surface as Failed: {evs:?}"
     );
     let result = evs
@@ -2673,8 +2675,10 @@ async fn rate_limit_midstream_recovers_partial_with_cutoff_note() {
     );
     // The salvaged partial text follows the note.
     assert!(
-        content.iter().any(|b| b.get("text").and_then(serde_json::Value::as_str)
-            == Some("Partial answer before the cutoff")),
+        content
+            .iter()
+            .any(|b| b.get("text").and_then(serde_json::Value::as_str)
+                == Some("Partial answer before the cutoff")),
         "the salvaged mid-turn block must survive: {content:?}"
     );
     // Both round-trips were attempted (the loop reached turn 2 before erroring).
@@ -2696,11 +2700,13 @@ async fn qualifying_error_with_no_content_fails() {
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
     assert!(
-        evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Failed { .. })),
         "a qualifying error with an empty transcript must Fail: {evs:?}"
     );
     assert!(
-        !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Completed { .. })),
         "no partial exists to recover, so no Completed: {evs:?}"
     );
 }
@@ -2727,12 +2733,14 @@ async fn nonqualifying_error_after_content_still_fails() {
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
     assert!(
-        evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+        evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Failed { .. })),
         "a non-CTy error must Fail even with content: {evs:?}"
     );
     // The salvaged text must NOT leak into any Completed result.
     assert!(
-        !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SubagentEvent::Completed { .. })),
         "non-qualifying error must not recover a partial: {evs:?}"
     );
 }

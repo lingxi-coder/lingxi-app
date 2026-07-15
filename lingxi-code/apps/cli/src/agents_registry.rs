@@ -834,8 +834,7 @@ impl SessionRegistration {
         else {
             return;
         };
-        if record.status.as_deref() == Some(status)
-            && record.waiting_for.as_deref() == waiting_for
+        if record.status.as_deref() == Some(status) && record.waiting_for.as_deref() == waiting_for
         {
             return;
         }
@@ -885,10 +884,7 @@ mod tests {
     #[test]
     fn sanitize_name_strips_controls_and_collapses_whitespace() {
         // dXc: control-strip → whitespace-collapse → trim.
-        assert_eq!(
-            sanitize_name(" a\u{7}b \t\n c "),
-            Some("ab c".to_string())
-        );
+        assert_eq!(sanitize_name(" a\u{7}b \t\n c "), Some("ab c".to_string()));
         assert_eq!(sanitize_name("\u{1}\u{2} \t "), None);
     }
 
@@ -1059,7 +1055,15 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["pid", "cwd", "kind", "startedAt", "sessionId", "name", "status"]
+            [
+                "pid",
+                "cwd",
+                "kind",
+                "startedAt",
+                "sessionId",
+                "name",
+                "status"
+            ]
         );
         assert_eq!(rows[1]["kind"], "interactive");
     }
@@ -1117,10 +1121,8 @@ mod tests {
         let reg = SessionRegistration::register(tmp.path(), Some("sid-1"), Some("proj"));
         let path = sessions_dir(tmp.path()).join(format!("{}.json", std::process::id()));
         let read = || {
-            serde_json::from_str::<LiveSessionRecord>(
-                &std::fs::read_to_string(&path).unwrap(),
-            )
-            .unwrap()
+            serde_json::from_str::<LiveSessionRecord>(&std::fs::read_to_string(&path).unwrap())
+                .unwrap()
         };
         let before = read();
         assert_eq!(before.status.as_deref(), Some("idle"));
@@ -1147,10 +1149,7 @@ mod tests {
         let stamped = read();
         reg.update_status("idle", None);
         let unchanged = read();
-        assert_eq!(
-            unchanged.status_updated_at,
-            stamped.status_updated_at
-        );
+        assert_eq!(unchanged.status_updated_at, stamped.status_updated_at);
         assert_eq!(unchanged.updated_at, stamped.updated_at);
         drop(reg);
         assert!(!path.exists());
@@ -1164,11 +1163,7 @@ mod tests {
         // A pid that can't be alive (kernel-reserved huge pid on macOS/Linux
         // test hosts).
         let rec = live(i32::MAX - 7, "interactive", 1);
-        std::fs::write(
-            dir.join("weird.json"),
-            serde_json::to_string(&rec).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(dir.join("weird.json"), serde_json::to_string(&rec).unwrap()).unwrap();
         let recs = read_live_sessions(&dir);
         assert!(recs.is_empty());
         assert!(!dir.join("weird.json").exists());
@@ -1257,7 +1252,11 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].0, "bc7c6b33");
         let rows = build_agents_json(&[], &jobs, None, false);
-        assert_eq!(rows.len(), 1, "workerless working row survives default filter");
+        assert_eq!(
+            rows.len(),
+            1,
+            "workerless working row survives default filter"
+        );
         assert_eq!(rows[0]["id"], "bc7c6b33");
         assert_eq!(rows[0]["state"], "working");
         assert_eq!(rows[0]["kind"], "background");
@@ -1336,7 +1335,10 @@ mod tests {
         // Pinned fields survive the read-modify-write.
         assert_eq!(mid.template.as_deref(), Some("bg"));
         assert_eq!(mid.backend.as_deref(), Some("daemon"));
-        assert_eq!(mid.initial_prompt.as_deref(), Some("port the daemon supervisor"));
+        assert_eq!(
+            mid.initial_prompt.as_deref(),
+            Some("port the daemon supervisor")
+        );
 
         // Worker completes: terminal "done" + tempo forced off "active" + pid
         // cleared. merged_state now reports the terminal outcome.
@@ -1349,8 +1351,7 @@ mod tests {
         assert_eq!(merged_state(&done, None), "done");
 
         // The pinned prefix key order is still honored on disk.
-        let raw =
-            std::fs::read_to_string(jobs_dir(home).join("bc7c6b33/state.json")).unwrap();
+        let raw = std::fs::read_to_string(jobs_dir(home).join("bc7c6b33/state.json")).unwrap();
         let idx = |k: &str| raw.find(k).unwrap();
         assert!(idx(r#""state""#) < idx(r#""tempo""#));
         assert!(idx(r#""template""#) < idx(r#""respawnFlags""#));
@@ -1378,7 +1379,9 @@ mod tests {
         let short = mint_short_id(tmp.path());
         assert_eq!(short.len(), 8);
         assert!(
-            short.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            short
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "8 lowercase hex: {short}"
         );
     }
@@ -1402,7 +1405,8 @@ mod tests {
     #[test]
     fn register_bg_carries_kind_and_job_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = SessionRegistration::register_bg(tmp.path(), Some("sid-9"), Some("proj"), "bc7c6b33");
+        let reg =
+            SessionRegistration::register_bg(tmp.path(), Some("sid-9"), Some("proj"), "bc7c6b33");
         let path = sessions_dir(tmp.path()).join(format!("{}.json", std::process::id()));
         let rec: LiveSessionRecord =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

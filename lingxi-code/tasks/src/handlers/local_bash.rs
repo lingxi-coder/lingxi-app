@@ -1168,7 +1168,8 @@ mod tests {
 
         // Model the worker having reported a terminal status just before the
         // teardown races in (the record is still live in `workers`).
-        sink.set_status(&handle.task_id, TaskStatus::Completed).await;
+        sink.set_status(&handle.task_id, TaskStatus::Completed)
+            .await;
 
         // Cleanup moves the live record to pending_kill; drain then runs.
         (handle.cleanup.as_ref().unwrap())();

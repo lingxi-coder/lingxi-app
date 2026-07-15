@@ -474,7 +474,7 @@ impl<'a> Builder<'a> {
                 self.table_row.clear();
             }
             Event::End(TagEnd::TableRow) => {
-                if !self.in_table_head {
+                if !self.in_table_head && self.table_rows.len() < markdown_table::MAX_TABLE_ROWS {
                     self.table_rows.push(std::mem::take(&mut self.table_row));
                 }
             }

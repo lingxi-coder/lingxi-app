@@ -225,6 +225,13 @@ fn build_servers_from_map(
             }
         } else if let Some(url) = entry.url {
             let url = expand_field(&url, &mut missing);
+            if url.trim().is_empty() {
+                tracing::warn!(
+                    server = %name,
+                    "mcp.json: remote entry missing url; skipping"
+                );
+                continue;
+            }
             let headers = expand_header_values(entry.headers, &mut missing);
             match entry.transport_type.as_deref() {
                 Some("sse") => McpTransportSpec::Sse {
@@ -288,9 +295,11 @@ fn build_servers_from_map(
         // schemas carry no `request_timeout_ms` field (zod strips it), so the
         // alias is honoured for remote HTTP-family transports only.
         let timeout_ms = match &spec {
-            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => entry
-                .timeout
-                .or_else(|| as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))),
+            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => {
+                entry.timeout.or_else(|| {
+                    as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))
+                })
+            }
             _ => entry.timeout,
         };
         let always_load = entry.always_load.unwrap_or(false);
@@ -523,6 +532,13 @@ mod tests {
         let raw = r#"{"mcpServers":{"bogus":{}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
         assert!(cfgs.is_empty(), "bad entry skipped, no Err");
+    }
+
+    #[test]
+    fn empty_remote_url_is_skipped_not_loaded() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"   "}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert!(cfgs.is_empty(), "empty remote url is invalid");
     }
 
     #[test]
@@ -888,7 +904,11 @@ mod tests {
         // ignored (no fold).
         let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":"nope"}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
-        assert_eq!(cfgs.len(), 1, "invalid request_timeout_ms must not drop the server");
+        assert_eq!(
+            cfgs.len(),
+            1,
+            "invalid request_timeout_ms must not drop the server"
+        );
         assert_eq!(cfgs[0].timeout_ms, None);
 
         // Non-positive alias is also coerced away (.positive()).
@@ -901,7 +921,8 @@ mod tests {
     fn invalid_timeout_type_skips_entry() {
         // `timeout: RKe()` has NO `.catch`, so a non-integer value fails the
         // entry's safeParse → the whole server is skipped (valid siblings kept).
-        let raw = r#"{"mcpServers":{"bad":{"command":"c","timeout":"soon"},"good":{"command":"g"}}}"#;
+        let raw =
+            r#"{"mcpServers":{"bad":{"command":"c","timeout":"soon"},"good":{"command":"g"}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "good");

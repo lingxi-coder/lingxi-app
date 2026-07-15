@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="LingXi Mobius app icon">
+  <defs>
+    <radialGradient id="background" cx="50%" cy="42%" r="72%">
+      <stop offset="0%" stop-color="#18353a"/>
+      <stop offset="56%" stop-color="#071820"/>
+      <stop offset="100%" stop-color="#03070b"/>
+    </radialGradient>
+
+    <linearGradient id="crossShade" x1="466" y1="420" x2="558" y2="604" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#02070b" stop-opacity=".72"/>
+      <stop offset="46%" stop-color="#02070b" stop-opacity=".18"/>
+      <stop offset="54%" stop-color="#ffffff" stop-opacity=".24"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity=".06"/>
+    </linearGradient>
+
+    <filter id="depth" x="-18%" y="-24%" width="136%" height="148%">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#000000" flood-opacity=".42"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="14" flood-color="#2ce4cf" flood-opacity=".2"/>
+    </filter>
+
+    <filter id="lineGlow" x="-16%" y="-18%" width="132%" height="136%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <clipPath id="mobiusClip">
+      <path
+        d="M 226 512
+           C 304 346 440 348 512 512
+           C 584 676 720 678 798 512
+           C 720 346 584 348 512 512
+           C 440 676 304 678 226 512
+           Z"
+        fill="none"
+        stroke="#fff"
+        stroke-width="150"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#background)"/>
+
+  <g filter="url(#depth)">
+    <path
+      d="M 226 512
+         C 304 346 440 348 512 512
+         C 584 676 720 678 798 512
+         C 720 346 584 348 512 512
+         C 440 676 304 678 226 512
+         Z"
+      fill="none"
+      stroke="#02070b"
+      stroke-width="158"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      opacity=".5"/>
+
+    <g filter="url(#lineGlow)">
+      <path
+        d="M 226 458
+           C 304 292 440 294 512 458
+           C 584 622 720 624 798 458
+           C 720 292 584 294 512 458
+           C 440 622 304 624 226 458
+           Z"
+        fill="none"
+        stroke="#13998f"
+        stroke-width="17"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity=".82"/>
+
+      <path
+        d="M 226 480
+           C 304 314 440 316 512 480
+           C 584 644 720 646 798 480
+           C 720 314 584 316 512 480
+           C 440 644 304 646 226 480
+           Z"
+        fill="none"
+        stroke="#32dec8"
+        stroke-width="16"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity=".98"/>
+
+      <path
+        d="M 226 502
+           C 304 336 440 338 512 502
+           C 584 666 720 668 798 502
+           C 720 336 584 338 512 502
+           C 440 666 304 668 226 502
+           Z"
+        fill="none"
+        stroke="#8bf2df"
+        stroke-width="14"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity=".96"/>
+
+      <path
+        d="M 226 524
+           C 304 358 440 360 512 524
+           C 584 688 720 690 798 524
+           C 720 358 584 360 512 524
+           C 440 688 304 690 226 524
+           Z"
+        fill="none"
+        stroke="#f7fff6"
+        stroke-width="12"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity=".92"/>
+
+      <path
+        d="M 226 546
+           C 304 380 440 382 512 546
+           C 584 710 720 712 798 546
+           C 720 380 584 382 512 546
+           C 440 710 304 712 226 546
+           Z"
+        fill="none"
+        stroke="#ffd27b"
+        stroke-width="16"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity=".96"/>
+
+      <path
+        d="M 226 568
+           C 304 402 440 404 512 568
+           C 584 732 720 734 798 568
+           C 720 402 584 404 512 568
+           C 440 732 304 734 226 568
+           Z"
+        fill="none"
+        stroke="#d8dee4"
+        stroke-width="17"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity=".84"/>
+    </g>
+
+    <g clip-path="url(#mobiusClip)">
+      <path
+        d="M 414 330
+           C 468 410 494 464 512 512
+           C 530 560 556 614 610 694"
+        fill="none"
+        stroke="url(#crossShade)"
+        stroke-width="92"
+        stroke-linecap="round"
+        opacity=".92"/>
+
+      <path
+        d="M 226 512
+           C 304 346 440 348 512 512
+           C 584 676 720 678 798 512
+           C 720 346 584 348 512 512
+           C 440 676 304 678 226 512
+           Z"
+        fill="none"
+        stroke="#ffffff"
+        stroke-width="6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        opacity=".22"/>
+    </g>
+  </g>
+</svg>

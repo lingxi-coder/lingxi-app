@@ -112,7 +112,11 @@ pub struct Argv {
     /// code-implementation phases in the plan-mode system reminder; the read-only
     /// enforcement preamble and ExitPlanMode protocol footer are always kept."
     /// HIDDEN in 206 (`.hideHelp()`) — mirrored with `hide = true`.
-    #[arg(long = "plan-mode-instructions", value_name = "instructions", hide = true)]
+    #[arg(
+        long = "plan-mode-instructions",
+        value_name = "instructions",
+        hide = true
+    )]
     pub plan_mode_instructions: Option<String>,
 
     /// Maximum dollar amount to spend on API calls (only works with --print).
@@ -763,9 +767,7 @@ impl Argv {
     /// gates.
     pub fn validate_session_persistence_args(&self) -> Result<(), String> {
         if self.no_session_persistence && !self.print {
-            return Err(
-                "--no-session-persistence can only be used with --print mode.".to_string(),
-            );
+            return Err("--no-session-persistence can only be used with --print mode.".to_string());
         }
         Ok(())
     }
@@ -815,8 +817,7 @@ impl Argv {
     /// false` passes). The returned string EXCLUDES the `Error: ` prefix,
     /// matching the sibling gates' caller convention.
     pub fn validate_prompt_suggestions_args(&self) -> Result<(), String> {
-        if self.prompt_suggestions_enabled() == Some(true)
-            && !(self.print && self.is_stream_json())
+        if self.prompt_suggestions_enabled() == Some(true) && !(self.print && self.is_stream_json())
         {
             return Err(
                 "--prompt-suggestions requires --print and --output-format=stream-json (prompt_suggestion messages are only surfaced in stream-json output)."

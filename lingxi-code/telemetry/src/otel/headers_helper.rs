@@ -27,7 +27,8 @@ pub mod messages {
     pub const MUST_RETURN_JSON_OBJECT: &str =
         "otelHeadersHelper must return a JSON object with string key-value pairs";
     /// Prefix for a non-string value entry; the binary appends `"<key>": <typeof>`.
-    pub const NON_STRING_VALUE_PREFIX: &str = "otelHeadersHelper returned non-string value for key ";
+    pub const NON_STRING_VALUE_PREFIX: &str =
+        "otelHeadersHelper returned non-string value for key ";
     /// Prefix for the one-shot stderr line when the helper fails.
     pub const FAILED_UNAVAILABLE_PREFIX: &str =
         "otelHeadersHelper failed (OpenTelemetry export headers unavailable): ";
@@ -219,11 +220,7 @@ impl HeadersHelperState {
     ///
     /// Mirrors binary `RRi()`: cache-hit within debounce ⇒ [`ResolveOutcome::Cached`];
     /// otherwise run `exec`, validate, and cache success or failure.
-    pub fn resolve(
-        &mut self,
-        now_ms: i64,
-        exec: impl FnOnce() -> ExecOutcome,
-    ) -> ResolveOutcome {
+    pub fn resolve(&mut self, now_ms: i64, exec: impl FnOnce() -> ExecOutcome) -> ResolveOutcome {
         // Debounce: `if(JPr&&Date.now()-iRi<t)return JPr`.
         if let Some(cached) = &self.cached_headers {
             if now_ms.saturating_sub(self.cached_at_ms) < self.debounce_ms {
@@ -320,7 +317,8 @@ mod tests {
 
     #[test]
     fn validate_valid_object() {
-        let h = validate_helper_output(r#"{"Authorization":"Bearer x","x-tenant":"acme"}"#).unwrap();
+        let h =
+            validate_helper_output(r#"{"Authorization":"Bearer x","x-tenant":"acme"}"#).unwrap();
         assert_eq!(h.get("Authorization").map(String::as_str), Some("Bearer x"));
         assert_eq!(h.get("x-tenant").map(String::as_str), Some("acme"));
     }

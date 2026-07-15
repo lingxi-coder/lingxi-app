@@ -727,7 +727,9 @@ pub fn capacity_base_delay_ms(attempt: u8, backoff_ms: Option<u64>, watchdog: bo
     }
     let base = backoff_ms.unwrap_or(BASE_DELAY_MS);
     let factor = 1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX);
-    base.saturating_mul(factor).min(WATCHDOG_MAX_BACKOFF_MS).max(1)
+    base.saturating_mul(factor)
+        .min(WATCHDOG_MAX_BACKOFF_MS)
+        .max(1)
 }
 
 // ---------------------------------------------------------------------------

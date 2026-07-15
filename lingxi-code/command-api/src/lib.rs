@@ -45,6 +45,7 @@ pub use model::*;
 pub use parser::{parse_slash_command, ParsedSlashCommand};
 pub use registry::CommandRegistry;
 pub use shell_expansion::{
-    execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionError, ShellExpansionProvider,
-    ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
+    execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionError,
+    ShellExpansionProvider, ShellOut, ShellPermissionDecision, ShellPermissionGate, ShellRunError,
+    ShellRunner,
 };

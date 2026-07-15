@@ -527,7 +527,10 @@ fn encode_strict_tool_sends_converted_schema_and_strict_flag() {
     let tool = &codec.encode_request(&request).unwrap().body_json["tools"][0];
     assert_eq!(tool["strict"], serde_json::json!(true));
     // The converted schema closes the object with additionalProperties:false.
-    assert_eq!(tool["input_schema"]["additionalProperties"], serde_json::json!(false));
+    assert_eq!(
+        tool["input_schema"]["additionalProperties"],
+        serde_json::json!(false)
+    );
 }
 
 #[test]

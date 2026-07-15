@@ -119,7 +119,8 @@ impl TaskStatusSink for CoordinatorStatusSink {
     /// [`FAILURE_REASON_CAP`] chars, mirroring the binary's `.slice(0,200)`.
     async fn set_failed(&self, task_id: &str, error: &str) {
         let reason: String = error.chars().take(FAILURE_REASON_CAP).collect();
-        self.apply(task_id, WorkerStatus::Failed { error: reason }).await;
+        self.apply(task_id, WorkerStatus::Failed { error: reason })
+            .await;
     }
 }
 

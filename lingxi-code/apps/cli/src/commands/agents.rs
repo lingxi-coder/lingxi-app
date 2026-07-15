@@ -253,8 +253,7 @@ impl NotificationWatcher {
                         as Arc<dyn traits::RuntimeSpawner>,
                 )
                 .with_process_runner(
-                    Arc::new(platform_posix::PosixProcess::new())
-                        as Arc<dyn traits::ProcessRunner>,
+                    Arc::new(platform_posix::PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
                     Arc::new(platform_posix::PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
                 ),
             )
@@ -282,8 +281,7 @@ impl NotificationWatcher {
         // `current_job_id = None`: the standalone view process is not itself
         // a background job (binary `t` = the CURRENT session's job id).
         let rows = crate::agents_notify::notify_rows(&jobs, None);
-        let (next, notifications) =
-            crate::agents_notify::detect_transitions(&self.prev, &rows);
+        let (next, notifications) = crate::agents_notify::detect_transitions(&self.prev, &rows);
         self.prev = next;
         for n in notifications {
             // `TQ`: `{...base, hook_event_name: "Notification", message,
@@ -366,29 +364,38 @@ fn load_view_rows(cli: &Cli) -> Vec<tui::agents_screen::AgentRow> {
     // omit it, so look it up by short id.
     let detail_by_short: std::collections::HashMap<&str, &str> = jobs
         .iter()
-        .filter_map(|(short, job)| {
-            job.detail.as_deref().map(|d| (short.as_str(), d))
-        })
+        .filter_map(|(short, job)| job.detail.as_deref().map(|d| (short.as_str(), d)))
         .collect();
 
     reg::build_agents_json(&live, &jobs, filter.as_deref(), true)
         .into_iter()
         .filter_map(|row| {
-            if row.get("pid").and_then(serde_json::Value::as_i64)
-                == Some(i64::from(self_pid))
-            {
+            if row.get("pid").and_then(serde_json::Value::as_i64) == Some(i64::from(self_pid)) {
                 return None; // never list the view's own process
             }
-            let get = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let get = |k: &str| {
+                row.get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
             let name = {
                 let n = get("name");
-                if n.is_empty() { get("sessionId") } else { n }
+                if n.is_empty() {
+                    get("sessionId")
+                } else {
+                    n
+                }
             };
             let state = {
                 // Job rows carry `state`; live-only rows only a status —
                 // an interactive/live session is always "working".
                 let s = get("state");
-                if s.is_empty() { "working".to_string() } else { s }
+                if s.is_empty() {
+                    "working".to_string()
+                } else {
+                    s
+                }
             };
             let pr = row
                 .get("id")
@@ -439,6 +446,82 @@ fn attach_args(cli: &Cli, session_id: &str) -> Vec<String> {
     args
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveAttachTarget {
+    short: String,
+    session_id: String,
+    socket: PathBuf,
+    auth: String,
+}
+
+/// Locate the authenticated live-attach socket for `session_id`. Pure over the
+/// job store + roster + liveness probe so the "attach live worker, do not
+/// double-`--resume`" decision is unit-testable.
+fn live_attach_target_from(
+    jobs: &[(String, crate::agents_registry::JobState)],
+    roster: &crate::daemon_roster::Roster,
+    session_id: &str,
+    is_alive: &dyn Fn(i32) -> bool,
+) -> Option<LiveAttachTarget> {
+    for (short, job) in jobs {
+        if job.session_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        let Some(worker_pid) = job.worker_pid else {
+            continue;
+        };
+        if !is_alive(worker_pid) {
+            continue;
+        }
+        let Some(record) = roster.workers.get(short) else {
+            continue;
+        };
+        if !record.session_id.is_empty() && record.session_id != session_id {
+            continue;
+        }
+        let socket = record
+            .pty_sock
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                (!record.rendezvous_sock.is_empty()).then_some(record.rendezvous_sock.as_str())
+            })?;
+        let auth = record
+            .pty_auth
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| record.rv_auth.as_deref().filter(|s| !s.is_empty()))?;
+        return Some(LiveAttachTarget {
+            short: short.clone(),
+            session_id: session_id.to_string(),
+            socket: PathBuf::from(socket),
+            auth: auth.to_string(),
+        });
+    }
+    None
+}
+
+/// Production wrapper over [`live_attach_target_from`]: read jobs + roster and
+/// probe worker liveness via the system proc probe.
+fn find_live_attach_target(home: &Path, session_id: &str) -> Option<LiveAttachTarget> {
+    use crate::agents_registry as reg;
+    let jobs = reg::read_jobs(&reg::jobs_dir(home));
+    let roster = crate::daemon_roster::read_roster(
+        home,
+        i32::try_from(std::process::id()).unwrap_or(0),
+        false,
+    )
+    .into_roster();
+    let probe = crate::daemon_roster::SystemProbe;
+    live_attach_target_from(&jobs, &roster, session_id, &|pid| {
+        crate::daemon_roster::ProcProbe::is_alive(&probe, pid)
+    })
+}
+
+fn attach_to_live_worker(target: &LiveAttachTarget) -> std::io::Result<()> {
+    crate::bg_attach::attach_to_socket(&target.socket, &target.auth)
+}
+
 /// Whether any known job driving `session_id` is still executing under a LIVE
 /// worker process. Pure over the job store + a liveness probe so it is
 /// unit-testable.
@@ -446,18 +529,15 @@ fn attach_args(cli: &Cli, session_id: &str) -> Vec<String> {
 /// Attaching a fresh `lingxi-cli --resume <sid>` to such a session opens a
 /// SECOND writer against the same `<sessionId>.jsonl` transcript while the
 /// daemon's `__bg-run` worker is still writing it — the concurrent-writer
-/// hazard. CC 2.1.207 attaches to the live worker over its rendezvous socket and
-/// explicitly refuses to fork a second resume writer
-/// (`tengu_bg_respawn_resume_conflict`); lingxi has no attach socket yet, so it
-/// declines the attach rather than corrupt the transcript.
+/// hazard. The preferred path is [`find_live_attach_target`]; this guard remains
+/// as a safe fallback for legacy/stale live workers that have no attach socket.
 fn job_has_live_worker(
     jobs: &[(String, crate::agents_registry::JobState)],
     session_id: &str,
     is_alive: &dyn Fn(i32) -> bool,
 ) -> bool {
     jobs.iter().any(|(_short, job)| {
-        job.session_id.as_deref() == Some(session_id)
-            && job.worker_pid.is_some_and(is_alive)
+        job.session_id.as_deref() == Some(session_id) && job.worker_pid.is_some_and(is_alive)
     })
 }
 
@@ -521,15 +601,23 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
         match outcome {
             Ok(AgentsOutcome::Exit) => return crate::exit_codes::SUCCESS,
             Ok(AgentsOutcome::Attach(session_id)) => {
-                // Single-writer guard: never fork a second `--resume` JSONL
-                // writer against a session whose background worker is still
-                // live (the concurrent-writer hazard). CC attaches to the live
-                // worker over its socket; lingxi has no attach socket yet
-                // (Stage 2), so it declines and stays in the view. The worker
-                // keeps running and lands in "Completed" when it finishes.
-                if session_has_live_worker(&crate::run::lingxi_home_dir(), &session_id) {
+                // Live background attach: connect to the worker's authenticated
+                // socket instead of spawning a second `--resume` writer against
+                // the same JSONL transcript. If an old/stale live worker has no
+                // socket metadata, keep the single-writer guard and stay in the
+                // view.
+                let home = crate::run::lingxi_home_dir();
+                if let Some(target) = find_live_attach_target(&home, &session_id) {
+                    if let Err(e) = attach_to_live_worker(&target) {
+                        eprintln!("lingxi-cli agents: live attach failed: {e}");
+                    }
+                    watcher.observe();
+                    state.reload(load_view_rows(cli));
+                    continue;
+                }
+                if session_has_live_worker(&home, &session_id) {
                     eprintln!(
-                        "lingxi-cli agents: session {session_id} is still running in the background \u{2014} it keeps running; attach opens once it finishes."
+                        "lingxi-cli agents: session {session_id} is still running in the background, but its live attach socket is unavailable; it keeps running."
                     );
                     watcher.observe();
                     state.reload(load_view_rows(cli));
@@ -537,8 +625,7 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
                 }
                 // Attach = run the resumed session in the foreground; when it
                 // ends, fall through and remount the view with fresh rows.
-                let exe = std::env::current_exe()
-                    .unwrap_or_else(|_| PathBuf::from("lingxi-cli"));
+                let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lingxi-cli"));
                 let status = std::process::Command::new(exe)
                     .args(attach_args(cli, &session_id))
                     .status();
@@ -573,6 +660,57 @@ mod tests {
         Harness::try_parse_from(std::iter::once("agents").chain(args.iter().copied()))
             .unwrap()
             .agents
+    }
+
+    fn roster_worker(
+        session_id: &str,
+        socket: &str,
+        auth: &str,
+    ) -> crate::daemon_roster::WorkerRecord {
+        use crate::daemon_roster::{
+            Dispatch, DispatchSource, Isolation, Launch, WorkerRecord, PROTO,
+        };
+        WorkerRecord {
+            pid: 4321,
+            proc_start: None,
+            session_id: session_id.to_string(),
+            rendezvous_sock: socket.to_string(),
+            pty_sock: Some(socket.to_string()),
+            messaging_sock: None,
+            cli_version: Some("0.0.0".to_string()),
+            started_at: 1_700_000_000_000,
+            attempt: 0,
+            cwd: "/work".to_string(),
+            worktree_path: None,
+            dispatch: Dispatch {
+                proto: PROTO,
+                short: "bead0001".to_string(),
+                nonce: None,
+                session_id: session_id.to_string(),
+                created_at: 1_700_000_000_000,
+                source: DispatchSource::Shell,
+                cwd: "/work".to_string(),
+                launch: Launch::Prompt {
+                    args: vec!["hi".to_string()],
+                },
+                env: std::collections::BTreeMap::new(),
+                reattach_env: None,
+                worktree: None,
+                isolation: Isolation::None,
+                respawn_flags: Vec::new(),
+                attach_stall_respawns: None,
+                agent: None,
+                routine: None,
+                seed: None,
+                cols: None,
+                rows: None,
+            },
+            pending_respawn: None,
+            dec_modes: None,
+            rv_auth: Some(auth.to_string()),
+            pty_auth: Some(auth.to_string()),
+            extra: serde_json::Map::new(),
+        }
     }
 
     #[test]
@@ -625,6 +763,51 @@ mod tests {
         assert!(!job_has_live_worker(&jobs, "sid-workerless", &alive));
         // Unknown session id → attach allowed.
         assert!(!job_has_live_worker(&jobs, "sid-unknown", &alive));
+    }
+
+    #[test]
+    fn live_attach_target_uses_roster_socket_for_running_worker() {
+        use crate::agents_registry::JobState;
+        use crate::daemon_roster::empty_roster;
+
+        let jobs = vec![(
+            "bead0001".to_string(),
+            JobState {
+                session_id: Some("sid-live".to_string()),
+                worker_pid: Some(4321),
+                ..Default::default()
+            },
+        )];
+        let mut roster = empty_roster(999);
+        roster.workers.insert(
+            "bead0001".to_string(),
+            roster_worker("sid-live", "/tmp/live.sock", "token-1"),
+        );
+
+        let target =
+            live_attach_target_from(&jobs, &roster, "sid-live", &|pid| pid == 4321).unwrap();
+        assert_eq!(target.short, "bead0001");
+        assert_eq!(target.session_id, "sid-live");
+        assert_eq!(target.socket, PathBuf::from("/tmp/live.sock"));
+        assert_eq!(target.auth, "token-1");
+
+        assert!(
+            live_attach_target_from(&jobs, &roster, "sid-live", &|_pid| false).is_none(),
+            "dead worker pid must not produce a live attach target"
+        );
+
+        let mut roster_without_auth = empty_roster(999);
+        let mut record = roster_worker("sid-live", "/tmp/live.sock", "token-1");
+        record.pty_auth = None;
+        record.rv_auth = None;
+        roster_without_auth
+            .workers
+            .insert("bead0001".to_string(), record);
+        assert!(
+            live_attach_target_from(&jobs, &roster_without_auth, "sid-live", &|pid| pid == 4321)
+                .is_none(),
+            "auth is required before agents can attach to a live socket"
+        );
     }
 
     #[test]

@@ -51,7 +51,11 @@ pub fn is_repl_enabled() -> bool {
 
 /// Pure core of [`is_repl_enabled`] (`kO()` with its inputs injected, so it is
 /// testable without mutating process-global env).
-fn is_repl_enabled_from(repl_env: Option<&str>, entrypoint: Option<&str>, slate_harbor: bool) -> bool {
+fn is_repl_enabled_from(
+    repl_env: Option<&str>,
+    entrypoint: Option<&str>,
+    slate_harbor: bool,
+) -> bool {
     // `su(CLAUDE_CODE_REPL)`: a defined, explicitly-falsy value disables.
     if is_env_defined_falsy(repl_env) {
         return false;

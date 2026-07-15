@@ -1952,8 +1952,10 @@ async fn handle_malformed_tool_use(
             stop_reason: "end_turn".to_string(),
         });
     }
-    let nudge_msg =
-        ConversationMessage::user_meta(MessageId::new(), MALFORMED_TOOL_USE_RETRY_NUDGE.to_string());
+    let nudge_msg = ConversationMessage::user_meta(
+        MessageId::new(),
+        MALFORMED_TOOL_USE_RETRY_NUDGE.to_string(),
+    );
     {
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());

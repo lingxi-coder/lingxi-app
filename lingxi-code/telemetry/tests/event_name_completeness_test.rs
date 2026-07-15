@@ -216,7 +216,10 @@ fn category_ordering_preserved() {
     // (tengu_worktree_kept, tengu_worktree_removed) to the tool block:
     // 133 -> 135, shifting every downstream offset by another +2.
     for n in &ALL_EVENT_NAMES[73..208] {
-        assert!(n.starts_with("tengu_tool_") || n.starts_with("tengu_worktree_"), "tool block: {n}");
+        assert!(
+            n.starts_with("tengu_tool_") || n.starts_with("tengu_worktree_"),
+            "tool block: {n}"
+        );
     }
     // D2 strict-parity dropped tengu_cost_recorded: cost block 10 -> 9.
     for n in &ALL_EVENT_NAMES[208..217] {

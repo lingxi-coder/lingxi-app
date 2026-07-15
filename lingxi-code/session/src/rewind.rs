@@ -62,7 +62,8 @@ mod tests {
     use serde_json::json;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lingxi-rewind-{}-{}", std::process::id(), tag));
+        let dir =
+            std::env::temp_dir().join(format!("lingxi-rewind-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -79,8 +80,15 @@ mod tests {
             json!({"type":"user","uuid":uuid,"sessionId":sid.to_string(),"message":{"role":"user","content":text}}).to_string()
         };
         let path = session_path(&home, cwd, &sid.to_string());
-        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
-        let body = format!("{}\n{}\n{}\n", line(t1, "first"), line(t2, "second"), line("33333333-3333-3333-3333-333333333333", "third"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let body = format!(
+            "{}\n{}\n{}\n",
+            line(t1, "first"),
+            line(t2, "second"),
+            line("33333333-3333-3333-3333-333333333333", "third")
+        );
         tokio::fs::write(&path, body).await.unwrap();
 
         // Rewind to t2 → keep only t1; t2 + t3 dropped.
@@ -94,7 +102,11 @@ mod tests {
         let backup = path.with_extension("jsonl.rewind-bak");
         assert!(backup.exists());
         assert_eq!(
-            tokio::fs::read_to_string(&backup).await.unwrap().lines().count(),
+            tokio::fs::read_to_string(&backup)
+                .await
+                .unwrap()
+                .lines()
+                .count(),
             3
         );
     }

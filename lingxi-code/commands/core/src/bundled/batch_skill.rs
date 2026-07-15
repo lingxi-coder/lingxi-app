@@ -65,7 +65,9 @@ mod tests {
     fn template_is_resolved_except_the_instruction() {
         // Every interpolation but the `${e}` instruction is pre-resolved.
         assert!(BATCH_TEMPLATE.contains("${e}"));
-        for stray in ["${fi}", "${nme}", "${vm}", "${yrb}", "${gWp}", "${yWp}", "${Xy}"] {
+        for stray in [
+            "${fi}", "${nme}", "${vm}", "${yrb}", "${gWp}", "${yWp}", "${Xy}",
+        ] {
             assert!(!BATCH_TEMPLATE.contains(stray), "unresolved {stray}");
         }
         // Tool names resolved to LingXi's own.
@@ -81,7 +83,9 @@ mod tests {
     fn empty_arg_returns_usage() {
         assert_eq!(BatchPromptFn.build(""), BATCH_USAGE);
         assert_eq!(BatchPromptFn.build("   "), BATCH_USAGE);
-        assert!(BatchPromptFn.build("").starts_with("Provide an instruction"));
+        assert!(BatchPromptFn
+            .build("")
+            .starts_with("Provide an instruction"));
     }
 
     #[test]

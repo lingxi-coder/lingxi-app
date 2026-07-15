@@ -130,8 +130,10 @@ impl BuiltinCommandHandler for ForkHandler {
         // from. No new trait surface needed; `conversation_transcript` is an
         // existing default method (empty `Vec` when no session is tracked).
         let transcript = self.handle.conversation_transcript().await;
-        let has_first_turn =
-            matches!(transcript.last(), Some(ConversationMessage::Assistant { .. }));
+        let has_first_turn = matches!(
+            transcript.last(),
+            Some(ConversationMessage::Assistant { .. })
+        );
         if !has_first_turn {
             return CommandResult::Done {
                 display: Some("Cannot fork before the first conversation turn".to_string()),

@@ -268,7 +268,8 @@ where
     /// Returns any backend IO error from probing the size, scrolling, or
     /// clearing.
     pub fn set_bottom_viewport_height(&mut self, height: u16) -> io::Result<()> {
-        let size = self.size()?;
+        self.autoresize()?;
+        let size = self.last_known_screen_size;
         let mut area = self.viewport_area;
         area.height = height.min(size.height);
         area.width = size.width;
@@ -473,8 +474,33 @@ where
     pub fn autoresize(&mut self) -> io::Result<()> {
         let screen_size = self.size()?;
         if screen_size != self.last_known_screen_size {
-            self.resize(screen_size);
+            self.apply_screen_resize(screen_size)?;
         }
+        Ok(())
+    }
+
+    fn apply_screen_resize(&mut self, screen_size: Size) -> io::Result<()> {
+        let old_size = self.last_known_screen_size;
+        let old_area = self.viewport_area;
+        self.resize(screen_size);
+        if old_area.is_empty() {
+            return Ok(());
+        }
+
+        let mut area = old_area;
+        area.width = screen_size.width;
+        area.height = area.height.min(screen_size.height);
+        let was_bottom_pinned = old_area.bottom() >= old_size.height;
+        if was_bottom_pinned || area.bottom() > screen_size.height {
+            area.y = screen_size.height.saturating_sub(area.height);
+        } else {
+            area.y = area.y.min(screen_size.height.saturating_sub(area.height));
+        }
+
+        let clear_from = Position::new(0, old_area.top().min(area.top()));
+        self.clear_after_position(clear_from)?;
+        self.set_viewport_area(area);
+        self.invalidate_viewport();
         Ok(())
     }
 
@@ -956,6 +982,10 @@ pub(crate) mod test_support {
         pub(crate) fn raw_handle(&self) -> Rc<RefCell<Vec<u8>>> {
             Rc::clone(&self.raw)
         }
+
+        pub(crate) fn resize(&mut self, width: u16, height: u16) {
+            self.inner.resize(width, height);
+        }
     }
 
     impl Write for TestWriteBackend {
@@ -1336,6 +1366,29 @@ mod tests {
             leading,
             vec![(0, " ".to_string()), (1, " ".to_string())],
             "leading blank columns must repaint as spaces after a shrink"
+        );
+    }
+
+    #[test]
+    fn terminal_resize_keeps_bottom_pinned_viewport_at_new_bottom() {
+        // Regression (iTerm2 window resize): when a viewport that was pinned to
+        // the old bottom stays at its old absolute y after the terminal grows,
+        // old footer/composer rows remain visible below the live viewport and
+        // look like duplicated bottom UI. A screen resize must re-anchor a
+        // bottom-pinned viewport to the new bottom and force a full repaint.
+        let mut term = test_terminal(80, 24);
+        term.set_viewport_area(Rect::new(0, 20, 80, 4));
+        term.last_known_screen_size = Size::new(80, 24);
+
+        term.backend_mut().resize(120, 40);
+        term.autoresize().unwrap();
+
+        assert_eq!(term.last_known_screen_size, Size::new(120, 40));
+        assert_eq!(term.viewport_area, Rect::new(0, 36, 120, 4));
+        assert!(
+            term.previous_buffer().content.iter().all(|c| c.skip),
+            "resize must invalidate the previous buffer so blank cells erase \
+             stale footer/composer rows"
         );
     }
 

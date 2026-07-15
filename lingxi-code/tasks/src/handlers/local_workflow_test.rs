@@ -14,6 +14,8 @@ use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError
 use traits::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use traits::{BudgetError, SubagentUsage};
 
+static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
 // ---- Echo SubagentSpawner: `agent(p)` → "echo:p" (records prompts) ------
 
 #[derive(Default)]
@@ -67,6 +69,64 @@ impl SubagentSpawner for EchoSpawner {
             response_char_count: 0,
             last_request_id: None,
         })
+    }
+}
+
+#[derive(Default)]
+struct RecordingWorktreeManager {
+    created: StdMutex<Vec<(String, traits::worktree::WorktreeHandle)>>,
+    removed: StdMutex<Vec<traits::worktree::WorktreeHandle>>,
+}
+
+impl RecordingWorktreeManager {
+    fn created(&self) -> Vec<(String, traits::worktree::WorktreeHandle)> {
+        self.created.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl traits::worktree::WorktreeManager for RecordingWorktreeManager {
+    async fn create_worktree(
+        &self,
+        slug: &str,
+        _base_branch: Option<&str>,
+        _copy_includes: &[PathBuf],
+    ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
+        let handle = traits::worktree::WorktreeHandle {
+            path: PathBuf::from(format!("/tmp/mock-worktrees/{slug}")),
+            branch_name: format!("worktree-{slug}"),
+            base_commit: Some("base".into()),
+        };
+        self.created
+            .lock()
+            .unwrap()
+            .push((slug.to_string(), handle.clone()));
+        Ok(handle)
+    }
+
+    async fn remove_worktree(
+        &self,
+        handle: &traits::worktree::WorktreeHandle,
+    ) -> Result<(), traits::worktree::WorktreeError> {
+        self.removed.lock().unwrap().push(handle.clone());
+        Ok(())
+    }
+
+    async fn list_worktrees(
+        &self,
+    ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
+        Ok(Vec::new())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _max_age: std::time::Duration,
+    ) -> Result<Vec<PathBuf>, traits::worktree::WorktreeError> {
+        Ok(Vec::new())
+    }
+
+    fn is_supported(&self) -> bool {
+        true
     }
 }
 
@@ -361,7 +421,10 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
     let (outcome, drained_lines) = joined.unwrap();
     assert!(outcome.is_ok(), "run failed: {:?}", outcome.err());
     // 2 phases + 2 agents (start+done each) → several progress lines drained.
-    assert!(drained_lines >= 4, "expected progress lines, got {drained_lines}");
+    assert!(
+        drained_lines >= 4,
+        "expected progress lines, got {drained_lines}"
+    );
 }
 
 /// The 1000-agent lifetime cap: the 1001st REAL spawn rejects with the
@@ -750,6 +813,63 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
     );
 }
 
+#[tokio::test]
+async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
+    let _g = ENV_LOCK.lock().unwrap();
+    let config_dir = tempdir().unwrap();
+    let workflows_dir = config_dir.path().join("workflows");
+    std::fs::create_dir_all(&workflows_dir).unwrap();
+    std::fs::write(
+        workflows_dir.join("user-child.js"),
+        "return { source: 'user', n: args.n };",
+    )
+    .unwrap();
+    let old_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
+    std::env::set_var(branding::CONFIG_DIR_ENV, config_dir.path());
+
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let spawner = Arc::new(EchoSpawner::default());
+    let parent = r#"
+        const r = await workflow({ name: 'user-child' }, { n: 7 });
+        log('source=' + r.source + ' n=' + r.n);
+        return r;
+    "#;
+    let outcome = run_workflow_script(
+        parent,
+        DEFAULT_WORKFLOW_SUBAGENT,
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig {
+            allow_nested: true,
+            args: None,
+            fs: Some(fs),
+        },
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await;
+
+    match old_config_dir {
+        Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+        None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+    }
+
+    let outcome = outcome.unwrap();
+    assert_eq!(logs(&outcome), vec!["source=user n=7".to_string()]);
+    assert_eq!(
+        outcome.result.as_deref(),
+        Some(r#"{"source":"user","n":7}"#)
+    );
+}
+
 // ==== Handler-level tests (full Task lifecycle) =========================
 
 fn make_handler(
@@ -759,6 +879,48 @@ fn make_handler(
 ) -> LocalWorkflowHandler {
     LocalWorkflowHandler::new(spawner, Arc::new(MockInvoker), Arc::new(MockBudget), mgr)
         .with_status_sink(sink)
+}
+
+#[tokio::test]
+async fn workflow_isolation_spawner_creates_worktree_and_threads_cwd() {
+    let inner = Arc::new(EchoSpawner::default());
+    let worktree = Arc::new(RecordingWorktreeManager::default());
+    let spawner = WorkflowIsolationSpawner {
+        inner: inner.clone(),
+        worktree: worktree.clone(),
+        slug_prefix: "w123".to_string(),
+        sequence: AtomicU64::new(0),
+    };
+    let request = make_request(
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "do isolated work",
+        r#"{"isolation":"worktree"}"#,
+    );
+
+    let result = spawner
+        .spawn(
+            request,
+            SubagentInheritance {
+                tool_invoker: Arc::new(MockInvoker),
+                budget: Arc::new(MockBudget),
+            },
+        )
+        .await
+        .expect("spawn succeeds");
+
+    assert!(matches!(result, SubagentResult::Completed { .. }));
+    let created = worktree.created();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].0, "workflow-agent-w123-0");
+    let seen = inner.seen_reqs.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].isolation.as_deref(), Some("worktree"));
+    let created_path = created[0].1.path.to_string_lossy().into_owned();
+    assert_eq!(seen[0].cwd.as_deref(), Some(created_path.as_str()));
+    assert_eq!(
+        seen[0].worktree.as_ref().map(|h| h.branch_name.as_str()),
+        Some(created[0].1.branch_name.as_str())
+    );
 }
 
 #[tokio::test]
@@ -1864,10 +2026,8 @@ async fn workflow_progress_keeps_earliest_agents_through_log_flood() {
         .iter()
         .filter(|l| l.starts_with("[workflow_agent]"))
         .filter_map(|l| {
-            serde_json::from_str::<serde_json::Value>(
-                l.trim_start_matches("[workflow_agent] "),
-            )
-            .ok()
+            serde_json::from_str::<serde_json::Value>(l.trim_start_matches("[workflow_agent] "))
+                .ok()
         })
         .collect();
 

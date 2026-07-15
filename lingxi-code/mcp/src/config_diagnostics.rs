@@ -71,7 +71,8 @@ const KNOWN_MCP_TYPES: &[&str] = &[
 ];
 
 /// claude's byte-exact suggestion for the unknown-type warning.
-const VALID_TYPES_SUGGESTION: &str = "Valid types are: stdio, sse, http (or streamable-http), ws, sdk";
+const VALID_TYPES_SUGGESTION: &str =
+    "Valid types are: stdio, sse, http (or streamable-http), ws, sdk";
 
 /// Collect the `F7t` diagnostics for ONE config source (`configObject` = the
 /// parsed file / config object holding `mcpServers`). `file` is the source path
@@ -183,8 +184,14 @@ pub fn collect_mcp_config_warnings(
 /// Loader validity per type (aligned with [`crate::json_config`]): stdio needs
 /// a `command`, every remote type needs a `url`.
 fn entry_valid_for_type(entry: &Value, ty: &str) -> bool {
-    let has_command = entry.get("command").and_then(Value::as_str).is_some();
-    let has_url = entry.get("url").and_then(Value::as_str).is_some();
+    let has_command = entry
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    let has_url = entry
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
     match ty {
         "stdio" => has_command,
         _ => has_url,
@@ -194,9 +201,17 @@ fn entry_valid_for_type(entry: &Value, ty: &str) -> bool {
 /// Best-effort `<issues>` reason for the invalid-config warning (the one
 /// non-byte-reproducible detail — Zod's validator output).
 fn invalid_reason(entry: &Value, ty: &str) -> String {
-    if ty == "stdio" && entry.get("command").and_then(Value::as_str).is_none() {
+    let missing_command = entry
+        .get("command")
+        .and_then(Value::as_str)
+        .map_or(true, |s| s.trim().is_empty());
+    let missing_url = entry
+        .get("url")
+        .and_then(Value::as_str)
+        .map_or(true, |s| s.trim().is_empty());
+    if ty == "stdio" && missing_command {
         "command: Required".to_string()
-    } else if entry.get("url").and_then(Value::as_str).is_none() {
+    } else if missing_url {
         "url: Required".to_string()
     } else {
         "invalid entry".to_string()
@@ -281,7 +296,11 @@ pub fn collect_all_mcp_config_warnings(
     if let Some(gp) = global_config_path {
         if let Some(v) = read_json(gp) {
             let file = gp.to_string_lossy();
-            out.extend(collect_mcp_config_warnings(&v, ConfigScope::User, Some(&file)));
+            out.extend(collect_mcp_config_warnings(
+                &v,
+                ConfigScope::User,
+                Some(&file),
+            ));
             let key = migrations::global_config::project_path_for_config(cwd);
             if let Some(proj) = v.get("projects").and_then(|p| p.get(&key)) {
                 out.extend(collect_mcp_config_warnings(
@@ -340,6 +359,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_remote_url_is_reported_as_required() {
+        let c = json!({"mcpServers":{"bad":{"type":"http","url":"   "}}});
+        let w = only(&c);
+        assert_eq!(w.len(), 1);
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"bad\": url: Required"
+        );
+    }
+
+    #[test]
     fn reserved_name_warning_is_byte_exact() {
         let c = json!({"mcpServers":{"workspace":{"type":"stdio","command":"c"}}});
         let w = only(&c);
@@ -386,7 +416,10 @@ mod tests {
 
     #[test]
     fn valid_entries_and_absent_mcpservers_produce_no_warnings() {
-        assert!(only(&json!({"mcpServers":{"ok":{"type":"stdio","command":"c","args":["a"]}}})).is_empty());
+        assert!(
+            only(&json!({"mcpServers":{"ok":{"type":"stdio","command":"c","args":["a"]}}}))
+                .is_empty()
+        );
         assert!(only(&json!({"mcpServers":{"web":{"type":"http","url":"https://x"}}})).is_empty());
         // No mcpServers and no "servers" typo → nothing to diagnose.
         assert!(only(&json!({"other":1})).is_empty());

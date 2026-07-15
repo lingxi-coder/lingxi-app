@@ -1113,6 +1113,13 @@ impl LSPTool {
     fn lsp_registry(&self) -> Option<&Arc<LspRegistry>> {
         self.ctx.lsp_registry.as_ref()
     }
+
+    fn input_file_path<'a>(input: &'a Value) -> Option<&'a str> {
+        input
+            .get("filePath")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("file_path").and_then(Value::as_str))
+    }
 }
 
 static LSP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -1173,7 +1180,7 @@ impl Tool for LSPTool {
     fn get_path(&self, input: &Value) -> Option<PathBuf> {
         // `LSPTool.ts:152-154` `getPath({ filePath }) => expandPath(filePath)`,
         // where `expandPath` resolves relatives against the live `getCwd()`.
-        let file_path = input.get("file_path").and_then(Value::as_str)?;
+        let file_path = Self::input_file_path(input)?;
         Some(expand_path_in(file_path, &self.cwd_now()))
     }
 
@@ -1184,10 +1191,7 @@ impl Tool for LSPTool {
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let file_path = input
-            .get("file_path")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let file_path = Self::input_file_path(input).unwrap_or_default();
         validate_file_path_in(file_path, &self.cwd_now())
     }
 
@@ -1218,9 +1222,7 @@ impl Tool for LSPTool {
             .to_string();
         // claude-code dispatches by `filePath` and resolves the server itself —
         // there is NO model-supplied `server_name`.
-        let file_path = input
-            .get("filePath")
-            .and_then(|v| v.as_str())
+        let file_path = Self::input_file_path(&input)
             .ok_or_else(|| {
                 ToolError::InvalidInput("LSPTool: missing or non-string filePath".into())
             })?
@@ -1285,14 +1287,20 @@ impl Tool for LSPTool {
             }
         };
 
+        // `LSPTool.ts:225` `expandPath(input.filePath)` — tilde / relative path
+        // resolution (against the live `getCwd()`) before the file is routed
+        // to a server or opened.
+        let live_cwd = self.cwd_now();
+        let expanded = expand_path_in(&file_path, &live_cwd);
+        let path = expanded.as_path();
+        // `getCwd()` for the gitignore filter (`LSPTool.ts:226`) — live cwd.
+        let cwd = live_cwd;
+
         // Resolve (and start, if needed) the server responsible for this file —
         // claude-code routes by filePath, never a model-supplied server name.
         // A file with no configured server yields the documented "no server
         // available" error.
-        let (server_name, client, config) = match registry
-            .ensure_client_for_file(std::path::Path::new(&file_path))
-            .await
-        {
+        let (server_name, client, config) = match registry.ensure_client_for_file(path).await {
             Ok(triple) => triple,
             Err(e) => {
                 emit(
@@ -1311,13 +1319,6 @@ impl Tool for LSPTool {
         };
 
         let tracker = OpenFileTracker::new();
-        // `LSPTool.ts:225` `expandPath(input.filePath)` — tilde / relative path
-        // resolution (against the live `getCwd()`) before the file is opened.
-        let live_cwd = self.cwd_now();
-        let expanded = expand_path_in(&file_path, &live_cwd);
-        let path = expanded.as_path();
-        // `getCwd()` for the gitignore filter (`LSPTool.ts:226`) — live cwd.
-        let cwd = live_cwd;
 
         // `LSPTool.ts:427-` `getMethodAndParams` — per-operation dispatch. Position-
         // based ops use `line`/`character`; `documentSymbol` is file-level;
@@ -1992,7 +1993,10 @@ mod tests {
             PathBuf::from("/live/cwd/rel/f.rs")
         );
         // The empty path yields the cwd itself.
-        assert_eq!(expand_path_in("", Path::new("/live/cwd")), PathBuf::from("/live/cwd"));
+        assert_eq!(
+            expand_path_in("", Path::new("/live/cwd")),
+            PathBuf::from("/live/cwd")
+        );
         // Absolute + `~` forms ignore the cwd (unchanged by the parametrization).
         assert_eq!(
             expand_path_in("/abs/x.rs", Path::new("/live/cwd")),
@@ -2014,8 +2018,41 @@ mod tests {
         let cell = std::sync::Arc::new(std::sync::Mutex::new(PathBuf::from("/live/cwd")));
         let tool = LSPTool::new(ctx).with_live_cwd(cell);
         assert_eq!(
-            tool.get_path(&serde_json::json!({ "file_path": "rel/x.rs" })),
+            tool.get_path(&serde_json::json!({ "filePath": "rel/x.rs" })),
             Some(PathBuf::from("/live/cwd/rel/x.rs"))
         );
+        assert_eq!(
+            tool.get_path(&serde_json::json!({ "file_path": "legacy/x.rs" })),
+            Some(PathBuf::from("/live/cwd/legacy/x.rs"))
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_input_accepts_schema_file_path_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("src.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            std::sync::Arc::new(AnalyticsBus::new()),
+            vec![dir.path().to_path_buf()],
+        );
+        let tool = LSPTool::new(ctx);
+        let use_ctx = tool_api::test_support::fresh_ctx();
+        assert!(tool
+            .validate_input(
+                &serde_json::json!({ "filePath": file.to_string_lossy() }),
+                &use_ctx
+            )
+            .await
+            .is_ok());
+        assert!(tool
+            .validate_input(
+                &serde_json::json!({ "file_path": file.to_string_lossy() }),
+                &use_ctx
+            )
+            .await
+            .is_ok());
     }
 }

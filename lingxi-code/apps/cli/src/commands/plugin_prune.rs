@@ -131,7 +131,11 @@ fn resolve_dep(dep: &str, source_id: &str) -> String {
 
 /// The record within an id's record-array that matches the active scope +
 /// projectPath (mirrors `find(u => u.scope===scope && u.projectPath===pp)`).
-fn scoped_record<'a>(records: &'a [Value], scope: Scope, project_path: &Option<String>) -> Option<&'a Value> {
+fn scoped_record<'a>(
+    records: &'a [Value],
+    scope: Scope,
+    project_path: &Option<String>,
+) -> Option<&'a Value> {
     records.iter().find(|r| {
         let rec_scope = r.get("scope").and_then(Value::as_str);
         if rec_scope != Some(scope.label()) {
@@ -570,9 +574,10 @@ mod tests {
     #[test]
     fn empty_case_no_auto_installed() {
         let e = env();
-        let msg =
-            run_prune_inner(false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap();
+        let msg = run_prune_inner(
+            false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
         assert_eq!(
             msg,
             "Nothing to prune (no auto-installed plugins at user scope)."
@@ -582,9 +587,10 @@ mod tests {
     #[test]
     fn empty_case_dry_run_and_scope_wording() {
         let e = env();
-        let msg =
-            run_prune_inner(true, false, "project", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap();
+        let msg = run_prune_inner(
+            true, false, "project", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
         assert_eq!(
             msg,
             "Nothing to prune (no auto-installed plugins at project scope)."
@@ -594,10 +600,14 @@ mod tests {
     #[test]
     fn invalid_scope() {
         let e = env();
-        let err =
-            run_prune_inner(false, false, "bogus", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap_err();
-        assert_eq!(err, "Invalid scope: bogus. Must be one of: user, project, local.");
+        let err = run_prune_inner(
+            false, false, "bogus", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "Invalid scope: bogus. Must be one of: user, project, local."
+        );
     }
 
     #[test]
@@ -613,9 +623,10 @@ mod tests {
                 ("dep@mkt", "1.0.0", &dep, true),
             ],
         );
-        let msg =
-            run_prune_inner(false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap();
+        let msg = run_prune_inner(
+            false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
         assert_eq!(
             msg,
             "Nothing to prune (1 auto-installed plugin at user scope, all still needed)."
@@ -628,9 +639,10 @@ mod tests {
         // Auto `dep@mkt` with no manual dependant ⇒ orphan.
         let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
         write_db(&e, &[("dep@mkt", "1.0.0", &dep, true)]);
-        let msg =
-            run_prune_inner(true, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap();
+        let msg = run_prune_inner(
+            true, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
         assert_eq!(
             msg,
             "1 auto-installed plugin no longer needed at user scope:\n  dep@mkt (1.0.0)\n(dry run \u{2014} nothing removed)"
@@ -645,9 +657,10 @@ mod tests {
         let e = env();
         let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
         write_db(&e, &[("dep@mkt", "1.0.0", &dep, true)]);
-        let msg =
-            run_prune_inner(false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap();
+        let msg = run_prune_inner(
+            false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
         assert_eq!(
             msg,
             "1 auto-installed plugin no longer needed at user scope:\n  dep@mkt (1.0.0)\nNot a TTY \u{2014} run `lingxi-cli plugin prune -y` to remove."
@@ -661,9 +674,10 @@ mod tests {
         let e = env();
         // installPath manifest missing ⇒ failed to load.
         write_db(&e, &[("dep@mkt", "1.0.0", "/nonexistent/dep", true)]);
-        let msg =
-            run_prune_inner(false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap();
+        let msg = run_prune_inner(
+            false, false, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
         assert_eq!(
             msg,
             "Skipped \u{2014} cannot determine orphans: dep@mkt failed to load. Fix or uninstall, then retry."
@@ -682,9 +696,10 @@ mod tests {
         let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
         write_db(&e, &[("dep@mkt", "1.0.0", &dep, true)]);
 
-        let msg =
-            run_prune_inner(false, true, "user", &e.plugins, &e.home, &e.cwd, false, &mut never)
-                .unwrap();
+        let msg = run_prune_inner(
+            false, true, "user", &e.plugins, &e.home, &e.cwd, false, &mut never,
+        )
+        .unwrap();
         assert_eq!(msg, "Removed 1 auto-installed plugin: dep");
         // Record dropped, cache deleted, enabledPlugins key removed (others kept).
         assert!(db_json(&e)["plugins"].get("dep@mkt").is_none());

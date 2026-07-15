@@ -194,7 +194,9 @@ mod tests {
         assert!(p.contains("never writes or thinks anything else after using the EndConversation tool.\n\n# Addressing potential self-harm or violent harm to others\n"));
         // Two distinct ellipsis styles: U+2026 then literal "...".
         assert!(p.contains("The assistant NEVER uses or even considers the EndConversation tool\u{2026}\n- If the user appears to be considering self-harm or suicide."));
-        assert!(p.contains("imminent harm to others by the user...\n- The assistant engages constructively"));
+        assert!(p.contains(
+            "imminent harm to others by the user...\n- The assistant engages constructively"
+        ));
         // Background forks: em-dash U+2014.
         assert!(p.contains("should not call this tool \u{2014} it should stop its work and return"));
         assert!(p.contains("but it is the only channel a fork has.\n\n# Using the EndConversation tool\n- Do not issue a warning"));
@@ -233,7 +235,10 @@ mod tests {
             END_CONVERSATION_ENDED_MESSAGE,
             "Claude ended the conversation. To continue, please start a new session."
         );
-        assert!(END_CONVERSATION_DESCRIPTION.starts_with("End the current conversation. Use only for sustained user abuse"));
-        assert!(END_CONVERSATION_DESCRIPTION.ends_with("prevent any further messages from being sent."));
+        assert!(END_CONVERSATION_DESCRIPTION
+            .starts_with("End the current conversation. Use only for sustained user abuse"));
+        assert!(
+            END_CONVERSATION_DESCRIPTION.ends_with("prevent any further messages from being sent.")
+        );
     }
 }

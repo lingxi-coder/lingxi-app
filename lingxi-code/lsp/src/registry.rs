@@ -189,8 +189,8 @@ impl LspRegistry {
 
     /// Record `config`'s extensions in the registration-order routing table.
     ///
-    /// First-registered wins: when another server already handles an
-    /// extension, the newcomer is shadowed and — matching claude-code's
+    /// First-registered is primary: when another server already handles an
+    /// extension, the newcomer is a fallback and — matching claude-code's
     /// registration-time console warning byte-for-byte — we warn
     /// `LSP: extension {ext} already handled by "{first}"; "{name}" will not
     /// be used for {ext} files`.
@@ -215,12 +215,11 @@ impl LspRegistry {
 
     /// Return (or start) the server responsible for `path`.
     ///
-    /// Mirrors claude-code `getOrStartServerForFile`: resolve the
-    /// FIRST-registered server whose `extension_to_language` covers the file's
-    /// extension (claude-code's `getServerForFile` always takes the first
-    /// entry of its extension → ordered-server-array table; shadowed
-    /// same-extension servers are never used); if it is already
-    /// `Initialized`, return its connection; otherwise spawn it via
+    /// Mirrors claude-code `getOrStartServerForFile`: resolve the ordered
+    /// servers whose `extension_to_language` covers the file's extension,
+    /// trying the first registered server first and falling back to later
+    /// same-extension servers when start/initialize fails; if a candidate is
+    /// already `Initialized`, return its connection; otherwise spawn it via
     /// the transport, run the `initialize` handshake against the project root,
     /// bridge the transport's connection into a registry-side [`LspClient`] (so
     /// the `LSPTool` can dispatch over it), record the `Initialized` state, and
@@ -239,11 +238,39 @@ impl LspRegistry {
     ///
     /// # Errors
     /// [`LspError::Unavailable`] when no configured server handles the file;
-    /// [`LspError::Transport`] / [`LspError::ServerError`] on spawn/handshake
-    /// failure (like claude-code's `ensureServerStarted`, a start failure is
-    /// NOT retried against a shadowed same-extension server).
-    #[allow(clippy::too_many_lines)] // linear lifecycle: claim → spawn → publish
+    /// [`LspError::Transport`] / [`LspError::ServerError`] when every candidate
+    /// fails.
+    #[allow(clippy::too_many_lines)] // candidate loop + lifecycle helper
     pub async fn ensure_server_for_file(&self, path: &Path) -> Result<McpConnectionId, LspError> {
+        let names = {
+            let Some(ext) = file_extension(path) else {
+                return Err(LspError::Unavailable);
+            };
+            self.ext_routes
+                .read()
+                .await
+                .get(&ext)
+                .cloned()
+                .ok_or(LspError::Unavailable)?
+        };
+        let mut last_err = None;
+        for name in names {
+            match self.ensure_named_server_for_file(path, name).await {
+                Ok(connection_id) => return Ok(connection_id),
+                Err(err) => {
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(last_err.unwrap_or(LspError::Unavailable))
+    }
+
+    #[allow(clippy::too_many_lines)] // linear lifecycle: claim → spawn → publish
+    async fn ensure_named_server_for_file(
+        &self,
+        path: &Path,
+        name: String,
+    ) -> Result<McpConnectionId, LspError> {
         enum Claim {
             /// Already initialized → reuse its connection.
             Reuse(McpConnectionId),
@@ -254,20 +281,6 @@ impl LspRegistry {
             /// Terminal for this request (recorded failure / crash-recovery cap).
             Fail(LspError),
         }
-
-        // Resolve the responsible server deterministically: the
-        // first-registered server handling this extension.
-        let name = {
-            let Some(ext) = file_extension(path) else {
-                return Err(LspError::Unavailable);
-            };
-            self.ext_routes
-                .read()
-                .await
-                .get(&ext)
-                .and_then(|names| names.first().cloned())
-                .ok_or(LspError::Unavailable)?
-        };
 
         // Whether we already awaited an in-flight attempt: a waiter that then
         // observes `Failed` returns the recorded error instead of claiming an
@@ -611,6 +624,7 @@ mod routing_tests {
     use async_trait::async_trait;
     use jsonrpc::Connection;
     use serde_json::Value;
+    use std::collections::HashSet;
     use traits::{LspRawConnection, LspServerCapabilities};
 
     fn caps() -> LspServerCapabilities {
@@ -643,18 +657,30 @@ mod routing_tests {
         entered: tokio::sync::Notify,
         /// When true, `start_server` fails after passing the gate.
         fail_start: bool,
+        fail_names: HashSet<String>,
     }
     impl MockTransport {
         fn new() -> Self {
-            Self::build(None, false)
+            Self::build(None, false, HashSet::new())
         }
         fn failing() -> Self {
-            Self::build(None, true)
+            Self::build(None, true, HashSet::new())
+        }
+        fn failing_names(names: &[&str]) -> Self {
+            Self::build(
+                None,
+                false,
+                names.iter().map(|name| (*name).to_string()).collect(),
+            )
         }
         fn gated(gate: Arc<tokio::sync::Semaphore>, fail_start: bool) -> Self {
-            Self::build(Some(gate), fail_start)
+            Self::build(Some(gate), fail_start, HashSet::new())
         }
-        fn build(gate: Option<Arc<tokio::sync::Semaphore>>, fail_start: bool) -> Self {
+        fn build(
+            gate: Option<Arc<tokio::sync::Semaphore>>,
+            fail_start: bool,
+            fail_names: HashSet<String>,
+        ) -> Self {
             let (a, _b) = tokio::io::duplex(256);
             let (r, w) = tokio::io::split(a);
             Self {
@@ -665,6 +691,7 @@ mod routing_tests {
                 gate,
                 entered: tokio::sync::Notify::new(),
                 fail_start,
+                fail_names,
             }
         }
     }
@@ -679,7 +706,7 @@ mod routing_tests {
                 gate.acquire().await.expect("gate closed").forget();
             }
             self.started.lock().unwrap().push(config.name.clone());
-            if self.fail_start {
+            if self.fail_start || self.fail_names.contains(&config.name) {
                 return Err(LspError::Transport(format!(
                     "spawn {}: mock failure",
                     config.command
@@ -789,12 +816,11 @@ mod routing_tests {
         assert_eq!(name_a, name_b, "both files route to the same server");
     }
 
-    /// Parity (2.1.207 P1-09): claude-code's routing table is extension →
-    /// ordered array in registration order and `getServerForFile` always
-    /// takes the first entry — the pick must be deterministic
-    /// (first-registered wins) and the shadowed server must never start.
+    /// The routing table is extension → ordered array in registration order:
+    /// the first server is primary and later same-extension servers are only
+    /// fallbacks.
     #[tokio::test]
-    async fn first_registered_server_wins_and_shadowed_never_starts() {
+    async fn first_registered_server_wins_when_healthy() {
         let transport = Arc::new(MockTransport::new());
         let reg = LspRegistry::new(transport.clone());
         // Names chosen so any accidental alphabetical/hash ordering loses.
@@ -811,7 +837,26 @@ mod routing_tests {
         assert_eq!(
             *transport.started.lock().unwrap(),
             vec!["zzz-first".to_string()],
-            "shadowed same-extension server is never started"
+            "fallback same-extension server is not started while primary is healthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_extension_fallback_starts_when_primary_fails() {
+        let transport = Arc::new(MockTransport::failing_names(&["zzz-first"]));
+        let reg = LspRegistry::new(transport.clone());
+        reg.register_config(named_rust_config("zzz-first")).await;
+        reg.register_config(named_rust_config("aaa-second")).await;
+
+        let (name, _, _) = reg
+            .ensure_client_for_file(Path::new("/p/a.rs"))
+            .await
+            .expect("fallback server should start");
+        assert_eq!(name, "aaa-second");
+        assert_eq!(
+            *transport.started.lock().unwrap(),
+            vec!["zzz-first".to_string(), "aaa-second".to_string()],
+            "registry should try the primary and then the fallback"
         );
     }
 
@@ -949,7 +994,10 @@ mod routing_tests {
 
         let err_a = a.await.unwrap().expect_err("winner sees the spawn error");
         assert!(matches!(err_a, LspError::Transport(_)));
-        let err_b = b.await.unwrap().expect_err("waiter sees the recorded error");
+        let err_b = b
+            .await
+            .unwrap()
+            .expect_err("waiter sees the recorded error");
         assert!(
             matches!(&err_b, LspError::ServerError(msg) if msg.contains("mock failure")),
             "waiter returns the recorded failure, got: {err_b}"

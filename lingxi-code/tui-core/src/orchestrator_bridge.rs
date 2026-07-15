@@ -605,10 +605,7 @@ mod tests {
         bridge.emit_context_pressure(None, 0.0, 0, 0).await;
         assert!(matches!(
             rx.try_recv().expect("bridge must forward a TurnEvent"),
-            TurnEvent::ContextPressure {
-                banner: None,
-                ..
-            }
+            TurnEvent::ContextPressure { banner: None, .. }
         ));
     }
 

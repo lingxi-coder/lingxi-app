@@ -396,8 +396,7 @@ impl Tool for GlobTool {
         // must be canonicalized too for `strip_prefix` to match — same rule
         // GrepTool uses.
         let live_cwd = self.cwd_now();
-        let cwd_for_rel =
-            std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
+        let cwd_for_rel = std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
         let matches: Vec<String> = hits
             .iter()
             .map(|(p, _)| to_relative_path(p, &cwd_for_rel))
@@ -1099,7 +1098,10 @@ mod tests {
                 .iter()
                 .map(|v| v.as_str().unwrap().replace('\\', "/"))
                 .collect();
-            assert!(names.iter().any(|m| m.ends_with("root_only.rs")), "{names:?}");
+            assert!(
+                names.iter().any(|m| m.ends_with("root_only.rs")),
+                "{names:?}"
+            );
             assert!(names.iter().any(|m| m.ends_with("in_sub.rs")), "{names:?}");
         }
 

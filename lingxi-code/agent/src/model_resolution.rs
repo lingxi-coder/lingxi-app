@@ -1308,7 +1308,11 @@ mod tests {
         let def = builtin_explore_def();
         // fable/mythos-class session models name none of haiku/sonnet/opus →
         // obm true → the "opus" alias (Yyl).
-        for session in ["claude-fable-5", "claude-mythos-5-20260101", "CLAUDE-FABLE-5[1m]"] {
+        for session in [
+            "claude-fable-5",
+            "claude-mythos-5-20260101",
+            "CLAUDE-FABLE-5[1m]",
+        ] {
             assert!(
                 matches!(
                     resolve_builtin_explore_model(&def, session, true),
@@ -1332,7 +1336,10 @@ mod tests {
             "CLAUDE-OPUS-4-6",
         ] {
             assert!(
-                matches!(resolve_builtin_explore_model(&def, session, true), AgentModel::Inherit),
+                matches!(
+                    resolve_builtin_explore_model(&def, session, true),
+                    AgentModel::Inherit
+                ),
                 "{session} → inherit"
             );
         }
@@ -1345,7 +1352,11 @@ mod tests {
         let def = builtin_explore_def();
         // fr() !== "firstParty" (Bedrock/Vertex/Foundry) → obm false → inherit,
         // even for a fable-class session model.
-        for var in ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] {
+        for var in [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ] {
             let _p = EnvGuard::set(var, "1");
             assert!(
                 matches!(

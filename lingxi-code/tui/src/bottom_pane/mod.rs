@@ -22,21 +22,22 @@ pub mod connect_picker_view;
 pub mod dialog_view;
 pub mod footer;
 pub mod model_picker_view;
-pub mod pending_input_preview;
 mod paste_burst;
+pub mod pending_input_preview;
 pub mod permission_view;
 pub mod permissions_editor_view;
 pub mod plugins_view;
 pub mod resume_picker_view;
 pub mod rewind_picker_view;
-pub mod tasks_view;
 pub mod screen_view;
+pub mod tasks_view;
 pub mod theme_picker_view;
 pub mod view;
-pub mod workflows_view;
 pub mod web_config_view;
 pub mod web_picker_view;
+pub mod workflows_view;
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::SetCursorStyle;
@@ -51,9 +52,7 @@ use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
 
 use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
-use crate::bottom_pane::completion_view::{
-    command_items_merged, CompletionView, RegistrySlashRow,
-};
+use crate::bottom_pane::completion_view::{command_items_merged, CompletionView, RegistrySlashRow};
 use crate::bottom_pane::model_picker_view::ModelPickerView;
 use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::permission_view::PermissionView;
@@ -176,6 +175,11 @@ pub struct BottomPane {
     completion: Option<CompletionView>,
     /// Vim editing state when `/vim` is enabled (`None` → plain editor).
     vim: Option<VimState>,
+    /// Vim insert-mode two-key remaps, e.g. `{ "jj": "Escape" }`.
+    vim_insert_mode_remaps: BTreeMap<String, String>,
+    /// First char of a possible insert-mode remap sequence. The char is held
+    /// until the next key decides whether it becomes text or maps to Escape.
+    vim_insert_remap_pending: Option<char>,
     /// First unconfirmed idle Ctrl-C, for claude-code's press-twice-to-exit.
     /// Pane-local: it drives the "Press Ctrl-C again to exit" status hint; a
     /// second press within [`CTRL_C_EXIT_WINDOW`] surfaces
@@ -235,6 +239,8 @@ impl BottomPane {
             composer: Composer::default(),
             completion: None,
             vim: None,
+            vim_insert_mode_remaps: BTreeMap::new(),
+            vim_insert_remap_pending: None,
             ctrl_c_at: None,
             paste_burst: paste_burst::PasteBurst::default(),
             // Unit tests default the heuristic OFF: synthetic keystrokes
@@ -306,6 +312,10 @@ impl BottomPane {
         // handles Normal-mode motions/edits; Insert-mode typing + all Ctrl
         // chords fall through to the normal composer handling below.
         if self.vim.is_some() {
+            if let Some(outcome) = self.on_vim_insert_remap_key(key) {
+                self.sync_completion();
+                return outcome;
+            }
             let vim_outcome = {
                 let vim = self.vim.as_mut().expect("vim is Some");
                 crate::vim::handle_key(vim, &mut self.composer, key)
@@ -338,6 +348,7 @@ impl BottomPane {
         if let Some(outcome) = self.view_stack.route_paste(text) {
             return Self::map_view_outcome(outcome);
         }
+        self.flush_pending_vim_insert_remap();
         // A real bracketed paste arrived: no burst heuristic may affect the
         // next Enter (codex `clear_after_explicit_paste`).
         self.paste_burst.clear_after_explicit_paste();
@@ -532,12 +543,16 @@ impl BottomPane {
     /// of the list (the snapshot is synchronous, so there is no loading gate).
     pub fn show_workflows(&mut self, rows: Vec<tui_core::multiagent::WorkflowRow>) {
         if rows.len() == 1 {
-            self.view_stack.push(Box::new(
-                workflows_view::WorkflowDetailView::new(rows[0].clone(), self.theme),
-            ));
+            self.view_stack
+                .push(Box::new(workflows_view::WorkflowDetailView::new(
+                    rows[0].clone(),
+                    self.theme,
+                )));
         } else {
             self.view_stack
-                .push(Box::new(workflows_view::WorkflowsView::new(rows, self.theme)));
+                .push(Box::new(workflows_view::WorkflowsView::new(
+                    rows, self.theme,
+                )));
         }
     }
 
@@ -551,16 +566,13 @@ impl BottomPane {
     /// Open the `/rewind` restore-point picker over `rows` (the session's
     /// checkpoint index, preloaded at mount via `set_rewind_rows`).
     pub fn show_rewind_picker(&mut self, rows: Vec<rewind_picker_view::RewindRow>) {
-        self.view_stack.push(Box::new(
-            rewind_picker_view::RewindPickerView::new(rows, self.theme),
-        ));
+        self.view_stack
+            .push(Box::new(rewind_picker_view::RewindPickerView::new(
+                rows, self.theme,
+            )));
     }
 
-    pub fn show_resume_picker(
-        &mut self,
-        rows: Vec<crate::resume::ResumeRow>,
-        query: &str,
-    ) {
+    pub fn show_resume_picker(&mut self, rows: Vec<crate::resume::ResumeRow>, query: &str) {
         let view = if query.is_empty() {
             resume_picker_view::ResumePickerView::new(rows, self.theme)
         } else {
@@ -577,9 +589,11 @@ impl BottomPane {
         auth_methods: std::collections::BTreeMap<String, String>,
         availability: std::collections::BTreeMap<String, bool>,
     ) {
-        self.view_stack.push(Box::new(
-            connect_picker_view::ConnectPickerView::new(auth_methods, availability),
-        ));
+        self.view_stack
+            .push(Box::new(connect_picker_view::ConnectPickerView::new(
+                auth_methods,
+                availability,
+            )));
     }
 
     /// Feed the owner-computed task status (spinner text + running flag).
@@ -673,7 +687,18 @@ impl BottomPane {
     pub fn toggle_vim(&mut self) -> bool {
         let now_on = self.vim.is_none();
         self.vim = if now_on { Some(VimState::new()) } else { None };
+        self.vim_insert_remap_pending = None;
         now_on
+    }
+
+    /// Replace Vim insert-mode two-key remaps. Only two-character source
+    /// sequences are retained; target names are evaluated when matched.
+    pub fn set_vim_insert_mode_remaps(&mut self, remaps: BTreeMap<String, String>) {
+        self.vim_insert_mode_remaps = remaps
+            .into_iter()
+            .filter(|(from, _)| from.chars().count() == 2)
+            .collect();
+        self.vim_insert_remap_pending = None;
     }
 
     /// Whether vim editing mode is enabled.
@@ -694,6 +719,73 @@ impl BottomPane {
             crate::vim::VimMode::Insert => "INSERT",
             crate::vim::VimMode::Normal | crate::vim::VimMode::Visual => "NORMAL",
         })
+    }
+
+    /// Apply configured two-key insert-mode remaps before the generic Vim
+    /// insert passthrough. Returns `Some` only when this layer consumed the key.
+    fn on_vim_insert_remap_key(&mut self, key: KeyEvent) -> Option<BottomPaneOutcome> {
+        if self.vim_insert_mode_remaps.is_empty()
+            || !self
+                .vim
+                .as_ref()
+                .is_some_and(|vim| vim.mode == crate::vim::VimMode::Insert)
+        {
+            self.flush_pending_vim_insert_remap();
+            return None;
+        }
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let KeyCode::Char(c) = key.code else {
+            self.flush_pending_vim_insert_remap();
+            return None;
+        };
+        if !plain {
+            self.flush_pending_vim_insert_remap();
+            return None;
+        }
+
+        if let Some(first) = self.vim_insert_remap_pending.take() {
+            let sequence = format!("{first}{c}");
+            if self
+                .vim_insert_mode_remaps
+                .get(&sequence)
+                .is_some_and(|target| is_escape_remap_target(target))
+            {
+                if let Some(vim) = self.vim.as_mut() {
+                    vim.mode = crate::vim::VimMode::Normal;
+                }
+                self.composer.move_left();
+                return Some(BottomPaneOutcome::Consumed);
+            }
+
+            self.composer.insert(first);
+            if self.is_vim_insert_remap_prefix(c) {
+                self.vim_insert_remap_pending = Some(c);
+            } else {
+                self.composer.insert(c);
+            }
+            return Some(BottomPaneOutcome::Consumed);
+        }
+
+        if self.is_vim_insert_remap_prefix(c) {
+            self.vim_insert_remap_pending = Some(c);
+            return Some(BottomPaneOutcome::Consumed);
+        }
+
+        None
+    }
+
+    fn is_vim_insert_remap_prefix(&self, c: char) -> bool {
+        self.vim_insert_mode_remaps
+            .keys()
+            .any(|seq| seq.chars().next() == Some(c))
+    }
+
+    fn flush_pending_vim_insert_remap(&mut self) {
+        if let Some(c) = self.vim_insert_remap_pending.take() {
+            self.composer.insert(c);
+        }
     }
 
     /// Read-only access to the composer (rendering/tests; owners must not
@@ -756,9 +848,7 @@ impl BottomPane {
             }
             ViewOutcome::RunTaskAction(action) => BottomPaneOutcome::RunTaskAction(action),
             ViewOutcome::RunPluginAction(action) => BottomPaneOutcome::RunPluginAction(action),
-            ViewOutcome::Rewind { message, scope } => {
-                BottomPaneOutcome::Rewind { message, scope }
-            }
+            ViewOutcome::Rewind { message, scope } => BottomPaneOutcome::Rewind { message, scope },
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
         }
     }
@@ -802,7 +892,10 @@ impl BottomPane {
             KeyCode::Enter => {
                 // Modified Enter (Alt/Shift) inserts a newline — let the composer
                 // handle it instead of committing the completion.
-                if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) {
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT)
+                {
                     return None;
                 }
                 let insert = self.completion.as_ref()?.selected_insert().to_string();
@@ -879,7 +972,8 @@ impl BottomPane {
                 if !self.paste_burst.decide_begin_buffer(now, &tail) {
                     return None;
                 }
-                self.composer.remove_chars_before_cursor(tail.chars().count());
+                self.composer
+                    .remove_chars_before_cursor(tail.chars().count());
                 self.paste_burst.append_char_to_buffer(c, now);
                 self.sync_completion();
                 Some(BottomPaneOutcome::Consumed)
@@ -931,7 +1025,10 @@ impl BottomPane {
                     if self.paste_burst.append_newline_if_active(now) {
                         return BottomPaneOutcome::Consumed;
                     }
-                    if self.paste_burst.newline_should_insert_instead_of_submit(now) {
+                    if self
+                        .paste_burst
+                        .newline_should_insert_instead_of_submit(now)
+                    {
                         self.composer.insert_newline();
                         self.sync_completion();
                         return BottomPaneOutcome::Consumed;
@@ -1064,10 +1161,16 @@ impl BottomPane {
         let mut spans = vec![
             Span::raw("  "),
             Span::styled(self.status.text.clone(), Style::default().fg(claude)),
-            Span::styled("   ·  esc to interrupt  ·  Ctrl-C: cancel", Style::default().fg(dim)),
+            Span::styled(
+                "   ·  esc to interrupt  ·  Ctrl-C: cancel",
+                Style::default().fg(dim),
+            ),
         ];
         if let Some(cost) = &self.status.cost {
-            spans.push(Span::styled(format!("  ·  {cost}"), Style::default().fg(dim)));
+            spans.push(Span::styled(
+                format!("  ·  {cost}"),
+                Style::default().fg(dim),
+            ));
         }
         Line::from(spans)
     }
@@ -1261,6 +1364,10 @@ impl Renderable for BottomPane {
     }
 }
 
+fn is_escape_remap_target(target: &str) -> bool {
+    matches!(target, "Escape" | "Esc" | "escape" | "esc")
+}
+
 /// Whether `s` is a single existing image file path (used to route pastes to
 /// an image message vs composer text, and by `ChatWidget::push_image` to
 /// reject unreadable `/image` paths before they can poison a turn).
@@ -1381,9 +1488,7 @@ impl ViewStack {
             // persist result lands in the transcript, and the in-view buckets
             // already updated optimistically. Only `Esc` (→ `Cancelled`)
             // closes it.
-            ViewOutcome::RunPermissionAction(action) => {
-                ViewOutcome::RunPermissionAction(action)
-            }
+            ViewOutcome::RunPermissionAction(action) => ViewOutcome::RunPermissionAction(action),
             // A `/tasks` stop keeps the picker OPEN (like `/permissions`) so
             // several tasks can be stopped in one visit; the row was already
             // marked `killed` optimistically. Only `Esc` closes it.
@@ -1852,8 +1957,11 @@ mod tests {
         ));
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(pane.flush_paste_burst_if_due().is_some());
-        assert_eq!(pane.composer().text(), "hello world
-");
+        assert_eq!(
+            pane.composer().text(),
+            "hello world
+"
+        );
     }
 
     #[test]
@@ -1875,10 +1983,7 @@ mod tests {
     fn burst_flushed_image_path_still_becomes_an_image_message() {
         // A burst-pasted image path routes through the SAME pipeline as a
         // bracketed paste: it surfaces as PastedImage, not composer text.
-        let path = std::env::temp_dir().join(format!(
-            "tui-burst-image-{}.png",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("tui-burst-image-{}.png", std::process::id()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut pane = BottomPane::new(Theme::dark());
         pane.set_disable_paste_burst(false); // burst tests re-enable the heuristic
@@ -1892,7 +1997,11 @@ mod tests {
             matches!(flushed, Some(BottomPaneOutcome::PastedImage(ref p)) if *p == path.display().to_string()),
             "got {flushed:?}"
         );
-        assert_eq!(pane.composer().text(), "", "image path never hits the composer");
+        assert_eq!(
+            pane.composer().text(),
+            "",
+            "image path never hits the composer"
+        );
     }
 
     fn typ(pane: &mut BottomPane, s: &str) {
@@ -1933,10 +2042,14 @@ mod tests {
             "footer at bottom: {rows:?}"
         );
         // …and the first row is the composer's top padding, NOT a hint row.
-        assert!(!rows[0].contains("Enter: send"), "no hints above the composer: {rows:?}");
+        assert!(
+            !rows[0].contains("Enter: send"),
+            "no hints above the composer: {rows:?}"
+        );
         // Composer prompt sits directly above the footer block.
         assert!(
-            rows.iter().any(|r| r.starts_with("› ") || r.starts_with('›')),
+            rows.iter()
+                .any(|r| r.starts_with("› ") || r.starts_with('›')),
             "gutter prompt present: {rows:?}"
         );
     }
@@ -1953,7 +2066,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         let rows: Vec<String> = buffer_rows(&buf);
-        assert!(rows[0].contains("Simmering"), "spinner row above the composer: {rows:?}");
+        assert!(
+            rows[0].contains("Simmering"),
+            "spinner row above the composer: {rows:?}"
+        );
         assert!(
             rows[0].starts_with("  "),
             "codex status rows are LIVE_PREFIX_COLS-indented"
@@ -2145,6 +2261,47 @@ mod tests {
     }
 
     #[test]
+    fn vim_insert_mode_remap_jj_to_escape_enters_normal_without_typing_jj() {
+        let mut pane = pane();
+        pane.set_vim_insert_mode_remaps(std::collections::BTreeMap::from([(
+            "jj".to_string(),
+            "Escape".to_string(),
+        )]));
+        assert!(pane.toggle_vim());
+        typ(&mut pane, "abc");
+
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Char('j'))),
+            BottomPaneOutcome::Consumed
+        ));
+        assert_eq!(pane.composer().text(), "abc");
+        assert_eq!(pane.vim_mode_label(), Some("INSERT"));
+
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Char('j'))),
+            BottomPaneOutcome::Consumed
+        ));
+        assert_eq!(pane.composer().text(), "abc");
+        assert_eq!(pane.vim_mode_label(), Some("NORMAL"));
+    }
+
+    #[test]
+    fn vim_insert_mode_remap_mismatch_flushes_pending_text() {
+        let mut pane = pane();
+        pane.set_vim_insert_mode_remaps(std::collections::BTreeMap::from([(
+            "jj".to_string(),
+            "Escape".to_string(),
+        )]));
+        assert!(pane.toggle_vim());
+
+        let _ = pane.handle_key(key(KeyCode::Char('j')));
+        let _ = pane.handle_key(key(KeyCode::Char('x')));
+
+        assert_eq!(pane.composer().text(), "jx");
+        assert_eq!(pane.vim_mode_label(), Some("INSERT"));
+    }
+
+    #[test]
     fn esc_quits_and_ctrl_o_toggles_verbose_via_owner() {
         let mut pane = pane();
         assert!(matches!(
@@ -2304,7 +2461,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         // Idle has no leading status row: the preview is first now.
-        assert!(buffer_row(&buf, 0).starts_with("Queued messages:"), "preview first");
+        assert!(
+            buffer_row(&buf, 0).starts_with("Queued messages:"),
+            "preview first"
+        );
         assert!(buffer_row(&buf, 1).starts_with("  ↳ queued draft"));
         // Row 2 is the composer's top padding (no border glyph); the `›`
         // gutter prompt renders on row 3, the first content row.
@@ -2568,7 +2728,9 @@ mod tests {
         ));
         // Enter opens the key-entry child: the cursor moves into the field.
         let _ = pane.handle_key(key(KeyCode::Enter));
-        let field_cursor = pane.cursor_pos(area).expect("the key field claims a cursor");
+        let field_cursor = pane
+            .cursor_pos(area)
+            .expect("the key field claims a cursor");
         assert_ne!(
             Some(field_cursor),
             composer_cursor,

@@ -260,9 +260,7 @@ pub fn resume_lines(state: &ResumeState, theme: &Theme) -> Vec<Line<'static>> {
     // in list mode when the list overflows the viewport.
     let mut header = vec![Span::styled(
         "Resume session",
-        Style::default()
-            .fg(suggestion)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(suggestion).add_modifier(Modifier::BOLD),
     )];
     if !state.in_search_mode && n > VISIBLE_ROWS {
         header.push(Span::styled(
@@ -374,16 +372,28 @@ mod tests {
     fn relative_time_singular_plural_and_future() {
         use std::time::{Duration, UNIX_EPOCH};
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
-        assert_eq!(relative_time_ago(now - Duration::from_secs(60), now), "1 minute ago");
-        assert_eq!(relative_time_ago(now - Duration::from_secs(120), now), "2 minutes ago");
-        assert_eq!(relative_time_ago(now + Duration::from_secs(7200), now), "in 2 hours");
+        assert_eq!(
+            relative_time_ago(now - Duration::from_secs(60), now),
+            "1 minute ago"
+        );
+        assert_eq!(
+            relative_time_ago(now - Duration::from_secs(120), now),
+            "2 minutes ago"
+        );
+        assert_eq!(
+            relative_time_ago(now + Duration::from_secs(7200), now),
+            "in 2 hours"
+        );
     }
 
     #[test]
     fn arrows_navigate_and_clamp() {
         let mut s = ResumeState::new(vec![row("a"), row("b"), row("c")]);
         assert_eq!(s.selected, 0);
-        assert_eq!(handle_resume_key(&mut s, key(KeyCode::Up)), ResumeOutcome::Stay);
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Up)),
+            ResumeOutcome::Stay
+        );
         assert_eq!(s.selected, 0, "clamped at top");
         handle_resume_key(&mut s, key(KeyCode::Down));
         handle_resume_key(&mut s, key(KeyCode::Down));
@@ -397,13 +407,19 @@ mod tests {
         let want = rows[1].uuid;
         let mut s = ResumeState::new(rows);
         handle_resume_key(&mut s, key(KeyCode::Down));
-        assert_eq!(handle_resume_key(&mut s, key(KeyCode::Enter)), ResumeOutcome::Resume(want));
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Enter)),
+            ResumeOutcome::Resume(want)
+        );
     }
 
     #[test]
     fn esc_cancels_in_list_mode() {
         let mut s = ResumeState::new(vec![row("a")]);
-        assert_eq!(handle_resume_key(&mut s, key(KeyCode::Esc)), ResumeOutcome::Cancel);
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Esc)),
+            ResumeOutcome::Cancel
+        );
     }
 
     #[test]
@@ -425,14 +441,20 @@ mod tests {
     #[test]
     fn empty_state_enter_cancels_and_lines_are_locked() {
         let mut s = ResumeState::new(vec![]);
-        assert_eq!(handle_resume_key(&mut s, key(KeyCode::Enter)), ResumeOutcome::Cancel);
+        assert_eq!(
+            handle_resume_key(&mut s, key(KeyCode::Enter)),
+            ResumeOutcome::Cancel
+        );
         let lines = resume_lines(&s, &tui_core::theme::Theme::dark());
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|sp| sp.content.as_ref()).collect())
             .collect();
         assert_eq!(text[0], "No conversations found to resume.");
-        assert_eq!(text[1], "Press Ctrl+C to exit and start a new conversation.");
+        assert_eq!(
+            text[1],
+            "Press Ctrl+C to exit and start a new conversation."
+        );
     }
 
     #[test]
@@ -445,6 +467,8 @@ mod tests {
             .collect();
         assert_eq!(joined[0], "Resume session");
         assert!(joined.iter().any(|l| l == "> hello"));
-        assert!(joined.iter().any(|l| l == "Type to search \u{00b7} Esc cancel"));
+        assert!(joined
+            .iter()
+            .any(|l| l == "Type to search \u{00b7} Esc cancel"));
     }
 }

@@ -557,6 +557,7 @@ pub async fn build_mobile_inner(
         } else {
             None
         },
+        None,
         std::collections::BTreeMap::new(),
     );
     client = client.with_credential_provider(Arc::new(composite));

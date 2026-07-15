@@ -53,7 +53,8 @@ pub(crate) const CODE_REVIEW_DESCRIPTION: &str = "Review the current diff for co
 
 /// The skill's `argumentHint` (binary var `Arb`, default form; `MGt()` false so
 /// no `|ultra`).
-pub(crate) const CODE_REVIEW_ARGUMENT_HINT: &str = "[low|medium|high|xhigh|max] [--fix] [--comment] [<target>]";
+pub(crate) const CODE_REVIEW_ARGUMENT_HINT: &str =
+    "[low|medium|high|xhigh|max] [--fix] [--comment] [<target>]";
 
 fn is_level(s: &str) -> bool {
     matches!(s, "low" | "medium" | "high" | "xhigh" | "max")
@@ -118,7 +119,11 @@ fn parse_args(raw: &str) -> Parsed {
     // `iyt`: lowercase, alias `med`→`medium`, valid iff one of the 5 levels.
     let first = rest.first().copied().unwrap_or("");
     let lvl = first.to_ascii_lowercase();
-    let lvl = if lvl == "med" { "medium".to_string() } else { lvl };
+    let lvl = if lvl == "med" {
+        "medium".to_string()
+    } else {
+        lvl
+    };
     if is_level(&lvl) {
         return Parsed {
             effort: lvl,

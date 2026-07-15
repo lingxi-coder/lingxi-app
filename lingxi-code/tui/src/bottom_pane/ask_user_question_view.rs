@@ -491,10 +491,7 @@ mod tests {
 
     #[test]
     fn arrow_navigation_clamps_at_edges() {
-        let (mut view, _rx) = exchange(
-            vec![q("Q?", "H", &["A", "B", "C"], false)],
-            None,
-        );
+        let (mut view, _rx) = exchange(vec![q("Q?", "H", &["A", "B", "C"], false)], None);
         assert_eq!(view.states[0].highlighted, 0);
         view.handle_key(press(KeyCode::Up)); // clamp at 0
         assert_eq!(view.states[0].highlighted, 0);
@@ -506,10 +503,7 @@ mod tests {
 
     #[test]
     fn enter_submits_highlighted_single_answer() {
-        let (mut view, rx) = exchange(
-            vec![q("Pick?", "H", &["Alpha", "Beta"], false)],
-            None,
-        );
+        let (mut view, rx) = exchange(vec![q("Pick?", "H", &["Alpha", "Beta"], false)], None);
         view.handle_key(press(KeyCode::Down)); // highlight Beta
         let outcome = view.handle_key(press(KeyCode::Enter));
         assert!(matches!(
@@ -549,10 +543,7 @@ mod tests {
 
     #[test]
     fn space_toggles_checkmarks_and_enter_comma_joins() {
-        let (mut view, rx) = exchange(
-            vec![q("Which?", "H", &["A", "B", "C"], true)],
-            None,
-        );
+        let (mut view, rx) = exchange(vec![q("Which?", "H", &["A", "B", "C"], true)], None);
         // Check A (highlight 0), move to C (highlight 2), check C.
         view.handle_key(press(KeyCode::Char(' ')));
         assert!(view.states[0].checked[0]);
@@ -575,10 +566,7 @@ mod tests {
 
     #[test]
     fn number_toggles_in_multi_select_without_submitting() {
-        let (mut view, _rx) = exchange(
-            vec![q("Which?", "H", &["A", "B", "C"], true)],
-            None,
-        );
+        let (mut view, _rx) = exchange(vec![q("Which?", "H", &["A", "B", "C"], true)], None);
         // A number toggles (does not submit) in multi-select.
         assert!(matches!(
             view.handle_key(press(KeyCode::Char('2'))),
@@ -590,10 +578,7 @@ mod tests {
 
     #[test]
     fn multi_select_empty_falls_back_to_highlighted() {
-        let (mut view, rx) = exchange(
-            vec![q("Which?", "H", &["A", "B"], true)],
-            None,
-        );
+        let (mut view, rx) = exchange(vec![q("Which?", "H", &["A", "B"], true)], None);
         // No checkmarks; Enter falls back to the highlighted option.
         view.handle_key(press(KeyCode::Enter));
         let answers = rx.blocking_recv().expect("submitted");
@@ -638,7 +623,10 @@ mod tests {
             view.handle_key(press(KeyCode::Esc)),
             ViewOutcome::Cancelled
         ));
-        assert!(rx.blocking_recv().is_err(), "channel closed unsent on cancel");
+        assert!(
+            rx.blocking_recv().is_err(),
+            "channel closed unsent on cancel"
+        );
     }
 
     #[test]
@@ -674,10 +662,7 @@ mod tests {
 
     #[test]
     fn countdown_renders_when_timeout_armed() {
-        let (view, _rx) = exchange(
-            vec![q("Q?", "H", &["A", "B"], false)],
-            Some(60),
-        );
+        let (view, _rx) = exchange(vec![q("Q?", "H", &["A", "B"], false)], Some(60));
         let text = buffer_text(&view, Rect::new(0, 0, 60, view.desired_height(60)));
         assert!(text.contains("auto-continue in"), "countdown shown: {text}");
         assert!(text.contains("any key to stay"), "{text}");
@@ -693,10 +678,7 @@ mod tests {
 
     #[test]
     fn first_key_disarms_the_countdown() {
-        let (mut view, _rx) = exchange(
-            vec![q("Q?", "H", &["A", "B"], false)],
-            Some(60),
-        );
+        let (mut view, _rx) = exchange(vec![q("Q?", "H", &["A", "B"], false)], Some(60));
         assert!(view.remaining_secs().is_some(), "armed at start");
         // Any key (here a navigation key) disarms per "press any key to stay".
         view.handle_key(press(KeyCode::Down));
@@ -707,10 +689,7 @@ mod tests {
 
     #[test]
     fn remaining_secs_counts_down_and_expires() {
-        let (view, _rx) = exchange(
-            vec![q("Q?", "H", &["A", "B"], false)],
-            Some(60),
-        );
+        let (view, _rx) = exchange(vec![q("Q?", "H", &["A", "B"], false)], Some(60));
         // Simulate 59s elapsed: 1s remaining, not yet expired.
         let almost = view.started + Duration::from_secs(59);
         assert_eq!(view.remaining_secs_at(almost), Some(1));

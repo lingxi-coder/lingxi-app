@@ -269,7 +269,10 @@ impl std::fmt::Debug for WebAction {
                 .field("provider", provider)
                 .field("searxng_url", searxng_url)
                 .finish(),
-            Self::TestSearch { provider, typed_key } => f
+            Self::TestSearch {
+                provider,
+                typed_key,
+            } => f
                 .debug_struct("TestSearch")
                 .field("provider", provider)
                 .field("typed_key", &typed_key.as_ref().map(|_| "<redacted>"))
@@ -349,7 +352,10 @@ mod tests {
             key: "sk-super-secret-value".to_string(),
         };
         let rendered = format!("{action:?}");
-        assert!(!rendered.contains("sk-super-secret-value"), "leaked: {rendered}");
+        assert!(
+            !rendered.contains("sk-super-secret-value"),
+            "leaked: {rendered}"
+        );
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("anthropic"));
     }

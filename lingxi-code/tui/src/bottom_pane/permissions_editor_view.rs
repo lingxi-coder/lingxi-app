@@ -610,7 +610,11 @@ impl Renderable for PermissionsEditorView {
         } else {
             for (i, rule) in rows.iter().enumerate() {
                 let removable = source_to_destination(rule.source).is_some();
-                let marker = if i == self.state.selected { "❯ " } else { "  " };
+                let marker = if i == self.state.selected {
+                    "❯ "
+                } else {
+                    "  "
+                };
                 let mut style = if i == self.state.selected {
                     Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
                 } else {
@@ -686,8 +690,7 @@ impl Renderable for PermissionsEditorView {
             .saturating_add(u16::try_from(visible).unwrap_or(0))
             .saturating_add(confirm)
             .min(inner.bottom().saturating_sub(1));
-        let prefix_cols =
-            u16::try_from(input_prefix(self.state.dest).chars().count()).unwrap_or(0);
+        let prefix_cols = u16::try_from(input_prefix(self.state.dest).chars().count()).unwrap_or(0);
         let typed = u16::try_from(self.state.input.chars().count()).unwrap_or(u16::MAX);
         let x = inner
             .x
@@ -748,7 +751,11 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    fn rule(spec: &str, behavior: PermissionBehavior, source: PermissionRuleSource) -> PermissionRule {
+    fn rule(
+        spec: &str,
+        behavior: PermissionBehavior,
+        source: PermissionRuleSource,
+    ) -> PermissionRule {
         PermissionRule {
             value: PermissionRuleValue::from_rule_string(spec),
             behavior,
@@ -759,7 +766,11 @@ mod tests {
     fn snapshot() -> PermissionsSnapshot {
         PermissionsSnapshot {
             rules: vec![
-                rule("Read", PermissionBehavior::Allow, PermissionRuleSource::LocalSettings),
+                rule(
+                    "Read",
+                    PermissionBehavior::Allow,
+                    PermissionRuleSource::LocalSettings,
+                ),
                 rule(
                     "Edit(src/**)",
                     PermissionBehavior::Allow,
@@ -795,7 +806,10 @@ mod tests {
         let mut s = state();
         s.selected = 1;
         // → Ask (empty), → Deny.
-        assert_eq!(handle_perm_key(&mut s, press(KeyCode::Right)), PermEditorOutcome::Stay);
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Right)),
+            PermEditorOutcome::Stay
+        );
         assert_eq!(s.tab(), PermTab::Ask);
         assert_eq!(s.selected, 0, "selection resets on tab switch");
         assert!(s.rows_for_tab().is_empty());
@@ -832,7 +846,10 @@ mod tests {
         let mut s = state();
         let before = s.rows_for_tab().len();
         for c in "Bash(npm:*)".chars() {
-            assert_eq!(handle_perm_key(&mut s, press(KeyCode::Char(c))), PermEditorOutcome::Stay);
+            assert_eq!(
+                handle_perm_key(&mut s, press(KeyCode::Char(c))),
+                PermEditorOutcome::Stay
+            );
         }
         assert_eq!(s.input(), "Bash(npm:*)");
         let outcome = handle_perm_key(&mut s, press(KeyCode::Enter));
@@ -849,7 +866,11 @@ mod tests {
         // rule only appears after the write lands + the snapshot refreshes, so a
         // failed write never shows a phantom rule (finding #4).
         assert_eq!(s.input(), "");
-        assert_eq!(s.rows_for_tab().len(), before, "list not mutated optimistically");
+        assert_eq!(
+            s.rows_for_tab().len(),
+            before,
+            "list not mutated optimistically"
+        );
         assert!(!s
             .rows_for_tab()
             .iter()
@@ -861,7 +882,10 @@ mod tests {
         let mut s = state();
         assert_eq!(s.destination(), PermissionUpdateDestination::LocalSettings);
         let _ = handle_perm_key(&mut s, ctrl('s'));
-        assert_eq!(s.destination(), PermissionUpdateDestination::ProjectSettings);
+        assert_eq!(
+            s.destination(),
+            PermissionUpdateDestination::ProjectSettings
+        );
         let _ = handle_perm_key(&mut s, ctrl('s'));
         assert_eq!(s.destination(), PermissionUpdateDestination::UserSettings);
         let _ = handle_perm_key(&mut s, ctrl('s'));
@@ -872,7 +896,10 @@ mod tests {
     fn enter_confirms_then_emits_remove_action_without_mutating_the_list() {
         let mut s = state();
         // First Enter (empty buffer) arms confirmation.
-        assert_eq!(handle_perm_key(&mut s, press(KeyCode::Enter)), PermEditorOutcome::Stay);
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Enter)),
+            PermEditorOutcome::Stay
+        );
         assert!(s.is_confirming_remove());
         // Second Enter confirms → Remove(Read, allow, local).
         let outcome = handle_perm_key(&mut s, press(KeyCode::Enter));
@@ -921,7 +948,10 @@ mod tests {
             )],
         });
         // Enter over a managed row arms nothing.
-        assert_eq!(handle_perm_key(&mut s, press(KeyCode::Enter)), PermEditorOutcome::Stay);
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Enter)),
+            PermEditorOutcome::Stay
+        );
         assert!(!s.is_confirming_remove());
         // Delete over a managed row also does nothing.
         let _ = handle_perm_key(&mut s, press(KeyCode::Delete));
@@ -936,10 +966,16 @@ mod tests {
             let _ = handle_perm_key(&mut s, press(KeyCode::Char(c)));
         }
         // Esc with a non-empty buffer clears it (stays open).
-        assert_eq!(handle_perm_key(&mut s, press(KeyCode::Esc)), PermEditorOutcome::Stay);
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Esc)),
+            PermEditorOutcome::Stay
+        );
         assert_eq!(s.input(), "");
         // Esc with an empty buffer closes.
-        assert_eq!(handle_perm_key(&mut s, press(KeyCode::Esc)), PermEditorOutcome::Cancel);
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Esc)),
+            PermEditorOutcome::Cancel
+        );
     }
 
     #[test]

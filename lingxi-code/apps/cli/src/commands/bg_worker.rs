@@ -33,18 +33,24 @@
 //! receives the `# Background Session` prompt section and `/stop` resolves the
 //! job; a vanished worker is respawned by the supervisor with a bounded budget.
 //!
-//! DELIBERATELY OUT OF SCOPE (unchanged from the daemon design): the
-//! `control.sock`/`rvAuth`/`ptyAuth` PTY IPC, the PTY-owned attach-stall
-//! watchdog, low-memory handling, and upgrade takeover. This worker is a plain
-//! detached headless process, NOT a PTY worker.
+//! The worker also owns an authenticated live attach socket when the daemon
+//! provides `LINGXI_BG_ATTACH_*` env. `agents attach` connects to that socket
+//! while the worker is still running, avoiding a second `--resume` JSONL writer.
+//! Attached terminals can feed follow-up input and Ctrl-C control back into the
+//! same live turn loop.
 
 use crate::agents_registry::{self, SessionRegistration};
 use crate::argv::Argv;
 use crate::exit_codes;
 use crate::output::{OutputSink, PlainSink};
 use crate::output_adapter::SinkAdapter;
+use orchestrator::TurnOutcome;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use traits::{SlashCommandDispatcher, SlashDispatchResult};
 
 /// `__bg-run` subcommand args: the 8-hex job short id to execute.
 #[derive(Debug, Clone, clap::Args)]
@@ -156,7 +162,8 @@ fn worker_argv(spec: &JobSpec) -> Argv {
 }
 
 /// The production executor: chdir into the job cwd, synthesize a print-shaped
-/// [`Argv`], build the runtime, and run one turn.
+/// [`Argv`], build the runtime, run the initial turn, then keep driving the
+/// same runtime from live attach input while an attach client remains connected.
 async fn execute_job(spec: JobSpec) -> Result<(), String> {
     // Run the turn in the job's directory (tool + config resolution keys off
     // `std::env::current_dir()`, which `resolve_desktop_config` reads).
@@ -168,20 +175,145 @@ async fn execute_job(spec: JobSpec) -> Result<(), String> {
 
     let argv = worker_argv(&spec);
 
-    let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
-    let adapter: Arc<dyn traits::OutputStream> = Arc::new(SinkAdapter::new(sink));
+    let attach_hub = match crate::bg_attach::AttachHub::start_from_env() {
+        Ok(hub) => hub,
+        Err(e) => {
+            tracing::warn!("lingxi-cli __bg-run: could not start live attach socket: {e}");
+            None
+        }
+    };
+    let mut attach_rx = attach_hub
+        .as_ref()
+        .and_then(crate::bg_attach::AttachHub::take_input_rx);
+    let sink: Arc<dyn OutputSink> = match attach_hub.as_ref() {
+        Some(hub) => Arc::new(crate::bg_attach::AttachSink::new(hub.clone())),
+        None => Arc::new(PlainSink::new()),
+    };
+    let adapter: Arc<dyn traits::OutputStream> = Arc::new(SinkAdapter::new(sink.clone()));
     let permission_mode = permission::PermissionMode::Default;
 
     let runtime = crate::init::build_runtime(&argv, adapter, permission_mode)
         .await
         .map_err(|e| e.to_string())?;
 
+    let mut queued = VecDeque::new();
+    run_attached_turn(&runtime, &spec.prompt, attach_rx.as_mut(), &mut queued).await?;
+    if let (Some(hub), Some(rx)) = (attach_hub.as_ref(), attach_rx.as_mut()) {
+        run_attach_input_loop(&runtime, sink.as_ref(), hub, rx, queued).await?;
+    }
+    Ok(())
+}
+
+async fn run_attached_turn(
+    runtime: &crate::init::Runtime,
+    prompt: &str,
+    mut attach_rx: Option<&mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>>,
+    queued: &mut VecDeque<String>,
+) -> Result<(), String> {
+    if let Some(rx) = attach_rx.as_mut() {
+        let cancel = CancellationToken::new();
+        let turn = runtime
+            .orchestrator
+            .run_turn_streaming_with_cancel(prompt, cancel.clone());
+        tokio::pin!(turn);
+        let mut rx_closed = false;
+        loop {
+            tokio::select! {
+                result = &mut turn => return handle_turn_result(result),
+                input = rx.recv(), if !rx_closed => {
+                    match input {
+                        Some(crate::bg_attach::AttachInput::Line(line)) => queued.push_back(line),
+                        Some(crate::bg_attach::AttachInput::Interrupt) => cancel.cancel(),
+                        Some(crate::bg_attach::AttachInput::ClientDetached) => {}
+                        None => rx_closed = true,
+                    }
+                }
+            }
+        }
+    }
+
     runtime
         .orchestrator
-        .run_turn(&spec.prompt)
+        .run_turn(prompt)
         .await
         .map(|_outcome| ())
         .map_err(|e| e.to_string())
+}
+
+fn handle_turn_result(
+    result: Result<TurnOutcome, orchestrator::OrchestratorError>,
+) -> Result<(), String> {
+    match result {
+        Ok(TurnOutcome::EndTurn | TurnOutcome::Cancelled) => Ok(()),
+        Ok(TurnOutcome::MaxTurns) => Err("reached MAX_TURNS_PER_CONVERSATION".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+async fn run_attach_input_loop(
+    runtime: &crate::init::Runtime,
+    sink: &dyn OutputSink,
+    hub: &crate::bg_attach::AttachHub,
+    rx: &mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>,
+    mut queued: VecDeque<String>,
+) -> Result<(), String> {
+    while let Some(input) = next_attach_line(hub, rx, &mut queued).await {
+        if input.trim().is_empty() {
+            continue;
+        }
+        if input.starts_with('/') {
+            match runtime.dispatcher.dispatch(&input).await {
+                SlashDispatchResult::Handled { display }
+                | SlashDispatchResult::Unknown { display, .. } => {
+                    sink.command_output(&input, &display).await;
+                }
+                SlashDispatchResult::RunAsTurn { prompt } => {
+                    sink.turn_start().await;
+                    run_attached_turn(runtime, &prompt, Some(rx), &mut queued).await?;
+                }
+                SlashDispatchResult::NotASlashCommand => {}
+            }
+            if runtime.orchestrator.current_should_exit() {
+                break;
+            }
+        } else {
+            sink.turn_start().await;
+            run_attached_turn(runtime, &input, Some(rx), &mut queued).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn next_attach_line(
+    hub: &crate::bg_attach::AttachHub,
+    rx: &mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>,
+    queued: &mut VecDeque<String>,
+) -> Option<String> {
+    loop {
+        if let Some(line) = queued.pop_front() {
+            return Some(line);
+        }
+        while let Ok(input) = rx.try_recv() {
+            match input {
+                crate::bg_attach::AttachInput::Line(line) => return Some(line),
+                crate::bg_attach::AttachInput::Interrupt => continue,
+                crate::bg_attach::AttachInput::ClientDetached => continue,
+            }
+        }
+        if !hub.has_clients() {
+            return None;
+        }
+        match rx.recv().await {
+            Some(crate::bg_attach::AttachInput::Line(line)) => return Some(line),
+            Some(crate::bg_attach::AttachInput::Interrupt) => continue,
+            Some(crate::bg_attach::AttachInput::ClientDetached) => {
+                if !hub.has_clients() {
+                    return None;
+                }
+            }
+            None => return None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -274,9 +406,11 @@ mod tests {
     async fn err_execution_marks_job_failed() {
         let home = tmpdir();
         seed_job(&home, "aaaa1111", "explode please");
-        let code = run_worker_core(&home, "aaaa1111", |_spec| async move {
-            Err("boom".to_string())
-        })
+        let code = run_worker_core(
+            &home,
+            "aaaa1111",
+            |_spec| async move { Err("boom".to_string()) },
+        )
         .await;
         assert_eq!(code, exit_codes::SUCCESS);
         let job = read_job(&home, "aaaa1111").unwrap();
@@ -335,9 +469,8 @@ mod tests {
         // exists under sessions/<pid>.json (own pid is alive → reader keeps it).
         let observed = std::cell::Cell::new(0usize);
         let code = run_worker_core(&home, "ffff6666", |_spec| {
-            let sessions = agents_registry::read_live_sessions(
-                &agents_registry::sessions_dir(&home),
-            );
+            let sessions =
+                agents_registry::read_live_sessions(&agents_registry::sessions_dir(&home));
             observed.set(sessions.iter().filter(|s| s.kind == "bg").count());
             async move { Ok(()) }
         })
@@ -350,5 +483,20 @@ mod tests {
             after.iter().all(|s| s.kind != "bg"),
             "live bg session unlinked on exit"
         );
+    }
+
+    #[tokio::test]
+    async fn attach_input_loop_drains_queued_line_without_clients() {
+        let home = tmpdir();
+        let sock = home.join("attach.sock");
+        let hub = crate::bg_attach::AttachHub::start(sock, "token-1".to_string()).unwrap();
+        let mut rx = hub.take_input_rx().unwrap();
+        let mut queued = VecDeque::from(["follow up".to_string()]);
+
+        assert_eq!(
+            next_attach_line(&hub, &mut rx, &mut queued).await,
+            Some("follow up".to_string())
+        );
+        assert_eq!(next_attach_line(&hub, &mut rx, &mut queued).await, None);
     }
 }

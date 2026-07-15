@@ -486,9 +486,7 @@ impl PluginManager {
             .read()
             .await
             .iter()
-            .filter_map(|(id, state)| {
-                matches!(state, PluginState::Loaded { .. }).then_some(*id)
-            })
+            .filter_map(|(id, state)| matches!(state, PluginState::Loaded { .. }).then_some(*id))
             .collect()
     }
 

@@ -219,9 +219,7 @@ fn serialize_node(node: &AxNode, parent_role: Option<&str>) -> String {
 
     // The role context handed to descendants: a node's own role shadows the
     // inherited one (`n?.role ?? t`).
-    let child_role = acc
-        .and_then(|a| a.role.as_deref())
-        .or(parent_role);
+    let child_role = acc.and_then(|a| a.role.as_deref()).or(parent_role);
 
     // Build the base content `r`.
     let mut r = if let Some(label) = acc.and_then(|a| a.label.as_ref()) {
@@ -442,8 +440,8 @@ mod tests {
 
     #[test]
     fn accessibility_hidden_serializes_empty() {
-        let node = AxNode::text_run(vec![AxNode::text("secret")])
-            .with_accessibility(Accessibility {
+        let node =
+            AxNode::text_run(vec![AxNode::text("secret")]).with_accessibility(Accessibility {
                 hidden: true,
                 ..Default::default()
             });
@@ -636,10 +634,7 @@ mod tests {
         // Outer: "table: " prefix. Header cell inherits parent role "table" (its
         // own boxes have no role) → plain "Task". Selected row: role "row" != "table"
         // → "row: ", plus "(selected) ".
-        assert_eq!(
-            table.to_flat_text(),
-            "table: Task\nrow: (selected) Deploy"
-        );
+        assert_eq!(table.to_flat_text(), "table: Task\nrow: (selected) Deploy");
     }
 
     // ---- role inheritance shadowing -------------------------------------

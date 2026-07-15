@@ -175,7 +175,9 @@ pub fn apply_project_server_gate(
         // the user disabled via `/mcp disable` is written to
         // `disabledMcpjsonServers` and must NOT connect on the next launch.
         if server.scope == ConfigScope::Project
-            && rejected_json.iter().any(|r| mcp_names_match(r, &server.name))
+            && rejected_json
+                .iter()
+                .any(|r| mcp_names_match(r, &server.name))
         {
             server.disabled = true;
         }
@@ -239,7 +241,11 @@ mod tests {
         assert!(!mcp_server_is_disabled("sentry", &[], &[]));
         // Being in the ALLOWLIST does nothing for a non-builtin server — only
         // the denylist governs it.
-        assert!(!mcp_server_is_disabled("sentry", &["sentry".to_string()], &[]));
+        assert!(!mcp_server_is_disabled(
+            "sentry",
+            &["sentry".to_string()],
+            &[]
+        ));
         // Present in the denylist ⇒ disabled.
         assert!(mcp_server_is_disabled(
             "sentry",
@@ -264,10 +270,7 @@ mod tests {
         .unwrap();
         let (enabled, disabled) = read_gate_lists(&cfg);
         assert_eq!(enabled, vec!["computer-use".to_string()]);
-        assert_eq!(
-            disabled,
-            vec!["sentry".to_string(), "linear".to_string()]
-        );
+        assert_eq!(disabled, vec!["sentry".to_string(), "linear".to_string()]);
 
         // Non-array values ⇒ empty lists (Eqn tolerance), not a panic.
         let cfg2: Map<String, Value> = serde_json::from_value(serde_json::json!({
@@ -324,9 +327,21 @@ mod tests {
         apply_project_server_gate(&mut servers, &global, &cwd);
 
         // Denylisted server is disabled.
-        assert!(servers.iter().find(|s| s.name == "sentry").unwrap().disabled);
+        assert!(
+            servers
+                .iter()
+                .find(|s| s.name == "sentry")
+                .unwrap()
+                .disabled
+        );
         // Un-listed normal server is untouched (enabled).
-        assert!(!servers.iter().find(|s| s.name == "linear").unwrap().disabled);
+        assert!(
+            !servers
+                .iter()
+                .find(|s| s.name == "linear")
+                .unwrap()
+                .disabled
+        );
         // Builtin computer-use with no allowlist entry is disabled.
         assert!(
             servers
@@ -345,8 +360,14 @@ mod tests {
         // Non-`[a-zA-Z0-9_-]` chars normalize to `_` on BOTH sides ⇒ match.
         assert!(mcp_names_match("my.server", "my_server"));
         // `plugin:` prefix compares EXACTLY (no normalization).
-        assert!(mcp_names_match("plugin:ctx:context7", "plugin:ctx:context7"));
-        assert!(!mcp_names_match("plugin:ctx:context7", "plugin:ctx_context7"));
+        assert!(mcp_names_match(
+            "plugin:ctx:context7",
+            "plugin:ctx:context7"
+        ));
+        assert!(!mcp_names_match(
+            "plugin:ctx:context7",
+            "plugin:ctx_context7"
+        ));
     }
 
     #[test]
@@ -422,7 +443,13 @@ mod tests {
         apply_project_server_gate(&mut servers, &global, dir.path());
 
         // A normal server stays enabled when there is no denylist.
-        assert!(!servers.iter().find(|s| s.name == "sentry").unwrap().disabled);
+        assert!(
+            !servers
+                .iter()
+                .find(|s| s.name == "sentry")
+                .unwrap()
+                .disabled
+        );
         // The builtin is disabled (never allowlisted).
         assert!(
             servers

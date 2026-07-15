@@ -924,7 +924,11 @@ mod tests {
             .invoke("TestEcho", json!({ "a": 1 }), ctx)
             .await
             .expect("allow dispatches");
-        let seen = seen.lock().unwrap().clone().expect("context gate consulted");
+        let seen = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("context gate consulted");
         assert_eq!(
             seen.mode_override.as_deref(),
             Some("plan"),
@@ -949,7 +953,11 @@ mod tests {
             .invoke("TestEcho", json!({}), no_ctx())
             .await
             .expect("allow dispatches");
-        let seen = seen.lock().unwrap().clone().expect("context gate consulted");
+        let seen = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("context gate consulted");
         assert_eq!(seen.mode_override, None);
     }
 

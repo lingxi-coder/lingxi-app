@@ -1021,9 +1021,7 @@ pub fn parse_agents_from_flag_json(raw: &str) -> Vec<AgentDefinition> {
     for (name, def) in obj {
         // `s2l` name guard — drops ONLY this agent (post-record-parse check).
         if name.starts_with('-') {
-            tracing::error!(
-                "Agent '{name}' has an invalid name: names must not start with '-'"
-            );
+            tracing::error!("Agent '{name}' has an invalid name: names must not start with '-'");
             continue;
         }
         match parse_agent_from_json(name, def, AgentSource::Flag) {
@@ -1868,12 +1866,16 @@ mod tests {
     #[test]
     fn flag_json_valid_agents_parse_with_flag_source() {
         // The binary's own help example.
-        let raw = r#"{"reviewer": {"description": "Reviews code", "prompt": "You are a code reviewer"}}"#;
+        let raw =
+            r#"{"reviewer": {"description": "Reviews code", "prompt": "You are a code reviewer"}}"#;
         let out = parse_agents_from_flag_json(raw);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].agent_type, "reviewer");
         assert_eq!(out[0].when_to_use, "Reviews code");
-        assert_eq!(out[0].system_prompt.as_deref(), Some("You are a code reviewer"));
+        assert_eq!(
+            out[0].system_prompt.as_deref(),
+            Some("You are a code reviewer")
+        );
         assert_eq!(out[0].source, AgentSource::Flag);
     }
 

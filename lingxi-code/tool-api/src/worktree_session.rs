@@ -125,6 +125,9 @@ mod tests {
         });
 
         let seen = exit_side.lock().unwrap().clone();
-        assert_eq!(seen.unwrap().worktree_path, PathBuf::from("/repo/.lingxi/worktrees/feat"));
+        assert_eq!(
+            seen.unwrap().worktree_path,
+            PathBuf::from("/repo/.lingxi/worktrees/feat")
+        );
     }
 }

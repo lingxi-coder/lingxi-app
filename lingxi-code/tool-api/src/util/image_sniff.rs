@@ -55,7 +55,10 @@ mod tests {
             sniff_image_media_type(&[137, 80, 78, 71, 13, 10, 26, 10]),
             Some("image/png")
         );
-        assert_eq!(sniff_image_media_type(&[255, 216, 255, 224]), Some("image/jpeg"));
+        assert_eq!(
+            sniff_image_media_type(&[255, 216, 255, 224]),
+            Some("image/jpeg")
+        );
         assert_eq!(sniff_image_media_type(b"GIF87a"), Some("image/gif"));
         assert_eq!(sniff_image_media_type(b"GIF89a"), Some("image/gif"));
         assert_eq!(

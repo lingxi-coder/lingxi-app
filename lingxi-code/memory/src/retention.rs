@@ -51,20 +51,20 @@ const SWEPT_SUBDIR_TREES: &[&str] = &[
 /// `(dir, ext, cap_days)` — a `Some(cap)` retains for `min(period, cap)` days
 /// (claude's `UY(cap)`), so a capped dir is cleaned more aggressively.
 const SWEPT_FILE_EXTS: &[(&str, &str, Option<u64>)] = &[
-    ("plans", ".md", None),                       // hVg
-    ("telemetry", ".json", None),                 // AVg
-    ("traces", ".json", None),                    // OVg
-    ("startup-perf", ".txt", None),               // OVg
-    ("startup-perf", ".json", None),              // OVg
-    ("shell-snapshots", ".sh", None),             // xVg
-    ("feedback-bundles", ".zip", None),           // PVg
-    ("dump-prompts", ".jsonl", Some(3)),          // RVg (Qju = 3-day cap)
-    ("shares", ".zip", None),                     // wVg (also VRt-swept below)
-    ("backups", "", None),                        // HVg (every file)
-    ("jobs/settled", ".json", None),              // IVg
-    ("daemon/dispatch/rejected", ".json", None),  // IVg
-    ("daemon/dispatch", ".json", None),           // IVg
-    ("daemon/auth", ".json", None),               // IVg
+    ("plans", ".md", None),                      // hVg
+    ("telemetry", ".json", None),                // AVg
+    ("traces", ".json", None),                   // OVg
+    ("startup-perf", ".txt", None),              // OVg
+    ("startup-perf", ".json", None),             // OVg
+    ("shell-snapshots", ".sh", None),            // xVg
+    ("feedback-bundles", ".zip", None),          // PVg
+    ("dump-prompts", ".jsonl", Some(3)),         // RVg (Qju = 3-day cap)
+    ("shares", ".zip", None),                    // wVg (also VRt-swept below)
+    ("backups", "", None),                       // HVg (every file)
+    ("jobs/settled", ".json", None),             // IVg
+    ("daemon/dispatch/rejected", ".json", None), // IVg
+    ("daemon/dispatch", ".json", None),          // IVg
+    ("daemon/auth", ".json", None),              // IVg
 ];
 
 /// Single cache files removed when stale (claude `fVg` / `mVg`).
@@ -131,12 +131,18 @@ pub fn run_retention_sweep_in(config_home: &Path, period: Duration) -> Retention
     };
     // Entry-level sweep (todos/statsig/logs): remove every stale file/dir.
     for sub in SWEPT_ENTRY_DIRS {
-        report = merge(report, sweep_stale_entries(&config_home.join(sub), cutoff, true));
+        report = merge(
+            report,
+            sweep_stale_entries(&config_home.join(sub), cutoff, true),
+        );
     }
     // Subdirectory-level sweep (VRt): remove stale subdirectories, then prune the
     // named dir if it emptied.
     for sub in SWEPT_SUBDIR_TREES {
-        report = merge(report, sweep_stale_entries(&config_home.join(sub), cutoff, false));
+        report = merge(
+            report,
+            sweep_stale_entries(&config_home.join(sub), cutoff, false),
+        );
     }
     // File-extension sweeps (aj): stale `<dir>/*<ext>` files. A capped dir uses
     // the more-recent `now - min(period, cap)` cutoff (claude `UY(cap)`).
@@ -182,10 +188,10 @@ fn sweep_orphan_host_managed(config_home: &Path, cutoff: SystemTime) -> Retentio
     for entry in entries.flatten() {
         let name = entry.file_name();
         match jobs.join(&name).try_exists() {
-            Ok(true) => continue,     // job still exists → keep the record
-            Ok(false) => {}           // job gone → candidate for deletion
+            Ok(true) => continue, // job still exists → keep the record
+            Ok(false) => {}       // job gone → candidate for deletion
             Err(_) => {
-                report.errors += 1;   // couldn't tell (non-ENOENT) → skip
+                report.errors += 1; // couldn't tell (non-ENOENT) → skip
                 continue;
             }
         }
@@ -510,9 +516,11 @@ fn sweep_transcripts(config_home: &Path, cutoff: SystemTime) -> RetentionReport 
                     if let Some(base) = name.strip_suffix(".jsonl") {
                         report.transcripts_deleted += 1;
                         if !base.is_empty() && base != "." && base != ".." {
-                            let _ = std::fs::remove_file(project.join(format!("{base}.ccr-tip.json")));
                             let _ =
-                                std::fs::remove_file(project.join(format!("{base}.precompact.json")));
+                                std::fs::remove_file(project.join(format!("{base}.ccr-tip.json")));
+                            let _ = std::fs::remove_file(
+                                project.join(format!("{base}.precompact.json")),
+                            );
                             let _ = std::fs::remove_dir_all(project.join(base));
                         }
                     }
@@ -547,7 +555,7 @@ mod tests {
         fs::write(&old, b"{}").unwrap();
         fs::write(&fresh, b"{}").unwrap();
         set_old(&old, Duration::from_secs(40 * 86400)); // 40 days old
-        // `fresh` keeps its just-now mtime.
+                                                        // `fresh` keeps its just-now mtime.
 
         let report = run_retention_sweep_in(root.path(), day_period(30));
         assert_eq!(report.session_files_deleted, 1);
@@ -603,7 +611,10 @@ mod tests {
         let report = run_retention_sweep_in(root.path(), day_period(30));
         assert_eq!(report.session_files_deleted, 1);
         assert!(!old_dir.exists(), "stale subdir must be swept");
-        assert!(stray_file.exists(), "a file in a VRt dir must be left alone");
+        assert!(
+            stray_file.exists(),
+            "a file in a VRt dir must be left alone"
+        );
     }
 
     #[test]

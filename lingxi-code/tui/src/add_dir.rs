@@ -153,7 +153,8 @@ mod tests {
 
     #[test]
     fn missing_path_is_not_found() {
-        let missing = std::env::temp_dir().join(format!("lingxi-add-dir-missing-{}", std::process::id()));
+        let missing =
+            std::env::temp_dir().join(format!("lingxi-add-dir-missing-{}", std::process::id()));
         let input = missing.to_string_lossy().to_string();
         assert!(matches!(
             resolve_and_validate(&input),
@@ -178,7 +179,9 @@ mod tests {
             "Please provide a directory path."
         );
         assert_eq!(
-            help_message(&AddDirValidation::PathNotFound { absolute: "/x".into() }),
+            help_message(&AddDirValidation::PathNotFound {
+                absolute: "/x".into()
+            }),
             "Path /x was not found."
         );
         assert_eq!(
@@ -190,4 +193,3 @@ mod tests {
         );
     }
 }
-

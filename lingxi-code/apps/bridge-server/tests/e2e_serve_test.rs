@@ -44,6 +44,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     let cfg = DesktopConfig {
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
+        api_key_helper: None,
         cwd: cwd.clone(),
         lingxi_home: cwd.join(".lingxi"),
         default_model: "claude-sonnet-4-20250514".to_string(),

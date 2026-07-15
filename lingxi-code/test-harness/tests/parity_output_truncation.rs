@@ -123,7 +123,10 @@ fn tool_files() -> Vec<&'static str> {
 
 #[test]
 fn output_truncation_constants_locked() {
-    assert_eq!(MAX_TOOL_OUTPUT_LENGTH, 30_000, "BASH_MAX_OUTPUT_LENGTH default: 30_000 chars");
+    assert_eq!(
+        MAX_TOOL_OUTPUT_LENGTH, 30_000,
+        "BASH_MAX_OUTPUT_LENGTH default: 30_000 chars"
+    );
     assert_eq!(
         SHELL_TRUNCATION_SUFFIX_TEMPLATE, "\n\n... [{N} lines truncated] ...",
         "claude-code Qyu()/BashTool utils.ts:156-158 shell truncation suffix"

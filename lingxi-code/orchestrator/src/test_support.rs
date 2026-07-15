@@ -986,7 +986,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     /// render. Note: `/fork`'s handler gates on `conversation_transcript`
     /// (default empty here) BEFORE calling this, so exercising this override
     /// end-to-end needs a handle that also reports an assistant turn.
-    async fn fork_conversation(&self, _directive: &str) -> Result<traits::ForkOutcome, HandleError> {
+    async fn fork_conversation(
+        &self,
+        _directive: &str,
+    ) -> Result<traits::ForkOutcome, HandleError> {
         Ok(traits::ForkOutcome {
             name: "mock-fork".to_string(),
             agent_id: "mock-agent-abcd".to_string(),

@@ -241,10 +241,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock before epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "lingxi-stop-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lingxi-stop-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp job dir");
         dir
     }
@@ -259,7 +257,9 @@ mod tests {
 
     #[test]
     fn is_bg_session_matches_the_exact_predicate() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var("LINGXI_SESSION_KIND");
         assert!(!is_bg_session());
         std::env::set_var("LINGXI_SESSION_KIND", "interactive");
@@ -271,7 +271,9 @@ mod tests {
 
     #[tokio::test]
     async fn handle_requests_exit_and_returns_locked_literal() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var("LINGXI_JOB_DIR");
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = StopHandler::new(mock.clone());
@@ -288,20 +290,26 @@ mod tests {
     async fn handle_runs_fully_even_when_bg_gate_is_closed() {
         // Step 1's gate is palette-visibility only; `call()`'s internal
         // logic (this handler's `handle`) must run unconditionally.
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::remove_var("LINGXI_SESSION_KIND");
         std::env::remove_var("LINGXI_JOB_DIR");
         assert!(!is_bg_session());
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = StopHandler::new(mock.clone());
         let result = h.handle(&args()).await;
-        assert!(matches!(result, CommandResult::Done { display: Some(ref s) } if s == "Session stopped."));
+        assert!(
+            matches!(result, CommandResult::Done { display: Some(ref s) } if s == "Session stopped.")
+        );
         assert!(mock.was_exit_requested());
     }
 
     #[tokio::test]
     async fn handle_rewrites_non_terminal_job_state_to_stopped() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tmp_job_dir("rewrite");
         std::fs::write(
             tmp.join("state.json"),
@@ -332,7 +340,9 @@ mod tests {
 
     #[tokio::test]
     async fn handle_never_clobbers_an_already_terminal_job() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tmp_job_dir("terminal");
         let original = r#"{"state":"done","tempo":"idle","detail":"pr opened","firstTerminalAt":"2026-01-01T00:00:00Z"}"#;
         std::fs::write(tmp.join("state.json"), original).unwrap();
@@ -352,7 +362,9 @@ mod tests {
 
     #[tokio::test]
     async fn handle_ignores_missing_job_dir_without_failing() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("LINGXI_JOB_DIR", "/nonexistent/lingxi-job-dir-for-tests");
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = StopHandler::new(mock.clone());
@@ -364,7 +376,9 @@ mod tests {
 
     #[tokio::test]
     async fn handle_treats_empty_job_dir_as_unset() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("LINGXI_JOB_DIR", "");
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = StopHandler::new(mock.clone());

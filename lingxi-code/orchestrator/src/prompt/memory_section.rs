@@ -70,7 +70,9 @@ mod tests {
         ));
         // Body-linking + tier-glossary paragraphs.
         assert!(s.contains("Link liberally \u{2014} a `[[name]]` that doesn't match an existing memory yet is fine; it marks something worth writing later, not an error."));
-        assert!(s.contains("`reference` \u{2014} pointers to external resources (URLs, dashboards, tickets)."));
+        assert!(s.contains(
+            "`reference` \u{2014} pointers to external resources (URLs, dashboards, tickets)."
+        ));
         // MEMORY.md index paragraph.
         assert!(s.contains("`MEMORY.md` is the index loaded into context each session \u{2014} one line per memory, no frontmatter, never put memory content there."));
         // CLAUDE.md -> LINGXI.md rebrand; no stray "CLAUDE.md".

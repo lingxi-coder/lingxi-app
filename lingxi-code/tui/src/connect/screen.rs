@@ -328,7 +328,10 @@ mod tests {
         // A copied key often carries a trailing newline; it must not enter the
         // buffer, and the paste must land after already-typed input.
         handle_connect_paste(&mut st, "sk-or-v1-xyz\n");
-        assert_eq!(st.key_buffer, "ask-or-v1-xyz", "paste appends, newline stripped");
+        assert_eq!(
+            st.key_buffer, "ask-or-v1-xyz",
+            "paste appends, newline stripped"
+        );
         assert_eq!(
             handle_connect_key(&mut st, KeyCode::Enter),
             ConnectAction::SubmitKey {
@@ -342,7 +345,10 @@ mod tests {
     fn paste_is_inert_in_the_copilot_flow() {
         let mut st = ConnectScreenState::copilot_pending();
         handle_connect_paste(&mut st, "should-be-ignored");
-        assert!(st.key_buffer.is_empty(), "no editable field in the Copilot flow");
+        assert!(
+            st.key_buffer.is_empty(),
+            "no editable field in the Copilot flow"
+        );
     }
 
     #[test]

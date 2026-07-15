@@ -235,7 +235,11 @@ impl fmt::Debug for AwsExportedCredentials {
 
 /// `Rdi(e)`: the three key fields are non-empty strings.
 fn is_sts_credentials_shape(v: &serde_json::Value) -> bool {
-    let non_empty_str = |k: &str| v.get(k).and_then(serde_json::Value::as_str).is_some_and(|s| !s.is_empty());
+    let non_empty_str = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    };
     v.is_object()
         && non_empty_str("AccessKeyId")
         && non_empty_str("SecretAccessKey")
@@ -251,7 +255,13 @@ pub fn parse_sts_output(v: &serde_json::Value) -> Option<AwsExportedCredentials>
         _ if is_sts_credentials_shape(v) => v,
         _ => return None,
     };
-    let s = |k: &str| creds.get(k).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    let s = |k: &str| {
+        creds
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     // `Date.parse(o)` → ms; `Number.isFinite(s) ? s : void 0`.
     let expiration_ms = creds
         .get("Expiration")
@@ -293,10 +303,7 @@ pub fn is_aws_auth_error(error: &LlmError, provider_id: &ProviderId) -> bool {
     if !matches!(provider_id, ProviderId::BedrockClaude) {
         return false;
     }
-    matches!(
-        error,
-        LlmError::Authentication | LlmError::PermissionDenied
-    )
+    matches!(error, LlmError::Authentication | LlmError::PermissionDenied)
 }
 
 // ── Refresh driver (`ZBd` / `t2d`) ──────────────────────────────────────────
@@ -367,13 +374,21 @@ impl AwsAuthRefresher {
     /// `tat()`: reset the cooldown and bump the generation. The binary calls
     /// this on settings change and after an interactive `awsAuthRefresh` run.
     pub fn reset(&self) {
-        *self.inner.last_attempt.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .inner
+            .last_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.inner.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Replace the settings snapshot (host-side settings reload).
     pub fn set_settings(&self, settings: AwsAuthSettings) {
-        *self.inner.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+        *self
+            .inner
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
     }
 
     /// `t2d()`: run `awsCredentialExport` and parse its stdout as STS JSON.
@@ -385,7 +400,10 @@ impl AwsAuthRefresher {
     pub async fn export_credentials(&self) -> Option<AwsExportedCredentials> {
         let inner = &self.inner;
         let (cmd, from_project, trusted) = {
-            let s = inner.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let s = inner
+                .settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (
                 s.aws_credential_export.clone(),
                 s.aws_credential_export_from_project,
@@ -439,7 +457,10 @@ impl AwsAuthRefresh for AwsAuthRefresher {
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
             let (cmd, from_project, trusted) = {
-                let s = inner.settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let s = inner
+                    .settings
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 (
                     s.aws_auth_refresh.clone(),
                     s.aws_auth_refresh_from_project,
@@ -552,7 +573,8 @@ async fn run_refresh_command(process: &dyn AwsAuthProcess, command: &str) -> boo
 /// Emit a `tengu_*` event with the binary's empty `{}` payload.
 async fn emit_empty(bus: &Option<Arc<telemetry::AnalyticsBus>>, name: &'static str) {
     if let Some(bus) = bus {
-        bus.log_event(name, telemetry::LogEventMetadata::new()).await;
+        bus.log_event(name, telemetry::LogEventMetadata::new())
+            .await;
     }
 }
 
@@ -639,7 +661,11 @@ mod tests {
         let process = Arc::new(FixtureProcess::new(false, RefreshRunOutcome::Success));
         let r = AwsAuthRefresher::new(settings(None, false, true), process.clone(), None);
         assert!(!r.refresh().await);
-        assert_eq!(process.probe_calls.load(Ordering::SeqCst), 0, "no probe without a command");
+        assert_eq!(
+            process.probe_calls.load(Ordering::SeqCst),
+            0,
+            "no probe without a command"
+        );
         assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -662,18 +688,33 @@ mod tests {
             Some(bus),
         );
         assert!(!r.refresh().await);
-        assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 0, "script must NOT run");
-        assert_eq!(process.probe_calls.load(Ordering::SeqCst), 0, "trust gate precedes the probe");
+        assert_eq!(
+            process.refresh_calls.load(Ordering::SeqCst),
+            0,
+            "script must NOT run"
+        );
+        assert_eq!(
+            process.probe_calls.load(Ordering::SeqCst),
+            0,
+            "trust gate precedes the probe"
+        );
         let events = sink.events().await;
         assert_eq!(events.len(), 1, "exactly one telemetry event");
         assert_eq!(events[0].name, "tengu_awsAuthRefresh_missing_trust");
-        assert!(events[0].metadata.is_empty(), "binary emits an empty payload");
+        assert!(
+            events[0].metadata.is_empty(),
+            "binary emits an empty payload"
+        );
     }
 
     #[tokio::test]
     async fn project_sourced_command_with_trust_runs() {
         let process = Arc::new(FixtureProcess::new(false, RefreshRunOutcome::Success));
-        let r = AwsAuthRefresher::new(settings(Some("./refresh.sh"), true, true), process.clone(), None);
+        let r = AwsAuthRefresher::new(
+            settings(Some("./refresh.sh"), true, true),
+            process.clone(),
+            None,
+        );
         assert!(r.refresh().await);
         assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 1);
     }
@@ -682,7 +723,11 @@ mod tests {
     async fn valid_caller_identity_skips_refresh() {
         // STS probe succeeds ⇒ "skipping AWS auth refresh command" ⇒ false.
         let process = Arc::new(FixtureProcess::new(true, RefreshRunOutcome::Success));
-        let r = AwsAuthRefresher::new(settings(Some("./refresh.sh"), false, true), process.clone(), None);
+        let r = AwsAuthRefresher::new(
+            settings(Some("./refresh.sh"), false, true),
+            process.clone(),
+            None,
+        );
         assert!(!r.refresh().await);
         assert_eq!(process.probe_calls.load(Ordering::SeqCst), 1);
         assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 0);
@@ -691,12 +736,23 @@ mod tests {
     #[tokio::test]
     async fn success_path_returns_true_and_arms_cooldown() {
         let process = Arc::new(FixtureProcess::new(false, RefreshRunOutcome::Success));
-        let r = AwsAuthRefresher::new(settings(Some("./refresh.sh"), false, true), process.clone(), None);
+        let r = AwsAuthRefresher::new(
+            settings(Some("./refresh.sh"), false, true),
+            process.clone(),
+            None,
+        );
         assert!(r.refresh().await, "exit 0 resolves true");
         assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 1);
         // Second attempt inside QBd=30s ⇒ cooldown short-circuits to false.
-        assert!(!r.refresh().await, "cooldown (QBd) suppresses the second run");
-        assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 1, "script ran once");
+        assert!(
+            !r.refresh().await,
+            "cooldown (QBd) suppresses the second run"
+        );
+        assert_eq!(
+            process.refresh_calls.load(Ordering::SeqCst),
+            1,
+            "script ran once"
+        );
         // tat() resets the cooldown ⇒ the script may run again.
         r.reset();
         assert!(r.refresh().await);
@@ -707,7 +763,11 @@ mod tests {
     async fn timeout_resolves_false() {
         // gIn SIGTERM branch → "AWS auth refresh timed out after 3 minutes…" → false.
         let process = Arc::new(FixtureProcess::new(false, RefreshRunOutcome::TimedOut));
-        let r = AwsAuthRefresher::new(settings(Some("./slow.sh"), false, true), process.clone(), None);
+        let r = AwsAuthRefresher::new(
+            settings(Some("./slow.sh"), false, true),
+            process.clone(),
+            None,
+        );
         assert!(!r.refresh().await);
         assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 1);
     }
@@ -727,7 +787,11 @@ mod tests {
         let mut process = FixtureProcess::new(false, RefreshRunOutcome::Success);
         process.hold = Some(gate.clone());
         let process = Arc::new(process);
-        let r = AwsAuthRefresher::new(settings(Some("./refresh.sh"), false, true), process.clone(), None);
+        let r = AwsAuthRefresher::new(
+            settings(Some("./refresh.sh"), false, true),
+            process.clone(),
+            None,
+        );
 
         let r1 = r.clone();
         let t1 = tokio::spawn(async move { r1.refresh().await });
@@ -739,7 +803,11 @@ mod tests {
         gate.notify_one();
         let (a, b) = (t1.await.unwrap(), t2.await.unwrap());
         assert!(a && b, "both callers observe the shared success");
-        assert_eq!(process.refresh_calls.load(Ordering::SeqCst), 1, "exactly one run");
+        assert_eq!(
+            process.refresh_calls.load(Ordering::SeqCst),
+            1,
+            "exactly one run"
+        );
     }
 
     // ── t2d / wdi ────────────────────────────────────────────────────────────
@@ -756,7 +824,11 @@ mod tests {
         });
         let c = parse_sts_output(&v).expect("nested Credentials accepted");
         assert_eq!(c.access_key_id, "AKIA123");
-        assert_eq!(c.expiration_ms, Some(1_782_993_600_000), "2026-07-02T12:00:00Z in epoch ms");
+        assert_eq!(
+            c.expiration_ms,
+            Some(1_782_993_600_000),
+            "2026-07-02T12:00:00Z in epoch ms"
+        );
     }
 
     #[test]
@@ -768,7 +840,10 @@ mod tests {
             "Expiration": "not-a-date"
         });
         let c = parse_sts_output(&v).expect("flat shape accepted");
-        assert_eq!(c.expiration_ms, None, "unparseable Expiration → None (Number.isFinite gate)");
+        assert_eq!(
+            c.expiration_ms, None,
+            "unparseable Expiration → None (Number.isFinite gate)"
+        );
     }
 
     #[test]
@@ -809,17 +884,30 @@ mod tests {
     #[test]
     fn aws_auth_error_is_provider_gated() {
         // 401/403 on the Bedrock provider trigger; every other provider never does.
-        assert!(is_aws_auth_error(&LlmError::Authentication, &ProviderId::BedrockClaude));
-        assert!(is_aws_auth_error(&LlmError::PermissionDenied, &ProviderId::BedrockClaude));
-        assert!(!is_aws_auth_error(&LlmError::ProviderInternal, &ProviderId::BedrockClaude));
+        assert!(is_aws_auth_error(
+            &LlmError::Authentication,
+            &ProviderId::BedrockClaude
+        ));
+        assert!(is_aws_auth_error(
+            &LlmError::PermissionDenied,
+            &ProviderId::BedrockClaude
+        ));
+        assert!(!is_aws_auth_error(
+            &LlmError::ProviderInternal,
+            &ProviderId::BedrockClaude
+        ));
         for provider in [
             ProviderId::AnthropicFirstParty,
             ProviderId::OpenAI,
             ProviderId::Gemini,
             ProviderId::VertexClaude,
             ProviderId::AzureOpenAI,
-            ProviderId::OpenAICompatible { name: "glm".to_string() },
-            ProviderId::Custom { name: "x".to_string() },
+            ProviderId::OpenAICompatible {
+                name: "glm".to_string(),
+            },
+            ProviderId::Custom {
+                name: "x".to_string(),
+            },
         ] {
             assert!(
                 !is_aws_auth_error(&LlmError::Authentication, &provider),

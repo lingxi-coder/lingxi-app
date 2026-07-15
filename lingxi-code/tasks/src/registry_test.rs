@@ -101,6 +101,7 @@ struct RecordingHandler {
     task_id: String,
     spawns: AtomicUsize,
     killed: StdMutex<Vec<String>>,
+    cleanup_count: Option<Arc<AtomicUsize>>,
 }
 impl RecordingHandler {
     fn new(task_type: TaskType, task_id: &str) -> Arc<Self> {
@@ -109,6 +110,20 @@ impl RecordingHandler {
             task_id: task_id.to_string(),
             spawns: AtomicUsize::new(0),
             killed: StdMutex::new(Vec::new()),
+            cleanup_count: None,
+        })
+    }
+    fn with_cleanup_counter(
+        task_type: TaskType,
+        task_id: &str,
+        cleanup_count: Arc<AtomicUsize>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            task_type,
+            task_id: task_id.to_string(),
+            spawns: AtomicUsize::new(0),
+            killed: StdMutex::new(Vec::new()),
+            cleanup_count: Some(cleanup_count),
         })
     }
     fn spawn_count(&self) -> usize {
@@ -132,9 +147,14 @@ impl Task for RecordingHandler {
         _ctx: TaskContext,
     ) -> Result<TaskHandle, TaskError> {
         self.spawns.fetch_add(1, Ordering::SeqCst);
+        let cleanup = self.cleanup_count.clone().map(|count| {
+            Arc::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn() + Send + Sync>
+        });
         Ok(TaskHandle {
             task_id: self.task_id.clone(),
-            cleanup: None,
+            cleanup,
         })
     }
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
@@ -1042,12 +1062,75 @@ async fn spawn_does_not_reallocate_and_worker_output_survives() {
     assert!(registry.get(&id).await.is_some());
 }
 
-// ---- T9 / T35: mark_notified + terminal-task eviction ------------------
+#[tokio::test]
+async fn spawned_agent_aliases_resolve_to_task_id_and_kill_routes() {
+    let (_d, mut registry) = make_registry();
+    let handler = RecordingHandler::new(TaskType::InProcessTeammate, "thandlerid");
+    registry.register_handler(TaskType::InProcessTeammate, handler.clone());
+
+    let agent_id = protocol::AgentId::new();
+    let id = registry
+        .spawn(
+            TaskType::InProcessTeammate,
+            TaskSpawnInput::InProcessTeammate {
+                agent_id,
+                name: "buddy".into(),
+                team_name: "alpha".into(),
+                description: "work".into(),
+            },
+            "a teammate".into(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(id, "thandlerid");
+    assert_eq!(
+        registry.get(&agent_id.to_string()).await.unwrap().base().id,
+        "thandlerid"
+    );
+    assert_eq!(registry.get("buddy").await.unwrap().base().id, "thandlerid");
+    assert_eq!(
+        registry.get("buddy@alpha").await.unwrap().base().id,
+        "thandlerid"
+    );
+
+    registry.kill("buddy").await.unwrap();
+    assert_eq!(handler.killed_ids(), vec!["thandlerid".to_string()]);
+}
 
 #[tokio::test]
-async fn mark_notified_on_terminal_task_evicts_it() {
-    // claude-code `evictTerminalTask`: a terminal + notified task is
-    // eagerly dropped from the map.
+async fn spawned_task_cleanup_hook_is_preserved_and_run_on_kill() {
+    let (_d, mut registry) = make_registry();
+    let cleanup_count = Arc::new(AtomicUsize::new(0));
+    let handler = RecordingHandler::with_cleanup_counter(
+        TaskType::InProcessTeammate,
+        "thandlerid",
+        cleanup_count.clone(),
+    );
+    registry.register_handler(TaskType::InProcessTeammate, handler);
+
+    registry
+        .spawn(
+            TaskType::InProcessTeammate,
+            teammate_input(),
+            "a teammate".into(),
+        )
+        .await
+        .unwrap();
+    registry.kill("thandlerid").await.unwrap();
+
+    assert_eq!(
+        cleanup_count.load(Ordering::SeqCst),
+        1,
+        "registry must retain and invoke TaskHandle cleanup"
+    );
+}
+
+// ---- T9 / T35: mark_notified + terminal-task retention ------------------
+
+#[tokio::test]
+async fn mark_notified_on_terminal_task_retains_it() {
+    // 2.1.208 keeps completed background tasks available until explicit cleanup.
     let (_d, registry) = make_registry();
     let id = registry
         .create(TaskType::LocalBash, teammate_input(), "x".into())
@@ -1060,11 +1143,8 @@ async fn mark_notified_on_terminal_task_evicts_it() {
 
     registry.mark_notified(&id).await.unwrap();
 
-    // Terminal + notified ⇒ evicted.
-    assert!(
-        registry.get(&id).await.is_none(),
-        "a terminal task is evicted once marked notified"
-    );
+    let state = registry.get(&id).await.expect("terminal task is retained");
+    assert!(state.base().notified, "terminal task is marked notified");
 }
 
 #[tokio::test]
@@ -1095,10 +1175,8 @@ async fn mark_notified_unknown_id_is_not_found() {
 
 #[tokio::test]
 async fn evict_terminal_tasks_sweeps_terminal_notified_only() {
-    // The lazy-GC safety net: a task that became terminal AFTER it was
-    // notified (the eager path in mark_notified ran while still pending) is
-    // swept here; a still-running notified task and a terminal un-notified
-    // task both survive.
+    // Terminal tasks are retained after notification; this compatibility method
+    // no longer performs implicit GC.
     let (_d, registry) = make_registry();
 
     // Task A: notified while pending, THEN driven terminal — eager evict did
@@ -1129,12 +1207,11 @@ async fn evict_terminal_tasks_sweeps_terminal_notified_only() {
     registry.mark_notified(&c).await.unwrap();
 
     let evicted = registry.evict_terminal_tasks().await;
-    assert_eq!(
-        evicted,
-        vec![a.clone()],
-        "only the terminal+notified task is swept"
+    assert!(evicted.is_empty(), "implicit terminal-task GC is disabled");
+    assert!(
+        registry.get(&a).await.is_some(),
+        "terminal+notified is retained"
     );
-    assert!(registry.get(&a).await.is_none());
     assert!(
         registry.get(&b).await.is_some(),
         "terminal but un-notified survives"
@@ -1176,8 +1253,8 @@ async fn take_pending_drains_terminal_bash_once_with_exit_code() {
         n.output_path
     );
 
-    // The drained task is evicted (terminal + now-notified).
-    assert!(registry.get(&id).await.is_none(), "drained task is evicted");
+    let state = registry.get(&id).await.expect("drained task is retained");
+    assert!(state.base().notified, "drained task is marked notified");
 
     // Drain 2: consume-once — nothing left.
     assert!(
@@ -1436,8 +1513,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
 async fn take_pending_skips_already_notified_and_non_terminal() {
     let (_d, registry) = make_registry();
 
-    // A: terminal but ALREADY notified — but mark_notified evicts it, so
-    // model it as a notified+terminal task inserted directly via test seam.
+    // A: terminal but ALREADY notified.
     {
         use crate::state::{LocalBashTaskState, TaskState, TaskStateBase};
         let base = TaskStateBase {
@@ -1596,10 +1672,10 @@ async fn finished_background_bash_task_does_not_stay_running() {
         &mut registry,
         Arc::new(ExitZeroRunner),
         Arc::new(PassSandbox),
-        Arc::new(mcp::McpRegistry::new(Arc::new(
-            test_harness::mocks::MockMcpTransport::default(),
-        )
-            as Arc<dyn traits::McpTransport>)),
+        Arc::new(mcp::McpRegistry::new(
+            Arc::new(test_harness::mocks::MockMcpTransport::default())
+                as Arc<dyn traits::McpTransport>,
+        )),
         bash_sink.clone() as Arc<dyn crate::handlers::TaskStatusSink>,
     );
     let registry = Arc::new(registry);

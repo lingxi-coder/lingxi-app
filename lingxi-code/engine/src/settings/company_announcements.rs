@@ -102,7 +102,10 @@ impl AnnouncementMemo {
         num_startups: u64,
         memoize: bool,
     ) -> Option<String> {
-        let mut guard = self.cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = guard.as_ref() {
             return cached.clone();
         }
@@ -155,10 +158,7 @@ mod tests {
     #[test]
     fn empty_and_all_empty_yield_none() {
         assert_eq!(select_company_announcement_at(None, 1, 0), None);
-        assert_eq!(
-            select_company_announcement_at(Some(&v(&[])), 5, 0),
-            None
-        );
+        assert_eq!(select_company_announcement_at(Some(&v(&[])), 5, 0), None);
         assert_eq!(
             select_company_announcement_at(Some(&v(&["", ""])), 5, 0),
             None

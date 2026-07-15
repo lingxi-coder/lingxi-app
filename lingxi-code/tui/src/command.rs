@@ -787,7 +787,12 @@ pub struct SandboxDescFlags {
 
 impl Default for SandboxDescFlags {
     fn default() -> Self {
-        Self { auto_allow: false, fallback_allowed: false, managed: false, deps_ok: true }
+        Self {
+            auto_allow: false,
+            fallback_allowed: false,
+            managed: false,
+            deps_ok: true,
+        }
     }
 }
 
@@ -1032,7 +1037,10 @@ mod tests {
         // An alias resolves to its canonical entry.
         assert_eq!(resolve("/quit").expect("alias").0.name, "/exit");
         // /permissions is registered with its claude-code alias.
-        assert_eq!(resolve("/permissions").expect("registered").0.name, "/permissions");
+        assert_eq!(
+            resolve("/permissions").expect("registered").0.name,
+            "/permissions"
+        );
         assert_eq!(
             resolve("/allowed-tools").expect("alias").0.name,
             "/permissions"
@@ -1087,16 +1095,28 @@ mod tests {
         let is_ours = SANDBOX_TOGGLE
             .lock()
             .ok()
-            .and_then(|slot| slot.as_ref().map(|live| std::sync::Arc::ptr_eq(live, &ours)))
+            .and_then(|slot| {
+                slot.as_ref()
+                    .map(|live| std::sync::Arc::ptr_eq(live, &ours))
+            })
             .unwrap_or(false);
         if is_ours {
             ours.store(true, std::sync::atomic::Ordering::Relaxed);
-            assert_eq!(sandbox.describe(), "\u{2714} sandbox enabled (\u{23CE} to configure)");
+            assert_eq!(
+                sandbox.describe(),
+                "\u{2714} sandbox enabled (\u{23CE} to configure)"
+            );
             ours.store(false, std::sync::atomic::Ordering::Relaxed);
-            assert_eq!(sandbox.describe(), "\u{25EF} sandbox disabled (\u{23CE} to configure)");
+            assert_eq!(
+                sandbox.describe(),
+                "\u{25EF} sandbox disabled (\u{23CE} to configure)"
+            );
         }
 
-        let ts = BUILTIN.iter().find(|c| c.name == "/terminal-setup").unwrap();
+        let ts = BUILTIN
+            .iter()
+            .find(|c| c.name == "/terminal-setup")
+            .unwrap();
         assert!(!ts.describe().is_empty());
     }
 

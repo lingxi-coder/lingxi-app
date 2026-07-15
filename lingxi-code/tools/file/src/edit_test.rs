@@ -175,7 +175,8 @@ mod tests {
             } else {
                 let err = outcome.expect_err("default (flag off) must keep the stale error");
                 assert!(
-                    err.to_string().contains("File content has changed since it was last read"),
+                    err.to_string()
+                        .contains("File content has changed since it was last read"),
                     "expected J2n stale error, got: {err}"
                 );
                 // File untouched on the error path.

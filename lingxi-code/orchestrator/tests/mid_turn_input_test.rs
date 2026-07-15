@@ -20,8 +20,8 @@ use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::test_support_stream::{
-    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    input_json_delta, text_delta, MockStreamingApiClient,
+    content_block_start_text, content_block_stop, input_json_delta, message_delta_stop,
+    message_start, message_stop, text_delta, MockStreamingApiClient,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
 use protocol::{ContentBlock, ConversationMessage, ToolUseId};

@@ -580,7 +580,9 @@ fn reasoning_config_is_dropped_gracefully_on_chat_wire() {
         budget_tokens: 2048,
     });
 
-    let encoded = codec.encode_request(&request).expect("reasoning is dropped, not rejected");
+    let encoded = codec
+        .encode_request(&request)
+        .expect("reasoning is dropped, not rejected");
 
     assert!(encoded.body_json.get("reasoning").is_none());
     assert!(encoded.body_json.get("reasoning_effort").is_none());

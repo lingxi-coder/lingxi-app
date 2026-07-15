@@ -150,13 +150,22 @@ mod tests {
             "ERR_SSL_DECRYPTION_FAILED_OR_BAD_RECORD_MAC",
         ] {
             assert!(is_ssl_code(code), "{code} must be an SSL code");
-            assert!(!is_cert_code(code), "{code} is protocol-only, not a cert code");
+            assert!(
+                !is_cert_code(code),
+                "{code} is protocol-only, not a cert code"
+            );
         }
     }
 
     #[test]
     fn non_ssl_codes_are_rejected() {
-        for code in ["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ConnectionClosed", ""] {
+        for code in [
+            "ECONNREFUSED",
+            "ENOTFOUND",
+            "ETIMEDOUT",
+            "ConnectionClosed",
+            "",
+        ] {
             assert!(!is_ssl_code(code), "{code} must not be an SSL code");
         }
     }
@@ -190,7 +199,10 @@ mod tests {
     #[test]
     fn detect_returns_none_for_non_ssl_transport_error() {
         assert_eq!(detect_ssl_code("connection refused: ECONNREFUSED"), None);
-        assert_eq!(detect_ssl_code("dns error: ENOTFOUND api.example.com"), None);
+        assert_eq!(
+            detect_ssl_code("dns error: ENOTFOUND api.example.com"),
+            None
+        );
         assert_eq!(detect_ssl_code(""), None);
     }
 

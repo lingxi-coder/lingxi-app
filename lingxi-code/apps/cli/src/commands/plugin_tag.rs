@@ -74,8 +74,8 @@ pub fn run_tag(
 
     let raw = std::fs::read_to_string(&plugin_json)
         .map_err(|e| format!("✘ Invalid JSON in {abs_json}: {e}"))?;
-    let value: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("✘ Invalid JSON in {abs_json}: {e}"))?;
+    let value: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("✘ Invalid JSON in {abs_json}: {e}"))?;
 
     // --- (3) hard validation (short-circuits before warnings) ---
     let mut issues: Vec<String> = Vec::new();
@@ -225,7 +225,12 @@ pub fn run_tag(
     // --- (10) dirty tree + already-exists (unless --force) ---
     if !force {
         let dirty = git_stdout(
-            &["status", "--porcelain", "--", &plugin_root.display().to_string()],
+            &[
+                "status",
+                "--porcelain",
+                "--",
+                &plugin_root.display().to_string(),
+            ],
             repo,
         )
         .unwrap_or_default();
@@ -250,7 +255,12 @@ pub fn run_tag(
         }
 
         let exists = git(
-            &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}")],
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/tags/{tag}"),
+            ],
             repo,
         )
         .map(|o| o.status.success())
@@ -320,7 +330,10 @@ pub fn run_tag(
             ));
         }
         None => {
-            return Err(finish(lines, "✘ Failed to create tag: git not available".to_string()));
+            return Err(finish(
+                lines,
+                "✘ Failed to create tag: git not available".to_string(),
+            ));
         }
     }
 
@@ -421,10 +434,7 @@ fn match_entry(
             None => p.get("name").and_then(Value::as_str) == Some(plugin_name),
         };
         if matches {
-            let ver = p
-                .get("version")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let ver = p.get("version").and_then(Value::as_str).map(str::to_string);
             return Some((i, ver));
         }
     }
@@ -497,9 +507,7 @@ fn is_valid_semver(raw: &str) -> bool {
 
 /// A numeric identifier: non-empty, all digits, no leading zero unless `"0"`.
 fn is_numeric_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.bytes().all(|b| b.is_ascii_digit())
-        && (s.len() == 1 || !s.starts_with('0'))
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && (s.len() == 1 || !s.starts_with('0'))
 }
 
 /// A prerelease identifier: alphanumeric-with-hyphen; if all-digits it must have
@@ -524,11 +532,7 @@ fn is_build_id(s: &str) -> bool {
 fn path_relative(from: &Path, to: &Path) -> PathBuf {
     let from_c: Vec<_> = from.components().collect();
     let to_c: Vec<_> = to.components().collect();
-    let common = from_c
-        .iter()
-        .zip(&to_c)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let common = from_c.iter().zip(&to_c).take_while(|(a, b)| a == b).count();
     let mut result = PathBuf::new();
     for _ in common..from_c.len() {
         result.push("..");
@@ -546,7 +550,12 @@ fn display_path(p: &Path) -> String {
 
 /// Run `git <args>` with `-C <cwd>` and capture output.
 fn git(args: &[&str], cwd: &Path) -> Option<std::process::Output> {
-    Command::new("git").arg("-C").arg(cwd).args(args).output().ok()
+    Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()
 }
 
 /// Run `git <args>` and return trimmed stdout on success, else `None`.
@@ -586,7 +595,12 @@ mod tests {
     }
 
     fn commit(root: &Path, msg: &str) {
-        Command::new("git").arg("-C").arg(root).args(["add", "-A"]).output().unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["add", "-A"])
+            .output()
+            .unwrap();
         let ok = Command::new("git")
             .arg("-C")
             .arg(root)
@@ -605,7 +619,11 @@ mod tests {
         // macOS (/var → /private/var).
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         std::fs::create_dir_all(root.join(PLUGIN_MANIFEST_DIR)).unwrap();
-        std::fs::write(root.join(PLUGIN_MANIFEST_DIR).join("plugin.json"), plugin_json).unwrap();
+        std::fs::write(
+            root.join(PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            plugin_json,
+        )
+        .unwrap();
         git_init(&root);
         commit(&root, "init");
         Repo { _tmp: tmp, root }
@@ -615,7 +633,12 @@ mod tests {
         Command::new("git")
             .arg("-C")
             .arg(root)
-            .args(["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}")])
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/tags/{tag}"),
+            ])
             .output()
             .unwrap()
             .status
@@ -628,7 +651,9 @@ mod tests {
     // parallel test threads clobbering each other's cwd (poison-tolerant).
     fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir).unwrap();
         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
@@ -638,7 +663,9 @@ mod tests {
 
     #[test]
     fn creates_annotated_tag_with_push_hint() {
-        let r = repo_with(r#"{ "name":"myplug","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"myplug","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         let out = with_cwd(&r.root, || {
             run_tag(None, false, false, None, false, "origin").unwrap()
         });
@@ -668,8 +695,15 @@ mod tests {
     fn missing_manifest_errors_with_absolute_path() {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let err = run_tag(Some(root.to_str().unwrap()), false, false, None, false, "origin")
-            .unwrap_err();
+        let err = run_tag(
+            Some(root.to_str().unwrap()),
+            false,
+            false,
+            None,
+            false,
+            "origin",
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             format!(
@@ -681,13 +715,21 @@ mod tests {
 
     #[test]
     fn dry_run_previews_git_commands_no_tag() {
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         let out = with_cwd(&r.root, || {
             run_tag(None, true, false, None, false, "origin").unwrap()
         });
-        assert!(out.contains("✔ Dry run — would create tag p--v1.2.3 at HEAD in "), "{out}");
         assert!(
-            out.contains(&format!("  git -C {} tag -a p--v1.2.3 -m \"p 1.2.3\"", r.root.display())),
+            out.contains("✔ Dry run — would create tag p--v1.2.3 at HEAD in "),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "  git -C {} tag -a p--v1.2.3 -m \"p 1.2.3\"",
+                r.root.display()
+            )),
             "{out}"
         );
         assert!(
@@ -697,17 +739,25 @@ mod tests {
             )),
             "{out}"
         );
-        assert!(!tag_exists(&r.root, "p--v1.2.3"), "dry-run must not create the tag");
+        assert!(
+            !tag_exists(&r.root, "p--v1.2.3"),
+            "dry-run must not create the tag"
+        );
     }
 
     #[test]
     fn dry_run_force_adds_flags_and_remote() {
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         let out = with_cwd(&r.root, || {
             run_tag(None, true, true, None, true, "upstream").unwrap()
         });
         assert!(
-            out.contains(&format!("  git -C {} tag -f -a p--v1.2.3 -m \"p 1.2.3\"", r.root.display())),
+            out.contains(&format!(
+                "  git -C {} tag -f -a p--v1.2.3 -m \"p 1.2.3\"",
+                r.root.display()
+            )),
             "{out}"
         );
         assert!(
@@ -721,9 +771,19 @@ mod tests {
 
     #[test]
     fn message_replaces_percent_s_with_version() {
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         with_cwd(&r.root, || {
-            run_tag(None, false, false, Some("Release %s of plugin"), false, "origin").unwrap()
+            run_tag(
+                None,
+                false,
+                false,
+                Some("Release %s of plugin"),
+                false,
+                "origin",
+            )
+            .unwrap()
         });
         let ann = Command::new("git")
             .arg("-C")
@@ -740,7 +800,9 @@ mod tests {
 
     #[test]
     fn already_exists_without_force_errors() {
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         with_cwd(&r.root, || {
             run_tag(None, false, false, None, false, "origin").unwrap();
             let err = run_tag(None, false, false, None, false, "origin").unwrap_err();
@@ -754,7 +816,9 @@ mod tests {
 
     #[test]
     fn force_moves_existing_tag() {
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         with_cwd(&r.root, || {
             run_tag(None, false, false, None, false, "origin").unwrap();
             let out = run_tag(None, false, true, None, false, "origin").unwrap();
@@ -812,7 +876,9 @@ mod tests {
 
     #[test]
     fn dirty_tree_truncates_after_five() {
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         for i in 1..=15 {
             std::fs::write(r.root.join(format!("f{i}.txt")), "x").unwrap();
         }
@@ -847,7 +913,8 @@ mod tests {
 
     #[test]
     fn invalid_semver_errors() {
-        let r = repo_with(r#"{ "name":"p","version":"nope","description":"d","author":{"name":"x"} }"#);
+        let r =
+            repo_with(r#"{ "name":"p","version":"nope","description":"d","author":{"name":"x"} }"#);
         let err = with_cwd(&r.root, || {
             run_tag(None, false, false, None, false, "origin").unwrap_err()
         });
@@ -868,7 +935,10 @@ mod tests {
             run_tag(None, false, false, None, false, "origin").unwrap_err()
         });
         assert!(err.starts_with("✘ Plugin validation failed for "), "{err}");
-        assert!(err.ends_with(":\n  name: Invalid input: expected string, received number"), "{err}");
+        assert!(
+            err.ends_with(":\n  name: Invalid input: expected string, received number"),
+            "{err}"
+        );
         // No warnings before a hard validation failure.
         assert!(!err.contains('⚠'), "{err}");
     }
@@ -879,7 +949,10 @@ mod tests {
         let err = with_cwd(&r.root, || {
             run_tag(None, false, false, None, false, "origin").unwrap_err()
         });
-        assert!(err.ends_with(":\n  name: Plugin name cannot be empty"), "{err}");
+        assert!(
+            err.ends_with(":\n  name: Plugin name cannot be empty"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1001,10 +1074,16 @@ mod tests {
         // Real bare remote so the push actually succeeds. Keep it in its OWN
         // tempdir (not r.root.parent(), which is the shared $TMPDIR — a fixed
         // path there persists across runs and collides with `tag already exists`).
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         let bare_tmp = tempfile::tempdir().unwrap();
         let bare = bare_tmp.path().join("bare.git");
-        Command::new("git").args(["init", "-q", "--bare"]).arg(&bare).output().unwrap();
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
         Command::new("git")
             .arg("-C")
             .arg(&r.root)
@@ -1018,18 +1097,27 @@ mod tests {
         assert!(out.contains("✔ Created tag p--v1.2.3"), "{out}");
         assert!(out.contains("✔ Pushed to origin"), "{out}");
         // Remote actually has the tag.
-        let ls = Command::new("git").args(["ls-remote", "--tags"]).arg(&bare).output().unwrap();
+        let ls = Command::new("git")
+            .args(["ls-remote", "--tags"])
+            .arg(&bare)
+            .output()
+            .unwrap();
         assert!(String::from_utf8_lossy(&ls.stdout).contains("refs/tags/p--v1.2.3"));
     }
 
     #[test]
     fn push_failure_reports_tag_created_locally() {
         // No remote configured → push fails, tag stays local.
-        let r = repo_with(r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#);
+        let r = repo_with(
+            r#"{ "name":"p","version":"1.2.3","description":"d","author":{"name":"x"} }"#,
+        );
         let err = with_cwd(&r.root, || {
             run_tag(None, false, false, None, true, "origin").unwrap_err()
         });
-        assert!(err.contains("✘ Tag created locally but push failed (exit "), "{err}");
+        assert!(
+            err.contains("✘ Tag created locally but push failed (exit "),
+            "{err}"
+        );
         // Success line is suppressed on push failure.
         assert!(!err.contains("✔ Created tag"), "{err}");
         assert!(tag_exists(&r.root, "p--v1.2.3"), "tag should exist locally");

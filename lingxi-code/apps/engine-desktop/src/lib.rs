@@ -505,8 +505,7 @@ async fn load_boot_permission_tiers(
         if permission::auto_mode_disabled_from_settings_json(raw) {
             auto_mode_disabled = true; // managed auto-mode killswitch binds (sticky)
         }
-        additional_working_dirs
-            .extend(permission::additional_directories_from_settings_json(raw));
+        additional_working_dirs.extend(permission::additional_directories_from_settings_json(raw));
     }
     if managed_tiers
         .iter()
@@ -536,7 +535,9 @@ async fn load_boot_permission_tiers(
 /// read. Only the MANAGED tiers are consulted: the enforce flag requires a
 /// policy-OWNED allowlist, so user/project `availableModels` are deliberately
 /// NOT folded in here.
-fn managed_model_policy_source(managed_tiers: &[String]) -> llm_client::model::allowlist::PolicySource {
+fn managed_model_policy_source(
+    managed_tiers: &[String],
+) -> llm_client::model::allowlist::PolicySource {
     use llm_client::model::allowlist::{PolicyModelView, PolicySource};
     let mut view = PolicyModelView::default();
     for raw in managed_tiers {
@@ -1004,7 +1005,16 @@ pub fn desktop_tool_registry(
     // No `CwdChanged` firer here either (offline factory has no hook executor) —
     // the BashTool is the byte-identical no-firer variant. No shared live-cwd
     // cell either: every tool falls back to `ctx.workspace` / the process cwd.
-    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None, None, None);
+    register_desktop_tools(
+        &mut reg,
+        ctx,
+        coordinator,
+        cron_auth,
+        None,
+        None,
+        None,
+        None,
+    );
     reg
 }
 
@@ -1403,6 +1413,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 /// let cfg = DesktopConfig {
 ///     api_base: "https://api.anthropic.com".to_string(),
 ///     api_key: "sk-test".to_string(),
+///     api_key_helper: None,
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
 ///     default_model: "claude-sonnet-5".to_string(),
@@ -1462,6 +1473,9 @@ pub struct DesktopConfig {
     /// successfully and only fails at `run_turn` with a 401, so slash-command
     /// dispatch still works with no key configured.
     pub api_key: String,
+    /// Settings `apiKeyHelper`: shell command/path that prints the Anthropic
+    /// auth value. Used only when no higher-priority API key/OAuth source wins.
+    pub api_key_helper: Option<String>,
     /// Working directory the orchestrator + tool context are rooted at.
     pub cwd: std::path::PathBuf,
     /// The `~/.claude` root the hook / agents / global-MCP / settings loaders
@@ -1837,6 +1851,7 @@ impl std::fmt::Debug for DesktopConfig {
         f.debug_struct("DesktopConfig")
             .field("api_base", &self.api_base)
             .field("api_key", &self.api_key)
+            .field("api_key_helper", &self.api_key_helper)
             .field("cwd", &self.cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
@@ -1902,6 +1917,7 @@ impl Default for DesktopConfig {
         Self {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
+            api_key_helper: None,
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
@@ -2610,8 +2626,11 @@ fn connected_provider_fallback(
         return None; // connected — or the probe doesn't know this provider
     }
     let connected = |p: &str| availability.get(p) == Some(&true);
-    let in_listings =
-        |p: &str, m: &str| listings.iter().any(|l| l.provider_id == p && l.request_model == m);
+    let in_listings = |p: &str, m: &str| {
+        listings
+            .iter()
+            .any(|l| l.provider_id == p && l.request_model == m)
+    };
     let route = |model: String, provider: &str| DefaultModelFallback {
         model,
         profile: provider.to_string(),
@@ -2725,9 +2744,7 @@ fn merge_cli_flag_agents(
 ) {
     let Some(raw) = cli_agents_json else { return };
     if safe_mode {
-        tracing::warn!(
-            "--agents: ignored in safe mode (user-supplied custom agents are disabled)"
-        );
+        tracing::warn!("--agents: ignored in safe mode (user-supplied custom agents are disabled)");
         return;
     }
     for a in agent::parse_agents_from_flag_json(raw) {
@@ -2787,7 +2804,11 @@ async fn discover_plugin_set(
     cwd: &std::path::Path,
     plugins_dir: &std::path::Path,
     cli_plugin_dirs: &[std::path::PathBuf],
-) -> Vec<(protocol::PluginId, plugin::PluginManifest, std::path::PathBuf)> {
+) -> Vec<(
+    protocol::PluginId,
+    plugin::PluginManifest,
+    std::path::PathBuf,
+)> {
     let mut discovered = if ambient {
         let enabled = load_enabled_plugins(lingxi_home, cwd).await;
         let mut d = plugin::discover_enabled_plugins(plugins_dir, &enabled).await;
@@ -2818,11 +2839,8 @@ async fn materialize_plugin_agents(
     if !agents_dir.is_dir() {
         return;
     }
-    let plugin_agents = agent::load_agents_from_dirs(&[(
-        agents_dir,
-        agent::definition::AgentSource::Plugin,
-    )])
-    .await;
+    let plugin_agents =
+        agent::load_agents_from_dirs(&[(agents_dir, agent::definition::AgentSource::Plugin)]).await;
     if plugin_agents.is_empty() {
         return;
     }
@@ -3855,6 +3873,7 @@ pub async fn build(
         } else {
             None
         },
+        cfg.api_key_helper.clone(),
         oauth_delegates,
     );
     // GitHub Copilot needs a short-lived token minted from the raw OAuth token
@@ -3998,16 +4017,13 @@ pub async fn build(
                 // (mode.rs `trust_gate_should_prompt` — nothing to check
                 // against), so treat as trusted like the gate does.
                 workspace_trusted: match migrations::global_config::global_config_path() {
-                    Some(p) => migrations::global_config::check_has_trust_dialog_accepted(
-                        &p, &cwd,
-                    ),
+                    Some(p) => migrations::global_config::check_has_trust_dialog_accepted(&p, &cwd),
                     None => true,
                 },
             }
         })
         .unwrap_or_default();
-        if aws_settings.aws_auth_refresh.is_some() || aws_settings.aws_credential_export.is_some()
-        {
+        if aws_settings.aws_auth_refresh.is_some() || aws_settings.aws_credential_export.is_some() {
             service_built.with_aws_auth(Arc::new(llm_client::AwsAuthRefresher::new(
                 aws_settings,
                 Arc::new(llm_client::ShellAwsAuthProcess),
@@ -4387,7 +4403,8 @@ pub async fn build(
     // missing env vars, `servers`-vs-`mcpServers`) to stderr at startup, the way
     // claude logs them. Silent when every config is clean, so a healthy setup
     // prints nothing.
-    for w in mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global_mcp_path)) {
+    for w in mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global_mcp_path))
+    {
         eprintln!("{}", w.to_stderr_line());
     }
     // Build one concrete `PosixMcpTransport` and hand it to the registry as
@@ -5236,6 +5253,7 @@ pub async fn build(
             .with_token_budget(orch_cfg.token_budget)
             .with_output_pool_cell(local_workflow_output_pool.clone())
             .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
+            .with_worktree_manager(worktree_manager.clone())
             .with_status_sink(
                 local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             ),
@@ -5335,10 +5353,9 @@ pub async fn build(
         // Read the USER tier (lingxi_home/settings.json) separately so the
         // source-restricted `allowAppleEvents` resolution can consult it: CC honors
         // allowAppleEvents from user / managed / flag only, NOT project/local.
-        let user_settings_raw =
-            tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
-                .await
-                .ok();
+        let user_settings_raw = tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+            .await
+            .ok();
         if let Some(raw) = &user_settings_raw {
             tiers.push(raw.clone());
         }
@@ -5473,8 +5490,9 @@ pub async fn build(
     // toggle flips sandboxing for the session's next command. Whether
     // sandboxing physically engages still rides platform support (unchanged),
     // exactly as the config `enabled` flag does today.
-    let sandbox_toggle =
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(sandbox_runtime_cfg.enabled));
+    let sandbox_toggle = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        sandbox_runtime_cfg.enabled,
+    ));
     // (`/sandbox` description fidelity) Capture the static config flags the TUI's
     // dynamic `/sandbox` description renders (claude-code `t`/`r`/`o`) BEFORE the
     // config is moved into `tool_ctx` below. `deps_ok` = claude-code
@@ -5827,17 +5845,18 @@ pub async fn build(
         // into the tool for the session — the binary's `St().workflowSizeGuideline`
         // fed through `Jvd`. It flavors the Workflow tool's prompt appendix.
         // Absent / unknown ⇒ `unrestricted` (no appendix), via `from_wire`.
-        let workflow_size_guideline = std::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|v| {
-                v.get("workflowSizeGuideline")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .map_or(tool_workflow::WorkflowSizeGuideline::Unrestricted, |s| {
-                tool_workflow::WorkflowSizeGuideline::from_wire(&s)
-            });
+        let workflow_size_guideline =
+            std::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| {
+                    v.get("workflowSizeGuideline")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .map_or(tool_workflow::WorkflowSizeGuideline::Unrestricted, |s| {
+                    tool_workflow::WorkflowSizeGuideline::from_wire(&s)
+                });
         tools_inner.register_builtin(Arc::new(
             tool_workflow::WorkflowTool::new(Some(workflow_launcher))
                 .with_size_guideline(workflow_size_guideline),
@@ -6042,7 +6061,15 @@ pub async fn build(
         Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
     ));
     let orch_builder = ConversationOrchestrator::new_with_streaming(
-        orch_cfg, api_client, streaming_api, tools, hooks, perms, output, memory, cwd,
+        orch_cfg,
+        api_client,
+        streaming_api,
+        tools,
+        hooks,
+        perms,
+        output,
+        memory,
+        cwd,
     );
     // Gap #5: wire the production JSONL writer (constructed just above) so the
     // session is persisted + discoverable by the resume loader.
@@ -6056,93 +6083,93 @@ pub async fn build(
         orch_builder
     };
     let orch_builder = orch_builder
-    // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
-    // carry a deterministically-computed `transcript_path`
-    // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-    // `getTranscriptPathForSession`). This is the SAME path the Gap #5
-    // `JsonlWriter` (wired just above) persists to, so the hook payload path and
-    // the on-disk transcript agree. Without this every PreToolUse /
-    // PostToolBatch / lifecycle hook fired with an empty path.
-    // (/fast) Share the same fast-mode flag the adapter reads, so the
-    // `set_fast_mode` handle flips the value the next request-build sees.
-    .with_fast_mode(fast_flag.clone())
-    // (/rewind) Share the file-history store so the turn loop snapshots each
-    // turn + the write tools back up pre-edit content.
-    .with_file_history(file_history.clone())
-    .with_config_home(cfg.lingxi_home.clone())
-    // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
-    // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
-    .with_current_cwd(current_cwd_cell)
-    // Task 5 (worktree 206 session-cwd plumbing): share the SAME
-    // `Arc<SessionCwd>` the tool context swaps on `EnterWorktree`/
-    // `ExitWorktree`, so the system prompt's `Primary working directory:`
-    // line and the conditional-rules memory cache re-derive from the
-    // post-swap worktree cwd instead of the frozen boot cwd.
-    .with_session_cwd(session_cwd)
-    // FIX A/B/C: adopt the boot-canonical session id so the orchestrator's LIVE
-    // session matches the id baked into the leaf firers' `transcript_path` and the
-    // subagent spawner's subagents dir — one consistent session id end-to-end.
-    .with_session_id(main_session_id)
-    .with_cost_tracker(cost_tracker)
-    .with_analytics_bus(analytics_bus)
-    .with_mcp_registry(mcp_registry)
-    .with_hook_registry(hook_registry)
-    .with_agent_catalog(agent_catalog)
-    .with_compaction(compactor)
-    .with_cache_safe_slot(cache_safe_slot)
-    // `/fork` engine seam: hand the orchestrator the background-agent spawner
-    // (`BackgroundAgentSpawner`, built above) + the budget the spawned agent
-    // inherits, so `fork_conversation` can dispatch a detached background agent.
-    .with_fork_spawner(subagent_spawner.clone())
-    .with_fork_budget(budget_enforcer.clone())
-    // `/recap` engine seam: the SAME forked runner the summarizer uses (cloned
-    // above), so recap replays the identical cache-safe prefix, read-only.
-    .with_recap_runner(recap_runner)
-    // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
-    // LSP registry drains publishDiagnostics into).
-    .with_new_diagnostics_source(
-        Arc::new(lsp_diagnostics.clone()) as Arc<dyn traits::NewDiagnosticsSource>
-    )
-    // SKILLLIST.1: enumerate model-invocable skills each turn so the model
-    // can discover them. Reads `shared_command_registry` lazily at turn time
-    // (populated below at (6), before any turn fires).
-    .with_skill_listing(Arc::new(RegistrySkillListing(
-        shared_command_registry.clone(),
-    )))
-    // B5: fold completed background (`async`) hook responses back into the
-    // next turn. Backed by the completion-channel drain buffer above.
-    .with_async_hook_responses(Arc::new(async_hook_response_buffer))
-    // T35: fold terminal background tasks (a backgrounded `local_bash` /
-    // `local_agent` / MCP `monitor` …) back into the next turn as a
-    // `<task-notification>` reminder so the model learns its async task
-    // finished. Backed by the SAME `TaskRegistry` Arc wired into the tool
-    // context above; the provider drains the registry's terminal-not-notified
-    // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
-    .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-        task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
-    )))
-    // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
-    // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
-    // `session_crons` (claude-code `Mic()`) from the SAME live `TaskRegistry`
-    // Arc wired above plus the project-root `.lingxi/scheduled_tasks.json` cron
-    // file (located via the shared `current_cwd` cell). The orchestrator stamps
-    // the snapshot onto the payload ONLY at its Stop / SubagentStop firings
-    // (claude's tool-use-context `s` gate).
-    .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
-        registry: task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
-        current_cwd: current_cwd_cell_for_snapshot,
-    }))
-    // Finding #73: supply the V2 task list to the per-turn `task_reminder`
-    // (the default variant when tasks are enabled). Reads the file-backed
-    // `TodoStore` for the active list each turn, resolving the list id via the
-    // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
-    // needs no provider; it reads `session.todos` directly.
-    .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
-    // P1-06: hand the orchestrator the SAME `readFileState` map the file tools'
-    // `BuiltinToolContext` share (created just above), so a tool's
-    // `readFileState.set` feeds the post-compact file restore + staleness /
-    // `/files` consumers — 1:1 with claude-code's single per-session map.
-    .with_read_state_map(read_state_map);
+        // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
+        // carry a deterministically-computed `transcript_path`
+        // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+        // `getTranscriptPathForSession`). This is the SAME path the Gap #5
+        // `JsonlWriter` (wired just above) persists to, so the hook payload path and
+        // the on-disk transcript agree. Without this every PreToolUse /
+        // PostToolBatch / lifecycle hook fired with an empty path.
+        // (/fast) Share the same fast-mode flag the adapter reads, so the
+        // `set_fast_mode` handle flips the value the next request-build sees.
+        .with_fast_mode(fast_flag.clone())
+        // (/rewind) Share the file-history store so the turn loop snapshots each
+        // turn + the write tools back up pre-edit content.
+        .with_file_history(file_history.clone())
+        .with_config_home(cfg.lingxi_home.clone())
+        // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
+        // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
+        .with_current_cwd(current_cwd_cell)
+        // Task 5 (worktree 206 session-cwd plumbing): share the SAME
+        // `Arc<SessionCwd>` the tool context swaps on `EnterWorktree`/
+        // `ExitWorktree`, so the system prompt's `Primary working directory:`
+        // line and the conditional-rules memory cache re-derive from the
+        // post-swap worktree cwd instead of the frozen boot cwd.
+        .with_session_cwd(session_cwd)
+        // FIX A/B/C: adopt the boot-canonical session id so the orchestrator's LIVE
+        // session matches the id baked into the leaf firers' `transcript_path` and the
+        // subagent spawner's subagents dir — one consistent session id end-to-end.
+        .with_session_id(main_session_id)
+        .with_cost_tracker(cost_tracker)
+        .with_analytics_bus(analytics_bus)
+        .with_mcp_registry(mcp_registry)
+        .with_hook_registry(hook_registry)
+        .with_agent_catalog(agent_catalog)
+        .with_compaction(compactor)
+        .with_cache_safe_slot(cache_safe_slot)
+        // `/fork` engine seam: hand the orchestrator the background-agent spawner
+        // (`BackgroundAgentSpawner`, built above) + the budget the spawned agent
+        // inherits, so `fork_conversation` can dispatch a detached background agent.
+        .with_fork_spawner(subagent_spawner.clone())
+        .with_fork_budget(budget_enforcer.clone())
+        // `/recap` engine seam: the SAME forked runner the summarizer uses (cloned
+        // above), so recap replays the identical cache-safe prefix, read-only.
+        .with_recap_runner(recap_runner)
+        // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
+        // LSP registry drains publishDiagnostics into).
+        .with_new_diagnostics_source(
+            Arc::new(lsp_diagnostics.clone()) as Arc<dyn traits::NewDiagnosticsSource>
+        )
+        // SKILLLIST.1: enumerate model-invocable skills each turn so the model
+        // can discover them. Reads `shared_command_registry` lazily at turn time
+        // (populated below at (6), before any turn fires).
+        .with_skill_listing(Arc::new(RegistrySkillListing(
+            shared_command_registry.clone(),
+        )))
+        // B5: fold completed background (`async`) hook responses back into the
+        // next turn. Backed by the completion-channel drain buffer above.
+        .with_async_hook_responses(Arc::new(async_hook_response_buffer))
+        // T35: fold terminal background tasks (a backgrounded `local_bash` /
+        // `local_agent` / MCP `monitor` …) back into the next turn as a
+        // `<task-notification>` reminder so the model learns its async task
+        // finished. Backed by the SAME `TaskRegistry` Arc wired into the tool
+        // context above; the provider drains the registry's terminal-not-notified
+        // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
+        .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
+            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+        )))
+        // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
+        // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
+        // `session_crons` (claude-code `Mic()`) from the SAME live `TaskRegistry`
+        // Arc wired above plus the project-root `.lingxi/scheduled_tasks.json` cron
+        // file (located via the shared `current_cwd` cell). The orchestrator stamps
+        // the snapshot onto the payload ONLY at its Stop / SubagentStop firings
+        // (claude's tool-use-context `s` gate).
+        .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
+            registry: task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
+            current_cwd: current_cwd_cell_for_snapshot,
+        }))
+        // Finding #73: supply the V2 task list to the per-turn `task_reminder`
+        // (the default variant when tasks are enabled). Reads the file-backed
+        // `TodoStore` for the active list each turn, resolving the list id via the
+        // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
+        // needs no provider; it reads `session.todos` directly.
+        .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+        // P1-06: hand the orchestrator the SAME `readFileState` map the file tools'
+        // `BuiltinToolContext` share (created just above), so a tool's
+        // `readFileState.set` feeds the post-compact file restore + staleness /
+        // `/files` consumers — 1:1 with claude-code's single per-session map.
+        .with_read_state_map(read_state_map);
 
     // P0.1 ACTIVATION (gated, default OFF). When `LINGXI_MEMDIR_PREFETCH`
     // is truthy, wire the memdir-backed memory selector so relevant
@@ -6343,10 +6370,8 @@ pub async fn build(
     // interactive refresh reports "plugins disabled" rather than reloading.
     let mut plugin_runtime: Option<Arc<PluginRuntime>> = None;
     if ambient_plugins || inline_plugins {
-        let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR").map_or_else(
-            || cfg.lingxi_home.join("plugins"),
-            std::path::PathBuf::from,
-        );
+        let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR")
+            .map_or_else(|| cfg.lingxi_home.join("plugins"), std::path::PathBuf::from);
         // Primary (faithful) path: resolve the `settings.enabledPlugins`
         // allowlist (`plugin@marketplace` → enabled) to versioned cache dirs
         // `cache/{marketplace}/{plugin}/{version}/`, exactly as
@@ -6455,13 +6480,10 @@ pub async fn build(
         // catalog read lock is released before we mutate the orchestrator seam.
         let applied = {
             let cat = plugin_agent_catalog.read().await;
-            let hit = cat
-                .iter()
-                .find(|a| a.agent_type == wanted)
-                .or_else(|| {
-                    let suffix = format!(":{wanted}");
-                    cat.iter().find(|a| a.agent_type.ends_with(&suffix))
-                });
+            let hit = cat.iter().find(|a| a.agent_type == wanted).or_else(|| {
+                let suffix = format!(":{wanted}");
+                cat.iter().find(|a| a.agent_type.ends_with(&suffix))
+            });
             match hit {
                 Some(a) => {
                     // claude `if(!userSpecifiedModel&&y.model&&y.model!=="inherit")
@@ -6498,7 +6520,8 @@ pub async fn build(
                 }
             }
         };
-        if let Some((agent_type, system_prompt, tools, disallowed_tools, model_override)) = applied {
+        if let Some((agent_type, system_prompt, tools, disallowed_tools, model_override)) = applied
+        {
             tracing::debug!(agent = %agent_type, "--agent applied to main thread");
             orch.set_main_thread_agent(
                 agent_type,
@@ -6849,13 +6872,19 @@ mod tests {
         struct C;
         #[async_trait]
         impl CopilotConnectDriver for C {
-            async fn begin(&self, _domain: Option<&str>) -> Result<CopilotConnectStep, ConnectError> {
+            async fn begin(
+                &self,
+                _domain: Option<&str>,
+            ) -> Result<CopilotConnectStep, ConnectError> {
                 Ok(CopilotConnectStep {
                     user_code: "X".into(),
                     verification_uri: "u".into(),
                 })
             }
-            async fn poll_to_completion(&self, _s: &CopilotConnectStep) -> Result<(), ConnectError> {
+            async fn poll_to_completion(
+                &self,
+                _s: &CopilotConnectStep,
+            ) -> Result<(), ConnectError> {
                 Ok(())
             }
         }
@@ -6877,8 +6906,20 @@ mod tests {
 
         for (gates, want_custom) in [
             (super::CustomizationGates::default(), true),
-            (super::CustomizationGates { safe_mode: true, bare: false }, false),
-            (super::CustomizationGates { safe_mode: false, bare: true }, false),
+            (
+                super::CustomizationGates {
+                    safe_mode: true,
+                    bare: false,
+                },
+                false,
+            ),
+            (
+                super::CustomizationGates {
+                    safe_mode: false,
+                    bare: true,
+                },
+                false,
+            ),
         ] {
             let handle: Arc<dyn OrchestratorHandle> =
                 Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
@@ -7276,6 +7317,7 @@ mod tests {
         let cfg = DesktopConfig {
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
+            api_key_helper: None,
             cwd: cwd.clone(),
             lingxi_home,
             default_model: "claude-sonnet-4-20250514".to_string(),
@@ -7572,7 +7614,11 @@ mod tests {
             .await
             .expect("worktree-only launch must succeed");
 
-        assert_eq!(runner.call_count(), 0, "no --tmux flag must issue no tmux call");
+        assert_eq!(
+            runner.call_count(),
+            0,
+            "no --tmux flag must issue no tmux call"
+        );
         let session = ctx
             .worktree_session
             .lock()
@@ -8021,12 +8067,18 @@ mod tests {
             "copilot fallback must NOT be in the anthropic profile: {ids:?}"
         );
         // The first-party Claude defaults are still present.
-        assert!(ids.contains(&"claude-opus-4-8"), "claude defaults kept: {ids:?}");
+        assert!(
+            ids.contains(&"claude-opus-4-8"),
+            "claude defaults kept: {ids:?}"
+        );
 
         // An `anthropic/…`-qualified default IS registered, as its BARE id.
         let q = super::anthropic_models_for("anthropic/claude-opus-4-6", None);
         let qids: Vec<&str> = q.iter().map(|x| x.display_model.as_str()).collect();
-        assert!(qids.contains(&"claude-opus-4-6"), "anthropic-qualified kept bare: {qids:?}");
+        assert!(
+            qids.contains(&"claude-opus-4-6"),
+            "anthropic-qualified kept bare: {qids:?}"
+        );
         assert!(
             !qids.iter().any(|id| id.contains('/')),
             "no profile-qualified id leaks into the model list: {qids:?}"
@@ -8527,8 +8579,14 @@ mod tests {
     fn customization_gates_match_binary_maps() {
         use super::CustomizationGates;
         let off = CustomizationGates::default();
-        let safe = CustomizationGates { safe_mode: true, bare: false };
-        let bare = CustomizationGates { safe_mode: false, bare: true };
+        let safe = CustomizationGates {
+            safe_mode: true,
+            bare: false,
+        };
+        let bare = CustomizationGates {
+            safe_mode: false,
+            bare: true,
+        };
 
         // Neither mode ⟶ nothing disabled (byte-identical to pre-M3 boot).
         assert!(!off.disables_settings_hooks());
@@ -8558,7 +8616,10 @@ mod tests {
         assert!(bare.disables_custom_agents());
         assert!(!bare.disables_mcp_discovery());
         assert!(bare.disables_claude_md(false));
-        assert!(!bare.disables_claude_md(true), "--add-dir re-enables in bare");
+        assert!(
+            !bare.disables_claude_md(true),
+            "--add-dir re-enables in bare"
+        );
     }
 
     /// (M3 cc2.1.198) `--safe-mode` / `--bare` boot: the SAME project-settings
@@ -8573,8 +8634,14 @@ mod tests {
         use traits::OrchestratorHandle as _;
 
         for gates in [
-            CustomizationGates { safe_mode: true, bare: false },
-            CustomizationGates { safe_mode: false, bare: true },
+            CustomizationGates {
+                safe_mode: true,
+                bare: false,
+            },
+            CustomizationGates {
+                safe_mode: false,
+                bare: true,
+            },
         ] {
             let (_tmp, mut cfg) = test_config(true);
             cfg.customization_gates = gates;
@@ -9339,10 +9406,7 @@ mod tests {
 
         // No honored source set it → None (⇒ default false downstream).
         assert_eq!(apple_events_override(&[], None), None);
-        assert_eq!(
-            apple_events_override(&[], Some(r#"{"sandbox":{}}"#)),
-            None
-        );
+        assert_eq!(apple_events_override(&[], Some(r#"{"sandbox":{}}"#)), None);
 
         // User tier sets it (no managed) → honored.
         assert_eq!(apple_events_override(&[], Some(&on)), Some(true));
@@ -9741,8 +9805,7 @@ mod tests {
         )
         .expect("write user settings");
 
-        let tiers =
-            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
         assert_eq!(tiers.rules.len(), 2, "user allow + managed deny both load");
         assert!(
             tiers
@@ -9752,13 +9815,14 @@ mod tests {
             "managed tier rules must parse with PermissionRuleSource::PolicySettings"
         );
         // The managed raw text also feeds the sandbox derivation (appended last).
-        assert_eq!(tiers.raw_tiers.len(), 2, "user tier + managed tier raw texts");
+        assert_eq!(
+            tiers.raw_tiers.len(),
+            2,
+            "user tier + managed tier raw texts"
+        );
 
         let policy = permission::PermissionPolicy::from_rules(tiers.mode, tiers.rules);
-        let res = policy.authorize(
-            "Bash",
-            &serde_json::json!({ "command": "rm -rf scratch" }),
-        );
+        let res = policy.authorize("Bash", &serde_json::json!({ "command": "rm -rf scratch" }));
         match res {
             permission::PermissionResult::Deny { reason, .. } => match reason {
                 permission::PermissionDecisionReason::MatchedRule { rule } => assert_eq!(
@@ -9794,8 +9858,7 @@ mod tests {
         )
         .expect("write user settings");
 
-        let tiers =
-            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
         assert_eq!(
             tiers.mode,
             permission::PermissionMode::Plan,
@@ -9820,8 +9883,7 @@ mod tests {
         std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
         let (home, cwd) = perm_tier_dirs();
-        let tiers =
-            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
         assert!(
             tiers.bypass_disabled,
             "managed disableBypassPermissionsMode:\"disable\" must activate the killswitch"
@@ -9889,9 +9951,12 @@ mod tests {
         )
         .expect("write project settings");
 
-        let tiers =
-            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
-        assert_eq!(tiers.rules.len(), 1, "only the managed deny survives the lockdown");
+        let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        assert_eq!(
+            tiers.rules.len(),
+            1,
+            "only the managed deny survives the lockdown"
+        );
         assert_eq!(
             tiers.rules[0].source,
             permission::PermissionRuleSource::PolicySettings
@@ -9924,8 +9989,7 @@ mod tests {
         std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
         let (home, cwd) = perm_tier_dirs();
-        let tiers =
-            super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
+        let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
         assert_eq!(tiers.rules.len(), 2, "base + drop-in rules both accumulate");
         assert!(tiers
             .rules
@@ -10436,11 +10500,11 @@ mod tests {
         use lsp::LspRegistry;
         use mcp::McpRegistry;
         use outputstyles::OutputStyleRegistry;
-        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
         use platform_posix::{
             PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
             PosixMcpTransport, PosixRuntime,
         };
+        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
         use secret::CredentialManager;
         use skill_api::SkillRegistry;
         use tokio::sync::RwLock;
@@ -10499,7 +10563,11 @@ mod tests {
         assert_eq!(c1.commands, 1, "A's command tallied");
         assert_eq!(c1.errors, 0);
         assert!(
-            command_registry.read().await.resolve("plugina:acmd").is_some(),
+            command_registry
+                .read()
+                .await
+                .resolve("plugina:acmd")
+                .is_some(),
             "A's command materialised"
         );
         assert_eq!(manager.loaded_plugin_ids().await.len(), 1);
@@ -10510,11 +10578,19 @@ mod tests {
         assert_eq!(c2.enabled, 1, "still one plugin — the set swapped");
         assert_eq!(c2.errors, 0);
         assert!(
-            command_registry.read().await.resolve("plugina:acmd").is_none(),
+            command_registry
+                .read()
+                .await
+                .resolve("plugina:acmd")
+                .is_none(),
             "A's command unloaded on disable"
         );
         assert!(
-            command_registry.read().await.resolve("pluginb:bcmd").is_some(),
+            command_registry
+                .read()
+                .await
+                .resolve("pluginb:bcmd")
+                .is_some(),
             "B's command materialised on enable"
         );
         let ids = manager.loaded_plugin_ids().await;
@@ -10536,11 +10612,11 @@ mod tests {
         use lsp::LspRegistry;
         use mcp::McpRegistry;
         use outputstyles::OutputStyleRegistry;
-        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
         use platform_posix::{
             PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
             PosixMcpTransport, PosixRuntime,
         };
+        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
         use secret::CredentialManager;
         use skill_api::SkillRegistry;
         use tokio::sync::RwLock;
@@ -10633,7 +10709,11 @@ mod tests {
         assert_eq!(c.errors, 1, "the escalating-agent plugin fails to load");
         assert_eq!(c.enabled, 0, "no plugin enabled");
         assert!(
-            command_registry.read().await.resolve("rogueplugin:ok").is_none(),
+            command_registry
+                .read()
+                .await
+                .resolve("rogueplugin:ok")
+                .is_none(),
             "rejected plugin's command must not register (all-or-nothing)"
         );
         assert!(
@@ -10680,10 +10760,7 @@ mod connected_fallback_tests {
     }
 
     fn avail(pairs: &[(&str, bool)]) -> BTreeMap<String, bool> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), *v))
-            .collect()
+        pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
     }
 
     /// `model_providers` fixture mapping bare ids to their profile.

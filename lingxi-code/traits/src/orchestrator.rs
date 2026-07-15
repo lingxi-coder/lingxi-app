@@ -666,7 +666,10 @@ mod provider_boot_default_tests {
         assert_eq!(order.first(), Some(&"anthropic"));
         let set: std::collections::HashSet<_> = order.iter().collect();
         assert_eq!(set.len(), order.len(), "no duplicate providers");
-        assert!(order.contains(&"openrouter"), "aggregator last-resort present");
+        assert!(
+            order.contains(&"openrouter"),
+            "aggregator last-resort present"
+        );
         assert_eq!(order.last(), Some(&"openrouter"), "aggregator ranks last");
     }
 

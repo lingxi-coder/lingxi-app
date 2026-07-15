@@ -193,10 +193,10 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
                 || bare(c.name())
                     .split(['-', '_', ':'])
                     .any(|part| part.starts_with(&query))
-                || c.describe()
-                    .to_lowercase()
-                    .split_whitespace()
-                    .any(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric()).starts_with(&query))
+                || c.describe().to_lowercase().split_whitespace().any(|word| {
+                    word.trim_matches(|ch: char| !ch.is_alphanumeric())
+                        .starts_with(&query)
+                })
         })
         .collect();
 
@@ -412,16 +412,17 @@ mod tests {
         // The merged surface with an empty snapshot must be byte-for-byte the
         // builtin-only popup — the R1 ordering guarantee is untouched.
         for q in ["/", "/m", "/re", "/help", "/zzz", "model"] {
-            assert_eq!(command_items_merged(q, &[]), command_items(q), "query {q:?}");
+            assert_eq!(
+                command_items_merged(q, &[]),
+                command_items(q),
+                "query {q:?}"
+            );
         }
     }
 
     #[test]
     fn registry_commands_merge_into_the_popup() {
-        let reg = rows(&[
-            ("/loop", "run a task on a loop"),
-            ("/deploy", "ship it"),
-        ]);
+        let reg = rows(&[("/loop", "run a task on a loop"), ("/deploy", "ship it")]);
         // Bare "/" now includes the registry rows alongside the builtins,
         // alphabetically, and one more than the builtin-only count.
         let all = command_items_merged("/", &reg);
@@ -434,7 +435,10 @@ mod tests {
         assert!(d < l);
         // A query surfaces the registry command with its description.
         let lo = command_items_merged("/lo", &reg);
-        let loop_row = lo.iter().find(|i| i.insert == "/loop").expect("/loop matches /lo");
+        let loop_row = lo
+            .iter()
+            .find(|i| i.insert == "/loop")
+            .expect("/loop matches /lo");
         assert_eq!(loop_row.desc, "run a task on a loop");
     }
 

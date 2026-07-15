@@ -1457,8 +1457,14 @@ mod retry_watchdog_tests {
     #[test]
     fn pds_unparseable_falls_to_default() {
         // JS `if(Number.isFinite(t)&&t>=0)` false → `return e?_j_:yj_`.
-        assert_eq!(resolve_max_retries(false, Some("notanint")), DEFAULT_MAX_RETRIES);
-        assert_eq!(resolve_max_retries(true, Some("notanint")), WATCHDOG_MAX_RETRIES);
+        assert_eq!(
+            resolve_max_retries(false, Some("notanint")),
+            DEFAULT_MAX_RETRIES
+        );
+        assert_eq!(
+            resolve_max_retries(true, Some("notanint")),
+            WATCHDOG_MAX_RETRIES
+        );
         // Empty string is falsy in JS (`if(process.env.X)` false) → default.
         assert_eq!(resolve_max_retries(false, Some("")), DEFAULT_MAX_RETRIES);
     }
@@ -1498,7 +1504,10 @@ mod retry_watchdog_tests {
             ..ResolveRetryEnv::default()
         };
         let ctl = resolve_retry_control("claude-sonnet-4-20250514", None, false, &env);
-        assert_eq!(ctl.max_retries, MAX_RETRIES_CLAMP, "no watchdog → clamp to 15");
+        assert_eq!(
+            ctl.max_retries, MAX_RETRIES_CLAMP,
+            "no watchdog → clamp to 15"
+        );
     }
 
     // ── next_step: capacity errors are exempt from budget under watchdog ──
@@ -1517,7 +1526,12 @@ mod retry_watchdog_tests {
         let mut state = RetryState::default();
         // Far past max_retries (3): every 529 still retries under the watchdog.
         for i in 0..40u32 {
-            let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+            let step = next_step(
+                &mut state,
+                &ctl,
+                &LlmError::Overloaded { repeated: false },
+                0,
+            );
             assert!(
                 matches!(step, DriveStep::RetryAfter(_)),
                 "iter {i}: 529 under watchdog must retry, got {step:?}"
@@ -1533,7 +1547,10 @@ mod retry_watchdog_tests {
             let step = next_step(
                 &mut state,
                 &ctl,
-                &LlmError::RateLimited { retry_after: None, scope: None },
+                &LlmError::RateLimited {
+                    retry_after: None,
+                    scope: None,
+                },
                 0,
             );
             assert!(
@@ -1554,13 +1571,21 @@ mod retry_watchdog_tests {
         let mut state = RetryState::default();
         let mut saw_terminal = false;
         for _ in 0..10u32 {
-            let step = next_step(&mut state, &ctl, &LlmError::Overloaded { repeated: false }, 0);
+            let step = next_step(
+                &mut state,
+                &ctl,
+                &LlmError::Overloaded { repeated: false },
+                0,
+            );
             if step == DriveStep::Terminal {
                 saw_terminal = true;
                 break;
             }
         }
-        assert!(saw_terminal, "without watchdog the budget must eventually exhaust");
+        assert!(
+            saw_terminal,
+            "without watchdog the budget must eventually exhaust"
+        );
     }
 
     #[test]

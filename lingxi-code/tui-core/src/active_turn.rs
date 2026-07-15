@@ -137,7 +137,10 @@ impl ActiveTurn {
                 messages_after,
                 ..
             } => {
-                if !matches!(messages.last(), Some(RenderedMessage::CompactBoundary { .. })) {
+                if !matches!(
+                    messages.last(),
+                    Some(RenderedMessage::CompactBoundary { .. })
+                ) {
                     messages.push(RenderedMessage::CompactBoundary {
                         messages_before,
                         messages_after,

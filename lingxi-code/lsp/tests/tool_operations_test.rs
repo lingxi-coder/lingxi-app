@@ -12,7 +12,7 @@ use lsp::tool_operations::{
     prepare_call_hierarchy, workspace_symbol, LspOperation, LspOperationError,
     MAX_LSP_FILE_SIZE_BYTES,
 };
-use lsp::OpenFileTracker;
+use lsp::{OpenFileTracker, MAX_OPEN_DOCUMENTS};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -180,6 +180,69 @@ async fn hover_sends_did_open_then_hover_with_zero_based_position() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn did_open_lru_sends_did_close_for_evicted_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    for idx in 0..=MAX_OPEN_DOCUMENTS {
+        let path = dir.path().join(format!("{idx}.rs"));
+        tokio::fs::write(&path, format!("fn f{idx}() {{}}\n"))
+            .await
+            .unwrap();
+        files.push(path);
+    }
+
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let connection = Connection::new_lsp(client_read, client_write);
+    let client = Arc::new(LspClient::new("rust-analyzer".to_string(), connection));
+    let tracker = OpenFileTracker::new();
+    let cfg = rust_config();
+
+    let peer = tokio::spawn(async move {
+        let mut first_uri = None;
+        for idx in 0..=MAX_OPEN_DOCUMENTS {
+            let did_open = read_one_frame(&mut peer_io).await;
+            assert_eq!(did_open["method"], "textDocument/didOpen");
+            if idx == 0 {
+                first_uri = did_open["params"]["textDocument"]["uri"]
+                    .as_str()
+                    .map(str::to_string);
+            }
+
+            if idx == MAX_OPEN_DOCUMENTS {
+                let did_close = read_one_frame(&mut peer_io).await;
+                assert_eq!(did_close["method"], "textDocument/didClose");
+                assert_eq!(
+                    did_close["params"]["textDocument"]["uri"].as_str(),
+                    first_uri.as_deref(),
+                    "the oldest opened URI should be closed first"
+                );
+            }
+
+            let req = read_one_frame(&mut peer_io).await;
+            assert_eq!(req["method"], "textDocument/hover");
+            write_frame(
+                &mut peer_io,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "result": {"contents": "ok"}
+                }),
+            )
+            .await;
+        }
+    });
+
+    for file in &files {
+        hover(&client, &tracker, &cfg, file, 1, 1)
+            .await
+            .expect("hover ok");
+    }
+    assert_eq!(tracker.len().await, MAX_OPEN_DOCUMENTS);
+    peer.await.expect("peer ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hover_skips_did_open_when_already_tracked() {
     let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
     tokio::fs::write(temp.path(), b"fn main() {}\n")
@@ -193,7 +256,7 @@ async fn hover_skips_did_open_when_already_tracked() {
     let connection = Connection::new_lsp(client_read, client_write);
     let client = Arc::new(LspClient::new("rust-analyzer".to_string(), connection));
     let tracker = OpenFileTracker::new();
-    tracker.mark_open("rust-analyzer", uri.clone()).await;
+    let _ = tracker.mark_open("rust-analyzer", uri.clone()).await;
     let cfg = rust_config();
 
     let peer = tokio::spawn(async move {

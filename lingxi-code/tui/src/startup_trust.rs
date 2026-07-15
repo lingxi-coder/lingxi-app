@@ -139,9 +139,9 @@ pub async fn mount_trust_dialog(cwd: &Path) -> std::io::Result<TrustDialogOutcom
 /// Text comes from the byte-locked [`render_lines`].
 fn draw_dialog(state: TrustDialogState, cwd: &Path) -> std::io::Result<()> {
     use crossterm::cursor::MoveTo;
+    use crossterm::execute;
     use crossterm::style::{Attribute, SetAttribute};
     use crossterm::terminal::{Clear, ClearType};
-    use crossterm::execute;
     use std::io::Write;
 
     let lines = render_lines(cwd);
@@ -203,15 +203,26 @@ mod tests {
     #[test]
     fn enter_returns_highlighted_choice() {
         let mut s = TrustDialogState::default();
-        assert_eq!(handle_key(&mut s, key(KeyCode::Enter)), Some(TrustDialogOutcome::Accept));
-        let mut d = TrustDialogState { selected: TrustChoice::Decline };
-        assert_eq!(handle_key(&mut d, key(KeyCode::Enter)), Some(TrustDialogOutcome::Decline));
+        assert_eq!(
+            handle_key(&mut s, key(KeyCode::Enter)),
+            Some(TrustDialogOutcome::Accept)
+        );
+        let mut d = TrustDialogState {
+            selected: TrustChoice::Decline,
+        };
+        assert_eq!(
+            handle_key(&mut d, key(KeyCode::Enter)),
+            Some(TrustDialogOutcome::Decline)
+        );
     }
 
     #[test]
     fn esc_declines() {
         let mut s = TrustDialogState::default();
-        assert_eq!(handle_key(&mut s, key(KeyCode::Esc)), Some(TrustDialogOutcome::Decline));
+        assert_eq!(
+            handle_key(&mut s, key(KeyCode::Esc)),
+            Some(TrustDialogOutcome::Decline)
+        );
     }
 
     #[test]
@@ -220,8 +231,14 @@ mod tests {
         assert_eq!(lines[0], "Accessing workspace:");
         assert_eq!(lines[1], "/home/me/project");
         assert_eq!(lines[2], "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.");
-        assert_eq!(lines[3], "LingXi'll be able to read, edit, and execute files here.");
-        assert_eq!(lines[4], "Security guide: https://code.claude.com/docs/en/security");
+        assert_eq!(
+            lines[3],
+            "LingXi'll be able to read, edit, and execute files here."
+        );
+        assert_eq!(
+            lines[4],
+            "Security guide: https://code.claude.com/docs/en/security"
+        );
         assert_eq!(lines[5], "Yes, I trust this folder");
         assert_eq!(lines[6], "No, exit");
         assert_eq!(lines[7], "Enter to confirm \u{00B7} Esc to cancel");

@@ -444,10 +444,7 @@ mod tests {
         // backend (always false), so even with the flag on Yke() is false — the
         // splice stays absent, matching the binary default. Assert the gate wiring:
         telemetry::test_set_flag("tengu_kairos_push_notifications", true);
-        assert!(
-            !cron::is_push_notif_enabled(),
-            "Yke needs the setting too"
-        );
+        assert!(!cron::is_push_notif_enabled(), "Yke needs the setting too");
         let rt = tokio::runtime::Runtime::new().unwrap();
         let d = rt.block_on(tool().description(
             &json!({}),

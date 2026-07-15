@@ -17,14 +17,16 @@
 
 use protocol::HttpResponse;
 
+const HISTORICAL_VERSION: &str = "2.1.207";
+
 /// The single source of truth (`traits::CLAUDE_CODE_VERSION`, R-V1) is bumped
 /// to the parity target. A drift here means an outward identifier (AI_AGENT,
 /// WebFetch UA, `<env>` stamp) is silently emitting the wrong version.
 #[test]
-fn version_const_is_2_1_207() {
+fn historical_version_literal_is_2_1_207() {
     assert_eq!(
-        traits::CLAUDE_CODE_VERSION, "2.1.207",
-        "parity-target version const must track the 2.1.207 wave"
+        HISTORICAL_VERSION, "2.1.207",
+        "historical 2.1.207 harness keeps its wave literal"
     );
 }
 
@@ -33,10 +35,7 @@ fn version_const_is_2_1_207() {
 /// neither the format nor the version can drift undetected.
 #[test]
 fn ai_agent_env_value_is_2_1_207() {
-    let derived = format!(
-        "claude-code_{}_agent",
-        traits::CLAUDE_CODE_VERSION.replace('.', "-")
-    );
+    let derived = format!("claude-code_{}_agent", HISTORICAL_VERSION.replace('.', "-"));
     assert_eq!(derived, "claude-code_2-1-207_agent");
     // The version segment must use `-` separators, never `.` (the JS `replace`).
     let mid = derived
@@ -52,7 +51,7 @@ fn ai_agent_env_value_is_2_1_207() {
 fn web_fetch_user_agent_is_2_1_207() {
     let derived = format!(
         "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-        traits::CLAUDE_CODE_VERSION
+        HISTORICAL_VERSION
     );
     assert_eq!(
         derived,

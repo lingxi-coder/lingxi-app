@@ -187,7 +187,10 @@ mod tests {
         // The env name is the brand-swapped var; the value is the literal "1".
         // Exercise the pure mapping without touching the process-wide cache.
         let enabled_pairs = vec![(ENV_VAR.to_string(), "1".to_string())];
-        assert_eq!(enabled_pairs, vec![("LINGXI_AX_SCREEN_READER".to_string(), "1".to_string())]);
+        assert_eq!(
+            enabled_pairs,
+            vec![("LINGXI_AX_SCREEN_READER".to_string(), "1".to_string())]
+        );
         // Disabled → no entries (the `return {}` branch).
         let disabled: Vec<(String, String)> = Vec::new();
         assert!(disabled.is_empty());

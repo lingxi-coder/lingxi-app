@@ -131,10 +131,8 @@ pub fn dynamic_description() -> String {
     if let Some(label) = terminal.as_deref().and_then(check_setup_display_name) {
         return format!("Check terminal setup (Shift+Enter is natively supported in {label})");
     }
-    let bundle_is_iterm = std::env::var("__CFBundleIdentifier")
-        .ok()
-        .as_deref()
-        == Some("com.googlecode.iterm2");
+    let bundle_is_iterm =
+        std::env::var("__CFBundleIdentifier").ok().as_deref() == Some("com.googlecode.iterm2");
     if bundle_is_iterm
         && matches!(
             terminal.as_deref(),
@@ -324,7 +322,8 @@ To install the Shift+Enter keybinding:\n\
 
 /// Port of `installBindingsForAlacritty`.
 fn install_bindings_for_alacritty() -> Result<String, String> {
-    const KEYBINDING: &str = "[[keyboard.bindings]]\nkey = \"Return\"\nmods = \"Shift\"\nchars = \"\\u001B\\r\"";
+    const KEYBINDING: &str =
+        "[[keyboard.bindings]]\nkey = \"Return\"\nmods = \"Shift\"\nchars = \"\\u001B\\r\"";
     let fail = || "Failed to install Alacritty Shift+Enter key binding".to_string();
 
     let base = std::env::var("XDG_CONFIG_HOME")
@@ -380,7 +379,10 @@ fn install_bindings_for_alacritty() -> Result<String, String> {
 /// macOS).
 fn install_bindings_for_zed() -> Result<String, String> {
     let fail = || "Failed to install Zed Shift+Enter key binding".to_string();
-    let zed_dir = dirs::home_dir().unwrap_or_default().join(".config").join("zed");
+    let zed_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config")
+        .join("zed");
     let keymap_path = zed_dir.join("keymap.json");
 
     if std::fs::create_dir_all(&zed_dir).is_err() {
@@ -470,7 +472,9 @@ fn enable_option_as_meta_for_terminal() -> Result<String, String> {
     let set_key = |profile: &str, key: &str, value: &str| -> bool {
         let add = Command::new("/usr/libexec/PlistBuddy")
             .arg("-c")
-            .arg(format!("Add :'Window Settings':'{profile}':{key} bool {value}"))
+            .arg(format!(
+                "Add :'Window Settings':'{profile}':{key} bool {value}"
+            ))
             .arg(&plist_arg)
             .status();
         if add.map(|s| s.success()).unwrap_or(false) {
@@ -618,4 +622,3 @@ mod tests {
         });
     }
 }
-

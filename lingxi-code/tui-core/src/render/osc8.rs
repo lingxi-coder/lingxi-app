@@ -131,15 +131,9 @@ fn url_end(s: &str) -> usize {
         };
         let cut = match last {
             '.' | ',' | ';' | ':' | '!' | '?' | '\'' => true,
-            ')' => {
-                trimmed.matches('(').count() < trimmed.matches(')').count()
-            }
-            ']' => {
-                trimmed.matches('[').count() < trimmed.matches(']').count()
-            }
-            '}' => {
-                trimmed.matches('{').count() < trimmed.matches('}').count()
-            }
+            ')' => trimmed.matches('(').count() < trimmed.matches(')').count(),
+            ']' => trimmed.matches('[').count() < trimmed.matches(']').count(),
+            '}' => trimmed.matches('{').count() < trimmed.matches('}').count(),
             _ => false,
         };
         if !cut {
@@ -278,10 +272,19 @@ mod tests {
         // stdout probe wins when true.
         assert!(supports_hyperlinks(true, env_of(&[])));
         // FORCE_HYPERLINK returns the stdout probe verbatim.
-        assert!(!supports_hyperlinks(false, env_of(&[("FORCE_HYPERLINK", "1")])));
+        assert!(!supports_hyperlinks(
+            false,
+            env_of(&[("FORCE_HYPERLINK", "1")])
+        ));
         // Allowlisted TERM_PROGRAM / LC_TERMINAL (incl. iTerm2 over SSH).
-        assert!(supports_hyperlinks(false, env_of(&[("TERM_PROGRAM", "ghostty")])));
-        assert!(supports_hyperlinks(false, env_of(&[("LC_TERMINAL", "iTerm2")])));
+        assert!(supports_hyperlinks(
+            false,
+            env_of(&[("TERM_PROGRAM", "ghostty")])
+        ));
+        assert!(supports_hyperlinks(
+            false,
+            env_of(&[("LC_TERMINAL", "iTerm2")])
+        ));
         // JetBrains + Windows Terminal.
         assert!(supports_hyperlinks(
             false,
@@ -302,7 +305,10 @@ mod tests {
             env_of(&[("TERM_PROGRAM", "tmux"), ("TERM_PROGRAM_VERSION", "3.3")])
         ));
         // TERM containing kitty.
-        assert!(supports_hyperlinks(false, env_of(&[("TERM", "xterm-kitty")])));
+        assert!(supports_hyperlinks(
+            false,
+            env_of(&[("TERM", "xterm-kitty")])
+        ));
         // Nothing set → unsupported.
         assert!(!supports_hyperlinks(false, env_of(&[])));
     }

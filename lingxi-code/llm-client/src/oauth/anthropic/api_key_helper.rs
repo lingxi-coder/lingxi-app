@@ -21,16 +21,9 @@
 //! `CLAUDE_CODE_*` protocol/env names — cf. `CLAUDE_CODE_EXTRA_BODY`,
 //! `CLAUDE_CODE_OAUTH_TOKEN`), matching the binary's process-env read exactly.
 //!
-//! RESIDUAL (not yet wired — pre-existing dead-seam surface): the live
-//! per-request auth path (binary `Bqt` sets `Authorization: Bearer …` on each
-//! request) has no consumer in LingXi today — the whole
-//! [`super::resolver::AuthSource`] resolver is currently un-wired, so no code
-//! path invokes this executor. Wiring it in (making the boot `api_key` /
-//! per-request bearer resolution consult `AuthSource::ApiKeyHelper`) requires a
-//! dynamic key provider and is the documented follow-up. The binary's
-//! single-flight in-flight-promise dedup (`a3e`) and the workspace-trust gate
-//! (`nbc()`/`bd()` → `tengu_apiKeyHelper_missing_trust11`) are likewise not
-//! ported here.
+//! The binary's single-flight in-flight-promise dedup (`a3e`) and the
+//! workspace-trust gate (`nbc()`/`bd()` → `tengu_apiKeyHelper_missing_trust11`)
+//! are not ported here.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -147,11 +140,7 @@ pub async fn run_api_key_helper_with_timeout(
                 let o = format!("exited {code}");
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let i = stderr.trim();
-                return Err(if i.is_empty() {
-                    o
-                } else {
-                    format!("{o}: {i}")
-                });
+                return Err(if i.is_empty() { o } else { format!("{o}: {i}") });
             }
             let stdout = String::from_utf8_lossy(&output.stdout);
             let n = stdout.trim();
@@ -191,7 +180,10 @@ impl ApiKeyHelperCache {
     /// (`Date.now() - ise.timestamp < t`).
     #[must_use]
     pub fn get_fresh(&self, ttl_ms: u64) -> Option<String> {
-        let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cached = guard.as_ref()?;
         if cached.at.elapsed() < Duration::from_millis(ttl_ms) {
             Some(cached.value.clone())
@@ -203,7 +195,10 @@ impl ApiKeyHelperCache {
     /// Store a freshly-fetched value with the current instant
     /// (`ise = {value, timestamp: Date.now()}`).
     pub fn store(&self, value: String) {
-        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(Cached {
             value,
             at: Instant::now(),
@@ -212,7 +207,10 @@ impl ApiKeyHelperCache {
 
     /// `fjt()` — clear the cache (`ise = null`).
     pub fn clear(&self) {
-        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = None;
     }
 }
@@ -229,20 +227,31 @@ pub async fn fetch_api_key(
     cache: &ApiKeyHelperCache,
     ttl_ms: u64,
 ) -> Option<String> {
+    fetch_api_key_result(command, cache, ttl_ms).await.ok()
+}
+
+/// Same as [`fetch_api_key`], but preserves the helper failure string for live
+/// auth resolution paths that need to surface the exact helper error instead of
+/// collapsing it into a generic authentication failure.
+pub async fn fetch_api_key_result(
+    command: &str,
+    cache: &ApiKeyHelperCache,
+    ttl_ms: u64,
+) -> Result<String, String> {
     if let Some(v) = cache.get_fresh(ttl_ms) {
-        return Some(v);
+        return Ok(v);
     }
     match run_api_key_helper(command).await {
         Ok(key) => {
             cache.store(key.clone());
-            Some(key)
+            Ok(key)
         }
         Err(o) => {
             // `console.error(mt.red(\`apiKeyHelper failed: ${o}\`))` (color dropped).
             eprintln!("apiKeyHelper failed: {o}");
             // `C(\`Error getting API key from apiKeyHelper: ${o}\`,{level:"error"})`.
             tracing::error!("Error getting API key from apiKeyHelper: {o}");
-            None
+            Err(o)
         }
     }
 }

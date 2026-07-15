@@ -433,7 +433,10 @@ async fn pump_stream_inner(
         }
         // `Hr` (binary @219640711): a non-thinking `content_block_start` flips
         // `real_content_started`, disqualifying the mid-stream transient retry.
-        if let LlmEvent::ContentBlockStart { ref content_block, .. } = event {
+        if let LlmEvent::ContentBlockStart {
+            ref content_block, ..
+        } = event
+        {
             if !matches!(
                 content_block,
                 llm_client::ContentBlock::Reasoning { .. }

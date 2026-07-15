@@ -173,10 +173,7 @@ pub fn auto_mode_disabled_from_settings_json(raw: &str) -> bool {
     if top.disable_auto_mode.as_deref() == Some("disable") {
         return true;
     }
-    top.permissions
-        .and_then(|p| p.disable_auto_mode)
-        .as_deref()
-        == Some("disable")
+    top.permissions.and_then(|p| p.disable_auto_mode).as_deref() == Some("disable")
 }
 
 /// Parse `permissions.additionalDirectories` (a string array of extra working
@@ -453,10 +450,11 @@ mod tests {
     /// when the lockdown is set, only `PolicySettings`-sourced rules survive.
     #[test]
     fn managed_only_lockdown_retain_drops_non_managed_rules() {
-        let user =
-            permission_rules_from_settings_json(r#"{ "permissions": { "allow": ["WebFetch"] } }"#,
-                PermissionRuleSource::UserSettings)
-            .unwrap();
+        let user = permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["WebFetch"] } }"#,
+            PermissionRuleSource::UserSettings,
+        )
+        .unwrap();
         let managed = permission_rules_from_settings_json(
             r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
             PermissionRuleSource::PolicySettings,

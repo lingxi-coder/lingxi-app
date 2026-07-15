@@ -11,10 +11,10 @@
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
-/// (`claude-code_2-1-207_agent`) and the WebFetch `User-Agent`
-/// (`claude-code/2.1.207`). LingXi is a 1:1 copy, so it presents the same string.
+/// (`claude-code_2-1-208_agent`) and the WebFetch `User-Agent`
+/// (`claude-code/2.1.208`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.207";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.208";
 
 pub mod agent_name_registry;
 pub mod auth;
@@ -62,7 +62,6 @@ pub mod web_search;
 pub mod worktree;
 
 pub use auth::{AuthError, AuthHandle, LoginInfo};
-pub use file_history_sink::FileHistorySink;
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
@@ -71,6 +70,7 @@ pub use clock::Clock;
 pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
 pub use computer_control::{ComputerControl, ComputerError, Screenshot};
 pub use effect_handler::EffectHandler;
+pub use file_history_sink::FileHistorySink;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{
     HttpError, HttpTransport, RawByteStreamWithMeta, WebSocketConnection,
@@ -87,19 +87,15 @@ pub use mcp::*;
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
     curated_model_names, is_curated_model, parse_model_ref, provider_default_model,
-    provider_fallback_order, provider_has_curated_list, AgentInfo,
-    CheckStatus,
-    CompactionSummary, ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck,
-    DoctorReport, DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState,
-    McpServerInfo, McpStatus,
-    MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle, OutputEvent, OutputStream,
-    RateLimitSnapshot, RecapOutcome, RewindRowData, StatusSnapshot, TurnOutcome,
+    provider_fallback_order, provider_has_curated_list, AgentInfo, CheckStatus, CompactionSummary,
+    ContextPressureBanner, ContextPressureLevel, CostSnapshot, DoctorCheck, DoctorReport,
+    DoctorSummary, ForkOutcome, HandleError, HookInfo, McpActionState, McpServerInfo, McpStatus,
+    MemoryEditorOutcome, ModelListing, ModelUsageRow, OrchestratorHandle, OutputEvent,
+    OutputStream, RateLimitSnapshot, RecapOutcome, RewindRowData, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;
-pub use process::{
-    HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner,
-};
+pub use process::{HookRunOutcome, ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
 };

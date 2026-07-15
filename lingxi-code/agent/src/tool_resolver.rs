@@ -44,11 +44,25 @@
 use crate::definition::{AgentDefinition, AgentModel, AgentPermissionMode, AgentToolPolicy};
 use std::collections::HashSet;
 use std::sync::Arc;
+use thiserror::Error;
 use tool_api::Tool;
 
 /// Stateless utility that computes the effective tool set for an agent
 /// spawn from the agent definition plus the surrounding tool sets.
 pub struct AgentToolResolver;
+
+/// Errors while converting an agent definition's explicit tool policy into the
+/// child-visible schema/allow-list.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ToolResolutionError {
+    /// A definition requested tool names the parent tool pool cannot resolve.
+    #[error("unknown explicit agent tool(s): {0}")]
+    UnknownExplicitTools(String),
+    /// A non-empty explicit policy was valid syntactically but every requested
+    /// tool was removed by default deny rules, plan mode, or policy filters.
+    #[error("explicit agent tools resolved to an empty set after filtering: {0}")]
+    EmptyExplicitToolSet(String),
+}
 
 impl AgentToolResolver {
     /// Tools every subagent has stripped by default, mirroring claude-code's
@@ -258,10 +272,29 @@ pub async fn resolve_subagent_tools(
     // The resolved subagent's own recursion depth — gates its `Agent` tool at
     // `depth < 5` (claude `e9t`). Threaded from `SubagentSpawnRequest::depth`.
     depth: u32,
-) -> (Vec<serde_json::Value>, Vec<String>) {
+) -> Result<(Vec<serde_json::Value>, Vec<String>), ToolResolutionError> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
     let parent_tools = registry.available_tools(&ToolStaticContext::default());
+    if let AgentToolPolicy::Explicit(names) = &agent_def.tools {
+        let known: HashSet<String> = parent_tools
+            .iter()
+            .flat_map(|t| {
+                std::iter::once(t.name().to_string())
+                    .chain(t.aliases().iter().map(|alias| (*alias).to_string()))
+            })
+            .collect();
+        let unknown: Vec<String> = names
+            .iter()
+            .filter(|name| !known.contains(*name))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            return Err(ToolResolutionError::UnknownExplicitTools(
+                unknown.join(", "),
+            ));
+        }
+    }
     let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], depth, false);
     if !tool_wide_deny.is_empty() {
         resolved.retain(|t| {
@@ -269,6 +302,11 @@ pub async fn resolve_subagent_tools(
                 .iter()
                 .any(|d| permission::tool_wide_name_matches(d, t.name()))
         });
+    }
+    if let AgentToolPolicy::Explicit(names) = &agent_def.tools {
+        if !names.is_empty() && resolved.is_empty() {
+            return Err(ToolResolutionError::EmptyExplicitToolSet(names.join(", ")));
+        }
     }
     let allowed: Vec<String> = resolved
         .iter()
@@ -290,7 +328,7 @@ pub async fn resolve_subagent_tools(
         },
     )
     .await;
-    (schemas, allowed)
+    Ok((schemas, allowed))
 }
 
 #[cfg(test)]

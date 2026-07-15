@@ -59,6 +59,7 @@ pub mod agents_registry;
 pub mod argv;
 pub mod ax_screen_reader;
 pub mod background_dispatch;
+pub mod bg_attach;
 mod bypass_env;
 pub mod commands;
 pub mod control_plane;
@@ -72,6 +73,7 @@ pub mod logging;
 pub mod mode;
 pub mod output;
 pub mod output_adapter;
+pub(crate) mod process_wrapper;
 pub mod repl;
 pub mod repl_loop;
 pub mod run;
@@ -1202,7 +1204,10 @@ mod cli_mode_settings_tests {
         a.model = Some("claude-sonnet-4-5".to_string()); // legacy → auto-unsupported
         let (mode, notice) = resolve_permission_mode(&a);
         assert_eq!(mode, permission::PermissionMode::Default);
-        assert_eq!(notice.as_deref(), Some("auto mode unavailable for this model"));
+        assert_eq!(
+            notice.as_deref(),
+            Some("auto mode unavailable for this model")
+        );
 
         if let Some(cwd) = prior_cwd {
             let _ = std::env::set_current_dir(cwd);

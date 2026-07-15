@@ -418,7 +418,10 @@ pub fn parse_force_login_org_uuid(value: Option<&serde_json::Value>) -> ForceLog
 /// the byte-exact denial message when login is forbidden. `account_org_ids` is
 /// the set of org UUIDs the authenticated account belongs to.
 #[must_use]
-pub fn check_org_membership(pin: &ForceLoginOrgPin, account_org_ids: &[String]) -> OrgMembershipCheck {
+pub fn check_org_membership(
+    pin: &ForceLoginOrgPin,
+    account_org_ids: &[String],
+) -> OrgMembershipCheck {
     match pin {
         ForceLoginOrgPin::Unset => OrgMembershipCheck::Permitted,
         ForceLoginOrgPin::Invalid => {
@@ -548,34 +551,31 @@ Your organization requires version 2.9.0 or older. Install an approved version u
     #[test]
     fn version_gate_invalid_min_logs_and_ignores() {
         let mut warnings: Vec<String> = Vec::new();
-        let out = version_gate(
-            "2.1.207",
-            Some("latest"),
-            None,
-            None,
-            &mut |m| warnings.push(m.to_string()),
-        );
+        let out = version_gate("2.1.207", Some("latest"), None, None, &mut |m| {
+            warnings.push(m.to_string())
+        });
         assert_eq!(out, None, "an un-parseable minimum must not gate");
         assert_eq!(
             warnings,
-            vec!["requiredMinimumVersion 'latest' is not a valid semver version — ignoring".to_string()]
+            vec![
+                "requiredMinimumVersion 'latest' is not a valid semver version — ignoring"
+                    .to_string()
+            ]
         );
     }
 
     #[test]
     fn version_gate_invalid_max_logs_and_ignores() {
         let mut warnings: Vec<String> = Vec::new();
-        let out = version_gate(
-            "2.1.207",
-            None,
-            Some("2.x"),
-            None,
-            &mut |m| warnings.push(m.to_string()),
-        );
+        let out = version_gate("2.1.207", None, Some("2.x"), None, &mut |m| {
+            warnings.push(m.to_string())
+        });
         assert_eq!(out, None);
         assert_eq!(
             warnings,
-            vec!["requiredMaximumVersion '2.x' is not a valid semver version — ignoring".to_string()]
+            vec![
+                "requiredMaximumVersion '2.x' is not a valid semver version — ignoring".to_string()
+            ]
         );
     }
 
@@ -797,7 +797,10 @@ Your organization requires version 2.9.0 or older. Install an approved version u
             "forceLoginOrgUUID": ["org-1", "org-2"]
         }"#;
         let s: SettingsJson = serde_json::from_str(json).unwrap();
-        assert_eq!(s.force_login_method_parsed(), Some(ForceLoginMethod::Console));
+        assert_eq!(
+            s.force_login_method_parsed(),
+            Some(ForceLoginMethod::Console)
+        );
         assert_eq!(
             s.force_login_org_pin(),
             ForceLoginOrgPin::Pinned(vec!["org-1".to_string(), "org-2".to_string()])

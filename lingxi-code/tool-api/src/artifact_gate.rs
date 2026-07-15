@@ -81,7 +81,11 @@ fn x9i() -> bool {
 /// (the schema key round-trips, but its live value is not yet threaded here — the
 /// dominant Statsig gate already keeps the tool disabled in this build).
 fn disabled_by_config() -> bool {
-    is_env_truthy(std::env::var("CLAUDE_CODE_DISABLE_ARTIFACT").ok().as_deref())
+    is_env_truthy(
+        std::env::var("CLAUDE_CODE_DISABLE_ARTIFACT")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// `qXc()` = `!BXc() && UXc()`.

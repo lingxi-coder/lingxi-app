@@ -1333,8 +1333,7 @@ mod tests {
             authorization_endpoint: "https://as.example.com/authorize".into(),
             token_endpoint: "https://as.example.com/token".into(),
             registration_endpoint: None,
-            scopes_supported: scopes_supported
-                .map(|v| v.into_iter().map(String::from).collect()),
+            scopes_supported: scopes_supported.map(|v| v.into_iter().map(String::from).collect()),
             scope: scope.map(String::from),
             default_scope: default_scope.map(String::from),
             revocation_endpoint: None,
@@ -1436,8 +1435,14 @@ mod tests {
     #[test]
     fn authorize_scope_nonempty_gets_offline_access_when_advertised() {
         let meta = meta_with(Some(vec!["read", "offline_access"]), None, None);
-        assert_eq!(authorize_url_scope("read", false, &meta), "read offline_access");
-        assert_eq!(authorize_url_scope("read", true, &meta), "read offline_access");
+        assert_eq!(
+            authorize_url_scope("read", false, &meta),
+            "read offline_access"
+        );
+        assert_eq!(
+            authorize_url_scope("read", true, &meta),
+            "read offline_access"
+        );
         // Not advertised → left untouched.
         let no_off = meta_with(Some(vec!["read"]), None, None);
         assert_eq!(authorize_url_scope("read", false, &no_off), "read");

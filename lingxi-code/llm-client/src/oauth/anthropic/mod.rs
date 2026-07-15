@@ -36,6 +36,11 @@ pub mod subscription;
 #[cfg(test)]
 mod testsupport;
 
+pub use api_key_helper::{
+    api_key_helper_ttl_ms, fetch_api_key, fetch_api_key_result, resolve_ttl_ms, run_api_key_helper,
+    run_api_key_helper_with_timeout, ApiKeyHelperCache, API_KEY_HELPER_TIMEOUT,
+    API_KEY_HELPER_TTL_ENV, DEFAULT_API_KEY_HELPER_TTL_MS,
+};
 #[cfg(not(loom))]
 pub use callback::{await_callback, CallbackError, CallbackListener, CallbackParams};
 pub use client::{ClaudeAiOAuthClient, OAuthError};
@@ -49,11 +54,6 @@ pub use profile::{
     OAuthOrganization, OAuthProfileResponse, UserRolesResponse,
 };
 pub use refresh::{AuthState, RefreshDriver};
-pub use api_key_helper::{
-    api_key_helper_ttl_ms, fetch_api_key, resolve_ttl_ms, run_api_key_helper,
-    run_api_key_helper_with_timeout, ApiKeyHelperCache, API_KEY_HELPER_TIMEOUT,
-    API_KEY_HELPER_TTL_ENV, DEFAULT_API_KEY_HELPER_TTL_MS,
-};
 pub use resolver::{resolve, AuthSource, ResolverContext};
 pub use scope_upgrade::{
     parse_scope_upgrade, run_scope_upgrade, PkceRunResult, PkceRunner, ScopeUpgradeRequired,

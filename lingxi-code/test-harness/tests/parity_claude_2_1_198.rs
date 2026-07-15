@@ -666,6 +666,9 @@ fn gateway_subcommand_surface_is_pinned() {
 
 #[test]
 fn agents_and_mcp_help_fixtures_nonempty() {
-    assert!(AGENTS_HELP.contains("agents"), "agents help fixture looks wrong");
+    assert!(
+        AGENTS_HELP.contains("agents"),
+        "agents help fixture looks wrong"
+    );
     assert!(MCP_HELP.contains("mcp"), "mcp help fixture looks wrong");
 }

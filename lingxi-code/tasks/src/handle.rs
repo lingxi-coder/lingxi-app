@@ -418,7 +418,7 @@ impl TaskRegistryHandle for TaskRegistry {
 
     async fn mark_notified(&self, id: &str) -> Result<(), TaskRegistryError> {
         // Dispatch to the inherent `TaskRegistry::mark_notified`, which sets the
-        // `notified` flag and eagerly evicts the task if it is now terminal.
+        // `notified` flag while keeping the task addressable.
         TaskRegistry::mark_notified(self, id)
             .await
             .map_err(task_err_to_registry_err)
@@ -438,7 +438,7 @@ impl TaskRegistryHandle for TaskRegistry {
         &self,
     ) -> Result<Vec<traits::task_registry::TaskNotification>, TaskRegistryError> {
         // Dispatch to the inherent drain, which snapshots + marks-notified +
-        // evicts the terminal-not-notified tasks. Infallible at the registry
+        // retains the terminal-not-notified tasks. Infallible at the registry
         // level (the lock is always acquirable), so the seam result is always
         // `Ok`.
         Ok(TaskRegistry::take_pending_task_notifications(self).await)
@@ -732,7 +732,11 @@ mod tests {
         let mut wfs = h.list_workflows().await.unwrap();
         wfs.sort_by(|a, b| a.task_id.cmp(&b.task_id));
 
-        assert_eq!(wfs.len(), 2, "only the two workflow runs, not the bash task");
+        assert_eq!(
+            wfs.len(),
+            2,
+            "only the two workflow runs, not the bash task"
+        );
         let done = wfs.iter().find(|w| w.task_id == "w0000done0").unwrap();
         assert_eq!(done.name, "wf-w0000done0");
         assert_eq!(done.run_id.as_deref(), Some("wf_done"));

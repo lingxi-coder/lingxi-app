@@ -54,7 +54,8 @@ const DESC_ACTION: &str = r#"Omit (or 'publish') to publish file_path. 'list' en
 const DESC_FILE_PATH: &str = "Path to an .html or .md file to render. Required to publish (the default action). Use a short, distinctive basename \u{2014} it is the fallback title if the HTML has no <title>.";
 const DESC_FAVICON: &str = r#"Browser-tab icon: one or two emoji (e.g. "📊"). No markup. Required to publish. Keep stable across redeploys; change only on a hard topic pivot."#;
 const DESC_LIMIT: &str = "list only: maximum artifacts to return (default 25).";
-const DESC_DESCRIPTION: &str = "One-sentence subtitle shown on the gallery card. Say what the page is or does.";
+const DESC_DESCRIPTION: &str =
+    "One-sentence subtitle shown on the gallery card. Say what the page is or does.";
 const DESC_LABEL: &str = r#"Short human-readable name for this version, max 60 chars (e.g. "fixed-background"). Shown in the version picker. Not a description — keep it to a few words."#;
 const DESC_URL: &str = r#"Existing artifact URL to update in place. Pass whenever the user wants to update an artifact this conversation did not publish — "update my artifact", "keep the same link", a pasted artifact URL — and find the URL with action: "list" if you don't have it; without this, a conversation that didn't publish the artifact always mints a new URL. Omit for new artifacts and same-conversation redeploys. Must be an artifact the user owns."#;
 const DESC_FORCE: &str = "Overwrite without a conflict check. Use only after a 409 when you have reconciled with the other session's version and intend to replace it. Omit (or false) to send baseVersion so a concurrent write 409s instead of being silently clobbered.";
@@ -245,10 +246,17 @@ impl Tool for ArtifactTool {
 
         if action == Some("list") {
             // errorCode 8: `list` takes only `limit`.
-            let extras: Vec<&str> = ["file_path", "favicon", "description", "label", "url", "force"]
-                .into_iter()
-                .filter(|k| input.get(*k).is_some_and(|v| !v.is_null()))
-                .collect();
+            let extras: Vec<&str> = [
+                "file_path",
+                "favicon",
+                "description",
+                "label",
+                "url",
+                "force",
+            ]
+            .into_iter()
+            .filter(|k| input.get(*k).is_some_and(|v| !v.is_null()))
+            .collect();
             if !extras.is_empty() {
                 return Err(ValidationError(format!(
                     "action \"list\" takes only `limit` \u{2014} remove {}. To publish or update an artifact, omit `action`.",
@@ -286,7 +294,11 @@ impl Tool for ArtifactTool {
             .map(|e| format!(".{}", e.to_ascii_lowercase()))
             .unwrap_or_default();
         if ext != ".html" && ext != ".htm" && ext != ".md" {
-            let shown = if ext.is_empty() { "(none)".to_string() } else { ext };
+            let shown = if ext.is_empty() {
+                "(none)".to_string()
+            } else {
+                ext
+            };
             return Err(ValidationError(format!(
                 "unsupported file type: {shown} \u{2014} use .html or .md"
             )));
@@ -446,7 +458,9 @@ mod tests {
         let p = rt.block_on(t.prompt(&PromptOptions::default()));
         assert_eq!(p.len(), 4742, "prompt byte length");
         assert!(p.starts_with("Render an HTML or Markdown file to an Artifact \u{2014} a default-private web page hosted on claude.ai"));
-        assert!(p.contains("**Before writing the page, you MUST load the `artifact-design` skill**"));
+        assert!(
+            p.contains("**Before writing the page, you MUST load the `artifact-design` skill**")
+        );
         assert!(p.ends_with("do not suggest other ways to host or distribute the page."));
         // Paragraphs are joined by `\n\n`.
         assert_eq!(p.split("\n\n").count(), 13);
@@ -508,7 +522,10 @@ mod tests {
 
         // limit on a publish call.
         let e = t
-            .validate_input(&json!({"file_path": "x.html", "favicon": "📊", "limit": 5}), &ctx)
+            .validate_input(
+                &json!({"file_path": "x.html", "favicon": "📊", "limit": 5}),
+                &ctx,
+            )
             .await
             .unwrap_err();
         assert_eq!(e.0, "`limit` applies only to action \"list\"");
@@ -525,7 +542,10 @@ mod tests {
             .validate_input(&json!({"file_path": "README", "favicon": "📊"}), &ctx)
             .await
             .unwrap_err();
-        assert_eq!(e.0, "unsupported file type: (none) \u{2014} use .html or .md");
+        assert_eq!(
+            e.0,
+            "unsupported file type: (none) \u{2014} use .html or .md"
+        );
 
         // a valid .html publish passes the ported structural checks.
         assert!(t
@@ -548,9 +568,15 @@ mod tests {
             other => panic!("expected Ask, got {other:?}"),
         }
 
-        match t.check_permissions(&json!({"file_path": "x.html"}), &ctx).await {
+        match t
+            .check_permissions(&json!({"file_path": "x.html"}), &ctx)
+            .await
+        {
             PermissionResult::Deny { explanation, .. } => {
-                assert_eq!(explanation.as_deref(), Some("file_path and favicon are required to publish"));
+                assert_eq!(
+                    explanation.as_deref(),
+                    Some("file_path and favicon are required to publish")
+                );
             }
             other => panic!("expected Deny, got {other:?}"),
         }

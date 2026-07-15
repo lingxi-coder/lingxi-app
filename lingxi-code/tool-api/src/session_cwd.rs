@@ -332,6 +332,9 @@ mod tests {
 
         assert_eq!(swap_count.load(Ordering::SeqCst), n_swaps);
         // Final state must reflect the very last swap.
-        assert_eq!(sc.cwd(), PathBuf::from(format!("/worktree/{}", n_swaps - 1)));
+        assert_eq!(
+            sc.cwd(),
+            PathBuf::from(format!("/worktree/{}", n_swaps - 1))
+        );
     }
 }

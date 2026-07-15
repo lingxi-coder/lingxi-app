@@ -208,9 +208,8 @@ fn read_usage_log(lingxi_home: &Path) -> Result<HashMap<String, UsageRecord>, St
 pub fn record_skill_usage(lingxi_home: &Path, name: &str) -> Result<(), String> {
     let path = usage_log_path(lingxi_home);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!("failed to create {}: {e}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
     let mut map = read_usage_log(lingxi_home)?;
     let now_unix = SystemTime::now()
@@ -307,18 +306,11 @@ async fn load_entries(
     // that cannot exist so the loader's `read_dir` fails closed (returns
     // nothing) rather than accidentally resolving a real path.
     let no_managed_dir = roots.lingxi_home.join(".skill-doctor-no-managed-dir");
-    let managed_for_commands = roots
-        .managed_dir
-        .clone()
-        .unwrap_or(no_managed_dir);
+    let managed_for_commands = roots.managed_dir.clone().unwrap_or(no_managed_dir);
 
-    let command_files = load_command_markdown_files(
-        &roots.cwd,
-        &roots.lingxi_home,
-        &managed_for_commands,
-        &home,
-    )
-    .await;
+    let command_files =
+        load_command_markdown_files(&roots.cwd, &roots.lingxi_home, &managed_for_commands, &home)
+            .await;
     let skill_files = load_skill_markdown_files_with_roots(
         &roots.cwd,
         &roots.lingxi_home,
@@ -516,7 +508,10 @@ mod tests {
                     s.contains("demo"),
                     "table should list the discovered skill: {s}"
                 );
-                assert!(s.contains("project"), "source column should read project: {s}");
+                assert!(
+                    s.contains("project"),
+                    "source column should read project: {s}"
+                );
                 assert!(s.contains("never"), "unrecorded usage renders never: {s}");
                 assert!(
                     s.contains(
@@ -538,9 +533,7 @@ mod tests {
         fs::create_dir_all(cwd.join(".git")).unwrap();
         fs::create_dir_all(&lingxi_home).unwrap();
         write(
-            &cwd.join(".lingxi")
-                .join("commands")
-                .join("foo.md"),
+            &cwd.join(".lingxi").join("commands").join("foo.md"),
             "# Foo\n\nDo the foo",
         );
         record_skill_usage(&lingxi_home, "foo").expect("record usage");
@@ -549,7 +542,10 @@ mod tests {
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.contains("foo"), "table should list foo: {s}");
-                assert!(s.contains("today"), "just-recorded usage renders today: {s}");
+                assert!(
+                    s.contains("today"),
+                    "just-recorded usage renders today: {s}"
+                );
                 assert_eq!(
                     s.lines().last(),
                     Some(ALL_USED),

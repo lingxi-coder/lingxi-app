@@ -42,7 +42,10 @@ impl ConnectPickerView {
     /// joined with `availability` (which providers already have a usable
     /// credential).
     #[must_use]
-    pub fn new(auth_methods: BTreeMap<String, String>, availability: BTreeMap<String, bool>) -> Self {
+    pub fn new(
+        auth_methods: BTreeMap<String, String>,
+        availability: BTreeMap<String, bool>,
+    ) -> Self {
         Self {
             state: ConnectPickerState::from_connectable(&auth_methods, &availability),
             auth_methods,
@@ -58,7 +61,9 @@ impl ConnectPickerView {
         if methods.len() > 1 {
             let label = provider_label(&provider_id);
             return ViewOutcome::OpenView(Box::new(ConnectMethodView::new(
-                provider_id, label, methods,
+                provider_id,
+                label,
+                methods,
             )));
         }
         match methods.first().copied() {

@@ -78,7 +78,10 @@ impl ResumePickerView {
         let max_scroll = total - viewport;
         let selected = u16::try_from(selected_title_line_index(&self.state)).unwrap_or(0);
         // Reveal the selected title (+ its metadata line): `selected + 2`.
-        selected.saturating_add(2).saturating_sub(viewport).min(max_scroll)
+        selected
+            .saturating_add(2)
+            .saturating_sub(viewport)
+            .min(max_scroll)
     }
 }
 

@@ -289,12 +289,18 @@ mod tests {
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
         assert!(cmd.has_user_specified_description);
-        assert!(cmd.description.starts_with("Verify that a code change actually does"));
+        assert!(cmd
+            .description
+            .starts_with("Verify that a code change actually does"));
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
-                assert!(f.build("").starts_with("**Verification is runtime observation.**"));
-                assert!(f.build("check X").contains("\n\n## User Request\n\ncheck X"));
+                assert!(f
+                    .build("")
+                    .starts_with("**Verification is runtime observation.**"));
+                assert!(f
+                    .build("check X")
+                    .contains("\n\n## User Request\n\ncheck X"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
@@ -308,11 +314,15 @@ mod tests {
         assert_eq!(cmd.source, CommandSource::Bundled);
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
-        assert!(cmd.description.starts_with("Launch and drive this project's app"));
+        assert!(cmd
+            .description
+            .starts_with("Launch and drive this project's app"));
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
-                assert!(f.build("").starts_with("**Running means launching the actual app"));
+                assert!(f
+                    .build("")
+                    .starts_with("**Running means launching the actual app"));
             }
             other => panic!("expected Bundled kind, got {other:?}"),
         }
@@ -327,7 +337,9 @@ mod tests {
         assert_eq!(cmd.loaded_from.as_deref(), Some("bundled"));
         assert_eq!(cmd.user_invocable, Some(true));
         assert_eq!(cmd.argument_hint.as_deref(), Some("[<target>]"));
-        assert!(cmd.description.contains("reuse, simplification, efficiency, and altitude"));
+        assert!(cmd
+            .description
+            .contains("reuse, simplification, efficiency, and altitude"));
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {
                 let f = prompt_fn.as_ref().expect("prompt_fn set");
@@ -348,7 +360,9 @@ mod tests {
         assert_eq!(cmd.user_invocable, Some(true));
         // Reference `disableModelInvocation:!0` — the model may not invoke it.
         assert!(cmd.disable_model_invocation);
-        assert!(cmd.description.starts_with("Author or improve the run-<unit> skill"));
+        assert!(cmd
+            .description
+            .starts_with("Author or improve the run-<unit> skill"));
         // Excluded from the model-invocable listing.
         assert!(!reg
             .model_invocable_commands()
@@ -387,7 +401,9 @@ mod tests {
             cmd.argument_hint.as_deref(),
             Some("[low|medium|high|xhigh|max] [--fix] [--comment] [<target>]")
         );
-        assert!(cmd.description.starts_with("Review the current diff for correctness bugs"));
+        assert!(cmd
+            .description
+            .starts_with("Review the current diff for correctness bugs"));
         // Distinct command from the builtin `/review`.
         assert!(reg.resolve("review").is_none());
         match &cmd.kind {
@@ -410,7 +426,11 @@ mod tests {
         assert_eq!(cmd.user_invocable, Some(true));
         assert!(cmd.disable_model_invocation);
         assert_eq!(cmd.argument_hint.as_deref(), Some("<instruction>"));
-        assert!(cmd.when_to_use.as_deref().unwrap().starts_with("Use when the user wants"));
+        assert!(cmd
+            .when_to_use
+            .as_deref()
+            .unwrap()
+            .starts_with("Use when the user wants"));
         assert!(cmd.description.contains("5–30 isolated worktree agents"));
         match &cmd.kind {
             SlashCommandKind::Bundled { prompt_fn, .. } => {

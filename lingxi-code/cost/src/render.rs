@@ -13,7 +13,11 @@ pub fn format_duration_ms(ms: u64) -> String {
     let mut r = ms / 86_400_000;
     let mut n = (ms % 86_400_000) / 3_600_000;
     let mut o = (ms % 3_600_000) / 60_000;
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let mut i = ((ms % 60_000) as f64 / 1000.0).round() as u64;
     if i == 60 {
         i = 0;
@@ -158,8 +162,16 @@ pub fn cost_summary(input: &CostSummaryInput) -> String {
     };
     let api = format_duration_ms(input.api_duration_ms);
     let wall = format_duration_ms(input.wall_duration_ms);
-    let added_unit = if input.code_lines_added == 1 { "line" } else { "lines" };
-    let removed_unit = if input.code_lines_removed == 1 { "line" } else { "lines" };
+    let added_unit = if input.code_lines_added == 1 {
+        "line"
+    } else {
+        "lines"
+    };
+    let removed_unit = if input.code_lines_removed == 1 {
+        "line"
+    } else {
+        "lines"
+    };
     let by_model = usage_by_model_block(input.by_model);
     // NOTE: built with explicit `\n` (not `\`-line-continuations) so the
     // literal cannot pick up stray leading whitespace from source
@@ -229,14 +241,14 @@ mod tests {
     #[test]
     fn qs_matches_cc() {
         assert_eq!(format_duration_ms(0), "0s");
-        assert_eq!(format_duration_ms(500), "0s");     // <1s floors to 0
-        assert_eq!(format_duration_ms(1_500), "1s");   // floor(1.5)
+        assert_eq!(format_duration_ms(500), "0s"); // <1s floors to 0
+        assert_eq!(format_duration_ms(1_500), "1s"); // floor(1.5)
         assert_eq!(format_duration_ms(59_000), "59s");
         assert_eq!(format_duration_ms(60_000), "1m 0s");
         assert_eq!(format_duration_ms(65_000), "1m 5s");
         assert_eq!(format_duration_ms(3_661_000), "1h 1m 1s");
         assert_eq!(format_duration_ms(90_061_000), "1d 1h 1m"); // days form drops seconds
-        assert_eq!(format_duration_ms(59_500), "59s");  // floor(59.5)=59
+        assert_eq!(format_duration_ms(59_500), "59s"); // floor(59.5)=59
         assert_eq!(format_duration_ms(119_500), "2m 0s"); // round(59.5s)=60 -> carry: 1m -> 2m 0s
     }
 
@@ -244,8 +256,8 @@ mod tests {
     fn ftu_matches_cc() {
         assert_eq!(format_cost(0.0), "$0.0000");
         assert_eq!(format_cost(0.05), "$0.0500");
-        assert_eq!(format_cost(0.5), "$0.5000");        // not > 0.5
-        assert_eq!(format_cost(0.5001), "$0.50");       // > 0.5 -> 2dp rounded
+        assert_eq!(format_cost(0.5), "$0.5000"); // not > 0.5
+        assert_eq!(format_cost(0.5001), "$0.50"); // > 0.5 -> 2dp rounded
         assert_eq!(format_cost(1.2345), "$1.23");
         assert_eq!(format_cost(12.999), "$13.00");
     }
@@ -318,13 +330,21 @@ mod tests {
     #[test]
     fn i6e_unknown_models_note() {
         let out = cost_summary(&CostSummaryInput {
-            total_usd: 0.05, unknown_models: true, api_duration_ms: 0, wall_duration_ms: 0,
-            code_lines_added: 0, code_lines_removed: 0, by_model: &[],
+            total_usd: 0.05,
+            unknown_models: true,
+            api_duration_ms: 0,
+            wall_duration_ms: 0,
+            code_lines_added: 0,
+            code_lines_removed: 0,
+            by_model: &[],
         });
         assert!(out.starts_with(
             "Total cost:            $0.0500 (costs may be inaccurate due to usage of unknown models)\n"
         ), "{out}");
         // plural on zero: "0 lines added, 0 lines removed"
-        assert!(out.contains("Total code changes:    0 lines added, 0 lines removed"), "{out}");
+        assert!(
+            out.contains("Total code changes:    0 lines added, 0 lines removed"),
+            "{out}"
+        );
     }
 }

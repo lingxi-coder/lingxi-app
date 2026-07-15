@@ -224,8 +224,7 @@ pub fn build_status_line_input(inputs: &StatusLineInputs<'_>) -> Value {
     let has_usage = i.used_tokens > 0 && i.context_window_tokens > 0;
     let (used, remaining) = if has_usage {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let pct = ((i.used_tokens as f64 / i.context_window_tokens as f64) * 100.0).round()
-            as u64;
+        let pct = ((i.used_tokens as f64 / i.context_window_tokens as f64) * 100.0).round() as u64;
         let pct = pct.min(100);
         (json!(pct), json!(100 - pct))
     } else {

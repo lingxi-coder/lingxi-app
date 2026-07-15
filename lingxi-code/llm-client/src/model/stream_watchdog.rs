@@ -79,9 +79,20 @@ pub fn watchdog_enabled_from_values(lingxi: Option<&str>, claude: Option<&str>) 
 pub fn idle_timeout_from_values(lingxi: Option<&str>, claude: Option<&str>) -> Duration {
     let parsed: u64 = lingxi
         .or(claude)
-        .and_then(|v| v.trim().parse::<u64>().ok())
+        .and_then(parse_js_number_millis)
         .unwrap_or(0);
     Duration::from_millis(parsed.max(STREAM_IDLE_TIMEOUT_FLOOR_MS))
+}
+
+fn parse_js_number_millis(raw: &str) -> Option<u64> {
+    let parsed = raw.trim().parse::<f64>().ok()?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return None;
+    }
+    if parsed >= u64::MAX as f64 {
+        return Some(u64::MAX);
+    }
+    Some(parsed.trunc() as u64)
 }
 
 /// Resolve the effective idle timeout from the process environment:
@@ -91,15 +102,23 @@ pub fn idle_timeout_from_values(lingxi: Option<&str>, claude: Option<&str>) -> D
 #[must_use]
 pub fn resolve_stream_idle_timeout() -> Option<Duration> {
     let enabled = watchdog_enabled_from_values(
-        std::env::var("LINGXI_ENABLE_STREAM_WATCHDOG").ok().as_deref(),
-        std::env::var("CLAUDE_ENABLE_STREAM_WATCHDOG").ok().as_deref(),
+        std::env::var("LINGXI_ENABLE_STREAM_WATCHDOG")
+            .ok()
+            .as_deref(),
+        std::env::var("CLAUDE_ENABLE_STREAM_WATCHDOG")
+            .ok()
+            .as_deref(),
     );
     if !enabled {
         return None;
     }
     Some(idle_timeout_from_values(
-        std::env::var("LINGXI_STREAM_IDLE_TIMEOUT_MS").ok().as_deref(),
-        std::env::var("CLAUDE_STREAM_IDLE_TIMEOUT_MS").ok().as_deref(),
+        std::env::var("LINGXI_STREAM_IDLE_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+        std::env::var("CLAUDE_STREAM_IDLE_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
     ))
 }
 
@@ -156,6 +175,18 @@ mod tests {
             idle_timeout_from_values(Some("600000"), None),
             Duration::from_millis(600_000)
         );
+        assert_eq!(
+            idle_timeout_from_values(Some("1e6"), None),
+            Duration::from_millis(1_000_000)
+        );
+        assert_eq!(
+            idle_timeout_from_values(Some("2.5e5"), None),
+            Duration::from_millis(300_000)
+        );
+        assert_eq!(
+            idle_timeout_from_values(Some("600000.9"), None),
+            Duration::from_millis(600_000)
+        );
     }
 
     #[test]
@@ -165,8 +196,10 @@ mod tests {
         assert!(!is_stream_idle_timeout(&crate::LlmError::Transport {
             message: "connection reset".into()
         }));
-        assert!(!is_stream_idle_timeout(&crate::LlmError::StreamInterrupted {
-            message: "malformed frame".into()
-        }));
+        assert!(!is_stream_idle_timeout(
+            &crate::LlmError::StreamInterrupted {
+                message: "malformed frame".into()
+            }
+        ));
     }
 }

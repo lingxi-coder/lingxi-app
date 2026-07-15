@@ -176,8 +176,7 @@ pub async fn dispatch(
             // Capture the freshly-launched session id up front: it seeds the
             // switch loop's failed-switch fallback (finding #2) so a `/resume` to
             // an unloadable target re-mounts THIS session instead of exiting.
-            let initial_session_id =
-                tui_build.runtime.orchestrator.current_session_id().await;
+            let initial_session_id = tui_build.runtime.orchestrator.current_session_id().await;
             let session_registration = {
                 let name = std::env::current_dir()
                     .ok()
@@ -513,33 +512,32 @@ pub(crate) async fn run_ratatui(
     if initial_cost > 0.0 {
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
-    let on_submit = move |prompt: String,
-                          images: Vec<std::path::PathBuf>,
-                          cancel: CancellationToken| {
-        let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
-        let orch = orchestrator.clone();
-        let tx = turn_tx.clone();
-        handle.spawn(async move {
-            // Image-aware entry: with no images this is byte-identical to
-            // `run_turn_streaming_with_cancel`; with pasted/attached images
-            // they become `ContentBlock::Image` on the user message.
-            if let Err(e) = orch
-                .run_turn_streaming_with_images(&prompt, &images, cancel)
-                .await
-            {
-                // A HARD terminal error (rate limit, auth, model-unavailable, …)
-                // propagates as `Err` WITHOUT being surfaced as an assistant
-                // message or an `emit_end_turn` — unlike a graceful `model_error`,
-                // which the orchestrator renders + ends itself. So the retry loop
-                // could exhaust (e.g. "Retrying… attempt 10/10") and then hang the
-                // spinner forever with no error shown. Surface it as the turn's
-                // reply and end the turn so the spinner + any "Retrying…" status
-                // clear.
-                let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
-                let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
-            }
-        });
-    };
+    let on_submit =
+        move |prompt: String, images: Vec<std::path::PathBuf>, cancel: CancellationToken| {
+            let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
+            let orch = orchestrator.clone();
+            let tx = turn_tx.clone();
+            handle.spawn(async move {
+                // Image-aware entry: with no images this is byte-identical to
+                // `run_turn_streaming_with_cancel`; with pasted/attached images
+                // they become `ContentBlock::Image` on the user message.
+                if let Err(e) = orch
+                    .run_turn_streaming_with_images(&prompt, &images, cancel)
+                    .await
+                {
+                    // A HARD terminal error (rate limit, auth, model-unavailable, …)
+                    // propagates as `Err` WITHOUT being surfaced as an assistant
+                    // message or an `emit_end_turn` — unlike a graceful `model_error`,
+                    // which the orchestrator renders + ends itself. So the retry loop
+                    // could exhaust (e.g. "Retrying… attempt 10/10") and then hang the
+                    // spinner forever with no error shown. Surface it as the turn's
+                    // reply and end the turn so the spinner + any "Retrying…" status
+                    // clear.
+                    let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
+                    let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+                }
+            });
+        };
     let on_switch_model = move |model: String, profile: Option<String>| {
         let orch = switch_orch.clone();
         switch_handle.spawn(async move {
@@ -643,10 +641,8 @@ pub(crate) async fn run_ratatui(
                 Ok(_summary) => ("Compacted (ctrl+o to see full summary)".to_string(), false),
                 Err(_e) => ("Error compacting conversation".to_string(), true),
             };
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
-                body,
-                is_error,
-            });
+            let _ =
+                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
     // (/rename async effect) `/rename <name>` returns `ChatOutcome::RenameSession`
@@ -663,10 +659,8 @@ pub(crate) async fn run_ratatui(
                 Ok(()) => (format!("Session renamed to: {name}"), false),
                 Err(_e) => ("Error renaming session".to_string(), true),
             };
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
-                body,
-                is_error,
-            });
+            let _ =
+                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
     // (/fast async effect) `/fast [on|off]` returns `ChatOutcome::FastMode` from
@@ -693,10 +687,8 @@ pub(crate) async fn run_ratatui(
                 ),
                 Err(_e) => ("Error toggling fast mode".to_string(), true),
             };
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
-                body,
-                is_error,
-            });
+            let _ =
+                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
     // (/plan async effect) `/plan` returns `ChatOutcome::PlanMode` from the
@@ -722,10 +714,8 @@ pub(crate) async fn run_ratatui(
                     Err(_e) => ("Error entering plan mode".to_string(), true),
                 }
             };
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
-                body,
-                is_error,
-            });
+            let _ =
+                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
     // (/sandbox) The live toggle already flipped in the widget (a lock-free
@@ -754,10 +744,8 @@ pub(crate) async fn run_ratatui(
                 Ok(_) => (format!("Stopped task {task_id}"), false),
                 Err(e) => (format!("Could not stop task {task_id}: {e}"), true),
             };
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
-                body,
-                is_error,
-            });
+            let _ =
+                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
     // (registry slash dispatch) `/loop`, user commands, skills, and plugin/
@@ -955,9 +943,7 @@ pub(crate) async fn run_ratatui(
             // it matches the on-disk `<uuid>.jsonl` and what `--resume` resolves
             // to (claude-code uses bare uuids for session ids end-to-end).
             let session_uuid = summary_orch.current_session_id().await.as_uuid();
-            println!(
-                "\nSession {session_uuid} saved. Resume with: lingxi --resume {session_uuid}"
-            );
+            println!("\nSession {session_uuid} saved. Resume with: lingxi --resume {session_uuid}");
             RunOutcome::Exit(exit_codes::SUCCESS)
         }
         // (/resume) The picker resolved a session uuid: hand it up so the mount
@@ -1201,7 +1187,10 @@ async fn run_sandbox_action(
                 o.insert("enabled".to_string(), json!(enabled));
             }) {
                 Ok(()) => (
-                    format!("Sandbox mode {}.", if enabled { "enabled" } else { "disabled" }),
+                    format!(
+                        "Sandbox mode {}.",
+                        if enabled { "enabled" } else { "disabled" }
+                    ),
                     false,
                 ),
                 Err(e) => (format!("Failed to save sandbox setting: {e}"), true),
@@ -1228,7 +1217,11 @@ async fn run_sandbox_action(
                     // cwd-relative path (fallback literal when unresolvable).
                     let rel = std::env::current_dir()
                         .ok()
-                        .and_then(|cwd| path.strip_prefix(&cwd).ok().map(std::path::Path::to_path_buf))
+                        .and_then(|cwd| {
+                            path.strip_prefix(&cwd)
+                                .ok()
+                                .map(std::path::Path::to_path_buf)
+                        })
                         .map_or_else(
                             || ".lingxi/settings.local.json".to_string(),
                             |p| p.display().to_string(),
@@ -1422,9 +1415,9 @@ async fn run_permission_action(
                     // directory.`
                     let body = if written {
                         match dest {
-                            PermissionUpdateDestination::Session => format!(
-                                "Added {path} as a working directory for this session"
-                            ),
+                            PermissionUpdateDestination::Session => {
+                                format!("Added {path} as a working directory for this session")
+                            }
                             PermissionUpdateDestination::LocalSettings => format!(
                                 "Added {path} as a working directory and saved to local settings"
                             ),
@@ -1436,7 +1429,10 @@ async fn run_permission_action(
                     } else {
                         format!("{path} is already added as a working directory.")
                     };
-                    let _ = turn_tx.send(TurnEvent::SystemNotice { body, is_error: false });
+                    let _ = turn_tx.send(TurnEvent::SystemNotice {
+                        body,
+                        is_error: false,
+                    });
                 }
                 Err(e) => {
                     // claude-code's save-failure variant (the session add is
@@ -1568,12 +1564,12 @@ async fn run_web_action(
                 }
             }
             let env = EnvSearchConfig::from_env();
-            let result = match resolve_client_search_provider_with_credentials(
-                &cfg, &creds, &env,
-            ) {
-                Ok(resolved) => run_client_web_search(&http, &resolved, "current weather Beijing", &[], &[], 3)
-                    .await
-                    .map(|hits| (resolved, hits)),
+            let result = match resolve_client_search_provider_with_credentials(&cfg, &creds, &env) {
+                Ok(resolved) => {
+                    run_client_web_search(&http, &resolved, "current weather Beijing", &[], &[], 3)
+                        .await
+                        .map(|hits| (resolved, hits))
+                }
                 Err(e) => Err(e),
             };
             // Build the BARE message (no ✓/✗ mark) — matches the iocraft
@@ -1680,7 +1676,10 @@ async fn run_connect_action(
         }
         ConnectAction::OAuth { provider_id } => {
             notice(
-                format!("Opening your browser to sign in to {}…", label(&provider_id)),
+                format!(
+                    "Opening your browser to sign in to {}…",
+                    label(&provider_id)
+                ),
                 false,
             );
             match oauth.login(&provider_id).await {
@@ -1884,10 +1883,7 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
 /// Flatten the on-disk skill sections (`skill_api::load_file_skill_sections`:
 /// project `.lingxi/skills/` ancestors + user `~/.lingxi/skills/`) into
 /// `/skills` rows: name + `"<section> · <description>"` detail.
-fn skills_rows(
-    cwd: &std::path::Path,
-    lingxi_home: &std::path::Path,
-) -> Vec<tui::session::InfoRow> {
+fn skills_rows(cwd: &std::path::Path, lingxi_home: &std::path::Path) -> Vec<tui::session::InfoRow> {
     skill_api::load_file_skill_sections(cwd, lingxi_home)
         .into_iter()
         .flat_map(|section| {
@@ -1908,10 +1904,7 @@ fn skills_rows(
 /// selector labels (read-only here): the always-offered Project + User tiers
 /// (marked `(new)` when the file does not exist yet) plus any other LINGXI.md
 /// the `memory::lingxi_md::hierarchy::walk` discovers (project parents).
-fn memory_rows(
-    cwd: &std::path::Path,
-    os_home: &std::path::Path,
-) -> Vec<tui::session::InfoRow> {
+fn memory_rows(cwd: &std::path::Path, os_home: &std::path::Path) -> Vec<tui::session::InfoRow> {
     use memory::lingxi_md::hierarchy::{user_config_dir, walk, FILE_NAME};
     use tui::session::InfoRow;
 
@@ -2148,14 +2141,25 @@ mod tests {
         assert_eq!(v["sandbox"]["enabled"], serde_json::json!(true));
         assert!(matches!(
             rx.try_recv(),
-            Ok(TurnEvent::SystemNotice { is_error: false, .. })
+            Ok(TurnEvent::SystemNotice {
+                is_error: false,
+                ..
+            })
         ));
 
         // Exclude appends to local settings; a repeat is idempotent.
-        run_sandbox_action(SandboxAction::Exclude("npm test:*".into()), paths.clone(), tx.clone())
-            .await;
-        run_sandbox_action(SandboxAction::Exclude("npm test:*".into()), paths.clone(), tx.clone())
-            .await;
+        run_sandbox_action(
+            SandboxAction::Exclude("npm test:*".into()),
+            paths.clone(),
+            tx.clone(),
+        )
+        .await;
+        run_sandbox_action(
+            SandboxAction::Exclude("npm test:*".into()),
+            paths.clone(),
+            tx.clone(),
+        )
+        .await;
         let local: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&local_path).unwrap()).unwrap();
         let arr = local["sandbox"]["excludedCommands"].as_array().unwrap();
@@ -2250,7 +2254,6 @@ mod tests {
         }
         std::fs::write(path, body).unwrap();
     }
-
 
     // ── (Task 3) startup trust gate ───────────────────────────────────────
     //

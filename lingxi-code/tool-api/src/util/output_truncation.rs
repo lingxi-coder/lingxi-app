@@ -79,7 +79,10 @@ mod tests {
         let (out, trunc) = truncate_shell_output(s, 50);
         assert!(trunc);
         // tail = "\n\nbcd" → 2 newlines + 1 = 3.
-        assert_eq!(out, format!("{}\n\n... [3 lines truncated] ...", "a".repeat(50)));
+        assert_eq!(
+            out,
+            format!("{}\n\n... [3 lines truncated] ...", "a".repeat(50))
+        );
     }
 
     #[test]
@@ -88,7 +91,10 @@ mod tests {
         let (out, trunc) = truncate_shell_output(s, 50);
         assert!(trunc);
         // tail = 10 "a"s, 0 newlines + 1 = 1.
-        assert_eq!(out, format!("{}\n\n... [1 lines truncated] ...", "a".repeat(50)));
+        assert_eq!(
+            out,
+            format!("{}\n\n... [1 lines truncated] ...", "a".repeat(50))
+        );
     }
 
     #[test]

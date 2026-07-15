@@ -482,8 +482,7 @@ impl EnterWorktreeTool {
                     .swap(handle.path.clone(), vec![handle.path.clone()]);
                 self.emit_completed(invocation_id, &handle.branch_name, duration_ms)
                     .await;
-                self.emit_worktree_event(WORKTREE_ENTERED_EXISTING)
-                    .await;
+                self.emit_worktree_event(WORKTREE_ENTERED_EXISTING).await;
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
                 let message = worktree_session_message("Entered", &display_path, &suffix);
@@ -569,8 +568,7 @@ impl EnterWorktreeTool {
                     .swap(handle.path.clone(), vec![handle.path.clone()]);
                 self.emit_completed(invocation_id, &handle.branch_name, duration_ms)
                     .await;
-                self.emit_worktree_event(WORKTREE_CREATED)
-                    .await;
+                self.emit_worktree_event(WORKTREE_CREATED).await;
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
                 let message = worktree_session_message("Created", &display_path, &suffix);
@@ -1085,7 +1083,8 @@ impl Tool for ExitWorktreeTool {
             )));
         }
 
-        self.emit_started(&invocation_id, &session.branch_name).await;
+        self.emit_started(&invocation_id, &session.branch_name)
+            .await;
 
         let is_remove = matches!(parsed.action, ExitAction::Remove);
         let discard_changes = parsed.discard_changes.unwrap_or(false);
@@ -1253,12 +1252,12 @@ impl Tool for ExitWorktreeTool {
         // module doc for why that differs from the TUI-only `wCd` render).
         // Byte-recovered from the 2.1.206 binary (`HCd.call`'s keep/remove
         // branches + its `y9o` cwd-restore-phrase helper).
-        let branch_suffix_str =
-            if !session.branch_name.is_empty() && session.branch_name != "HEAD" {
-                format!(" on branch {}", session.branch_name)
-            } else {
-                String::new()
-            };
+        let branch_suffix_str = if !session.branch_name.is_empty() && session.branch_name != "HEAD"
+        {
+            format!(" on branch {}", session.branch_name)
+        } else {
+            String::new()
+        };
         let original_cwd_display = session.original_cwd.to_string_lossy().into_owned();
         let worktree_path_display = session.worktree_path.to_string_lossy().into_owned();
 
@@ -1715,7 +1714,11 @@ mod tests {
             format!("invalid input: {ENTER_SUBAGENT_CWD_OVERRIDE_MESSAGE}")
         );
         assert_eq!(mock.created().len(), 0, "no worktree created");
-        assert_eq!(tool.ctx.cwd(), boot_cwd, "guard must not swap the shared cwd");
+        assert_eq!(
+            tool.ctx.cwd(),
+            boot_cwd,
+            "guard must not swap the shared cwd"
+        );
     }
 
     #[tokio::test]
@@ -1754,8 +1757,14 @@ mod tests {
             .find(|e| e.name == WORKTREE_CREATED)
             .expect("created event fired");
         assert!(ev.metadata.contains_key("mid_session"), "has mid_session");
-        assert!(!ev.metadata.contains_key("cwd_override"), "create: no cwd_override");
-        assert!(!ev.metadata.contains_key("tool_name"), "old tool_name dropped");
+        assert!(
+            !ev.metadata.contains_key("cwd_override"),
+            "create: no cwd_override"
+        );
+        assert!(
+            !ev.metadata.contains_key("tool_name"),
+            "old tool_name dropped"
+        );
         assert!(
             !ev.metadata.contains_key("_PROTO_branch_name"),
             "old branch field dropped"
@@ -1784,7 +1793,10 @@ mod tests {
             .find(|e| e.name == WORKTREE_ENTERED_EXISTING)
             .expect("entered_existing event fired");
         assert!(ev.metadata.contains_key("mid_session"), "has mid_session");
-        assert!(ev.metadata.contains_key("cwd_override"), "enter: has cwd_override");
+        assert!(
+            ev.metadata.contains_key("cwd_override"),
+            "enter: has cwd_override"
+        );
     }
 
     #[tokio::test]
@@ -1929,7 +1941,13 @@ mod tests {
         let (bctx, sink) = make_bctx(mock.clone());
         bctx.bus.attach_sink(sink.clone()).await;
         let wt = PathBuf::from("/tmp/repo-exsub/.lingxi/worktrees/wt");
-        populate_session(&bctx, &PathBuf::from("/tmp/repo-exsub"), &wt, "worktree-wt", None);
+        populate_session(
+            &bctx,
+            &PathBuf::from("/tmp/repo-exsub"),
+            &wt,
+            "worktree-wt",
+            None,
+        );
         let session_cwd = bctx.cwd();
         let tool = ExitWorktreeTool::new(bctx);
         let mut sub = fresh_ctx();
@@ -2010,7 +2028,10 @@ mod tests {
             .await
             .expect("keep on an entered worktree is allowed");
         assert_eq!(tool.ctx.cwd(), original, "cwd restored");
-        assert!(tool.ctx.worktree_session.lock().unwrap().is_none(), "session cleared");
+        assert!(
+            tool.ctx.worktree_session.lock().unwrap().is_none(),
+            "session cleared"
+        );
         assert_eq!(mock.removed().len(), 0);
     }
 
@@ -2021,13 +2042,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let original_cwd = PathBuf::from("/tmp/repo-keep");
         let worktree_path = PathBuf::from("/tmp/repo-keep/.lingxi/worktrees/feat");
-        populate_session(
-            &bctx,
-            &original_cwd,
-            &worktree_path,
-            "worktree-feat",
-            None,
-        );
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         let tool = ExitWorktreeTool::new(bctx);
         let res = tool
             .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
@@ -2062,13 +2077,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let original_cwd = PathBuf::from("/tmp/repo-remove");
         let worktree_path = PathBuf::from("/tmp/repo-remove/.lingxi/worktrees/feat");
-        populate_session(
-            &bctx,
-            &original_cwd,
-            &worktree_path,
-            "worktree-feat",
-            None,
-        );
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         let tool = ExitWorktreeTool::new(bctx);
         let res = tool
             .call(
@@ -2106,13 +2115,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let original_cwd = PathBuf::from("/tmp/repo-remove-fail");
         let worktree_path = PathBuf::from("/tmp/repo-remove-fail/.lingxi/worktrees/feat");
-        populate_session(
-            &bctx,
-            &original_cwd,
-            &worktree_path,
-            "worktree-feat",
-            None,
-        );
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         let tool = ExitWorktreeTool::new(bctx);
         let res = tool
             .call(
@@ -2184,13 +2187,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let original_cwd = PathBuf::from("/tmp/repo-unknown");
         let worktree_path = PathBuf::from("/tmp/repo-unknown/.lingxi/worktrees/feat");
-        populate_session(
-            &bctx,
-            &original_cwd,
-            &worktree_path,
-            "worktree-feat",
-            None,
-        );
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         let tool = ExitWorktreeTool::new(bctx);
         let err = tool
             .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
@@ -2297,13 +2294,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let original_cwd = PathBuf::from("/tmp/repo-force");
         let worktree_path = PathBuf::from("/tmp/repo-force/.lingxi/worktrees/feat");
-        populate_session(
-            &bctx,
-            &original_cwd,
-            &worktree_path,
-            "worktree-feat",
-            None,
-        );
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         let tool = ExitWorktreeTool::new(bctx);
         let res = tool
             .call(
@@ -2382,10 +2373,10 @@ mod tests {
             &self,
             cmd: &traits::SandboxedCommand,
         ) -> Result<traits::ProcessOutput, traits::ProcessError> {
-            self.recorded.lock().unwrap().push((
-                cmd.inner().command.clone(),
-                cmd.inner().args.clone(),
-            ));
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((cmd.inner().command.clone(), cmd.inner().args.clone()));
             Ok(traits::ProcessOutput {
                 stdout: String::new(),
                 stderr: self.stderr.clone(),
@@ -2445,7 +2436,13 @@ mod tests {
         bctx.process = process.clone();
         let original_cwd = PathBuf::from("/tmp/repo-tmux-remove");
         let worktree_path = PathBuf::from("/tmp/repo-tmux-remove/.lingxi/worktrees/feat");
-        populate_session_with_tmux(&bctx, &original_cwd, &worktree_path, "worktree-feat", "wt-x");
+        populate_session_with_tmux(
+            &bctx,
+            &original_cwd,
+            &worktree_path,
+            "worktree-feat",
+            "wt-x",
+        );
         let tool = ExitWorktreeTool::new(bctx);
         let res = tool
             .call(
@@ -2487,7 +2484,13 @@ mod tests {
         bctx.process = process.clone();
         let original_cwd = PathBuf::from("/tmp/repo-tmux-kill-fail");
         let worktree_path = PathBuf::from("/tmp/repo-tmux-kill-fail/.lingxi/worktrees/feat");
-        populate_session_with_tmux(&bctx, &original_cwd, &worktree_path, "worktree-feat", "wt-y");
+        populate_session_with_tmux(
+            &bctx,
+            &original_cwd,
+            &worktree_path,
+            "worktree-feat",
+            "wt-y",
+        );
         let tool = ExitWorktreeTool::new(bctx);
         let res = tool
             .call(
@@ -2522,7 +2525,13 @@ mod tests {
         bctx.process = process.clone();
         let original_cwd = PathBuf::from("/tmp/repo-tmux-keep");
         let worktree_path = PathBuf::from("/tmp/repo-tmux-keep/.lingxi/worktrees/feat");
-        populate_session_with_tmux(&bctx, &original_cwd, &worktree_path, "worktree-feat", "wt-z");
+        populate_session_with_tmux(
+            &bctx,
+            &original_cwd,
+            &worktree_path,
+            "worktree-feat",
+            "wt-z",
+        );
         let tool = ExitWorktreeTool::new(bctx);
         let res = tool
             .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
@@ -2530,7 +2539,10 @@ mod tests {
             .expect("keep must succeed");
 
         // NO tmux call was issued on `keep`.
-        assert!(process.calls().is_empty(), "keep must not kill the tmux session");
+        assert!(
+            process.calls().is_empty(),
+            "keep must not kill the tmux session"
+        );
         assert_eq!(mock.removed().len(), 0);
         // The session name is surfaced in `data` for reattach.
         assert_eq!(res.data["tmux_session_name"], json!("wt-z"));
@@ -2563,8 +2575,9 @@ mod tests {
             let process = Arc::new(RecordingProcess::new(0, ""));
             bctx.process = process.clone();
             let original_cwd = PathBuf::from(format!("/tmp/repo-tmux-inert-{action}"));
-            let worktree_path =
-                PathBuf::from(format!("/tmp/repo-tmux-inert-{action}/.lingxi/worktrees/feat"));
+            let worktree_path = PathBuf::from(format!(
+                "/tmp/repo-tmux-inert-{action}/.lingxi/worktrees/feat"
+            ));
             populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
             let tool = ExitWorktreeTool::new(bctx);
             let input = if action == "remove" {
@@ -2619,8 +2632,14 @@ mod tests {
         let schema = tool.input_schema();
         assert_eq!(schema["required"], json!(["action"]));
         assert_eq!(schema["additionalProperties"], json!(false));
-        assert_eq!(schema["properties"]["action"]["enum"], json!(["keep", "remove"]));
-        assert_eq!(schema["properties"]["discard_changes"]["type"], json!("boolean"));
+        assert_eq!(
+            schema["properties"]["action"]["enum"],
+            json!(["keep", "remove"])
+        );
+        assert_eq!(
+            schema["properties"]["discard_changes"]["type"],
+            json!("boolean")
+        );
     }
 
     #[tokio::test]

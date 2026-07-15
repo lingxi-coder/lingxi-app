@@ -922,6 +922,7 @@ Reach for this when the task matches an available agent type, when you have inde
         ctx: &ToolUseContext,
         budget: Arc<dyn traits::budget::BudgetEnforcerHandle>,
         parent_registry: Arc<tool_api::ToolRegistry>,
+        effective_isolation: Option<String>,
         resolved_cwd: Option<String>,
         agent_worktree: Option<traits::worktree::WorktreeHandle>,
     ) -> Result<ToolCallResult, ToolError> {
@@ -950,11 +951,7 @@ Reach for this when the task matches an available agent type, when you have inde
                 parsed.team_name.clone()
             },
             mode: if is_fork { None } else { parsed.mode.clone() },
-            isolation: if is_fork {
-                None
-            } else {
-                parsed.isolation.clone()
-            },
+            isolation: if is_fork { None } else { effective_isolation },
             // The RESOLVED cwd (explicit `cwd` override, else the isolation
             // worktree's path — claude `cwd ?? worktreePath`); `None` on fork.
             cwd: resolved_cwd,
@@ -1609,7 +1606,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // createAgentWorktree(agentWorktreeSlug(id))` precedes the
         // `run_in_background` branch, and the effective cwd `ge = l ??
         // ye?.worktreePath` is threaded into BOTH). When the caller requests
-        // `isolation:"worktree"` (non-fork) create a git worktree (slug
+        // `isolation:"worktree"` or the selected agent definition declares
+        // `isolation: worktree` (non-fork), create a git worktree (slug
         // `agent-<id>` → branch `worktree-agent-<id>` under `.lingxi/worktrees/`,
         // matching claude's scheme) and run the agent in it; an explicit `cwd`
         // takes precedence as the run dir (claude `cwd ?? worktreePath`).
@@ -1617,12 +1615,19 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // post-completion keep/cleanup judgment: run HERE on the sync path, and
         // by the detached background lifecycle on the async path (claude hands
         // the `getWorktreeResult` closure to the task — see `dispatch_async`).
-        // (`def.isolation` frontmatter as a secondary source is not threaded to
-        // the tool layer yet — the model-facing `isolation` arg is the supported
-        // path.)
+        // The model-facing `isolation` argument wins over the definition's
+        // frontmatter; omitted args inherit `SelectedAgentMeta.isolation`.
+        let effective_isolation = if is_fork {
+            None
+        } else {
+            parsed
+                .isolation
+                .clone()
+                .or_else(|| selected.isolation.clone())
+        };
         let mut agent_worktree: Option<traits::worktree::WorktreeHandle> = None;
         let mut resolved_cwd: Option<String> = if is_fork { None } else { parsed.cwd.clone() };
-        if !is_fork && parsed.isolation.as_deref() == Some("worktree") {
+        if effective_isolation.as_deref() == Some("worktree") {
             let slug = format!("agent-{invocation_id}");
             match self.ctx.worktree.create_worktree(&slug, None, &[]).await {
                 Ok(handle) => {
@@ -1667,6 +1672,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     &ctx,
                     budget.clone(),
                     parent_registry.clone(),
+                    effective_isolation.clone(),
                     resolved_cwd,
                     agent_worktree,
                 )
@@ -1721,11 +1727,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // Worktree notice (claude AgentTool.tsx:598-602): when the fork child
             // runs in an isolated worktree, claude appends
             // `build_worktree_notice(getCwd(), worktreeInfo.worktreePath)` to the
-            // fork prefix. Worktree isolation is DEFERRED in this arch
-            // (subagent_spawn.rs documents isolation deferred), so there is no
-            // worktree to notice today — this is intentionally a NO-OP (do NOT
-            // fabricate a worktree). Lands with the isolation batch via
-            // `traits::fork_subagent::build_worktree_notice`.
+            // fork prefix. LingXi's fork path deliberately carries no
+            // teammate/isolation/cwd overrides (see the request fields below), so
+            // there is no worktree to notice here — do NOT fabricate one.
             Some(fork_msgs)
         } else {
             None
@@ -1739,8 +1743,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
             context_paths: parsed.context_paths.clone(),
             // AgentTool spawn-surface parity: thread the new params through.
             // `model` is mapped to the agent model override by the spawner; the
-            // rest are carried with their behavior deferred (teammate routing /
-            // worktree-remote isolation / cwd override land with later batches).
+            // resolved `cwd`/`worktree` are computed above before the sync/async
+            // branch. Remote/team-specific execution remains a higher-level
+            // router concern.
             description: Some(parsed.description.clone()),
             // Fork path sends `model: None` (claude `model: undefined`) so the
             // FORK_AGENT's `Inherit` resolves to the parent model unchanged; the
@@ -1760,7 +1765,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             isolation: if is_fork {
                 None
             } else {
-                parsed.isolation.clone()
+                effective_isolation.clone()
             },
             // The RESOLVED cwd (the explicit `cwd` override, else the worktree
             // path for `isolation:"worktree"`) — the spawner sets

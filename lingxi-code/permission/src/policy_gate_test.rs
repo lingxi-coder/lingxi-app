@@ -760,7 +760,10 @@ mod tests {
         // the mutation trips the plan backstop → delegated to the inner transport,
         // while a read-only tool stays frictionless. The gate's own mode is never
         // mutated (the parent's checks are unaffected).
-        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::BypassPermissions);
+        let policy = policy_with(
+            r#"{ "permissions": {} }"#,
+            PermissionMode::BypassPermissions,
+        );
         let inner = RecordingInner::new(PermissionDecision::Deny {
             reason: "plan blocks writes".into(),
         });
@@ -786,7 +789,11 @@ mod tests {
             ..Default::default()
         };
         let edit = gate
-            .check_with_context("Edit", &serde_json::json!({ "file_path": "/x.rs" }), &plan_ctx)
+            .check_with_context(
+                "Edit",
+                &serde_json::json!({ "file_path": "/x.rs" }),
+                &plan_ctx,
+            )
             .await;
         match edit {
             PermissionOutcome::Deny { reason } => {
@@ -888,8 +895,10 @@ mod tests {
             PermissionMode::Auto,
             std::iter::empty(),
         ));
-        let gate =
-            PolicyPermissionGate::new(policy.clone(), RecordingInner::new(PermissionDecision::Allow));
+        let gate = PolicyPermissionGate::new(
+            policy.clone(),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
 
         match gate
             .resolve_detailed(

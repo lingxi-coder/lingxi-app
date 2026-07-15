@@ -181,7 +181,13 @@ pub fn references_user_config(s: &str) -> bool {
 #[must_use]
 pub fn option_env_key(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .to_ascii_uppercase()
 }
@@ -241,7 +247,10 @@ mod tests {
 
     #[test]
     fn inline_stringifies() {
-        let out = substitute_value(&json!("port=${user_config.PORT}&k=${user_config.API_KEY}"), &ctx());
+        let out = substitute_value(
+            &json!("port=${user_config.PORT}&k=${user_config.API_KEY}"),
+            &ctx(),
+        );
         assert_eq!(out, json!("port=8080&k=sk-123"));
     }
 
@@ -283,7 +292,10 @@ mod tests {
             "--port=${user_config.PORT}".to_string(),
             "${user_config.API_KEY}".to_string(),
         ];
-        assert_eq!(substitute_args(&args, &ctx()), vec!["--port=8080", "sk-123"]);
+        assert_eq!(
+            substitute_args(&args, &ctx()),
+            vec!["--port=8080", "sk-123"]
+        );
     }
 
     #[test]
@@ -297,7 +309,10 @@ mod tests {
 
     #[test]
     fn string_field_stringifies_number() {
-        assert_eq!(substitute_string_field("${user_config.PORT}", &ctx()), "8080");
+        assert_eq!(
+            substitute_string_field("${user_config.PORT}", &ctx()),
+            "8080"
+        );
     }
 
     #[test]

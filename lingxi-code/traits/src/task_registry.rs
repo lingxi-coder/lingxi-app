@@ -314,11 +314,12 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Mark a task as having had its terminal output consumed by a reader,
     /// suppressing a later duplicate `<task-notification>`. Mirrors claude-code
     /// `TaskOutputTool`'s `updateTaskState(task_id, t => ({ ...t, notified: true
-    /// }))` in both the non-blocking and blocking terminal branches. A terminal +
-    /// now-notified task is eagerly evicted from the registry (claude-code
-    /// `evictTerminalTask`). A `None`/unknown id is a no-op for callers that
-    /// cannot guarantee the task still exists; the default impl is a no-op so
-    /// existing mock handles compile unchanged.
+    /// }))` in both the non-blocking and blocking terminal branches. The task is
+    /// retained after notification so callers can still list/read completed
+    /// background work until an explicit cleanup/delete path removes it. A
+    /// `None`/unknown id is a no-op for callers that cannot guarantee the task
+    /// still exists; the default impl is a no-op so existing mock handles compile
+    /// unchanged.
     async fn mark_notified(&self, _id: &str) -> Result<(), TaskRegistryError> {
         Ok(())
     }
@@ -344,8 +345,8 @@ pub trait TaskRegistryHandle: Send + Sync {
     }
 
     /// Drain the terminal tasks that have NOT yet been surfaced to the model,
-    /// marking each `notified` (which eagerly evicts it) so a given completion
-    /// is reported exactly once. Returns a snapshot of each drained task for the
+    /// marking each `notified` so a given completion is reported exactly once.
+    /// Returns a snapshot of each drained task for the
     /// `<task-notification>` renderer, in registry-iteration order.
     ///
     /// 1:1 with claude-code's per-task-type completion path: a task that reaches

@@ -610,7 +610,13 @@ impl ApiService {
     /// Report a retry backoff to the attached [`RetryReporter`] (no-op if none).
     /// Called immediately before each retry sleep. `state.attempt` is the
     /// upcoming attempt number; `ctl.max_retries` the cap.
-    fn report_retry(&self, error: &LlmError, delay: Duration, state: &RetryState, ctl: &RetryControl) {
+    fn report_retry(
+        &self,
+        error: &LlmError,
+        delay: Duration,
+        state: &RetryState,
+        ctl: &RetryControl,
+    ) {
         if let Some(reporter) = &self.retry_reporter {
             reporter.report(RetryInfo {
                 message: error.to_string(),
@@ -2519,11 +2525,8 @@ impl ApiService {
                                 // `tengu_streaming_watchdog_retry` surface).
                                 let frame = match s.idle_timeout {
                                     Some(timeout) => {
-                                        match tokio::time::timeout(
-                                            timeout,
-                                            s.frames.next_frame(),
-                                        )
-                                        .await
+                                        match tokio::time::timeout(timeout, s.frames.next_frame())
+                                            .await
                                         {
                                             Ok(r) => r,
                                             Err(_elapsed) => Err(

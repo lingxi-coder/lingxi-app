@@ -534,9 +534,7 @@ pub fn run_app(
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
     orchestrator: Option<std::sync::Arc<dyn traits::OrchestratorHandle>>,
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    command_registry: Option<
-        std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
-    >,
+    command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
     task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
     on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
@@ -596,6 +594,7 @@ pub fn run_app(
     app.chat_widget.apply_startup_prefs(
         tui_core::theme_persist::load_verbose(),
         tui_core::theme_persist::load_editor_mode_is_vim(),
+        tui_core::theme_persist::load_vim_insert_mode_remaps(),
     );
     if let Some(slot) = subscription {
         app.chat_widget.set_subscription(slot);
@@ -919,18 +918,19 @@ mod tests {
 
     #[test]
     fn slash_image_pushes_image_message() {
-        let path = std::env::temp_dir().join(format!("tui-app-slash-image-{}.png", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("tui-app-slash-image-{}.png", std::process::id()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut app = test_app(Vec::new());
         let outcome = submit_command(&mut app, &format!("/image {}", path.display()));
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert_eq!(cells(&app).len(), 1);
         let image = cell::<UserImageCell>(&app, 0);
-        assert_eq!(image.source_path(), Some(path.display().to_string().as_str()));
         assert_eq!(
-            image.metadata(),
-            path.file_name().and_then(|n| n.to_str())
+            image.source_path(),
+            Some(path.display().to_string().as_str())
         );
+        assert_eq!(image.metadata(), path.file_name().and_then(|n| n.to_str()));
         std::fs::remove_file(&path).ok();
     }
 
@@ -1565,7 +1565,7 @@ mod tests {
             .view_stack()
             .contains::<ScreenView>());
         app.on_key(press(KeyCode::Esc)); // close /hooks
-        // `/agents` prints the 2.1.205 removed-notice (no picker view).
+                                         // `/agents` prints the 2.1.205 removed-notice (no picker view).
         assert!(matches!(
             submit_command(&mut app, "/agents"),
             ChatOutcome::Continue
@@ -1814,8 +1814,7 @@ mod tests {
                     .collect();
                 if rest[seq.len()..].starts_with('r') && seq.contains(';') {
                     let (top, bottom) = seq.split_once(';').unwrap();
-                    let (top, bottom): (u16, u16) =
-                        (top.parse().unwrap(), bottom.parse().unwrap());
+                    let (top, bottom): (u16, u16) = (top.parse().unwrap(), bottom.parse().unwrap());
                     assert!(
                         top < bottom,
                         "height {height}: degenerate scroll region ESC[{seq}r (top must be < bottom) — leaks a stray `[` on iTerm2"
@@ -2150,7 +2149,11 @@ mod tests {
         // The just-opened EMPTY assistant cell renders NO tail row (no stray `●`
         // before content) — the viewport is just the running pane (5: status +
         // composer 3 + footer). The tail appears once content streams.
-        assert_eq!(app.viewport_height(120), 5, "no tail row until content streams");
+        assert_eq!(
+            app.viewport_height(120),
+            5,
+            "no tail row until content streams"
+        );
         // A long markdown paragraph wraps at 120 columns into several rows.
         let paragraph = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(10);
         app.apply_turn_event(TurnEvent::TextDelta(paragraph));
@@ -2196,7 +2199,11 @@ mod tests {
         // Row 0 is top padding (no border glyph).
         assert!(!rows[0].contains('┌'), "composer top padding: {}", rows[0]);
         assert!(rows[1].starts_with("› /"), "prompt row: {}", rows[1]);
-        assert!(!rows[2].contains('└'), "composer bottom padding: {}", rows[2]);
+        assert!(
+            !rows[2].contains('└'),
+            "composer bottom padding: {}",
+            rows[2]
+        );
         // The popup box (6-item window) sits directly beneath the composer.
         assert!(rows[3].contains("Complete"), "popup title: {}", rows[3]);
         // Alphabetical popup order (claude-code): /add-dir sorts first.

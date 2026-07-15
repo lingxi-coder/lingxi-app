@@ -332,7 +332,8 @@ async fn build_context_resolves_inherit_to_default_model() {
             "go research",
             def,
         )
-        .await;
+        .await
+        .expect("context should build");
     assert!(
         matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7")
     );
@@ -378,7 +379,8 @@ async fn build_context_wires_budget_description_and_tool_resolution() {
             "do the task",
             def,
         )
-        .await;
+        .await
+        .expect("context should build");
     // Budget inherited (was None before this fix).
     assert!(
         ctx.budget.is_some(),
@@ -401,7 +403,8 @@ async fn build_context_without_default_model_leaves_model_raw() {
         .unwrap();
     let ctx = handler
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
-        .await;
+        .await
+        .expect("context should build");
     assert!(matches!(&ctx.agent_definition.model, AgentModel::Inherit));
     // Empty team_name spawns standalone → team_name is None (leader default).
     assert_eq!(ctx.agent_name.as_deref(), Some("lead"));
@@ -444,7 +447,8 @@ async fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
         .unwrap();
     let ctx = handler
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
-        .await;
+        .await
+        .expect("context should build");
     assert!(
         matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-8"),
         "opusplan + plan mode must resolve an Inherit teammate to Opus, got {:?}",
@@ -472,7 +476,8 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
         .unwrap();
     let ctx = handler
         .build_context(protocol::AgentId::new(), "lead", "", "", def)
-        .await;
+        .await
+        .expect("context should build");
     assert!(
         matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"),
         "opusplan outside plan mode must keep the resolved parent (Sonnet), got {:?}",

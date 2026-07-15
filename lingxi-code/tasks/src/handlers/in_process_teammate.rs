@@ -385,7 +385,7 @@ impl InProcessTeammateHandler {
         team_name: &str,
         description: &str,
         mut definition: AgentDefinition,
-    ) -> SubagentContext {
+    ) -> Result<SubagentContext, TaskError> {
         // Resolve the model preference to a concrete wire id, mirroring the
         // `PoolSubagentSpawner` seam (`Inherit`→parent model, family alias→
         // concrete id), so a wired teammate runs against a live provider. Unset
@@ -415,6 +415,7 @@ impl InProcessTeammateHandler {
                     0,
                 )
                 .await
+                .map_err(|e| TaskError::Internal(e.to_string()))?
             }
             None => (Vec::new(), Vec::new()),
         };
@@ -431,7 +432,7 @@ impl InProcessTeammateHandler {
             )]
         };
         let icon = definition.icon.clone();
-        SubagentContext {
+        Ok(SubagentContext {
             agent_id,
             parent_agent_id: None,
             // Swarm identity (claude-code `TeammateContext.agentName` /
@@ -486,7 +487,7 @@ impl InProcessTeammateHandler {
             hook_cwd: self.hook_cwd.clone(),
             depth: 0,
             permission_mode_override: None,
-        }
+        })
     }
 }
 
@@ -586,7 +587,7 @@ impl Task for InProcessTeammateHandler {
         })?;
         let subagent_ctx = self
             .build_context(agent_id, &name, &team_name, &description, definition)
-            .await;
+            .await?;
 
         // 4. Allocate the slot — the pool spawns the persistent runner and
         //    hands back the outbound SubagentEvent stream.
@@ -686,12 +687,29 @@ impl Task for InProcessTeammateHandler {
             },
         );
 
-        // 7. Cleanup seam: synchronous, so it only flips the streaming worker's
-        //    stop flag. Authoritative teardown (UserExit + deallocate) flows
-        //    through the async `Task::kill`, which the registry invokes.
+        // 7. Cleanup seam: synchronous, so it cannot await, but it must still
+        //    release the pool slot. Remove the live entry, stop the streaming
+        //    worker, and best-effort schedule the async deallocate on the current
+        //    runtime. `Task::kill` remains the authoritative explicit stop path;
+        //    cleanup covers parent/session teardown where the registry only has
+        //    the returned `TaskHandle`.
         let cleanup_stop = stop;
+        let cleanup_pool = self.pool.clone();
+        let cleanup_entries = self.entries.clone();
+        let cleanup_task_id = task_id.clone();
         let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             cleanup_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let Some(agent_id) = cleanup_entries.try_lock().ok().and_then(|mut entries| {
+                entries.remove(&cleanup_task_id).map(|entry| entry.agent_id)
+            }) else {
+                return;
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let pool = cleanup_pool.clone();
+                handle.spawn(async move {
+                    let _ = pool.deallocate(&agent_id).await;
+                });
+            }
         });
 
         Ok(TaskHandle {

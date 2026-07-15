@@ -77,7 +77,11 @@ impl TasksView {
         )));
         lines.push(Line::from(""));
         for (i, r) in self.rows.iter().enumerate() {
-            let marker = if i == self.selected { "\u{276f} " } else { "  " };
+            let marker = if i == self.selected {
+                "\u{276f} "
+            } else {
+                "  "
+            };
             let short: String = r.task_id.chars().take(9).collect();
             let label = r.command.clone().unwrap_or_else(|| r.description.clone());
             let text = format!(
@@ -281,4 +285,3 @@ mod tests {
         assert!(text.contains("cargo build"), "{text}");
     }
 }
-

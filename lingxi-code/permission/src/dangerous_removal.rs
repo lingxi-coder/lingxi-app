@@ -428,6 +428,25 @@ pub fn check_dangerous_removal(
     cwd: &Path,
     home: Option<&str>,
 ) -> Option<DangerousRemoval> {
+    check_dangerous_removal_inner(command, cwd, home, 0)
+}
+
+fn check_dangerous_removal_inner(
+    command: &str,
+    cwd: &Path,
+    home: Option<&str>,
+    depth: usize,
+) -> Option<DangerousRemoval> {
+    if depth > 8 {
+        return None;
+    }
+
+    for inner in active_command_substitutions(command) {
+        if let Some(hit) = check_dangerous_removal_inner(&inner, cwd, home, depth + 1) {
+            return Some(hit);
+        }
+    }
+
     for sub in crate::shell_command::split_command(command) {
         let tokens = split_argv(&sub);
         let Some((base, rest)) = tokens.split_first() else {
@@ -463,6 +482,115 @@ pub fn check_dangerous_removal(
                 }
             }
         }
+    }
+    None
+}
+
+fn active_command_substitutions(command: &str) -> Vec<String> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut single = false;
+    let mut double = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && !single {
+            i += 2;
+            continue;
+        }
+        if c == '\'' && !double {
+            single = !single;
+            i += 1;
+            continue;
+        }
+        if c == '"' && !single {
+            double = !double;
+            i += 1;
+            continue;
+        }
+        if single {
+            i += 1;
+            continue;
+        }
+
+        if c == '`' {
+            if let Some((inner, next)) = parse_backtick_substitution(&chars, i + 1) {
+                out.push(inner);
+                i = next;
+                continue;
+            }
+        }
+
+        if c == '$' && chars.get(i + 1) == Some(&'(') {
+            if let Some((inner, next)) = parse_paren_substitution(&chars, i + 2) {
+                out.push(inner);
+                i = next;
+                continue;
+            }
+        }
+
+        if !double && (c == '<' || c == '>') && chars.get(i + 1) == Some(&'(') {
+            if let Some((inner, next)) = parse_paren_substitution(&chars, i + 2) {
+                out.push(inner);
+                i = next;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    out
+}
+
+fn parse_paren_substitution(chars: &[char], mut i: usize) -> Option<(String, usize)> {
+    let start = i;
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && !single {
+            i += 2;
+            continue;
+        }
+        if c == '\'' && !double {
+            single = !single;
+            i += 1;
+            continue;
+        }
+        if c == '"' && !single {
+            double = !double;
+            i += 1;
+            continue;
+        }
+        if !single && c == '(' {
+            depth += 1;
+        } else if !single && c == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some((chars[start..i].iter().collect(), i + 1));
+            }
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn parse_backtick_substitution(chars: &[char], mut i: usize) -> Option<(String, usize)> {
+    let start = i;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 2;
+            continue;
+        }
+        if chars[i] == '`' {
+            return Some((chars[start..i].iter().collect(), i + 1));
+        }
+        i += 1;
     }
     None
 }
@@ -756,10 +884,7 @@ lazy_regex!(trailing_bracket_re, r"[)\]}]+$");
 lazy_regex!(redirect_start_re, r"^[\d&]*[<>]");
 // `/^(?:[0-9]+|&)?(?:>>?[|&]?|<<?<?|<>)$/` — a COMPLETE redirection operator
 // (its operand, the next arg, is then skipped).
-lazy_regex!(
-    redirect_full_re,
-    r"^(?:[0-9]+|&)?(?:>>?[|&]?|<<?<?|<>)$"
-);
+lazy_regex!(redirect_full_re, r"^(?:[0-9]+|&)?(?:>>?[|&]?|<<?<?|<>)$");
 // TS `Okg` (bin @219709311): a target beginning with an optionally
 // double-quoted `$VAR` / `${VAR}`, then `/`, then one of `*`, `$`, `/`, a
 // quote, or end-of-string.
@@ -1124,6 +1249,27 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_rm_inside_command_substitution_is_detected() {
+        let d = check_dangerous_removal("echo $(rm -rf /)", &cwd(), HOME).unwrap();
+        assert_eq!(d.resolved_path, "/");
+
+        let d = check_dangerous_removal("echo `rm -rf /etc`", &cwd(), HOME).unwrap();
+        assert_eq!(d.resolved_path, "/etc");
+
+        let d = check_dangerous_removal("diff <(rm -rf ~) file", &cwd(), HOME).unwrap();
+        assert_eq!(d.resolved_path, "/home/u");
+
+        let d =
+            check_dangerous_removal("echo $(printf '%s' $(rm -rf /usr))", &cwd(), HOME).unwrap();
+        assert_eq!(d.resolved_path, "/usr");
+    }
+
+    #[test]
+    fn quoted_literal_substitution_is_not_recursively_executed() {
+        assert!(check_dangerous_removal("echo '$(rm -rf /)'", &cwd(), HOME).is_none());
+    }
+
+    #[test]
     fn tilde_expansion_targets_home() {
         // `rm -rf ~` expands to the home directory → dangerous.
         let d = check_dangerous_removal("rm -rf ~", &cwd(), HOME).unwrap();
@@ -1338,8 +1484,7 @@ mod tests {
         assert_eq!(t, "$VAR/*");
         // A `$()` command substitution earlier in the line is blanked, so the
         // rm target after `;` is still reached.
-        let (_, t2) =
-            dangerous_rm_on_variable_path("x=$(date) ; rm -rf $VAR/*").unwrap();
+        let (_, t2) = dangerous_rm_on_variable_path("x=$(date) ; rm -rf $VAR/*").unwrap();
         assert_eq!(t2, "$VAR/*");
         // A backtick span is blanked.
         let (_, t3) = dangerous_rm_on_variable_path("echo `id` ; rm -rf $VAR/*").unwrap();

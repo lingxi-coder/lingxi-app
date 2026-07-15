@@ -78,8 +78,16 @@ fn fkn_special_shapes() {
     }
 
     // Copy/Move-Item include -Destination as a path param.
-    assert!(FKN.get("copy-item").unwrap().path_params.contains(&"-destination"));
-    assert!(FKN.get("move-item").unwrap().path_params.contains(&"-destination"));
+    assert!(FKN
+        .get("copy-item")
+        .unwrap()
+        .path_params
+        .contains(&"-destination"));
+    assert!(FKN
+        .get("move-item")
+        .unwrap()
+        .path_params
+        .contains(&"-destination"));
 
     // Pop-Location takes no path params.
     assert!(FKN.get("pop-location").unwrap().path_params.is_empty());
@@ -142,7 +150,10 @@ fn extract_positional_and_named_paths() {
     assert!(!e.has_unvalidatable_path_arg);
 
     // Named -Path with a skipped -Value.
-    let e = extract_paths(&cmd("Set-Content", &["-Path", "out.txt", "-Value", "hello"]));
+    let e = extract_paths(&cmd(
+        "Set-Content",
+        &["-Path", "out.txt", "-Value", "hello"],
+    ));
     assert_eq!(e.paths, vec!["out.txt"]);
     assert_eq!(e.operation_type, PsOperation::Write);
 
@@ -152,11 +163,20 @@ fn extract_positional_and_named_paths() {
 
 #[test]
 fn extract_colon_form_and_quote_strip() {
-    assert_eq!(extract_paths(&cmd("Set-Content", &["-Path:out.txt"])).paths, vec!["out.txt"]);
+    assert_eq!(
+        extract_paths(&cmd("Set-Content", &["-Path:out.txt"])).paths,
+        vec!["out.txt"]
+    );
     // Surrounding quotes stripped from a -Param:value value.
-    assert_eq!(extract_paths(&cmd("Set-Content", &["-Path:\"my file.txt\""])).paths, vec!["my file.txt"]);
+    assert_eq!(
+        extract_paths(&cmd("Set-Content", &["-Path:\"my file.txt\""])).paths,
+        vec!["my file.txt"]
+    );
     // Unambiguous abbreviation binds to -Path.
-    assert_eq!(extract_paths(&cmd("Get-Content", &["-pa", "z.txt"])).paths, vec!["z.txt"]);
+    assert_eq!(
+        extract_paths(&cmd("Get-Content", &["-pa", "z.txt"])).paths,
+        vec!["z.txt"]
+    );
 }
 
 #[test]
@@ -172,7 +192,10 @@ fn extract_switch_ignored_value_param_skipped() {
 #[test]
 fn extract_positional_skip_and_optional_write() {
     // Invoke-WebRequest skips the positional URI (positional_skip=1); only -OutFile is a path.
-    let e = extract_paths(&cmd("Invoke-WebRequest", &["https://example.com/x", "-OutFile", "dl.bin"]));
+    let e = extract_paths(&cmd(
+        "Invoke-WebRequest",
+        &["https://example.com/x", "-OutFile", "dl.bin"],
+    ));
     assert_eq!(e.paths, vec!["dl.bin"]);
     assert_eq!(e.operation_type, PsOperation::Write);
     assert!(e.optional_write);
@@ -185,7 +208,10 @@ fn extract_positional_skip_and_optional_write() {
 #[test]
 fn extract_leaf_only_param() {
     // New-Item -Name takes a bare leaf → valid path.
-    assert_eq!(extract_paths(&cmd("New-Item", &["-Name", "notes.md"])).paths, vec!["notes.md"]);
+    assert_eq!(
+        extract_paths(&cmd("New-Item", &["-Name", "notes.md"])).paths,
+        vec!["notes.md"]
+    );
     // A leaf value containing a separator is un-validatable, NOT a path.
     let e = extract_paths(&cmd("New-Item", &["-Name", "sub/notes.md"]));
     assert!(e.paths.is_empty());
@@ -347,20 +373,44 @@ fn reason_of(c: &PsPathClass) -> &str {
 #[test]
 fn classify_string_guards_block_with_exact_reasons() {
     use ps_path_reasons as R;
-    assert_eq!(reason_of(&classify("~bob/x", PsOperation::Read)), R::TILDE_USER);
+    assert_eq!(
+        reason_of(&classify("~bob/x", PsOperation::Read)),
+        R::TILDE_USER
+    );
     assert_eq!(reason_of(&classify("a`b", PsOperation::Read)), R::BACKTICK);
-    assert_eq!(reason_of(&classify("Registry::HKLM", PsOperation::Read)), R::PROVIDER_QUALIFIED);
-    assert_eq!(reason_of(&classify("//server/share", PsOperation::Read)), R::UNC);
-    assert_eq!(reason_of(&classify("$env:TEMP/x", PsOperation::Read)), R::VARIABLE_EXPANSION);
-    assert_eq!(reason_of(&classify("dir/../escape", PsOperation::Read)), R::TRAVERSAL);
+    assert_eq!(
+        reason_of(&classify("Registry::HKLM", PsOperation::Read)),
+        R::PROVIDER_QUALIFIED
+    );
+    assert_eq!(
+        reason_of(&classify("//server/share", PsOperation::Read)),
+        R::UNC
+    );
+    assert_eq!(
+        reason_of(&classify("$env:TEMP/x", PsOperation::Read)),
+        R::VARIABLE_EXPANSION
+    );
+    assert_eq!(
+        reason_of(&classify("dir/../escape", PsOperation::Read)),
+        R::TRAVERSAL
+    );
 }
 
 #[test]
 fn classify_glob_reason_depends_on_operation() {
     use ps_path_reasons as R;
-    assert_eq!(reason_of(&classify("out*.txt", PsOperation::Write)), R::GLOB_WRITE);
-    assert_eq!(reason_of(&classify("out*.txt", PsOperation::Create)), R::GLOB_WRITE);
-    assert_eq!(reason_of(&classify("in*.txt", PsOperation::Read)), R::GLOB_READ);
+    assert_eq!(
+        reason_of(&classify("out*.txt", PsOperation::Write)),
+        R::GLOB_WRITE
+    );
+    assert_eq!(
+        reason_of(&classify("out*.txt", PsOperation::Create)),
+        R::GLOB_WRITE
+    );
+    assert_eq!(
+        reason_of(&classify("in*.txt", PsOperation::Read)),
+        R::GLOB_READ
+    );
 }
 
 #[test]
@@ -370,7 +420,8 @@ fn classify_provider_and_drive_relative() {
     assert!(r.contains("uses a non-filesystem provider"));
     assert!(r.contains("C:foo"));
     // A URL-like provider prefix.
-    assert!(reason_of(&classify("http:notafile", PsOperation::Read)).contains("non-filesystem provider"));
+    assert!(reason_of(&classify("http:notafile", PsOperation::Read))
+        .contains("non-filesystem provider"));
 
     // On Windows, `C:foo` is drive-relative (distinct reason).
     let w = classify_ps_path("C:foo", PsOperation::Read, true, Some("C:\\Users\\u"));
@@ -382,26 +433,36 @@ fn classify_clean_paths_proceed_normalized() {
     // Backslashes normalized, surrounding quotes stripped.
     assert_eq!(
         classify("src\\file.txt", PsOperation::Read),
-        PsPathClass::Proceed { normalized: "src/file.txt".to_string() }
+        PsPathClass::Proceed {
+            normalized: "src/file.txt".to_string()
+        }
     );
     assert_eq!(
         classify("'quoted name.txt'", PsOperation::Read),
-        PsPathClass::Proceed { normalized: "quoted name.txt".to_string() }
+        PsPathClass::Proceed {
+            normalized: "quoted name.txt".to_string()
+        }
     );
     // `~/x` (tilde followed by '/') is expanded, NOT a ~user block.
     assert_eq!(
         classify("~/proj/a.txt", PsOperation::Read),
-        PsPathClass::Proceed { normalized: "/home/u/proj/a.txt".to_string() }
+        PsPathClass::Proceed {
+            normalized: "/home/u/proj/a.txt".to_string()
+        }
     );
     // A leading `../` is not traversal-after-segment → proceeds.
     assert_eq!(
         classify("../sibling.txt", PsOperation::Read),
-        PsPathClass::Proceed { normalized: "../sibling.txt".to_string() }
+        PsPathClass::Proceed {
+            normalized: "../sibling.txt".to_string()
+        }
     );
     // A plain relative path proceeds.
     assert_eq!(
         classify("logs/today.txt", PsOperation::Read),
-        PsPathClass::Proceed { normalized: "logs/today.txt".to_string() }
+        PsPathClass::Proceed {
+            normalized: "logs/today.txt".to_string()
+        }
     );
 }
 
@@ -409,7 +470,10 @@ fn classify_clean_paths_proceed_normalized() {
 fn classify_guard_ordering_var_before_provider() {
     // `$` variable-expansion fires before the provider-prefix guard.
     use ps_path_reasons as R;
-    assert_eq!(reason_of(&classify("env:$x", PsOperation::Read)), R::VARIABLE_EXPANSION);
+    assert_eq!(
+        reason_of(&classify("env:$x", PsOperation::Read)),
+        R::VARIABLE_EXPANSION
+    );
 }
 
 fn ps_roots() -> crate::filesystem::FsRoots {
@@ -430,7 +494,13 @@ fn check_ps_path_allows_inside_working_dir() {
     ));
     // An absolute path inside cwd → allowed.
     assert!(matches!(
-        check_ps_path("/proj/work/sub/a.txt", PsOperation::Read, &roots, &[], false),
+        check_ps_path(
+            "/proj/work/sub/a.txt",
+            PsOperation::Read,
+            &roots,
+            &[],
+            false
+        ),
         PsPathOutcome::Allowed { .. }
     ));
 }
@@ -449,12 +519,24 @@ fn check_ps_path_honors_additional_working_dirs() {
     let roots = ps_roots();
     let extra = [std::path::PathBuf::from("/tmp/allowed")];
     assert!(matches!(
-        check_ps_path("/tmp/allowed/f.txt", PsOperation::Write, &roots, &extra, false),
+        check_ps_path(
+            "/tmp/allowed/f.txt",
+            PsOperation::Write,
+            &roots,
+            &extra,
+            false
+        ),
         PsPathOutcome::Allowed { .. }
     ));
     // Still blocked outside both cwd and the extra dir.
     assert!(matches!(
-        check_ps_path("/tmp/other/f.txt", PsOperation::Write, &roots, &extra, false),
+        check_ps_path(
+            "/tmp/other/f.txt",
+            PsOperation::Write,
+            &roots,
+            &extra,
+            false
+        ),
         PsPathOutcome::AskContainment { .. }
     ));
 }
@@ -473,11 +555,13 @@ fn check_ps_path_string_guard_wins_over_containment() {
     }
 }
 
-fn ctx_of<'a>(
-    roots: &'a crate::filesystem::FsRoots,
-    add: &'a [std::path::PathBuf],
-) -> PsCtx<'a> {
-    PsCtx { roots, additional: add, is_windows: false, is_macos: false }
+fn ctx_of<'a>(roots: &'a crate::filesystem::FsRoots, add: &'a [std::path::PathBuf]) -> PsCtx<'a> {
+    PsCtx {
+        roots,
+        additional: add,
+        is_windows: false,
+        is_macos: false,
+    }
 }
 
 fn one_cmd_stmt(command: PsCommand) -> PsStatement {
@@ -496,9 +580,15 @@ fn validate_one(command: PsCommand) -> PsContainmentResult {
 #[test]
 fn xgg_allows_path_inside_cwd() {
     // Get-Content of a file under cwd → passthrough.
-    assert_eq!(validate_one(cmd("Get-Content", &["notes.txt"])), PsContainmentResult::Passthrough);
     assert_eq!(
-        validate_one(cmd("Set-Content", &["-Path", "/proj/work/out.txt", "-Value", "x"])),
+        validate_one(cmd("Get-Content", &["notes.txt"])),
+        PsContainmentResult::Passthrough
+    );
+    assert_eq!(
+        validate_one(cmd(
+            "Set-Content",
+            &["-Path", "/proj/work/out.txt", "-Value", "x"]
+        )),
         PsContainmentResult::Passthrough
     );
 }
@@ -518,7 +608,9 @@ fn xgg_asks_with_template_b_outside_cwd() {
 fn xgg_string_guard_message_wins() {
     // A tilde-user path asks with the guard reason (not template B).
     match validate_one(cmd("Get-Content", &["~bob/secret"])) {
-        PsContainmentResult::Ask { message, .. } => assert_eq!(message, ps_path_reasons::TILDE_USER),
+        PsContainmentResult::Ask { message, .. } => {
+            assert_eq!(message, ps_path_reasons::TILDE_USER)
+        }
         other => panic!("expected Ask, got {other:?}"),
     }
 }
@@ -534,7 +626,10 @@ fn xgg_remove_item_protected_path_denies() {
         other => panic!("expected Deny, got {other:?}"),
     }
     // Alias `rm` normalizes to remove-item.
-    assert!(matches!(validate_one(cmd("rm", &["/"])), PsContainmentResult::Deny { .. }));
+    assert!(matches!(
+        validate_one(cmd("rm", &["/"])),
+        PsContainmentResult::Deny { .. }
+    ));
 }
 
 #[test]
@@ -544,7 +639,10 @@ fn xgg_remove_recurse_targeting_cwd_asks() {
         // /proj/work is itself a top-level-ish path? No: dirname is /proj, not /.
         // It equals cwd → the recurse guard asks about deleting the working dir.
         PsContainmentResult::Ask { message, .. } => {
-            assert!(message.contains("would delete the working directory"), "{message}");
+            assert!(
+                message.contains("would delete the working directory"),
+                "{message}"
+            );
         }
         other => panic!("expected Ask, got {other:?}"),
     }
@@ -556,7 +654,10 @@ fn xgg_write_without_path_asks() {
     // NOT optional_write, unlike Invoke-WebRequest.
     match validate_one(cmd("Out-File", &["-Encoding", "utf8"])) {
         PsContainmentResult::Ask { message, .. } => {
-            assert!(message.contains("is a write operation but no target path"), "{message}");
+            assert!(
+                message.contains("is a write operation but no target path"),
+                "{message}"
+            );
         }
         other => panic!("expected Ask, got {other:?}"),
     }
@@ -564,7 +665,10 @@ fn xgg_write_without_path_asks() {
 
 #[test]
 fn xgg_non_path_cmdlet_passes_through() {
-    assert_eq!(validate_one(cmd("Write-Output", &["hello"])), PsContainmentResult::Passthrough);
+    assert_eq!(
+        validate_one(cmd("Write-Output", &["hello"])),
+        PsContainmentResult::Passthrough
+    );
 }
 
 #[test]
@@ -572,7 +676,9 @@ fn xgg_pipeline_source_before_cmdlet_asks() {
     let roots = ps_roots();
     let stmt = PsStatement {
         commands: vec![
-            PsElement::Expression { text: "$x".to_string() },
+            PsElement::Expression {
+                text: "$x".to_string(),
+            },
             PsElement::Command(cmd("Set-Content", &["out.txt"])),
         ],
         nested_commands: Vec::new(),
@@ -580,7 +686,10 @@ fn xgg_pipeline_source_before_cmdlet_asks() {
     };
     match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
         PsContainmentResult::Ask { message, .. } => {
-            assert!(message.contains("receives its path from a pipeline expression source"), "{message}");
+            assert!(
+                message.contains("receives its path from a pipeline expression source"),
+                "{message}"
+            );
         }
         other => panic!("expected Ask, got {other:?}"),
     }
@@ -592,7 +701,10 @@ fn xgg_redirection_outside_cwd_asks() {
     let stmt = PsStatement {
         commands: vec![PsElement::Command(cmd("Get-Process", &[]))],
         nested_commands: Vec::new(),
-        redirections: vec![PsRedirection { target: "/etc/evil".to_string(), is_merging: false }],
+        redirections: vec![PsRedirection {
+            target: "/etc/evil".to_string(),
+            is_merging: false,
+        }],
     };
     match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
         PsContainmentResult::Ask { message, .. } => assert_eq!(
@@ -610,8 +722,14 @@ fn xgg_merging_and_empty_redirections_skipped() {
         commands: vec![PsElement::Command(cmd("Get-Process", &[]))],
         nested_commands: Vec::new(),
         redirections: vec![
-            PsRedirection { target: String::new(), is_merging: true },
-            PsRedirection { target: String::new(), is_merging: false },
+            PsRedirection {
+                target: String::new(),
+                is_merging: true,
+            },
+            PsRedirection {
+                target: String::new(),
+                is_merging: false,
+            },
         ],
     };
     assert_eq!(
@@ -645,7 +763,10 @@ fn zu_compound_cd_asks() {
     let stmt = one_cmd_stmt(cmd("Get-Content", &["notes.txt"]));
     match validate_ps_statements(&[stmt], &ctx_of(&roots, &[]), true) {
         PsContainmentResult::Ask { message, .. } => {
-            assert!(message.contains("Compound command changes working directory"), "{message}");
+            assert!(
+                message.contains("Compound command changes working directory"),
+                "{message}"
+            );
         }
         other => panic!("expected Ask, got {other:?}"),
     }

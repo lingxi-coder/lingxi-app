@@ -268,7 +268,11 @@ impl AgentsScreenState {
                 )));
             }
             for (idx, row) in members {
-                let marker = if self.selected == Some(idx) { "> " } else { "  " };
+                let marker = if self.selected == Some(idx) {
+                    "> "
+                } else {
+                    "  "
+                };
                 let mut spans = vec![
                     Span::raw(marker.to_string()),
                     Span::styled(
@@ -488,10 +492,8 @@ mod tests {
 
     #[test]
     fn reload_keeps_selection_on_same_session() {
-        let mut s = AgentsScreenState::new(vec![
-            row("a", "one", "working"),
-            row("b", "two", "working"),
-        ]);
+        let mut s =
+            AgentsScreenState::new(vec![row("a", "one", "working"), row("b", "two", "working")]);
         let _ = s.on_key(key(KeyCode::Down));
         assert_eq!(s.selected(), Some(1)); // on "b"
         s.reload(vec![

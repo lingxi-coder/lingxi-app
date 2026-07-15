@@ -142,7 +142,8 @@ pub trait ShellExpansionProvider: Send + Sync {
     /// declared allow-list (e.g. `["Bash(git add:*)", …]`), injected on top of
     /// the base policy for this expansion only; `shell` is the
     /// frontmatter-selected shell (`None` → bash; builtins always pass `None`).
-    fn build(&self, allowed_tools: &[String], shell: Option<FrontmatterShell>) -> ShellExpansionCtx;
+    fn build(&self, allowed_tools: &[String], shell: Option<FrontmatterShell>)
+        -> ShellExpansionCtx;
 }
 
 /// A single extracted shell command: its full matched span (for replacement)

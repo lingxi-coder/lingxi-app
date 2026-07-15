@@ -423,8 +423,15 @@ mod tests {
         // The current GPT-5.5 remains selectable + highlighted.
         assert_eq!(p.rows[p.selected()].display, "GPT-5.5");
         let text = render_text(&p, Rect::new(0, 0, 60, 12));
-        assert!(text.contains("GLM (coding)") && text.contains("OpenAI"), "{text}");
-        assert_eq!(text.matches("GLM-5.1").count(), 1, "no duplicate row: {text}");
+        assert!(
+            text.contains("GLM (coding)") && text.contains("OpenAI"),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("GLM-5.1").count(),
+            1,
+            "no duplicate row: {text}"
+        );
     }
 
     #[test]
@@ -530,9 +537,7 @@ mod tests {
         // The stored display of the non-thinking row is CLEAN (no tag) — so the
         // statusline/welcome identity that read it stay untagged.
         assert!(
-            p.rows()
-                .iter()
-                .any(|r| r.display == "Qwen3 Coder (free)"),
+            p.rows().iter().any(|r| r.display == "Qwen3 Coder (free)"),
             "stored display must not carry the tag"
         );
         // But the rendered picker shows the tag on the non-thinking row only.
@@ -540,12 +545,25 @@ mod tests {
         // has spaces between them — strip spaces before matching.)
         let text = render_text(&p, Rect::new(0, 0, 60, 20));
         let packed = text.replace(' ', "");
-        assert!(packed.contains("无思考"), "non-thinking row shows the tag: {text}");
-        assert!(packed.contains("·无思考"), "tag carries the `·` separator: {text}");
+        assert!(
+            packed.contains("无思考"),
+            "non-thinking row shows the tag: {text}"
+        );
+        assert!(
+            packed.contains("·无思考"),
+            "tag carries the `·` separator: {text}"
+        );
         // The thinking row (GPT-5.5) is NOT tagged — only ONE 无思考 in the view.
-        assert_eq!(packed.matches("无思考").count(), 1, "only the non-thinking row is tagged: {text}");
+        assert_eq!(
+            packed.matches("无思考").count(),
+            1,
+            "only the non-thinking row is tagged: {text}"
+        );
         // The clean display name still renders (ASCII, no inter-cell spaces).
-        assert!(text.contains("Qwen3 Coder (free)"), "clean display renders: {text}");
+        assert!(
+            text.contains("Qwen3 Coder (free)"),
+            "clean display renders: {text}"
+        );
     }
 
     #[test]
@@ -699,7 +717,11 @@ mod tests {
             ));
         }
         let filtered: Vec<&str> = p.rows().iter().map(|r| r.request_model.as_str()).collect();
-        assert_eq!(filtered, vec!["openai/gpt-4o"], "only the GPT row matches 'gpt'");
+        assert_eq!(
+            filtered,
+            vec!["openai/gpt-4o"],
+            "only the GPT row matches 'gpt'"
+        );
         // Enter switches to the single filtered match.
         let outcome = p.handle_key(press(KeyCode::Enter));
         assert!(matches!(

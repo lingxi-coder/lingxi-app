@@ -197,7 +197,20 @@ async fn ensure_did_open(
             }),
         )
         .await?;
-    tracker.mark_open(client.name(), uri.clone()).await;
+    for (server_name, evicted_uri) in tracker.mark_open(client.name(), uri.clone()).await {
+        if server_name == client.name() {
+            client
+                .notify(
+                    "textDocument/didClose",
+                    json!({
+                        "textDocument": {
+                            "uri": evicted_uri,
+                        }
+                    }),
+                )
+                .await?;
+        }
+    }
     Ok(())
 }
 

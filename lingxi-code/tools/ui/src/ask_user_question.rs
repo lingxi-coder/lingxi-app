@@ -1171,7 +1171,10 @@ mod tests {
     #[test]
     fn timeout_default_is_never_and_blocks() {
         // Oracle default: never (wait forever, no auto-continue).
-        assert_eq!(AskUserQuestionTimeout::default(), AskUserQuestionTimeout::Never);
+        assert_eq!(
+            AskUserQuestionTimeout::default(),
+            AskUserQuestionTimeout::Never
+        );
         assert_eq!(AskUserQuestionTimeout::Never.idle_window(), None);
         assert_eq!(AskUserQuestionTimeout::Never.as_settings_str(), "never");
     }

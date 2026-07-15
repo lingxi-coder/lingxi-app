@@ -35,11 +35,18 @@ pub(crate) fn footer_line(props: &FooterProps, theme: &tui_core::theme::Theme) -
     let dim = crate::style_adapter::to_ratatui(theme.dim);
     if props.mode == FooterMode::CtrlCReminder {
         let claude = crate::style_adapter::to_ratatui(theme.claude);
-        return Line::from(Span::styled("Press Ctrl-C again to exit", Style::default().fg(claude)));
+        return Line::from(Span::styled(
+            "Press Ctrl-C again to exit",
+            Style::default().fg(claude),
+        ));
     }
     let base = match props.mode {
-        FooterMode::CompletionActive => "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run",
-        FooterMode::IdleVerbose => "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit",
+        FooterMode::CompletionActive => {
+            "↑/↓: pick  ·  Tab: complete  ·  Esc: dismiss  ·  Enter: run"
+        }
+        FooterMode::IdleVerbose => {
+            "Enter: send  ·  Ctrl-O: collapse  ·  ↑/↓: history  ·  Esc: quit"
+        }
         // CtrlCReminder is unreachable here (early return above); listed only
         // to keep the match exhaustive without a wildcard.
         FooterMode::Idle | FooterMode::CtrlCReminder => {
@@ -52,13 +59,21 @@ pub(crate) fn footer_line(props: &FooterProps, theme: &tui_core::theme::Theme) -
     };
     let mut spans = vec![Span::styled(text, Style::default().fg(dim))];
     if let Some(cost) = &props.cost {
-        spans.push(Span::styled(format!("  ·  {cost}"), Style::default().fg(dim)));
+        spans.push(Span::styled(
+            format!("  ·  {cost}"),
+            Style::default().fg(dim),
+        ));
     }
     Line::from(spans)
 }
 
 /// Render the footer with the codex 2-column indent (codex `render_footer_line`).
-pub(crate) fn render_footer(area: Rect, buf: &mut Buffer, props: &FooterProps, theme: &tui_core::theme::Theme) {
+pub(crate) fn render_footer(
+    area: Rect,
+    buf: &mut Buffer,
+    props: &FooterProps,
+    theme: &tui_core::theme::Theme,
+) {
     let indent = " ".repeat(FOOTER_INDENT_COLS);
     let mut line = footer_line(props, theme);
     line.spans.insert(0, Span::raw(indent));
@@ -78,22 +93,43 @@ mod tests {
         };
         let line = footer_line(&props, &tui_core::theme::Theme::dark());
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit  ·  $0.0123");
+        assert_eq!(
+            text,
+            "Enter: send  ·  Alt+Enter: newline  ·  Ctrl-O: verbose  ·  Esc: quit  ·  $0.0123"
+        );
     }
 
     #[test]
     fn footer_renders_with_two_column_indent() {
-        let props = FooterProps { mode: FooterMode::Idle, vim_label: None, cost: None };
+        let props = FooterProps {
+            mode: FooterMode::Idle,
+            vim_label: None,
+            cost: None,
+        };
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         render_footer(area, &mut buf, &props, &tui_core::theme::Theme::dark());
-        let row: String = (0..80).map(|x| buf.cell(ratatui::layout::Position::new(x, 0)).unwrap().symbol().to_string()).collect();
-        assert!(row.starts_with("  Enter: send"), "2-col FOOTER_INDENT_COLS prefix: {row:?}");
+        let row: String = (0..80)
+            .map(|x| {
+                buf.cell(ratatui::layout::Position::new(x, 0))
+                    .unwrap()
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            row.starts_with("  Enter: send"),
+            "2-col FOOTER_INDENT_COLS prefix: {row:?}"
+        );
     }
 
     #[test]
     fn footer_ctrl_c_reminder_replaces_hints() {
-        let props = FooterProps { mode: FooterMode::CtrlCReminder, vim_label: None, cost: Some("$1".into()) };
+        let props = FooterProps {
+            mode: FooterMode::CtrlCReminder,
+            vim_label: None,
+            cost: Some("$1".into()),
+        };
         let line = footer_line(&props, &tui_core::theme::Theme::dark());
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "Press Ctrl-C again to exit"); // transient reminder stays clean (no cost suffix)

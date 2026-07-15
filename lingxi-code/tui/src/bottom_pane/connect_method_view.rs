@@ -65,9 +65,7 @@ impl Renderable for ConnectMethodView {
             .min(area.width.saturating_sub(4))
             .max(30);
         let rows = self.state.options.len().max(1);
-        let height = u16::try_from(rows + 4)
-            .unwrap_or(u16::MAX)
-            .min(area.height);
+        let height = u16::try_from(rows + 4).unwrap_or(u16::MAX).min(area.height);
         let rect = centered_rect(width, height, area);
 
         Clear.render(rect, buf);
@@ -77,7 +75,11 @@ impl Renderable for ConnectMethodView {
 
         let mut lines: Vec<Line> = Vec::with_capacity(rows + 1);
         for (i, opt) in self.state.options.iter().enumerate() {
-            let marker = if i == self.state.selected { "❯ " } else { "  " };
+            let marker = if i == self.state.selected {
+                "❯ "
+            } else {
+                "  "
+            };
             let style = if i == self.state.selected {
                 Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {

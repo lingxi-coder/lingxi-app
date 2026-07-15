@@ -345,8 +345,7 @@ pub fn reasoning_for_request(
         // Non-Claude: only honor an EXPLICIT fixed budget.
         match thinking {
             ThinkingConfig::Enabled { budget_tokens } => {
-                let budget =
-                    budget_tokens.min(max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
+                let budget = budget_tokens.min(max_tokens.unwrap_or(u32::MAX).saturating_sub(1));
                 Some(crate::ReasoningConfig::Enabled {
                     budget_tokens: budget,
                 })

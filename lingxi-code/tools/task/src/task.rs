@@ -2587,9 +2587,8 @@ impl Tool for TaskOutputTool {
         // terminal branch (after `waitForTaskCompletion`)). `chunk.done` is true
         // for exactly those terminal statuses, so a single guarded call covers
         // both. Suppresses a later duplicate `<task-notification>` for a task the
-        // model has already seen; the registry also eagerly evicts the now
-        // terminal+notified task. Best-effort: a failure here must not fail the
-        // read that already succeeded.
+        // model has already seen while keeping the task inspectable. Best-effort:
+        // a failure here must not fail the read that already succeeded.
         if chunk.done {
             let _ = registry.mark_notified(&task_id).await;
         }

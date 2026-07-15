@@ -31,6 +31,7 @@
 //! script thread sends last is delivered to the caller.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 
@@ -39,6 +40,7 @@ use futures::stream::StreamExt;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use traits::filesystem::FileSystem;
+use traits::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
 use traits::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
@@ -73,9 +75,38 @@ const WORKFLOW_AGENT_CAP_MESSAGE: &str = "Workflow agent() call cap reached (100
 /// `__WF_THROW_PREFIX` (`String.fromCharCode(1)+"__wf_throw__"+...`).
 const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
 
+const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
+
 /// Build a throw-channel result slot carrying `message`.
 fn wf_throw(message: &str) -> String {
     format!("{WF_THROW_PREFIX}{message}")
+}
+
+fn user_config_home_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(branding::CONFIG_DIR_ENV) {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .map(|home| home.join(branding::DOT_DIR))
+}
+
+fn saved_workflow_candidates(name: &str) -> Vec<PathBuf> {
+    let project = PathBuf::from(branding::DOT_DIR).join("workflows");
+    let mut dirs = vec![project.clone()];
+    if let Some(user) = user_config_home_dir().map(|home| home.join("workflows")) {
+        if user != project {
+            dirs.push(user);
+        }
+    }
+    dirs.into_iter()
+        .flat_map(|dir| {
+            WORKFLOW_EXTENSIONS
+                .iter()
+                .map(move |ext| dir.join(format!("{name}{ext}")))
+        })
+        .collect()
 }
 
 /// Normalize the opts object for the resume chain-key (claude-code `ABp`).
@@ -217,6 +248,11 @@ pub struct LocalWorkflowHandler {
     output_manager: Arc<TaskOutputManager>,
     /// Where terminal status transitions are reported.
     status_sink: Arc<dyn TaskStatusSink>,
+    /// Optional worktree manager used to realize workflow `agent(...,
+    /// {isolation:"worktree"})` calls. When wired, each isolated workflow
+    /// subagent gets a fresh worktree cwd and the terminal keep/cleanup
+    /// judgment runs after the spawn returns.
+    worktree_manager: Option<Arc<dyn traits::worktree::WorktreeManager>>,
     /// `task_id` → live worker-cancel record (removed by the worker on exit, or
     /// by [`Task::kill`] / cleanup).
     workers: Arc<Mutex<HashMap<String, WorkerCancel>>>,
@@ -263,6 +299,7 @@ impl LocalWorkflowHandler {
             budget,
             output_manager,
             status_sink: Arc::new(NoopStatusSink),
+            worktree_manager: None,
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
             bus: Arc::new(AnalyticsBus::new()),
@@ -276,6 +313,16 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
+        self
+    }
+
+    /// Wire workflow-agent worktree isolation.
+    #[must_use]
+    pub fn with_worktree_manager(
+        mut self,
+        manager: Arc<dyn traits::worktree::WorktreeManager>,
+    ) -> Self {
+        self.worktree_manager = Some(manager);
         self
     }
 
@@ -335,6 +382,106 @@ impl LocalWorkflowHandler {
                 .set_status(&task_id, TaskStatus::Killed)
                 .await;
         }
+    }
+}
+
+struct WorkflowIsolationSpawner {
+    inner: Arc<dyn SubagentSpawner>,
+    worktree: Arc<dyn traits::worktree::WorktreeManager>,
+    slug_prefix: String,
+    sequence: AtomicU64,
+}
+
+impl WorkflowIsolationSpawner {
+    async fn spawn_inner(
+        &self,
+        mut request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        let worktree = if request.isolation.as_deref() == Some("worktree") {
+            let seq = self
+                .sequence
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let slug = format!("workflow-agent-{}-{seq}", self.slug_prefix);
+            let handle = self
+                .worktree
+                .create_worktree(&slug, None, &[])
+                .await
+                .map_err(|e| {
+                    SubagentSpawnError::Runtime(format!(
+                        "Cannot create workflow agent worktree: {e}"
+                    ))
+                })?;
+            if request.cwd.is_none() {
+                request.cwd = Some(handle.path.to_string_lossy().into_owned());
+            }
+            request.worktree = Some(handle.clone());
+            Some(handle)
+        } else {
+            request.worktree.clone()
+        };
+
+        let result = self
+            .inner
+            .spawn_with_progress(request, inherit, progress)
+            .await;
+        if let Some(handle) = worktree.as_ref() {
+            let _ = traits::worktree::agent_worktree_result(self.worktree.as_ref(), handle).await;
+        }
+        result
+    }
+}
+
+#[async_trait]
+impl SubagentSpawner for WorkflowIsolationSpawner {
+    async fn spawn(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_inner(request, inherit, None).await
+    }
+
+    async fn spawn_with_progress(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<SubagentResult, SubagentSpawnError> {
+        self.spawn_inner(request, inherit, progress).await
+    }
+
+    async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+        self.inner.agent_listing().await
+    }
+
+    async fn resolve_required_mcp_servers(&self, subagent_type: &str) -> Vec<String> {
+        self.inner.resolve_required_mcp_servers(subagent_type).await
+    }
+
+    async fn resolve_selection(
+        &self,
+        subagent_type: &str,
+        model: Option<&str>,
+    ) -> SelectedAgentMeta {
+        self.inner.resolve_selection(subagent_type, model).await
+    }
+
+    async fn register_name(&self, name: &str, agent_id: protocol::AgentId) {
+        self.inner.register_name(name, agent_id).await;
+    }
+
+    async fn resolve_name(&self, name: &str) -> Option<protocol::AgentId> {
+        self.inner.resolve_name(name).await
+    }
+
+    async fn spawn_async(
+        &self,
+        request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
+    ) -> Result<traits::subagent_spawn::AsyncLaunch, SubagentSpawnError> {
+        self.inner.spawn_async(request, inherit).await
     }
 }
 
@@ -1083,8 +1230,9 @@ pub async fn run_workflow_script(
 }
 
 /// Resolve a `workflow()` reference (`{ name }` or `{ scriptPath }`) to a script
-/// source via `fs`: `scriptPath` is read directly; `name` resolves under
-/// `.lingxi/workflows/<name>.{js,mjs,ts}`.
+/// source: `scriptPath` is read through the workflow filesystem; `name` resolves
+/// under project `.lingxi/workflows` first, then the user config workflow
+/// directory (`$LINGXI_CONFIG_DIR/workflows` or `~/.lingxi/workflows`).
 async fn resolve_nested_script(
     spec: &Value,
     fs: Option<&Arc<dyn FileSystem>>,
@@ -1106,15 +1254,15 @@ async fn resolve_nested_script(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
     {
-        for ext in [".js", ".mjs", ".ts"] {
-            if let Ok(fc) = fs
-                .read_file(
-                    &format!("{}/workflows/{name}{ext}", branding::DOT_DIR),
-                    None,
-                    None,
-                )
-                .await
-            {
+        for candidate in saved_workflow_candidates(name) {
+            let candidate = candidate.to_string_lossy().into_owned();
+            if PathBuf::from(&candidate).is_absolute() {
+                match std::fs::read_to_string(&candidate) {
+                    Ok(src) if !src.is_empty() => return Ok(src),
+                    Ok(_) => continue,
+                    Err(_) => {}
+                }
+            } else if let Ok(fc) = fs.read_file(&candidate, None, None).await {
                 if !fc.content.is_empty() {
                     return Ok(fc.content);
                 }
@@ -1173,6 +1321,7 @@ impl Task for LocalWorkflowHandler {
         //    awaits `run_workflow_script`, spools the script's return value,
         //    reports the terminal status, and removes its own cancel record.
         let spawner = self.spawner.clone();
+        let worktree_manager = self.worktree_manager.clone();
         let tool_invoker = self.tool_invoker.clone();
         let budget = self.budget.clone();
         let status_sink = self.status_sink.clone();
@@ -1362,10 +1511,21 @@ impl Task for LocalWorkflowHandler {
                     }
                 };
                 let run_start = std::time::Instant::now();
+                let workflow_spawner: Arc<dyn SubagentSpawner> =
+                    if let Some(worktree) = worktree_manager.clone() {
+                        Arc::new(WorkflowIsolationSpawner {
+                            inner: spawner.clone(),
+                            worktree,
+                            slug_prefix: worker_task_id.clone(),
+                            sequence: AtomicU64::new(0),
+                        })
+                    } else {
+                        spawner.clone()
+                    };
                 let run = run_workflow_script(
                     &script,
                     DEFAULT_WORKFLOW_SUBAGENT,
-                    spawner,
+                    workflow_spawner,
                     tool_invoker,
                     budget,
                     Some(ptx),

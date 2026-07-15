@@ -753,7 +753,9 @@ impl Renderable for ComposerView<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         // Codex chat_composer render: a borderless background block…
         let style = crate::style::user_message_style();
-        ratatui::widgets::Block::default().style(style).render(area, buf);
+        ratatui::widgets::Block::default()
+            .style(style)
+            .render(area, buf);
         let inner = inner_rect(area);
         if inner.width == 0 || inner.height == 0 {
             return;
@@ -1190,7 +1192,7 @@ mod tests {
         let (x, y) = view.cursor_pos(area).expect("cursor");
         assert_eq!((x, y), (4, 3), "cursor on the bottom visible row");
         assert!(y < area.bottom() - 1, "cursor stays inside the padding");
-    }    
+    }
     #[test]
     fn view_wraps_long_line_and_reports_wrapped_height() {
         let c = typed("hello world this wraps");
@@ -1203,7 +1205,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         ComposerView::new(&c).render(area, &mut buf);
         let row2 = buffer_row(&buf, 2).trim().to_string();
-        assert!(!row2.is_empty(), "row2 should have wrapped text, got {:?}", buffer_row(&buf, 2));
+        assert!(
+            !row2.is_empty(),
+            "row2 should have wrapped text, got {:?}",
+            buffer_row(&buf, 2)
+        );
     }
 
     #[test]

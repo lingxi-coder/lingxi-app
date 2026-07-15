@@ -197,7 +197,10 @@ mod terminal_api_error_tests {
             t.contains("is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup)."),
             "got: {t}"
         );
-        assert!(!t.contains("weapons-related content"), "206 removed the weapons arm; got: {t}");
+        assert!(
+            !t.contains("weapons-related content"),
+            "206 removed the weapons arm; got: {t}"
+        );
         assert!(!t.contains("added safeguards for"), "got: {t}");
     }
 
@@ -1734,9 +1737,9 @@ mod max_output_tokens_recovery_tests {
     async fn max_tokens_recovery_nudge_persists_with_top_level_is_meta() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session_path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn traits::FileSystem> = Arc::new(
-            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
-        );
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             session_path.clone(),
             fs,

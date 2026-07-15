@@ -263,10 +263,7 @@ pub fn classify_cmdline(argv: Option<&[String]>) -> bool {
         return true;
     }
     // `n.slice(1,4)` → indices 1,2,3.
-    argv.iter()
-        .skip(1)
-        .take(3)
-        .any(|a| a == DAEMON_SUBCOMMAND)
+    argv.iter().skip(1).take(3).any(|a| a == DAEMON_SUBCOMMAND)
 }
 
 // ---------------------------------------------------------------------------
@@ -607,13 +604,7 @@ pub fn acquire_or_yield<P: LockProbe>(
                     } else {
                         // Lost the takeover race — report the live peer that won,
                         // or fall back to reporting the takeover if it vanished.
-                        match evaluate_holder(
-                            runtime_dir,
-                            lock.pid,
-                            probe,
-                            RETRY_ATTEMPTS,
-                            sleep,
-                        ) {
+                        match evaluate_holder(runtime_dir, lock.pid, probe, RETRY_ATTEMPTS, sleep) {
                             HolderEval::LiveOther { pid, version } => Ok(LockOutcome::Yield {
                                 holder_pid: pid,
                                 version,
@@ -656,11 +647,7 @@ pub fn emit_yield() {
 /// yielding holder still owns the lock after the handover deadline (binary:
 /// "yield acked but lock still held after 5s … refusing").
 pub fn emit_yield_takeover(acked: bool, held_after_ms: u64) {
-    tracing::info!(
-        event = "tengu_daemon_yield_takeover",
-        acked,
-        held_after_ms,
-    );
+    tracing::info!(event = "tengu_daemon_yield_takeover", acked, held_after_ms,);
 }
 
 /// Emit `tengu_daemon_lease` — a lease lifecycle transition (`"open"` /
@@ -718,9 +705,10 @@ mod tests {
             self
         }
         fn start(mut self, pid: i32, seq: Vec<Option<&str>>) -> Self {
-            self.start_seq
-                .borrow_mut()
-                .insert(pid, seq.into_iter().map(|s| s.map(str::to_string)).collect());
+            self.start_seq.borrow_mut().insert(
+                pid,
+                seq.into_iter().map(|s| s.map(str::to_string)).collect(),
+            );
             self
         }
     }
@@ -868,7 +856,10 @@ mod tests {
 
         let mut mine = sample_lock(2222, Some("new"));
         mine.started_at = 1_800_000_000_000;
-        assert!(write_lock_takeover(&dir, &mine).unwrap(), "we won the readback");
+        assert!(
+            write_lock_takeover(&dir, &mine).unwrap(),
+            "we won the readback"
+        );
 
         let got = read_lock(&dir).unwrap();
         assert_eq!(got.pid, 2222);
@@ -904,10 +895,7 @@ mod tests {
 
     #[test]
     fn cmdline_rejects_unrelated_process() {
-        let argv = vec![
-            "/usr/bin/vim".to_string(),
-            "notes.txt".to_string(),
-        ];
+        let argv = vec!["/usr/bin/vim".to_string(), "notes.txt".to_string()];
         assert!(!classify_cmdline(Some(&argv)));
     }
 
@@ -931,7 +919,13 @@ mod tests {
         let probe = FakeProbe::new().alive(9000);
         let mut sleeper = no_sleep();
         // expected None → true, no probe calls.
-        assert!(start_time_matches(&probe, 9000, None, RETRY_ATTEMPTS, &mut sleeper));
+        assert!(start_time_matches(
+            &probe,
+            9000,
+            None,
+            RETRY_ATTEMPTS,
+            &mut sleeper
+        ));
         assert_eq!(*probe.calls.borrow(), 0);
     }
 
@@ -968,15 +962,17 @@ mod tests {
             &mut sleeper
         ));
         assert_eq!(*probe.calls.borrow(), 2, "probed twice");
-        assert_eq!(sleeps, vec![RETRY_BACKOFF_MS], "one backoff between the two tries");
+        assert_eq!(
+            sleeps,
+            vec![RETRY_BACKOFF_MS],
+            "one backoff between the two tries"
+        );
     }
 
     #[test]
     fn start_time_exhausts_all_none() {
         // Never readable across all attempts → false, backoff on each retry.
-        let probe = FakeProbe::new()
-            .alive(9000)
-            .start(9000, vec![None, None]);
+        let probe = FakeProbe::new().alive(9000).start(9000, vec![None, None]);
         let mut sleeps = Vec::new();
         let mut sleeper = |ms: u64| sleeps.push(ms);
         assert!(!start_time_matches(
@@ -1158,9 +1154,21 @@ mod tests {
         acquire(&dir, &old).unwrap();
         let probe = FakeProbe::new().alive(5555).start(5555, vec![Some("S")]);
         let mut s = no_sleep();
-        assert!(holder_needs_upgrade(&dir, "2.1.201", &probe, RETRY_ATTEMPTS, &mut s));
+        assert!(holder_needs_upgrade(
+            &dir,
+            "2.1.201",
+            &probe,
+            RETRY_ATTEMPTS,
+            &mut s
+        ));
         // same version → no upgrade needed.
-        assert!(!holder_needs_upgrade(&dir, "2.1.200", &probe, RETRY_ATTEMPTS, &mut s));
+        assert!(!holder_needs_upgrade(
+            &dir,
+            "2.1.200",
+            &probe,
+            RETRY_ATTEMPTS,
+            &mut s
+        ));
     }
 
     #[test]
@@ -1168,7 +1176,13 @@ mod tests {
         let dir = tmpdir();
         let probe = FakeProbe::new();
         let mut s = no_sleep();
-        assert!(!holder_needs_upgrade(&dir, "2.1.201", &probe, RETRY_ATTEMPTS, &mut s));
+        assert!(!holder_needs_upgrade(
+            &dir,
+            "2.1.201",
+            &probe,
+            RETRY_ATTEMPTS,
+            &mut s
+        ));
     }
 
     // ---- log line -------------------------------------------------------

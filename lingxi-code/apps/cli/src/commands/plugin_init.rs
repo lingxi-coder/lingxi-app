@@ -78,9 +78,15 @@ fn plugin_json(
     );
     root.insert("name".to_string(), Value::String(name.to_string()));
     root.insert("version".to_string(), Value::String("0.1.0".to_string()));
-    root.insert("description".to_string(), Value::String(description.to_string()));
+    root.insert(
+        "description".to_string(),
+        Value::String(description.to_string()),
+    );
     root.insert("author".to_string(), Value::Object(author_obj));
-    root.insert("skills".to_string(), Value::Array(vec![Value::String("./".to_string())]));
+    root.insert(
+        "skills".to_string(),
+        Value::Array(vec![Value::String("./".to_string())]),
+    );
 
     if with_channel {
         let mut channel = Map::new();
@@ -97,8 +103,15 @@ fn plugin_json(
 
 /// The seven valid `--with` component names, in the binary's canonical scaffold
 /// order (mcp before channel so channel's `.mcp.json` wins when both are asked).
-const WITH_COMPONENTS: [&str; 7] =
-    ["skills", "agents", "hooks", "mcp", "lsp", "output-style", "channel"];
+const WITH_COMPONENTS: [&str; 7] = [
+    "skills",
+    "agents",
+    "hooks",
+    "mcp",
+    "lsp",
+    "output-style",
+    "channel",
+];
 
 /// `agents/example.md` — an example subagent definition.
 const AGENT_EXAMPLE_MD: &str = "---\n\
@@ -387,7 +400,10 @@ pub fn run_init(
     std::fs::write(
         manifest_dir.join("plugin.json"),
         // The binary writes plugin.json with a trailing newline (`}\n`).
-        format!("{}\n", plugin_json(name, &author, &email, description, with_channel)),
+        format!(
+            "{}\n",
+            plugin_json(name, &author, &email, description, with_channel)
+        ),
     )
     .map_err(|e| format!("✘ Failed to write plugin.json: {e}"))?;
     std::fs::write(plugin_root.join("SKILL.md"), skill_md(name))
@@ -428,7 +444,16 @@ mod tests {
     #[test]
     fn init_scaffolds_manifest_and_skill() {
         let e = env();
-        let msg = run_init("myplug", Some("Bob"), Some("a@b.c"), None, false, &[], &e.home).unwrap();
+        let msg = run_init(
+            "myplug",
+            Some("Bob"),
+            Some("a@b.c"),
+            None,
+            false,
+            &[],
+            &e.home,
+        )
+        .unwrap();
         assert!(
             msg.starts_with("✔ Created plugin \"myplug\" at "),
             "got: {msg}"
@@ -441,11 +466,20 @@ mod tests {
             &std::fs::read_to_string(root.join(".lingxi-plugin").join("plugin.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(manifest["$schema"], "https://anthropic.com/claude-code/plugin.schema.json");
+        assert_eq!(
+            manifest["$schema"],
+            "https://anthropic.com/claude-code/plugin.schema.json"
+        );
         assert_eq!(manifest["name"], "myplug");
         assert_eq!(manifest["version"], "0.1.0");
-        assert_eq!(manifest["description"], "TODO: describe what this plugin provides");
-        assert_eq!(manifest["author"], serde_json::json!({"name": "Bob", "email": "a@b.c"}));
+        assert_eq!(
+            manifest["description"],
+            "TODO: describe what this plugin provides"
+        );
+        assert_eq!(
+            manifest["author"],
+            serde_json::json!({"name": "Bob", "email": "a@b.c"})
+        );
         assert_eq!(manifest["skills"], serde_json::json!(["./"]));
 
         let skill = std::fs::read_to_string(root.join("SKILL.md")).unwrap();
@@ -456,7 +490,16 @@ mod tests {
     #[test]
     fn init_custom_description() {
         let e = env();
-        run_init("p", Some("A"), Some("a@b"), Some("My desc"), false, &[], &e.home).unwrap();
+        run_init(
+            "p",
+            Some("A"),
+            Some("a@b"),
+            Some("My desc"),
+            false,
+            &[],
+            &e.home,
+        )
+        .unwrap();
         let manifest: Value = serde_json::from_str(
             &std::fs::read_to_string(e.home.join("skills/p/.lingxi-plugin/plugin.json")).unwrap(),
         )
@@ -469,7 +512,10 @@ mod tests {
         let e = env();
         run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap();
         let err = run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap_err();
-        assert!(err.ends_with(".lingxi-plugin already exists. Use --force to overwrite."), "got: {err}");
+        assert!(
+            err.ends_with(".lingxi-plugin already exists. Use --force to overwrite."),
+            "got: {err}"
+        );
         assert!(err.starts_with("✘ "));
     }
 
@@ -506,9 +552,17 @@ mod tests {
     #[test]
     fn init_with_skills_writes_example_skill() {
         let e = env();
-        run_init("s", Some("A"), Some("a@b"), None, false, &with(&["skills"]), &e.home).unwrap();
-        let body =
-            std::fs::read_to_string(root(&e, "s").join("skills/example/SKILL.md")).unwrap();
+        run_init(
+            "s",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["skills"]),
+            &e.home,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(root(&e, "s").join("skills/example/SKILL.md")).unwrap();
         assert_eq!(body, skill_md("example"));
         assert!(body.starts_with("---\nname: example\n"));
     }
@@ -516,7 +570,16 @@ mod tests {
     #[test]
     fn init_with_agents_writes_example_agent() {
         let e = env();
-        run_init("a", Some("A"), Some("a@b"), None, false, &with(&["agents"]), &e.home).unwrap();
+        run_init(
+            "a",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["agents"]),
+            &e.home,
+        )
+        .unwrap();
         let body = std::fs::read_to_string(root(&e, "a").join("agents/example.md")).unwrap();
         assert_eq!(body, AGENT_EXAMPLE_MD);
         assert!(body.contains("description: TODO — when should Claude delegate to this subagent?"));
@@ -526,7 +589,16 @@ mod tests {
     #[test]
     fn init_with_hooks_writes_hook_config_and_handler() {
         let e = env();
-        run_init("h", Some("A"), Some("a@b"), None, false, &with(&["hooks"]), &e.home).unwrap();
+        run_init(
+            "h",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["hooks"]),
+            &e.home,
+        )
+        .unwrap();
         let cfg = std::fs::read_to_string(root(&e, "h").join("hooks/hooks.json")).unwrap();
         assert_eq!(cfg, HOOKS_JSON);
         // Branding: env token is LINGXI_PLUGIN_ROOT (never CLAUDE_PLUGIN_ROOT).
@@ -535,9 +607,8 @@ mod tests {
         // Config is valid JSON with the SessionStart hook.
         let v: Value = serde_json::from_str(&cfg).unwrap();
         assert!(v["hooks"]["SessionStart"].is_array());
-        let ts =
-            std::fs::read_to_string(root(&e, "h").join("hooks-handlers/on-session-start.ts"))
-                .unwrap();
+        let ts = std::fs::read_to_string(root(&e, "h").join("hooks-handlers/on-session-start.ts"))
+            .unwrap();
         assert_eq!(ts, ON_SESSION_START_TS);
         assert!(ts.starts_with("#!/usr/bin/env bun\n"));
     }
@@ -545,7 +616,16 @@ mod tests {
     #[test]
     fn init_with_mcp_writes_example_servers() {
         let e = env();
-        run_init("m", Some("A"), Some("a@b"), None, false, &with(&["mcp"]), &e.home).unwrap();
+        run_init(
+            "m",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["mcp"]),
+            &e.home,
+        )
+        .unwrap();
         let body = std::fs::read_to_string(root(&e, "m").join(".mcp.json")).unwrap();
         assert_eq!(body, MCP_JSON);
         let v: Value = serde_json::from_str(&body).unwrap();
@@ -556,7 +636,16 @@ mod tests {
     #[test]
     fn init_with_lsp_writes_example_server() {
         let e = env();
-        run_init("l", Some("A"), Some("a@b"), None, false, &with(&["lsp"]), &e.home).unwrap();
+        run_init(
+            "l",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["lsp"]),
+            &e.home,
+        )
+        .unwrap();
         let body = std::fs::read_to_string(root(&e, "l").join(".lsp.json")).unwrap();
         assert_eq!(body, LSP_JSON);
         let v: Value = serde_json::from_str(&body).unwrap();
@@ -566,10 +655,17 @@ mod tests {
     #[test]
     fn init_with_output_style_writes_named_style() {
         let e = env();
-        run_init("os", Some("A"), Some("a@b"), None, false, &with(&["output-style"]), &e.home)
-            .unwrap();
-        let body =
-            std::fs::read_to_string(root(&e, "os").join("output-styles/os.md")).unwrap();
+        run_init(
+            "os",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["output-style"]),
+            &e.home,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(root(&e, "os").join("output-styles/os.md")).unwrap();
         assert_eq!(body, output_style_md("os"));
         assert!(body.starts_with("---\nname: os\n"));
         assert!(body.contains("force-for-plugin: true"));
@@ -578,8 +674,16 @@ mod tests {
     #[test]
     fn init_with_channel_writes_server_and_manifest_channels() {
         let e = env();
-        run_init("ch", Some("A"), Some("a@b"), None, false, &with(&["channel"]), &e.home)
-            .unwrap();
+        run_init(
+            "ch",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["channel"]),
+            &e.home,
+        )
+        .unwrap();
         let r = root(&e, "ch");
 
         // plugin.json gains a `channels` entry (server + displayName = name).
@@ -619,8 +723,16 @@ mod tests {
         let e = env();
         // Even when `mcp` is listed after `channel`, the canonical scaffold
         // order runs `channel` last, so its `.mcp.json` is the one on disk.
-        run_init("both", Some("A"), Some("a@b"), None, false, &with(&["channel", "mcp"]), &e.home)
-            .unwrap();
+        run_init(
+            "both",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &with(&["channel", "mcp"]),
+            &e.home,
+        )
+        .unwrap();
         let mcp = std::fs::read_to_string(root(&e, "both").join(".mcp.json")).unwrap();
         assert_eq!(mcp, channel_mcp_json("both"));
         assert!(!mcp.contains("example-remote"));
@@ -630,10 +742,8 @@ mod tests {
     fn init_default_manifest_has_no_channels() {
         let e = env();
         run_init("plain", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap();
-        let manifest = std::fs::read_to_string(
-            root(&e, "plain").join(".lingxi-plugin/plugin.json"),
-        )
-        .unwrap();
+        let manifest =
+            std::fs::read_to_string(root(&e, "plain").join(".lingxi-plugin/plugin.json")).unwrap();
         assert!(!manifest.contains("channels"));
     }
 

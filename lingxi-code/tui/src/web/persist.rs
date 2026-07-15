@@ -35,10 +35,7 @@ pub fn web_settings_path() -> Option<std::path::PathBuf> {
 /// with a trailing newline. Unrelated top-level keys already in the file are
 /// preserved — only the keys [`WebSearchConfig::write_settings_json`] touches
 /// are overwritten.
-pub fn save_web_settings_to(
-    path: &std::path::Path,
-    cfg: &WebSearchConfig,
-) -> std::io::Result<()> {
+pub fn save_web_settings_to(path: &std::path::Path, cfg: &WebSearchConfig) -> std::io::Result<()> {
     let mut value: serde_json::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -58,8 +55,14 @@ mod tests {
 
     #[test]
     fn web_credential_id_maps_tavily_and_brave_only() {
-        assert_eq!(web_credential_id(WebSearchProvider::Tavily), Some("web:tavily"));
-        assert_eq!(web_credential_id(WebSearchProvider::Brave), Some("web:brave"));
+        assert_eq!(
+            web_credential_id(WebSearchProvider::Tavily),
+            Some("web:tavily")
+        );
+        assert_eq!(
+            web_credential_id(WebSearchProvider::Brave),
+            Some("web:brave")
+        );
         assert_eq!(web_credential_id(WebSearchProvider::Auto), None);
         assert_eq!(web_credential_id(WebSearchProvider::DuckDuckGo), None);
         assert_eq!(web_credential_id(WebSearchProvider::Searxng), None);

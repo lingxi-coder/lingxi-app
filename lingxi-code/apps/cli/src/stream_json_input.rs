@@ -146,6 +146,10 @@ pub fn process_line(
     line: &str,
     seen_uuids: &mut HashSet<String>,
 ) -> Result<FrameAction, InputError> {
+    if line.trim().is_empty() {
+        return Ok(FrameAction::Consumed);
+    }
+
     // Parse JSON.
     let mut frame: Value = serde_json::from_str(line).map_err(|e| {
         eprintln!("Error parsing streaming input line: {line}: {e}");
@@ -355,7 +359,7 @@ pub fn read_input_turns(
             InputError::MalformedJson
         })?;
         let line = line.trim_end_matches('\r'); // strip CRLF if any
-        if line.is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
         match process_line(line, &mut seen_uuids)? {
@@ -447,7 +451,7 @@ pub fn spawn_stdin_router(replay_user_messages: bool, session_id: String) -> Std
                 }
             };
             let line = line.trim_end_matches('\r').to_string();
-            if line.is_empty() {
+            if line.trim().is_empty() {
                 continue;
             }
 
@@ -583,14 +587,14 @@ impl ControlPlaneWriter {
     pub fn reply_success(&self, request_id: &str, payload: Option<serde_json::Value>) {
         let frame = build_control_response_success(request_id, payload);
         let line = crate::stream_json::serialize_ndjson_line(&frame);
-        let _ = self.tx.send(line);
+        let _ = self.tx.send(crate::stream_json::OutboundMsg::Line(line));
     }
 
     /// Send an error `control_response` envelope.
     pub fn reply_error(&self, request_id: &str, msg: &str) {
         let frame = build_control_response_error(request_id, msg);
         let line = crate::stream_json::serialize_ndjson_line(&frame);
-        let _ = self.tx.send(line);
+        let _ = self.tx.send(crate::stream_json::OutboundMsg::Line(line));
     }
 }
 
@@ -602,6 +606,13 @@ mod tests {
 
     fn fresh_seen() -> HashSet<String> {
         HashSet::new()
+    }
+
+    fn outbound_line(msg: crate::stream_json::OutboundMsg) -> String {
+        match msg {
+            crate::stream_json::OutboundMsg::Line(line) => line,
+            crate::stream_json::OutboundMsg::Flush(_) => panic!("unexpected flush message"),
+        }
     }
 
     // ── normalizeControlMessageKeys ──────────────────────────────────────────
@@ -953,15 +964,22 @@ mod tests {
         assert!(matches!(result, FrameAction::Consumed));
     }
 
+    #[test]
+    fn whitespace_only_line_is_consumed() {
+        let result = process_line("   \t", &mut fresh_seen()).unwrap();
+        assert!(matches!(result, FrameAction::Consumed));
+    }
+
     // ── Phase 1: ControlPlaneWriter ───────────────────────────────────────────
 
     #[test]
     fn control_plane_writer_reply_success_envelope_shape() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::stream_json::OutboundMsg>();
         let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
         writer.reply_success("req-1", Some(json!({"pid": 42})));
 
-        let line = rx.try_recv().expect("should have sent one line");
+        let line = outbound_line(rx.try_recv().expect("should have sent one line"));
         let parsed: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(parsed["type"], "control_response");
         let inner = &parsed["response"];
@@ -972,11 +990,12 @@ mod tests {
 
     #[test]
     fn control_plane_writer_reply_error_envelope_shape() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::stream_json::OutboundMsg>();
         let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
         writer.reply_error("req-2", "Unsupported control request subtype: foo");
 
-        let line = rx.try_recv().expect("should have sent one line");
+        let line = outbound_line(rx.try_recv().expect("should have sent one line"));
         let parsed: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(parsed["type"], "control_response");
         let inner = &parsed["response"];
@@ -987,11 +1006,12 @@ mod tests {
 
     #[test]
     fn control_plane_writer_reply_success_no_payload_omits_response_key() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::stream_json::OutboundMsg>();
         let writer = ControlPlaneWriter::new(std::sync::Arc::new(tx));
         writer.reply_success("req-3", None);
 
-        let line = rx.try_recv().expect("should have sent one line");
+        let line = outbound_line(rx.try_recv().expect("should have sent one line"));
         let parsed: Value = serde_json::from_str(&line).unwrap();
         let inner = &parsed["response"];
         assert_eq!(inner["subtype"], "success");

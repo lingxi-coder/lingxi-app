@@ -573,9 +573,7 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
         components,
         trust_level,
         depends_on: Vec::new(),
-        user_config: parsed
-            .user_config
-            .map(|fields| UserConfigSchema { fields }),
+        user_config: parsed.user_config.map(|fields| UserConfigSchema { fields }),
         channels: Vec::new(),
         settings: HashMap::new(),
     };

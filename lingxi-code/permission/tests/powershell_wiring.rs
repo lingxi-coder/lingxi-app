@@ -62,7 +62,10 @@ fn policy_with(parser: ParseResult) -> PermissionPolicy {
 #[test]
 fn powershell_outside_cwd_asks_with_containment_message() {
     let policy = policy_with(get_content_ast("/etc/passwd"));
-    let result = policy.authorize("PowerShell", &json!({ "command": "Get-Content /etc/passwd" }));
+    let result = policy.authorize(
+        "PowerShell",
+        &json!({ "command": "Get-Content /etc/passwd" }),
+    );
     match result {
         PermissionResult::Ask { prompt, .. } => assert_eq!(
             prompt.message,
@@ -108,11 +111,20 @@ fn powershell_without_parser_passes_through() {
     let policy = PermissionPolicy::new(PermissionMode::Default)
         .with_roots(roots())
         .with_pwsh_parser(Arc::new(FakeParser(ParseResult::default())));
-    let result = policy.authorize("PowerShell", &json!({ "command": "Get-Content /etc/passwd" }));
+    let result = policy.authorize(
+        "PowerShell",
+        &json!({ "command": "Get-Content /etc/passwd" }),
+    );
     if let PermissionResult::Ask { prompt, .. } = &result {
-        assert!(!prompt.message.contains("targeting"), "invalid parse must pass through");
+        assert!(
+            !prompt.message.contains("targeting"),
+            "invalid parse must pass through"
+        );
     }
     // And a policy with genuinely no parser also does not panic / contain.
     let no_parser = PermissionPolicy::new(PermissionMode::Default).with_roots(roots());
-    let _ = no_parser.authorize("PowerShell", &json!({ "command": "Get-Content /etc/passwd" }));
+    let _ = no_parser.authorize(
+        "PowerShell",
+        &json!({ "command": "Get-Content /etc/passwd" }),
+    );
 }

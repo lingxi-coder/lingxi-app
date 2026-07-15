@@ -38,8 +38,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use traits::{CostSnapshot, OutputStream};
 
 // ── Wire-format helpers ─────────────────────────────────────────────────────
@@ -82,11 +81,22 @@ fn emit_line_to_stdout(out: &mut std::io::Stdout, line: &str) {
 /// `emit_replay_ack` in stream_json_input, which has its own direct-write
 /// — that pre-Phase-0 path is safe because replay_ack is only called from
 /// the stdin-reader task, which runs before any turn starts).
-fn spawn_drain_task(mut rx: mpsc::UnboundedReceiver<String>) {
+pub enum OutboundMsg {
+    Line(String),
+    Flush(oneshot::Sender<()>),
+}
+
+fn spawn_drain_task(mut rx: mpsc::UnboundedReceiver<OutboundMsg>) {
     tokio::spawn(async move {
         let mut stdout = std::io::stdout();
-        while let Some(line) = rx.recv().await {
-            emit_line_to_stdout(&mut stdout, &line);
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                OutboundMsg::Line(line) => emit_line_to_stdout(&mut stdout, &line),
+                OutboundMsg::Flush(done) => {
+                    let _ = stdout.flush();
+                    let _ = done.send(());
+                }
+            }
         }
         // Channel closed (all senders dropped) — flush any buffered output.
         let _ = stdout.flush();
@@ -241,7 +251,7 @@ pub struct StreamJsonInitParams {
 /// The drain task (spawned once per process) is the sole stdout writer.
 /// For Phase 1+ the `ControlPlaneWriter` also holds a clone so control
 /// frames share the same queue and cannot overtake data frames.
-pub type OutboundTx = mpsc::UnboundedSender<String>;
+pub type OutboundTx = mpsc::UnboundedSender<OutboundMsg>;
 
 /// A 4th `OutputStream` impl that writes NDJSON frames to stdout.
 ///
@@ -264,7 +274,7 @@ pub struct StreamJsonStream {
     /// The receiver is stored only until the drain task consumes it; after spawn
     /// it lives inside the task. We can't store it here because tokio mpsc receivers
     /// are not Clone — so we use a Mutex<Option<Rx>> to hand it off.
-    drain_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
+    drain_rx: Mutex<Option<mpsc::UnboundedReceiver<OutboundMsg>>>,
     /// 0 = drain not yet spawned, 1 = spawned (use AtomicUsize as a flag).
     drain_started: AtomicUsize,
     /// Session id threaded in from the orchestrator after build. `Mutex`
@@ -303,7 +313,7 @@ impl StreamJsonStream {
             .as_ref()
             .map(|p| p.session_id.clone())
             .unwrap_or_default();
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let (tx, rx) = mpsc::unbounded_channel::<OutboundMsg>();
         Self {
             out_tx: Arc::new(tx),
             drain_rx: Mutex::new(Some(rx)),
@@ -339,6 +349,21 @@ impl StreamJsonStream {
         // spawned — that's fine, we just skip.
     }
 
+    /// Wait until every frame enqueued before this call has reached the stdout
+    /// drain task and stdout has been flushed.
+    ///
+    /// This is a FIFO barrier rather than a channel close: control-plane writers
+    /// may still hold sender clones when the run loop emits its final result
+    /// frame. A barrier preserves ordering while preventing `process::exit`
+    /// callers from losing the last JSON line.
+    pub async fn flush(&self) {
+        self.ensure_drain_started().await;
+        let (done_tx, done_rx) = oneshot::channel();
+        if self.out_tx.send(OutboundMsg::Flush(done_tx)).is_ok() {
+            let _ = done_rx.await;
+        }
+    }
+
     /// Push a pre-serialised NDJSON line onto the outbound queue.
     ///
     /// This is the only place `emit_*` methods write to stdout (via the drain
@@ -346,7 +371,7 @@ impl StreamJsonStream {
     /// is dropped (i.e. the drain task panicked — in that case we silently drop
     /// the frame rather than panicking the caller).
     fn enqueue_line(&self, line: String) {
-        let _ = self.out_tx.send(line);
+        let _ = self.out_tx.send(OutboundMsg::Line(line));
     }
 
     /// Serialise `v` to an escaped NDJSON line and enqueue it.
@@ -1252,10 +1277,7 @@ mod tests {
         }
 
         let params = make_params("sess");
-        assert!(
-            !params.analytics_disabled,
-            "clean env ⇒ analytics enabled"
-        );
+        assert!(!params.analytics_disabled, "clean env ⇒ analytics enabled");
 
         std::env::set_var("DO_NOT_TRACK", "1");
         let params = make_params("sess");
@@ -1777,8 +1799,14 @@ mod tests {
             .await;
         let mu200k = frame200k["modelUsage"].as_object().unwrap();
         let entry200k = &mu200k["claude-opus-4-6"];
-        assert_eq!(entry200k["contextWindow"], 200_000_u64, "opus-4-6 default contextWindow");
-        assert_eq!(entry200k["maxOutputTokens"], 64_000_u64, "opus-4-6 maxOutputTokens");
+        assert_eq!(
+            entry200k["contextWindow"], 200_000_u64,
+            "opus-4-6 default contextWindow"
+        );
+        assert_eq!(
+            entry200k["maxOutputTokens"], 64_000_u64,
+            "opus-4-6 maxOutputTokens"
+        );
 
         // 1M context model (model id carries [1m] suffix):
         // contextWindow=1_000_000, maxOutputTokens=64_000.
@@ -1834,17 +1862,17 @@ mod tests {
         // Called by the orchestrator after each API turn.
         stream
             .emit_rate_limit(
-                Some("allowed"),         // status
-                Some("seven_day"),       // rate_limit_type
-                Some(0.75),              // utilization
-                Some(1_782_360_000),     // resets_at
-                None,                    // claim_resets_at
-                Some("allowed_warning"), // overage_status
-                None,                    // overage_resets_at
-                None,                    // overage_disabled_reason
-                None,                    // fallback_available
+                Some("allowed"),                // status
+                Some("seven_day"),              // rate_limit_type
+                Some(0.75),                     // utilization
+                Some(1_782_360_000),            // resets_at
+                None,                           // claim_resets_at
+                Some("allowed_warning"),        // overage_status
+                None,                           // overage_resets_at
+                None,                           // overage_disabled_reason
+                None,                           // fallback_available
                 Some(&["overage".to_string()]), // upgrade_paths
-                true,                    // credits_required
+                true,                           // credits_required
             )
             .await;
     }
@@ -1945,7 +1973,8 @@ mod tests {
         );
         assert_eq!(
             // 2.1.198 registry (M1b): opus-4-8 carries native_1m → 1M window.
-            mu["claude-opus-4-8"]["contextWindow"], 1_000_000_u64,
+            mu["claude-opus-4-8"]["contextWindow"],
+            1_000_000_u64,
             "contextWindow from catalog"
         );
         assert_eq!(

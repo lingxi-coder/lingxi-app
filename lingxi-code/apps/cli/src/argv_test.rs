@@ -17,7 +17,13 @@ mod tests {
         let b = Argv::from_iter(["lingxi-cli", "--permission-mode", "default"]).unwrap();
         assert_eq!(b.permission_mode.as_deref(), Some("default"));
         // Every other real mode still parses.
-        for mode in ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"] {
+        for mode in [
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "dontAsk",
+            "plan",
+        ] {
             let p = Argv::from_iter(["lingxi-cli", "--permission-mode", mode]).unwrap();
             assert_eq!(p.permission_mode.as_deref(), Some(mode));
         }
@@ -767,9 +773,15 @@ mod tests {
             "hi",
         ])
         .unwrap();
-        assert_eq!(b.plugin_dir, vec![PathBuf::from("/a"), PathBuf::from("/b.zip")]);
+        assert_eq!(
+            b.plugin_dir,
+            vec![PathBuf::from("/a"), PathBuf::from("/b.zip")]
+        );
         // Default: empty list (commander `(default: [])`).
-        assert!(Argv::from_iter(["lingxi-cli", "hi"]).unwrap().plugin_dir.is_empty());
+        assert!(Argv::from_iter(["lingxi-cli", "hi"])
+            .unwrap()
+            .plugin_dir
+            .is_empty());
     }
 
     /// (M4 cc2.1.198) `--effort` argParser port (`u4i`/`Xat`): trim+lowercase,
@@ -871,8 +883,7 @@ mod tests {
     #[test]
     fn plan_mode_instructions_requires_print_mode() {
         // Set without --print ⟶ byte-exact rejection.
-        let a =
-            Argv::from_iter(["lingxi-cli", "--plan-mode-instructions", "BODY", "hi"]).unwrap();
+        let a = Argv::from_iter(["lingxi-cli", "--plan-mode-instructions", "BODY", "hi"]).unwrap();
         assert_eq!(
             a.validate_plan_mode_instructions_args().unwrap_err(),
             "--plan-mode-instructions can only be used with --print mode."

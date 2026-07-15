@@ -122,7 +122,13 @@ fn prompt_suggestions_without_stream_json_exits_1() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
-        .args(["--prompt-suggestions", "-p", "hi", "--output-format", "text"])
+        .args([
+            "--prompt-suggestions",
+            "-p",
+            "hi",
+            "--output-format",
+            "text",
+        ])
         .assert()
         .code(1)
         .stderr(predicate::eq(format!("{locked}\n")));

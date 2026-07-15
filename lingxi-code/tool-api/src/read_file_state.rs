@@ -18,7 +18,7 @@
 //! - `max` entries = `READ_FILE_STATE_MAX_ENTRIES` (`fileStateCache.ts:18`,
 //!   `READ_FILE_STATE_CACHE_SIZE = 100`).
 //! - `maxSize` bytes = `READ_FILE_STATE_MAX_BYTES` (`fileStateCache.ts:22`,
-//!   `DEFAULT_MAX_CACHE_SIZE_BYTES = 25 * 1024 * 1024`).
+//!   `DEFAULT_MAX_CACHE_SIZE_BYTES = 16 * 1024 * 1024`).
 //! - per-entry size = `entry.content.len().max(1)` (UTF-8 byte length, the Rust
 //!   equal of `Math.max(1, Buffer.byteLength(content))`).
 //! - MRU-promote on [`ReadFileStateLru::get`]; on [`ReadFileStateLru::set`],
@@ -45,9 +45,9 @@ use std::sync::{Arc, Mutex};
 /// `fileStateCache.ts:18`).
 pub const READ_FILE_STATE_MAX_ENTRIES: usize = 100;
 
-/// Default byte budget: 25 MiB (claude-code `DEFAULT_MAX_CACHE_SIZE_BYTES`,
-/// `fileStateCache.ts:22` — `25 * 1024 * 1024`).
-pub const READ_FILE_STATE_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// Default byte budget: 16 MiB (claude-code `DEFAULT_MAX_CACHE_SIZE_BYTES`,
+/// `fileStateCache.ts:22` — `16 * 1024 * 1024`).
+pub const READ_FILE_STATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A single read-state entry — the faithful port of TS
 /// `readFileState.set(fullFilePath, {content, timestamp, offset, limit})`.

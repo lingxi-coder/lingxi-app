@@ -200,8 +200,7 @@ pub fn apply_auto_mode_gate(
     if mode == PermissionMode::Auto && !auto_mode_available(inputs) {
         // `One()` always yields Some here (auto_mode_available is false ⇒ at
         // least one denial branch fires); fall back defensively to Model.
-        let reason =
-            auto_mode_denial_reason(inputs).unwrap_or(AutoGateDenialReason::Model);
+        let reason = auto_mode_denial_reason(inputs).unwrap_or(AutoGateDenialReason::Model);
         return (PermissionMode::Default, Some(reason));
     }
     (mode, None)
@@ -285,7 +284,10 @@ mod tests {
         assert!(model_supports_auto_mode("claude-opus-4-6", "firstParty"));
         assert!(model_supports_auto_mode("claude-opus-4-6", "anthropicAws"));
         assert!(model_supports_auto_mode("claude-sonnet-4-6", "firstParty"));
-        assert!(model_supports_auto_mode("claude-sonnet-4-6", "anthropicAws"));
+        assert!(model_supports_auto_mode(
+            "claude-sonnet-4-6",
+            "anthropicAws"
+        ));
         // Denied on any other provider.
         assert!(!model_supports_auto_mode("claude-opus-4-6", "bedrock"));
         assert!(!model_supports_auto_mode("claude-opus-4-6", "vertex"));
@@ -314,7 +316,10 @@ mod tests {
     #[test]
     fn available_requires_all_three() {
         // All good → available.
-        assert!(auto_mode_available(&inputs("claude-sonnet-5", "firstParty")));
+        assert!(auto_mode_available(&inputs(
+            "claude-sonnet-5",
+            "firstParty"
+        )));
         // Settings kill.
         let mut i = inputs("claude-sonnet-5", "firstParty");
         i.disabled_by_settings = true;
@@ -324,7 +329,10 @@ mod tests {
         i.circuit_broken = true;
         assert!(!auto_mode_available(&i));
         // Model.
-        assert!(!auto_mode_available(&inputs("claude-sonnet-4-5", "firstParty")));
+        assert!(!auto_mode_available(&inputs(
+            "claude-sonnet-4-5",
+            "firstParty"
+        )));
     }
 
     #[test]
@@ -333,7 +341,10 @@ mod tests {
         let mut i = inputs("claude-sonnet-4-5", "firstParty"); // model unsupported
         i.disabled_by_settings = true;
         i.circuit_broken = true;
-        assert_eq!(auto_mode_denial_reason(&i), Some(AutoGateDenialReason::Settings));
+        assert_eq!(
+            auto_mode_denial_reason(&i),
+            Some(AutoGateDenialReason::Settings)
+        );
     }
 
     #[test]
@@ -351,7 +362,10 @@ mod tests {
         // With jqt() always true, the Provider branch can never fire — a
         // model-only denial is reported as Model, never Provider.
         let i = inputs("claude-opus-4-6", "bedrock"); // model unsupported off-1P
-        assert_eq!(auto_mode_denial_reason(&i), Some(AutoGateDenialReason::Model));
+        assert_eq!(
+            auto_mode_denial_reason(&i),
+            Some(AutoGateDenialReason::Model)
+        );
     }
 
     #[test]
@@ -373,8 +387,10 @@ mod tests {
 
     #[test]
     fn gate_passes_auto_through_when_available() {
-        let (mode, reason) =
-            apply_auto_mode_gate(PermissionMode::Auto, &inputs("claude-sonnet-5", "firstParty"));
+        let (mode, reason) = apply_auto_mode_gate(
+            PermissionMode::Auto,
+            &inputs("claude-sonnet-5", "firstParty"),
+        );
         assert_eq!(mode, PermissionMode::Auto);
         assert_eq!(reason, None);
     }

@@ -124,9 +124,9 @@ pub(crate) fn effective_child_mode(
 ) -> Option<PermissionMode> {
     let clamped = clamp_spawn_mode(requested, parent); // `ye`
     let effective = clamped.or_else(|| definition_mode_fallback(def_mode))?; // `ve`
-    // Context-override guard: apply `ve` UNLESS it came only from the definition
-    // fallback (no explicit clamped spawn mode) while the parent is already a
-    // permissive mode the fallback must not silently downgrade.
+                                                                             // Context-override guard: apply `ve` UNLESS it came only from the definition
+                                                                             // fallback (no explicit clamped spawn mode) while the parent is already a
+                                                                             // permissive mode the fallback must not silently downgrade.
     if clamped.is_none()
         && matches!(
             parent,
@@ -153,7 +153,10 @@ mod tests {
     fn clamp_child_cannot_escalate_above_parent() {
         // parent default (rank 1) + requested bypassPermissions (rank 4) → dropped.
         assert_eq!(
-            clamp_spawn_mode(Some(PermissionMode::BypassPermissions), PermissionMode::Default),
+            clamp_spawn_mode(
+                Some(PermissionMode::BypassPermissions),
+                PermissionMode::Default
+            ),
             None
         );
         // parent default (1) + requested acceptEdits (2) → dropped.

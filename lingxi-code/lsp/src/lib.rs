@@ -28,7 +28,7 @@ pub use action::{LspAction, LspResponse};
 pub use client::LspClient;
 pub use connection::LspConnectionState;
 pub use diagnostic_registry::{DiagnosticEntry, LspDiagnosticRegistry};
-pub use open_file_tracker::OpenFileTracker;
+pub use open_file_tracker::{OpenFileTracker, MAX_OPEN_DOCUMENTS};
 pub use passive_feedback::PassiveDiagnosticSubscriber;
 pub use registry::LspRegistry;
 pub use tool_operations::{

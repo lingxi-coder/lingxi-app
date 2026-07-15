@@ -702,6 +702,19 @@ pub(crate) struct MainThreadAgentState {
     pub(crate) disallowed_tools: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WireToolSchemaCacheKey {
+    tool_names: Vec<String>,
+    model: String,
+    model_profile: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WireToolSchemaCache {
+    key: WireToolSchemaCacheKey,
+    wire: Vec<serde_json::Value>,
+}
+
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
@@ -858,6 +871,10 @@ pub struct ConversationOrchestrator {
     /// returns `vec![]`. The CLI binary populates from settings + plugin
     /// sources at startup.
     pub(crate) hook_registry: Option<Arc<tokio::sync::RwLock<hooks::HookRegistry>>>,
+    /// Session-level cache for the expensive prompt/schema serialization of
+    /// the post-filter tool pool. Dynamic per-turn marks (`strict`,
+    /// `defer_loading`) are applied to a clone after cache lookup.
+    wire_tool_schema_cache: Mutex<Option<WireToolSchemaCache>>,
     /// Subagent catalog (M6-07). `None` when not wired — `list_agents`
     /// then returns `vec![]`. The CLI binary populates from
     /// `~/.lingxi/agents/` + project `.lingxi/agents/`.
@@ -1327,6 +1344,7 @@ impl ConversationOrchestrator {
             last_api_call_at_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(-1)),
             mcp_registry: None,
             hook_registry: None,
+            wire_tool_schema_cache: Mutex::new(None),
             agent_catalog: None,
             main_thread_agent: tokio::sync::RwLock::new(None),
             compaction: None,
@@ -1397,10 +1415,7 @@ impl ConversationOrchestrator {
     /// constructor allocated. Wired at the desktop + mobile composition roots;
     /// tests that need a live registry can call this with a map they also seed.
     #[must_use]
-    pub fn with_read_state_map(
-        mut self,
-        map: tool_api::read_file_state::ReadFileStateMap,
-    ) -> Self {
+    pub fn with_read_state_map(mut self, map: tool_api::read_file_state::ReadFileStateMap) -> Self {
         self.read_state_map = map;
         self
     }
@@ -2519,7 +2534,10 @@ impl ConversationOrchestrator {
             match tokio::fs::read_to_string(&candidate.path).await {
                 Ok(content) => {
                     self.fire_post_compact_file_restore(true).await;
-                    fresh.push(compaction::FileRestoreCandidate { content, ..candidate });
+                    fresh.push(compaction::FileRestoreCandidate {
+                        content,
+                        ..candidate
+                    });
                 }
                 Err(_) => {
                     // Unreadable/deleted at compact time → drop; `XQn` returns
@@ -4132,8 +4150,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 "isVisibleInTranscriptOnly".to_string(),
                 serde_json::Value::Bool(true),
             );
-            jmsg.extra
-                .insert("isCompactSummary".to_string(), serde_json::Value::Bool(true));
+            jmsg.extra.insert(
+                "isCompactSummary".to_string(),
+                serde_json::Value::Bool(true),
+            );
         }
         let uuid_for_chain = jmsg.uuid.clone();
         match writer.append(&jmsg).await {
@@ -5315,8 +5335,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// (isMeta, `utils/messages.ts:4130-4137`). Best-effort persist, exactly like
     /// [`Self::append_stop_hook_feedback`].
     async fn append_stop_hook_stopped_continuation(&self, reason: &str) {
-        let content =
-            format!("<system-reminder>\nStop hook stopped continuation: {reason}\n</system-reminder>");
+        let content = format!(
+            "<system-reminder>\nStop hook stopped continuation: {reason}\n</system-reminder>"
+        );
         let msg = ConversationMessage::user_meta(MessageId::new(), content);
         {
             let mut s = self.session.lock().await;
@@ -6147,8 +6168,12 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     // `Streaming` variant — this is the connect-phase streaming
                     // surface — so the classifier sees the inner `LlmError`.
                     let env = classify_api_error(&OrchestratorError::Streaming(other.clone()));
-                    let id =
-                        crate::turn_loop::surface_model_error(self, &self.model_error_text(&other).await, env).await;
+                    let id = crate::turn_loop::surface_model_error(
+                        self,
+                        &self.model_error_text(&other).await,
+                        env,
+                    )
+                    .await;
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("model_error", &cost).await;
                     final_message_id = id;
@@ -6188,22 +6213,22 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let pumped = match opened {
                 OpenOutcome::Recovered(pumped_from_recovery) => pumped_from_recovery,
                 OpenOutcome::Stream(first_stream) => {
-                // cc 2.1.198 mid-response transient retry (`query.ts` stream
-                // loop @219649648): on a transient network drop (ECONNRESET /
-                // connection closed / reset) OR a watchdog idle-timeout, re-open
-                // and re-pump the SAME streaming request with backoff — but ONLY
-                // while `!real_content_started` (binary `!Hr`). Because a
-                // `tool_use` block STARTING flips `real_content_started`, this
-                // guard also guarantees NO tool has been dispatched, so a
-                // non-idempotent tool is never re-run. The failed pump left
-                // `session.history` untouched and (by the guard) the executor
-                // clean, so the retry reuses `exec` and re-snapshots history.
-                let mut cur_stream = first_stream;
-                let mut mid_stream_retries: u32 = 0;
-                let pump_outcome: Result<
-                    crate::streaming_loop::PumpedTurn,
-                    crate::streaming_loop::PumpFailure,
-                > = loop {
+                    // cc 2.1.198 mid-response transient retry (`query.ts` stream
+                    // loop @219649648): on a transient network drop (ECONNRESET /
+                    // connection closed / reset) OR a watchdog idle-timeout, re-open
+                    // and re-pump the SAME streaming request with backoff — but ONLY
+                    // while `!real_content_started` (binary `!Hr`). Because a
+                    // `tool_use` block STARTING flips `real_content_started`, this
+                    // guard also guarantees NO tool has been dispatched, so a
+                    // non-idempotent tool is never re-run. The failed pump left
+                    // `session.history` untouched and (by the guard) the executor
+                    // clean, so the retry reuses `exec` and re-snapshots history.
+                    let mut cur_stream = first_stream;
+                    let mut mid_stream_retries: u32 = 0;
+                    let pump_outcome: Result<
+                        crate::streaming_loop::PumpedTurn,
+                        crate::streaming_loop::PumpFailure,
+                    > = loop {
                         match crate::streaming_loop::pump_stream_with_executor_tracked(
                             cur_stream,
                             &self.output,
@@ -6275,150 +6300,155 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             Err(f) => break Err(f),
                         }
                     };
-                match pump_outcome {
-                Ok(p) => p,
-                // P1-04 (cc 2.1.199 partial-stream finalize, binary-verified): a
-                // finalize-class mid-stream error (server/overloaded/api error,
-                // watchdog stall, or connection close) that landed AFTER a real
-                // content block COMPLETED is NOT discarded. The already-streamed
-                // partial is finalized in place — persisted with a synthesized
-                // `stop_reason` (`tool_use` if any tool_use else `end_turn`) +
-                // usage — `tengu_streaming_partial_finalized` fires, and a byte-exact
-                // "API Error: … The response above may be incomplete." notice is
-                // surfaced after it (see the notice + terminal sites below, gated on
-                // `partial_finalize`). This runs BEFORE the 529 non-streaming
-                // fallback so a completed-partial 529 keeps its streamed output
-                // instead of re-fetching; a 529 that erred before any block
-                // completed (no output) falls through to the fallback as before.
-                Err(f)
-                    if crate::streaming_loop::partial_has_output(&f.partial)
-                        && crate::streaming_loop::partial_finalize_cause(&f.error).is_some() =>
-                {
-                    let cause = crate::streaming_loop::partial_finalize_cause(&f.error)
-                        .expect("finalize cause present (guarded above)");
-                    let mut partial = f.partial;
-                    // cc `gm=vd?"tool_use":"end_turn"`: a dispatched tool_use makes
-                    // this a tool turn, else a natural end.
-                    let synthesized_stop_reason = if partial.tool_uses.is_empty() {
-                        "end_turn"
-                    } else {
-                        "tool_use"
-                    };
-                    partial.stop_reason = Some(synthesized_stop_reason.to_string());
-                    // cc `_r.length`: one yielded message per completed content block.
-                    let blocks_yielded = partial.assistant_blocks.len() + partial.tool_uses.len();
-                    if let Some(bus) = self.analytics_bus.as_ref() {
-                        let mut md = telemetry::LogEventMetadata::new();
-                        md.insert(
-                            "model".into(),
-                            telemetry::AnalyticsValue::String(model.clone()),
-                        );
-                        md.insert(
-                            "blocks_yielded".into(),
-                            telemetry::AnalyticsValue::Int(
-                                i64::try_from(blocks_yielded).unwrap_or(i64::MAX),
-                            ),
-                        );
-                        // has_output is always true on this arm (partial_has_output).
-                        md.insert("has_output".into(), telemetry::AnalyticsValue::Bool(true));
-                        md.insert(
-                            "synthesized_stop_reason".into(),
-                            telemetry::AnalyticsValue::String(
-                                synthesized_stop_reason.to_string(),
-                            ),
-                        );
-                        md.insert(
-                            "cause".into(),
-                            telemetry::AnalyticsValue::String(cause.as_str().to_string()),
-                        );
-                        if let Some(rid) = self.api.last_request_id() {
-                            md.insert(
-                                "request_id".into(),
-                                telemetry::AnalyticsValue::String(rid),
-                            );
+                    match pump_outcome {
+                        Ok(p) => p,
+                        // P1-04 (cc 2.1.199 partial-stream finalize, binary-verified): a
+                        // finalize-class mid-stream error (server/overloaded/api error,
+                        // watchdog stall, or connection close) that landed AFTER a real
+                        // content block COMPLETED is NOT discarded. The already-streamed
+                        // partial is finalized in place — persisted with a synthesized
+                        // `stop_reason` (`tool_use` if any tool_use else `end_turn`) +
+                        // usage — `tengu_streaming_partial_finalized` fires, and a byte-exact
+                        // "API Error: … The response above may be incomplete." notice is
+                        // surfaced after it (see the notice + terminal sites below, gated on
+                        // `partial_finalize`). This runs BEFORE the 529 non-streaming
+                        // fallback so a completed-partial 529 keeps its streamed output
+                        // instead of re-fetching; a 529 that erred before any block
+                        // completed (no output) falls through to the fallback as before.
+                        Err(f)
+                            if crate::streaming_loop::partial_has_output(&f.partial)
+                                && crate::streaming_loop::partial_finalize_cause(&f.error)
+                                    .is_some() =>
+                        {
+                            let cause = crate::streaming_loop::partial_finalize_cause(&f.error)
+                                .expect("finalize cause present (guarded above)");
+                            let mut partial = f.partial;
+                            // cc `gm=vd?"tool_use":"end_turn"`: a dispatched tool_use makes
+                            // this a tool turn, else a natural end.
+                            let synthesized_stop_reason = if partial.tool_uses.is_empty() {
+                                "end_turn"
+                            } else {
+                                "tool_use"
+                            };
+                            partial.stop_reason = Some(synthesized_stop_reason.to_string());
+                            // cc `_r.length`: one yielded message per completed content block.
+                            let blocks_yielded =
+                                partial.assistant_blocks.len() + partial.tool_uses.len();
+                            if let Some(bus) = self.analytics_bus.as_ref() {
+                                let mut md = telemetry::LogEventMetadata::new();
+                                md.insert(
+                                    "model".into(),
+                                    telemetry::AnalyticsValue::String(model.clone()),
+                                );
+                                md.insert(
+                                    "blocks_yielded".into(),
+                                    telemetry::AnalyticsValue::Int(
+                                        i64::try_from(blocks_yielded).unwrap_or(i64::MAX),
+                                    ),
+                                );
+                                // has_output is always true on this arm (partial_has_output).
+                                md.insert(
+                                    "has_output".into(),
+                                    telemetry::AnalyticsValue::Bool(true),
+                                );
+                                md.insert(
+                                    "synthesized_stop_reason".into(),
+                                    telemetry::AnalyticsValue::String(
+                                        synthesized_stop_reason.to_string(),
+                                    ),
+                                );
+                                md.insert(
+                                    "cause".into(),
+                                    telemetry::AnalyticsValue::String(cause.as_str().to_string()),
+                                );
+                                if let Some(rid) = self.api.last_request_id() {
+                                    md.insert(
+                                        "request_id".into(),
+                                        telemetry::AnalyticsValue::String(rid),
+                                    );
+                                }
+                                bus.log_event("tengu_streaming_partial_finalized", md).await;
+                            }
+                            // Arm the notice + terminal-end sites below; the partial flows
+                            // through the normal billing/persist/tool-drive path first.
+                            partial_finalize = Some(cause);
+                            partial
                         }
-                        bus.log_event("tengu_streaming_partial_finalized", md).await;
-                    }
-                    // Arm the notice + terminal-end sites below; the partial flows
-                    // through the normal billing/persist/tool-drive path first.
-                    partial_finalize = Some(cause);
-                    partial
-                }
-                Err(f)
-                    if matches!(
-                        f.error,
-                        OrchestratorError::Streaming(
-                            LlmError::Overloaded { .. } | LlmError::ProviderInternal
-                        )
-                    ) && !is_env_truthy(
-                        std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
-                            .as_deref()
-                            .ok(),
-                    ) =>
-                {
-                    // Seed: a streaming overload counts as 1 toward the consecutive
-                    // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
-                    // (e.g. ProviderInternal) seed 0 — matching TS
-                    // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
-                    let seed: u8 = u8::from(matches!(
-                        f.error,
-                        OrchestratorError::Streaming(LlmError::Overloaded { .. })
-                    ));
+                        Err(f)
+                            if matches!(
+                                f.error,
+                                OrchestratorError::Streaming(
+                                    LlmError::Overloaded { .. } | LlmError::ProviderInternal
+                                )
+                            ) && !is_env_truthy(
+                                std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
+                                    .as_deref()
+                                    .ok(),
+                            ) =>
+                        {
+                            // Seed: a streaming overload counts as 1 toward the consecutive
+                            // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
+                            // (e.g. ProviderInternal) seed 0 — matching TS
+                            // `is529Error(streamingError) ? 1 : 0` (claude.ts:2559).
+                            let seed: u8 = u8::from(matches!(
+                                f.error,
+                                OrchestratorError::Streaming(LlmError::Overloaded { .. })
+                            ));
 
-                    // Re-snapshot history for the non-streaming call (the partial
-                    // stream never touched session.history, so it is still the same
-                    // snapshot we used for the stream — no reset needed).
-                    let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
-                        let s = self.session.lock().await;
-                        (s.history.clone(), s.model.clone(), s.model_profile.clone())
-                    };
-                    // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
-                    // context meta message on EVERY `callModel`, including this
-                    // non-streaming fallback. Prepend it to the re-snapshot too.
-                    if let Some(ctx_msg) = self.additional_context_message().await {
-                        non_stream_snapshot.insert(0, ctx_msg);
-                    }
-                    let tools_for_fallback = wire_tools.clone();
+                            // Re-snapshot history for the non-streaming call (the partial
+                            // stream never touched session.history, so it is still the same
+                            // snapshot we used for the stream — no reset needed).
+                            let (mut non_stream_snapshot, non_stream_model, non_stream_profile) = {
+                                let s = self.session.lock().await;
+                                (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                            };
+                            // R-P1c/R-P1d: claude-code's `A6n` prepends the additional-
+                            // context meta message on EVERY `callModel`, including this
+                            // non-streaming fallback. Prepend it to the re-snapshot too.
+                            if let Some(ctx_msg) = self.additional_context_message().await {
+                                non_stream_snapshot.insert(0, ctx_msg);
+                            }
+                            let tools_for_fallback = wire_tools.clone();
 
-                    let resp = self
-                        .api
-                        .messages_create_seeded(
-                            &non_stream_model,
-                            non_stream_profile.as_deref(),
-                            system_prompt.as_deref(),
-                            non_stream_snapshot,
-                            tools_for_fallback,
-                            seed,
-                        )
-                        .await
-                        .map_err(OrchestratorError::ApiCall)?;
+                            let resp = self
+                                .api
+                                .messages_create_seeded(
+                                    &non_stream_model,
+                                    non_stream_profile.as_deref(),
+                                    system_prompt.as_deref(),
+                                    non_stream_snapshot,
+                                    tools_for_fallback,
+                                    seed,
+                                )
+                                .await
+                                .map_err(OrchestratorError::ApiCall)?;
 
-                    // Convert LlmResponse → PumpedTurn so the rest of the streaming
-                    // turn loop can proceed identically.
-                    let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+                            // Convert LlmResponse → PumpedTurn so the rest of the streaming
+                            // turn loop can proceed identically.
+                            let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
 
-                    // Emit text blocks from the non-streaming response to the output
-                    // stream, mirroring the batched path (turn_loop.rs step 4:
-                    // `orch.output.emit_text(text).await`).  In the normal streaming
-                    // path `pump_stream` calls `dispatch_event` → `emit_text` for each
-                    // `TextDelta`; the non-streaming path has no SSE events, so we
-                    // replicate the whole-body emit here.
-                    for blk in &pumped_from_fallback.assistant_blocks {
-                        if let ContentBlock::Text { text } = blk {
-                            self.output.emit_text(text).await;
-                        }
-                    }
+                            // Emit text blocks from the non-streaming response to the output
+                            // stream, mirroring the batched path (turn_loop.rs step 4:
+                            // `orch.output.emit_text(text).await`).  In the normal streaming
+                            // path `pump_stream` calls `dispatch_event` → `emit_text` for each
+                            // `TextDelta`; the non-streaming path has no SSE events, so we
+                            // replicate the whole-body emit here.
+                            for blk in &pumped_from_fallback.assistant_blocks {
+                                if let ContentBlock::Text { text } = blk {
+                                    self.output.emit_text(text).await;
+                                }
+                            }
 
-                    // claude-code `query.ts:733-740`: discard the partial
-                    // streaming attempt's executor (its tool_uses have stale ids
-                    // and would orphan against the fallback response) and replace
-                    // it with a fresh one. Dropping the old executor cancels any
-                    // in-flight tool futures it had started mid-stream. The fresh
-                    // executor's tools are registered from the FALLBACK response's
-                    // tool_uses by the post-stream drive loop below (this is the
-                    // ONLY path that still `add_tool`s after the stream — the
-                    // normal path registers mid-stream).
-                    exec = match &user_cancel {
+                            // claude-code `query.ts:733-740`: discard the partial
+                            // streaming attempt's executor (its tool_uses have stale ids
+                            // and would orphan against the fallback response) and replace
+                            // it with a fresh one. Dropping the old executor cancels any
+                            // in-flight tool futures it had started mid-stream. The fresh
+                            // executor's tools are registered from the FALLBACK response's
+                            // tool_uses by the post-stream drive loop below (this is the
+                            // ONLY path that still `add_tool`s after the stream — the
+                            // normal path registers mid-stream).
+                            exec = match &user_cancel {
                         Some(token) => {
                             crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
                                 self,
@@ -6427,47 +6457,50 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                         }
                         None => crate::streaming_executor::StreamingToolExecutor::new(self),
                     };
-                    for tu in &pumped_from_fallback.tool_uses {
-                        exec.add_tool(
-                            tu.id.clone(),
-                            tu.name.clone(),
-                            tu.input.clone(),
-                            tu.provider_id.clone(),
-                            assistant_id,
-                        );
-                    }
+                            for tu in &pumped_from_fallback.tool_uses {
+                                exec.add_tool(
+                                    tu.id.clone(),
+                                    tu.name.clone(),
+                                    tu.input.clone(),
+                                    tu.provider_id.clone(),
+                                    assistant_id,
+                                );
+                            }
 
-                    pumped_from_fallback
-                }
-                // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
-                // downstream handling — propagate.
-                Err(f) if crate::turn_loop::is_carveout_propagated(&f.error) => {
-                    return Err(f.error)
-                }
-                // #10: any other mid-stream model/runtime error (e.g. Transport)
-                // ends the turn GRACEFULLY as `model_error` (faithful port of the
-                // `query.ts` catch) rather than bubbling a hard error / phantom
-                // interrupt. Reached when the partial finalize above did NOT apply —
-                // either no content block completed before the error (a bare
-                // `content_block_start` that never reached `content_block_stop`, so
-                // there is no orphaned tool_use to repair) or the error is not a
-                // finalize class. The assistant message for a partial-with-real-
-                // -output turn is persisted by the finalize arm above; here nothing
-                // was persisted (TS `yieldMissingToolResultBlocks` no-op).
-                Err(f) => {
-                    let other = f.error;
-                    // Classify the typed mid-stream error (`Flp`/`KNn`) into the
-                    // api-error envelope; the message text stays verbatim.
-                    let env = classify_api_error(&other);
-                    let id =
-                        crate::turn_loop::surface_model_error(self, &other.to_string(), env)
+                            pumped_from_fallback
+                        }
+                        // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
+                        // downstream handling — propagate.
+                        Err(f) if crate::turn_loop::is_carveout_propagated(&f.error) => {
+                            return Err(f.error)
+                        }
+                        // #10: any other mid-stream model/runtime error (e.g. Transport)
+                        // ends the turn GRACEFULLY as `model_error` (faithful port of the
+                        // `query.ts` catch) rather than bubbling a hard error / phantom
+                        // interrupt. Reached when the partial finalize above did NOT apply —
+                        // either no content block completed before the error (a bare
+                        // `content_block_start` that never reached `content_block_stop`, so
+                        // there is no orphaned tool_use to repair) or the error is not a
+                        // finalize class. The assistant message for a partial-with-real-
+                        // -output turn is persisted by the finalize arm above; here nothing
+                        // was persisted (TS `yieldMissingToolResultBlocks` no-op).
+                        Err(f) => {
+                            let other = f.error;
+                            // Classify the typed mid-stream error (`Flp`/`KNn`) into the
+                            // api-error envelope; the message text stays verbatim.
+                            let env = classify_api_error(&other);
+                            let id = crate::turn_loop::surface_model_error(
+                                self,
+                                &other.to_string(),
+                                env,
+                            )
                             .await;
-                    let cost = self.snapshot_cost_real().await;
-                    self.output.emit_end_turn("model_error", &cost).await;
-                    final_message_id = id;
-                    break;
-                }
-                }
+                            let cost = self.snapshot_cost_real().await;
+                            self.output.emit_end_turn("model_error", &cost).await;
+                            final_message_id = id;
+                            break;
+                        }
+                    }
                 }
             };
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
@@ -8121,7 +8154,10 @@ As you answer the user's questions, you can use the following context:\n\
     /// guard (`Zht(Kt(),o)`) and the same-repo-root walk (`V7e`) — are NOT
     /// ported; only the documented "must be within project root" containment is,
     /// which is the observable behavior of the settings key.
-    fn plans_dir(project_root: &std::path::Path, plans_directory: Option<&str>) -> std::path::PathBuf {
+    fn plans_dir(
+        project_root: &std::path::Path,
+        plans_directory: Option<&str>,
+    ) -> std::path::PathBuf {
         if let Some(r) = plans_directory.filter(|s| !s.is_empty()) {
             // `path.resolve(project_root, r)`: absolute `r` wins; else join.
             let candidate = if std::path::Path::new(r).is_absolute() {
@@ -8150,8 +8186,10 @@ As you answer the user's questions, you can use the following context:\n\
             .map(|h| memory::lingxi_md::user_config_dir(&h))
             .unwrap_or_else(|| {
                 // No home: honor an explicit `$LINGXI_CONFIG_DIR`, else cwd-relative.
-                std::env::var_os(branding::CONFIG_DIR_ENV)
-                    .map_or_else(|| std::path::PathBuf::from(".lingxi"), std::path::PathBuf::from)
+                std::env::var_os(branding::CONFIG_DIR_ENV).map_or_else(
+                    || std::path::PathBuf::from(".lingxi"),
+                    std::path::PathBuf::from,
+                )
             });
         config_home.join("plans")
     }
@@ -8189,8 +8227,7 @@ As you answer the user's questions, you can use the following context:\n\
         // switch across a 200k↔1M window boundary re-sizes the budget correctly
         // (mirrors `build_prompt_context`).
         let model = self.session.lock().await.model.clone();
-        let window =
-            compaction::context_window::context_window_for_model(&model, &[]) as usize;
+        let window = compaction::context_window::context_window_for_model(&model, &[]) as usize;
         let content = crate::prompt::skill_listing::render_reminder(&new_entries, Some(window))?;
         Some(ConversationMessage::user(MessageId::new(), content))
     }
@@ -8782,8 +8819,10 @@ As you answer the user's questions, you can use the following context:\n\
     ///
     /// `ToolStaticContext::default()` (no feature flags) mirrors the system
     /// prompt's enable-filter punt; `include_examples: true` requests the full
-    /// tool prompt as the `description`. Recomputed per turn (no session-level
-    /// `toolSchemaCache` analog yet). The wire order is parity-fixed by
+    /// tool prompt as the `description`. The post-filter base wire schemas are
+    /// cached per session by `(tool names, model, model_profile)`; per-turn
+    /// dynamic fields are still applied after cloning the cached base. The wire
+    /// order is parity-fixed by
     /// [`available_tools`](tool_api::ToolRegistry::available_tools): builtins
     /// `locale_cmp`-sorted as a contiguous prefix, then MCP / LSP / plugin
     /// tools `locale_cmp`-sorted — matching claude-code's `assembleToolPool` /
@@ -8854,15 +8893,32 @@ As you answer the user's questions, you can use the following context:\n\
             let s = self.session.lock().await;
             (s.model.clone(), s.model_profile.clone())
         };
-        let mut wire = tool_api::wire::tools_to_wire(
-            &tools,
-            &PromptOptions {
-                include_examples: true,
-                model: Some(model),
-                model_profile,
-            },
-        )
-        .await;
+        let cache_key = WireToolSchemaCacheKey {
+            tool_names: tools.iter().map(|t| t.name().to_string()).collect(),
+            model: model.clone(),
+            model_profile: model_profile.clone(),
+        };
+        let mut wire = {
+            let cached = self.wire_tool_schema_cache.lock().await.clone();
+            if let Some(cached) = cached.filter(|entry| entry.key == cache_key) {
+                cached.wire
+            } else {
+                let wire = tool_api::wire::tools_to_wire(
+                    &tools,
+                    &PromptOptions {
+                        include_examples: true,
+                        model: Some(model),
+                        model_profile,
+                    },
+                )
+                .await;
+                *self.wire_tool_schema_cache.lock().await = Some(WireToolSchemaCache {
+                    key: cache_key,
+                    wire: wire.clone(),
+                });
+                wire
+            }
+        };
         // Structured-output strict mode (claude-code `tengu_structured_output_strict`
         // + `strictInputJSONSchema`): when the flag is on, mark the forced
         // `StructuredOutput` tool `strict` so the Anthropic codec sends its
@@ -11697,10 +11753,19 @@ mod skill_listing_reminder_tests {
             t0.starts_with("Plan mode is active. The user indicated"),
             "turn-0 must be the FULL reminder, got: {t0}"
         );
-        assert!(t0.contains("## Plan Workflow"), "full reminder scaffold: {t0}");
-        assert!(t0.contains("### Phase 5: Call ExitPlanMode"), "full reminder phases: {t0}");
+        assert!(
+            t0.contains("## Plan Workflow"),
+            "full reminder scaffold: {t0}"
+        );
+        assert!(
+            t0.contains("### Phase 5: Call ExitPlanMode"),
+            "full reminder phases: {t0}"
+        );
         // No plan file on disk for a fresh temp session.
-        assert!(t0.contains("No plan file exists yet."), "planExists=false: {t0}");
+        assert!(
+            t0.contains("No plan file exists yet."),
+            "planExists=false: {t0}"
+        );
         // Injection armed the sparse flag.
         assert!(orch.session().lock().await.plan_reminder_shown);
 
@@ -11711,7 +11776,9 @@ mod skill_listing_reminder_tests {
             .expect("plan-mode sparse reminder")
             .text_content();
         assert!(
-            t1.starts_with("Plan mode still active (see full instructions earlier in conversation)."),
+            t1.starts_with(
+                "Plan mode still active (see full instructions earlier in conversation)."
+            ),
             "turn-1 must be the SPARSE reminder, got: {t1}"
         );
         assert!(t1.contains("Follow 5-phase workflow."), "sparse body: {t1}");
@@ -11731,7 +11798,10 @@ mod skill_listing_reminder_tests {
             .await
             .expect("full again after reset")
             .text_content();
-        assert!(again.starts_with("Plan mode is active. The user indicated"), "got: {again}");
+        assert!(
+            again.starts_with("Plan mode is active. The user indicated"),
+            "got: {again}"
+        );
     }
 
     #[tokio::test]
@@ -11750,7 +11820,10 @@ mod skill_listing_reminder_tests {
             full.contains("## Plan Workflow\n\nMY BODY\n\n### Call ExitPlanMode"),
             "custom workflow body: {full}"
         );
-        assert!(!full.contains("### Phase 1"), "default phases suppressed: {full}");
+        assert!(
+            !full.contains("### Phase 1"),
+            "default phases suppressed: {full}"
+        );
     }
 
     // ── SKILLLIST.1 delta (sent-tracking) ──────────────────────────────────
@@ -14576,7 +14649,11 @@ mod post_compact_file_restore_tests {
         // A path recorded in the snapshot but never written to disk (deleted).
         let missing = dir.path().join("gone.txt");
         let map = tool_api::read_file_state::new_read_file_state_map();
-        set(&map, missing, stale_entry("content the model saw before deletion"));
+        set(
+            &map,
+            missing,
+            stale_entry("content the model saw before deletion"),
+        );
 
         let sink = Arc::new(telemetry::InMemorySink::new());
         let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
@@ -14963,8 +15040,14 @@ mod main_thread_agent_tests {
         let mut config = OrchestratorConfig::default();
         config.model = "base-model".to_string();
         let orch = orch_with_config(config);
-        orch.set_main_thread_agent("inheritor".to_string(), None, keep_all_tools(), Vec::new(), None)
-            .await;
+        orch.set_main_thread_agent(
+            "inheritor".to_string(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            None,
+        )
+        .await;
         assert_eq!(orch.session().lock().await.model, "base-model");
     }
 }

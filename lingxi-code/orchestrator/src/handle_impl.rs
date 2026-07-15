@@ -953,7 +953,10 @@ mod tests {
             });
         }
         let (used, max) = orch.context_window_usage().await;
-        assert_eq!(used, 1_545, "usage must come from session totals, not a model-id lookup");
+        assert_eq!(
+            used, 1_545,
+            "usage must come from session totals, not a model-id lookup"
+        );
         assert_eq!(max, CONTEXT_WINDOW_MAX_TOKENS);
     }
 

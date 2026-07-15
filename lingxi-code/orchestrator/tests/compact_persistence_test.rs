@@ -119,7 +119,10 @@ async fn cold_resume_reconstructs_post_compact_state() {
         .iter()
         .position(compaction::is_compact_boundary)
         .expect("hot history carries the compact boundary marker");
-    assert_eq!(boundary_pos, 0, "boundary marker leads the compacted history");
+    assert_eq!(
+        boundary_pos, 0,
+        "boundary marker leads the compacted history"
+    );
 
     // ---- On-disk shape (claude 2.1.207) ---------------------------------- //
     let reader = JsonlReader::new(session_path.clone(), fs.clone());

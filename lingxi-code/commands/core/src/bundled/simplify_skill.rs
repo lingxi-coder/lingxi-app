@@ -63,7 +63,12 @@ mod tests {
         assert!(!SIMPLIFY_BODY.contains("${"));
         assert!(SIMPLIFY_BODY.contains("via the Agent tool"));
         // The four angles are present.
-        for h in ["### Reuse", "### Simplification", "### Efficiency", "### Altitude"] {
+        for h in [
+            "### Reuse",
+            "### Simplification",
+            "### Efficiency",
+            "### Altitude",
+        ] {
             assert!(SIMPLIFY_BODY.contains(h), "missing angle {h}");
         }
     }

@@ -8,6 +8,7 @@
 //! applies it live.
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -143,6 +144,10 @@ pub fn save_verbose(verbose: bool) {
 /// back at startup.
 const EDITOR_MODE_KEY: &str = "editorMode";
 
+/// The `vimInsertModeRemaps` config field added in Claude Code 2.1.208. Shape:
+/// `{ "jj": "Escape" }`. Only two-character sequences are meaningful.
+const VIM_INSERT_MODE_REMAPS_KEY: &str = "vimInsertModeRemaps";
+
 /// Read the stored editor mode. `Some(true)` ⇒ Vim, `Some(false)` ⇒ normal,
 /// `None` ⇒ unset/error.
 #[must_use]
@@ -156,6 +161,29 @@ pub fn load_editor_mode_is_vim_from(path: &Path) -> Option<bool> {
     let body = std::fs::read_to_string(path).ok()?;
     let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
     Some(obj.get(EDITOR_MODE_KEY)?.as_str()? == "vim")
+}
+
+/// Read configured Vim insert-mode remaps. Unknown/non-string entries and
+/// sequences that are not exactly two chars are ignored.
+#[must_use]
+pub fn load_vim_insert_mode_remaps() -> Option<BTreeMap<String, String>> {
+    load_vim_insert_mode_remaps_from(&settings_path()?)
+}
+
+/// Test seam: read Vim insert-mode remaps from an explicit settings path.
+#[must_use]
+pub fn load_vim_insert_mode_remaps_from(path: &Path) -> Option<BTreeMap<String, String>> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
+    let remaps = obj.get(VIM_INSERT_MODE_REMAPS_KEY)?.as_object()?;
+    let parsed: BTreeMap<String, String> = remaps
+        .iter()
+        .filter_map(|(from, to)| {
+            let to = to.as_str()?;
+            (from.chars().count() == 2).then(|| (from.clone(), to.to_string()))
+        })
+        .collect();
+    (!parsed.is_empty()).then_some(parsed)
 }
 
 /// Best-effort save of the editor mode (`vim` ⇒ `"vim"`, else `"normal"`).
@@ -290,8 +318,7 @@ mod tests {
 
     #[test]
     fn workflow_size_guideline_round_trips_preserving_other_keys() {
-        let dir =
-            std::env::temp_dir().join(format!("lingxi_wsg_persist_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lingxi_wsg_persist_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         let _ = std::fs::remove_file(&path);
@@ -309,6 +336,36 @@ mod tests {
             );
         }
         assert_eq!(load_editor_mode_is_vim_from(&path), Some(true));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn vim_insert_mode_remaps_parse_two_key_sequences() {
+        let dir =
+            std::env::temp_dir().join(format!("lingxi_vim_remaps_persist_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "vimInsertModeRemaps": {
+    "jj": "Escape",
+    "jk": "Esc",
+    "x": "Escape",
+    "long": "Escape",
+    "nope": false
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let remaps = load_vim_insert_mode_remaps_from(&path).expect("remaps");
+        assert_eq!(remaps.get("jj").map(String::as_str), Some("Escape"));
+        assert_eq!(remaps.get("jk").map(String::as_str), Some("Esc"));
+        assert!(!remaps.contains_key("x"));
+        assert!(!remaps.contains_key("long"));
+        assert!(!remaps.contains_key("nope"));
         let _ = std::fs::remove_file(&path);
     }
 }

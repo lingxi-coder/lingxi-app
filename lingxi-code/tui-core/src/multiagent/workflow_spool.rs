@@ -40,7 +40,9 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
         // Phase marker: `[{index}] === {title} ===`.
         if let Some(rest) = line.strip_prefix('[') {
             if let Some((idx_str, tail)) = rest.split_once("] === ") {
-                if let (Ok(index), Some(title)) = (idx_str.parse::<usize>(), tail.strip_suffix(" ===")) {
+                if let (Ok(index), Some(title)) =
+                    (idx_str.parse::<usize>(), tail.strip_suffix(" ==="))
+                {
                     see_phase(index, &mut order);
                     titles.entry(index).or_insert_with(|| title.to_string());
                     continue;
@@ -52,7 +54,10 @@ pub fn parse_workflow_spool(spool: &str) -> (usize, Vec<WorkflowPhase>) {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) else {
                 continue;
             };
-            let index = v.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let index = v
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             let label = v
                 .get("label")
                 .and_then(serde_json::Value::as_str)

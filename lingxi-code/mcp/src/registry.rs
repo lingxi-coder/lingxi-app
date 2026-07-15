@@ -450,9 +450,21 @@ impl McpRegistry {
                 }
                 Err(e) => return Err(e),
             };
-        let mut tools = self.transport.list_tools(&conn).await?;
-        let resources = self.transport.list_resources(&conn).await?;
-        let prompts = self.transport.list_prompts(&conn).await?;
+        let mut tools = if caps.tools {
+            self.transport.list_tools(&conn).await?
+        } else {
+            Vec::new()
+        };
+        let resources = if caps.resources {
+            self.transport.list_resources(&conn).await?
+        } else {
+            Vec::new()
+        };
+        let prompts = if caps.prompts {
+            self.transport.list_prompts(&conn).await?
+        } else {
+            Vec::new()
+        };
 
         // Rewrite the empty `<server>` token the transport emits (it has no
         // logical server name, only an `McpConnectionId`). This is the missing
@@ -1109,7 +1121,9 @@ impl McpRegistry {
         let config = {
             let conns = self.connections.read().await;
             let Some(state) = conns.get(name) else {
-                return Err(McpError::Internal(format!("no MCP server named \"{name}\"")));
+                return Err(McpError::Internal(format!(
+                    "no MCP server named \"{name}\""
+                )));
             };
             state.config().clone()
         };

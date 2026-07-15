@@ -14,11 +14,12 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
-pub(crate) mod cost_lines;
 pub mod conversation;
+pub(crate) mod cost_lines;
 pub mod cost_wiring;
 pub mod cwd_changed_firer;
 pub mod diagnostics;
+pub mod end_conversation_tool;
 pub mod error;
 pub mod file_changed_firer;
 pub mod handle_impl;
@@ -35,7 +36,6 @@ pub mod stop_hook_snapshot;
 pub(crate) mod streaming_executor;
 pub mod streaming_loop;
 pub mod structured_output;
-pub mod end_conversation_tool;
 pub mod task_completed_firer;
 pub mod task_created_firer;
 pub mod task_lifecycle_hook_firer;

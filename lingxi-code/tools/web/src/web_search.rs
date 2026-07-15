@@ -1208,6 +1208,7 @@ impl WebSearchTool {
 
         let mut acc = StreamReassembler::default();
         let mut progress_counter: u64 = 0;
+        let mut saw_message_stop = false;
         while let Some(item) = stream.next().await {
             let ev = match item {
                 Ok(ev) => ev,
@@ -1240,8 +1241,19 @@ impl WebSearchTool {
                 Self::emit_progress(ctx, tx, query, progress_counter);
             }
             if event.get("type").and_then(Value::as_str) == Some("message_stop") {
+                saw_message_stop = true;
                 break;
             }
+        }
+        if !saw_message_stop {
+            let err = HttpError::Connection("stream ended before message_stop".into());
+            if acc.blocks.is_empty() {
+                return Err(err);
+            }
+            let usage = acc.usage.clone();
+            let mut blocks = acc.into_blocks();
+            blocks.push(json!({ "type": "text", "text": stream_partial_notice(&err) }));
+            return Ok((blocks, usage));
         }
         let usage = acc.usage.clone();
         Ok((acc.into_blocks(), usage))
@@ -2524,22 +2536,29 @@ mod tests {
             .await
             .expect("received results must be salvaged as a success, not a hard error");
         // Not an error result.
-        assert!(!res.is_error, "salvaged partial must not be an error result");
+        assert!(
+            !res.is_error,
+            "salvaged partial must not be an error result"
+        );
         // The received hit survived into the structured results.
         let results = res.data["results"].as_array().expect("results array");
         assert!(
-            results.iter().any(|r| r
-                .get("content")
-                .and_then(|c| c.as_array())
-                .is_some_and(|hits| hits
-                    .iter()
-                    .any(|h| h.get("url").and_then(Value::as_str) == Some("https://docs.rs")))),
+            results
+                .iter()
+                .any(|r| r
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|hits| hits
+                        .iter()
+                        .any(|h| h.get("url").and_then(Value::as_str) == Some("https://docs.rs")))),
             "the received search result must survive: {results:?}"
         );
         // The incomplete-response notice is appended to the model-facing text.
         let mc = res.model_content.as_deref().expect("model_content");
         assert!(
-            mc.contains("API Error: Connection closed mid-response. The response above may be incomplete."),
+            mc.contains(
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+            ),
             "the incomplete-response notice must be present: {mc}"
         );
         // COMPLETED (not FAILED) telemetry fired.
@@ -2547,6 +2566,79 @@ mod tests {
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_web_search_completed"));
         assert!(!names.contains(&"tengu_tool_web_search_failed"));
+    }
+
+    #[tokio::test]
+    async fn eof_without_message_stop_after_result_block_marks_partial() {
+        struct ResultThenEof;
+        #[async_trait]
+        impl HttpTransport for ResultThenEof {
+            async fn request(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, HttpError> {
+                Err(HttpError::InvalidRequest("not used".into()))
+            }
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<traits::http::SseStream, HttpError> {
+                struct S(u8);
+                impl futures_util::Stream for S {
+                    type Item = Result<protocol::SseEvent, HttpError>;
+                    fn poll_next(
+                        mut self: std::pin::Pin<&mut Self>,
+                        _cx: &mut std::task::Context<'_>,
+                    ) -> std::task::Poll<Option<Self::Item>> {
+                        self.0 += 1;
+                        match self.0 {
+                            1 => std::task::Poll::Ready(Some(Ok(protocol::SseEvent {
+                                event_type: Some("content_block_start".into()),
+                                data: json!({
+                                    "type": "content_block_start",
+                                    "index": 0,
+                                    "content_block": {
+                                        "type": "web_search_tool_result",
+                                        "tool_use_id": "stu_1",
+                                        "content": [ { "title": "Docs.rs", "url": "https://docs.rs" } ]
+                                    }
+                                })
+                                .to_string(),
+                                id: None,
+                            }))),
+                            _ => std::task::Poll::Ready(None),
+                        }
+                    }
+                }
+                Ok(Box::pin(S(0)))
+            }
+        }
+
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::default());
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.http = Arc::new(ResultThenEof) as Arc<dyn HttpTransport>;
+        ctx.provider = Arc::new(tool_api::AnthropicRequestBuilder::new("test-key", None));
+        ctx.default_model = "claude-sonnet-4-20250514".into();
+        ctx.bus.attach_sink(sink).await;
+        let tool = WebSearchTool::new(ctx);
+        let (tx, _rx) = progress_channel();
+        let res = tool
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
+            .await
+            .expect("received results must be salvaged when EOF is incomplete");
+        assert!(!res.is_error);
+        let mc = res.model_content.as_deref().expect("model_content");
+        assert!(
+            mc.contains(
+                "API Error: Connection closed mid-response. The response above may be incomplete."
+            ),
+            "EOF without message_stop must append incomplete notice: {mc}"
+        );
     }
 
     /// Minimal ctx for tests that exercise `validate_input` only (no HTTP).

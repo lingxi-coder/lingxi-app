@@ -333,19 +333,44 @@ pub fn max_thinking_tokens_for_model(model: &str) -> u32 {
     u32::try_from(upper_limit.saturating_sub(1)).unwrap_or(u32::MAX)
 }
 
-/// Parse a base-10 integer that must be `> 0`; returns `None` otherwise.
-/// Mirrors the `parseInt(...)` + `!isNaN && > 0` guard used throughout the TS
-/// env-override code. Leading whitespace and a trailing non-numeric suffix are
-/// tolerated to match JS `parseInt` semantics for the common cases.
+/// Parse a positive integer override. Leading whitespace and a trailing
+/// non-numeric suffix are tolerated to match the historical `parseInt` behavior,
+/// but scientific notation is read as a full numeric literal (`1e6` -> 1000000).
 fn parse_positive_i64(raw: &str) -> Option<u64> {
     let trimmed = raw.trim_start();
-    // JS parseInt reads a leading run of digits (with optional sign). We accept
-    // a clean unsigned integer, which covers every realistic override value.
-    let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
+    let literal = leading_numeric_literal(trimmed);
+    if literal.is_empty() {
         return None;
     }
-    digits.parse::<u64>().ok().filter(|&v| v > 0)
+    if literal.contains(['.', 'e', 'E']) {
+        let parsed = literal.parse::<f64>().ok()?;
+        if !parsed.is_finite() || parsed <= 0.0 || parsed.fract() != 0.0 {
+            return None;
+        }
+        if parsed > u64::MAX as f64 {
+            return None;
+        }
+        return Some(parsed as u64);
+    }
+    literal.parse::<u64>().ok().filter(|&v| v > 0)
+}
+
+fn leading_numeric_literal(s: &str) -> &str {
+    let mut end = 0;
+    let mut prev = '\0';
+    for (idx, ch) in s.char_indices() {
+        let allowed = ch.is_ascii_digit()
+            || ch == '.'
+            || ch == 'e'
+            || ch == 'E'
+            || ((ch == '+' || ch == '-') && (prev == 'e' || prev == 'E'));
+        if !allowed {
+            break;
+        }
+        end = idx + ch.len_utf8();
+        prev = ch;
+    }
+    &s[..end]
 }
 
 #[cfg(test)]
@@ -416,7 +441,10 @@ mod tests {
         );
         // The 1M beta also unlocks it (registry supports_1m_beta:!0) — same 1M.
         let betas = vec![CONTEXT_1M_BETA_HEADER.to_string()];
-        assert_eq!(context_window_for_model("claude-sonnet-5", &betas), 1_000_000);
+        assert_eq!(
+            context_window_for_model("claude-sonnet-5", &betas),
+            1_000_000
+        );
         // 2.1.198 pIe: claude-sonnet-5 → default 64k (upper 128k).
         assert_eq!(max_output_tokens_for_model("claude-sonnet-5"), 64_000);
         assert_eq!(max_thinking_tokens_for_model("claude-sonnet-5"), 127_999);
@@ -443,8 +471,14 @@ mod tests {
         }
         // The 1M beta ALSO unlocks them (registry supports_1m_beta:!0) — same 1M.
         let betas = vec![CONTEXT_1M_BETA_HEADER.to_string()];
-        assert_eq!(context_window_for_model("claude-opus-4-8", &betas), 1_000_000);
-        assert_eq!(context_window_for_model("claude-fable-5", &betas), 1_000_000);
+        assert_eq!(
+            context_window_for_model("claude-opus-4-8", &betas),
+            1_000_000
+        );
+        assert_eq!(
+            context_window_for_model("claude-fable-5", &betas),
+            1_000_000
+        );
         // pIe max-output stays the 64k/128k tier (locked in
         // max_output_tokens_canonical_table); the thinking ceiling rides 128k-1.
         assert_eq!(max_thinking_tokens_for_model("claude-opus-4-7"), 127_999);
@@ -452,7 +486,10 @@ mod tests {
         // NEIGHBOR LOCK: opus-4-6 has NO native_1m in the 2.1.198 registry —
         // it stays beta/suffix-gated (200k bare, 1M only with the beta).
         assert_eq!(context_window_for_model("claude-opus-4-6", &[]), 200_000);
-        assert_eq!(context_window_for_model("claude-opus-4-6", &betas), 1_000_000);
+        assert_eq!(
+            context_window_for_model("claude-opus-4-6", &betas),
+            1_000_000
+        );
         // `Hx` special case: claude-mythos-preview is native-1M despite having
         // no registry entry (`t!=="claude-mythos-preview"` bail).
         assert_eq!(
@@ -472,11 +509,20 @@ mod tests {
         assert_eq!(canonical_name("claude-3-5-sonnet"), "claude-3-5-sonnet");
         // Neighbors keep their own windows / outputs (sonnet-4-5 stays 200k/32k,
         // sonnet-4-6 stays 200k/32k without the beta).
-        assert_eq!(context_window_for_model("claude-sonnet-4-5-20250929", &[]), 200_000);
-        assert_eq!(max_output_tokens_for_model("claude-sonnet-4-5-20250929"), 32_000);
+        assert_eq!(
+            context_window_for_model("claude-sonnet-4-5-20250929", &[]),
+            200_000
+        );
+        assert_eq!(
+            max_output_tokens_for_model("claude-sonnet-4-5-20250929"),
+            32_000
+        );
         assert_eq!(context_window_for_model("claude-sonnet-4-6", &[]), 200_000);
         assert_eq!(max_output_tokens_for_model("claude-sonnet-4-6"), 32_000);
-        assert_eq!(max_output_tokens_for_model("claude-3-5-sonnet-20241022"), 8_192);
+        assert_eq!(
+            max_output_tokens_for_model("claude-3-5-sonnet-20241022"),
+            8_192
+        );
     }
 
     #[test]
@@ -590,6 +636,10 @@ mod tests {
         assert_eq!(parse_positive_i64("12345"), Some(12_345));
         assert_eq!(parse_positive_i64("  42"), Some(42));
         assert_eq!(parse_positive_i64("100abc"), Some(100));
+        assert_eq!(parse_positive_i64("1e6"), Some(1_000_000));
+        assert_eq!(parse_positive_i64("2E5tokens"), Some(200_000));
+        assert_eq!(parse_positive_i64("1.5e6"), Some(1_500_000));
+        assert_eq!(parse_positive_i64("1.5"), None);
         assert_eq!(parse_positive_i64("0"), None);
         assert_eq!(parse_positive_i64(""), None);
         assert_eq!(parse_positive_i64("abc"), None);

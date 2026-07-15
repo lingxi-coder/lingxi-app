@@ -188,16 +188,27 @@ mod tests {
 
     #[test]
     fn enter_returns_highlighted_choice() {
-        let mut a = BypassDialogState { selected: BypassChoice::Accept };
-        assert_eq!(handle_key(&mut a, key(KeyCode::Enter)), Some(BypassDialogOutcome::Accept));
+        let mut a = BypassDialogState {
+            selected: BypassChoice::Accept,
+        };
+        assert_eq!(
+            handle_key(&mut a, key(KeyCode::Enter)),
+            Some(BypassDialogOutcome::Accept)
+        );
         let mut s = BypassDialogState::default();
-        assert_eq!(handle_key(&mut s, key(KeyCode::Enter)), Some(BypassDialogOutcome::Decline));
+        assert_eq!(
+            handle_key(&mut s, key(KeyCode::Enter)),
+            Some(BypassDialogOutcome::Decline)
+        );
     }
 
     #[test]
     fn esc_declines() {
         let mut s = BypassDialogState::default();
-        assert_eq!(handle_key(&mut s, key(KeyCode::Esc)), Some(BypassDialogOutcome::Decline));
+        assert_eq!(
+            handle_key(&mut s, key(KeyCode::Esc)),
+            Some(BypassDialogOutcome::Decline)
+        );
     }
 
     #[test]
@@ -210,11 +221,16 @@ mod tests {
     #[test]
     fn render_lines_are_byte_exact() {
         let lines = render_lines();
-        assert_eq!(lines[0], "WARNING: LingXi running in Bypass Permissions mode");
+        assert_eq!(
+            lines[0],
+            "WARNING: LingXi running in Bypass Permissions mode"
+        );
         assert!(lines.iter().any(|l| l == "In Bypass Permissions mode, LingXi will not ask for your approval before running potentially dangerous commands."));
         assert!(lines.iter().any(|l| l == "This mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged."));
         assert!(lines.iter().any(|l| l == "By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode."));
-        assert!(lines.iter().any(|l| l == "https://code.claude.com/docs/en/security"));
+        assert!(lines
+            .iter()
+            .any(|l| l == "https://code.claude.com/docs/en/security"));
         assert!(lines.iter().any(|l| l == "No, exit"));
         assert!(lines.iter().any(|l| l == "Yes, I accept"));
     }

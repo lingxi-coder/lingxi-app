@@ -126,7 +126,9 @@ mod tests {
                 assert!(content.contains("2. `gh pr diff 123` for the unified diff\n"));
                 // The instructions line is unconditional — empty tail here.
                 assert!(content.contains("Additional instructions from the user: \n"));
-                assert!(content.ends_with("Format your review with clear sections and bullet points."));
+                assert!(
+                    content.ends_with("Format your review with clear sections and bullet points.")
+                );
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

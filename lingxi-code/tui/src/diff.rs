@@ -59,7 +59,10 @@ pub fn collect_diff(cwd: &Path) -> DiffOutput {
             } else {
                 format!("Failed to compute diff: {detail}")
             };
-            DiffOutput { body, is_error: true }
+            DiffOutput {
+                body,
+                is_error: true,
+            }
         }
         Err(err) => DiffOutput {
             body: format!("Failed to run git: {err}"),

@@ -195,17 +195,20 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpStream;
+    use tokio::time::{sleep, Duration};
 
-    async fn send_get(port: u16, path_and_query: &str) -> String {
-        let mut client = TcpStream::connect(("127.0.0.1", port))
-            .await
-            .expect("connect");
+    async fn try_send_get(port: u16, path_and_query: &str) -> std::io::Result<String> {
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await?;
         let req = format!("GET {path_and_query} HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        client.write_all(req.as_bytes()).await.expect("write");
+        client.write_all(req.as_bytes()).await?;
         let mut resp = Vec::new();
         // The server closes the connection after writing; read to EOF.
         let _ = client.read_to_end(&mut resp).await;
-        String::from_utf8_lossy(&resp).into_owned()
+        Ok(String::from_utf8_lossy(&resp).into_owned())
+    }
+
+    async fn send_get(port: u16, path_and_query: &str) -> String {
+        try_send_get(port, path_and_query).await.expect("send GET")
     }
 
     #[tokio::test]
@@ -268,17 +271,29 @@ mod tests {
 
     #[tokio::test]
     async fn await_callback_wrapper_binds_explicit_port() {
-        // Bind 0 first to discover a free port, drop it, then reuse for the
-        // explicit-port wrapper. Small race window is acceptable in a unit test.
-        let probe = CallbackListener::bind(0).await.expect("probe bind");
-        let port = probe.port();
-        drop(probe);
+        let base = 41000 + (std::process::id() % 10_000) as u16;
+        for offset in 0..64u16 {
+            let port = base.saturating_add(offset);
+            let server = tokio::spawn(async move { await_callback(port, "S").await });
+            for _ in 0..50 {
+                if server.is_finished() {
+                    break;
+                }
+                if try_send_get(port, "/callback?code=c&state=S").await.is_ok() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
 
-        let server = tokio::spawn(async move { await_callback(port, "S").await });
-        // Give the wrapper a moment to bind.
-        tokio::task::yield_now().await;
-        let _ = send_get(port, "/callback?code=c&state=S").await;
-        let params = server.await.expect("join").expect("ok");
-        assert_eq!(params.code, "c");
+            match server.await.expect("join") {
+                Ok(params) => {
+                    assert_eq!(params.code, "c");
+                    return;
+                }
+                Err(CallbackError::Bind(_)) => continue,
+                Err(other) => panic!("unexpected callback error: {other}"),
+            }
+        }
+        panic!("could not bind any explicit callback test port");
     }
 }

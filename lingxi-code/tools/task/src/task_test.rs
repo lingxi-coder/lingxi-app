@@ -2028,8 +2028,9 @@ mod tests {
             // the DEPRECATED advice bullets and the capability bullets — od-verified
             // `(same as bash).\n\n- Retrieves output …`.
             assert!(
-                TASK_OUTPUT_PROMPT
-                    .contains("(same as bash).\n\n- Retrieves output from a running or completed task"),
+                TASK_OUTPUT_PROMPT.contains(
+                    "(same as bash).\n\n- Retrieves output from a running or completed task"
+                ),
                 "prompt missing blank line before capability list; got: {TASK_OUTPUT_PROMPT:?}"
             );
         }

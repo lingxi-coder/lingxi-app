@@ -622,8 +622,7 @@ impl Tool for GrepTool {
         // `toRelativePath(_, getCwd())`. The walk yields canonicalized paths, so
         // the cwd must be canonicalized too for `strip_prefix` to match.
         let live_cwd = self.cwd_now();
-        let cwd_for_rel =
-            std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
+        let cwd_for_rel = std::fs::canonicalize(&live_cwd).unwrap_or_else(|_| live_cwd.clone());
 
         // --- Build regex matcher (multiline → -U --multiline-dotall) ---
         let matcher = match RegexMatcherBuilder::new()
@@ -853,20 +852,9 @@ impl Tool for GrepTool {
                 data.insert("appliedOffset".to_string(), json!(o));
             }
         } else if count_mode {
+            let total_file_count = u64::try_from(count_lines.len()).unwrap_or(u64::MAX);
             let (limited, applied_limit) = apply_head_limit(count_lines, head_limit, offset);
-            // Re-parse totals from the (limited) `relpath:count` lines.
-            let mut total: u64 = 0;
-            let mut file_count: u64 = 0;
-            for line in &limited {
-                if let Some(idx) = line.rfind(':') {
-                    if idx > 0 {
-                        if let Ok(c) = line[idx + 1..].parse::<u64>() {
-                            total += c;
-                            file_count += 1;
-                        }
-                    }
-                }
-            }
+            let total = total_matches;
             let limit_info = format_limit_info(applied_limit, offset);
             let raw_content = if limited.is_empty() {
                 "No matches found".to_string()
@@ -878,17 +866,22 @@ impl Tool for GrepTool {
             } else {
                 "occurrences"
             };
-            let fpl = if file_count == 1 { "file" } else { "files" };
+            let fpl = if total_file_count == 1 {
+                "file"
+            } else {
+                "files"
+            };
             let pag = if limit_info.is_empty() {
                 String::new()
             } else {
                 format!(" with pagination = {limit_info}")
             };
-            let summary = format!("\n\nFound {total} total {occ} across {file_count} {fpl}.{pag}");
+            let summary =
+                format!("\n\nFound {total} total {occ} across {total_file_count} {fpl}.{pag}");
             let model = format!("{raw_content}{summary}");
             // binary: {mode, numFiles, filenames:[], content, numMatches, appliedLimit?, appliedOffset?}
             data.insert("mode".to_string(), json!("count"));
-            data.insert("numFiles".to_string(), json!(file_count));
+            data.insert("numFiles".to_string(), json!(total_file_count));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
             data.insert("content".to_string(), json!(model));
             data.insert("numMatches".to_string(), json!(total));
@@ -1579,6 +1572,33 @@ mod tests {
             c.ends_with("\n\nFound 1 total occurrence across 1 file."),
             "singular summary: {c}"
         );
+    }
+
+    #[tokio::test]
+    async fn count_mode_pagination_keeps_total_counts() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a\n").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn b\n").unwrap();
+        std::fs::write(tmp.path().join("c.rs"), "fn c\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "fn", "output_mode": "count", "head_limit": 1 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let c = content_str(&result);
+        assert!(
+            c.ends_with("\n\nFound 3 total occurrences across 3 files. with pagination = limit: 1"),
+            "count summary should use full totals, not paginated rows: {c}"
+        );
+        assert_eq!(c.lines().filter(|line| line.ends_with(":1")).count(), 1);
+        assert_eq!(result.data["numMatches"], 3);
+        assert_eq!(result.data["numFiles"], 3);
+        assert_eq!(result.data["appliedLimit"], 1);
     }
 
     #[tokio::test]

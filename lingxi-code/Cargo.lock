@@ -806,6 +806,7 @@ dependencies = [
  "client-protocol",
  "command-api",
  "command-core",
+ "crossterm",
  "dirs",
  "engine",
  "engine-desktop",

@@ -110,14 +110,11 @@ impl PermissionGate for TuiPermissionGate {
         // identity so the dialog attributes it (claude-code's `● @name` badge).
         // `color` seeds the multiagent color (`agent_color_from_name`); the
         // wired ToolUseConfirm badge renders only the name.
-        let worker_info =
-            worker.map(
-                |w| tui_core::permission_bridge::WorkerPermissionInfo {
-                    color: w.name.clone(),
-                    name: w.name,
-                    team: w.team,
-                },
-            );
+        let worker_info = worker.map(|w| tui_core::permission_bridge::WorkerPermissionInfo {
+            color: w.name.clone(),
+            name: w.name,
+            team: w.team,
+        });
         let (tx, rx) = oneshot::channel();
         let exchange = PermissionExchange {
             request,

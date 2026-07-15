@@ -34,8 +34,8 @@ pub struct FileState {
 /// Maximum number of cached file entries.
 pub const MAX_ENTRIES: usize = 100;
 
-/// Maximum total bytes across all cached file contents (25 MiB).
-pub const MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// Maximum total bytes across all cached file contents (16 MiB).
+pub const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 struct CacheInner {
     map: HashMap<PathBuf, FileState>,

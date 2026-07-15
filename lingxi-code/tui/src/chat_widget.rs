@@ -16,7 +16,7 @@
 //! [`ChatWidget::desired_height`], [`ChatWidget::render`],
 //! [`ChatWidget::cursor_pos`], and [`ChatWidget::cursor_style`].
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::io::Write;
 
@@ -33,12 +33,12 @@ use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 
 use crate::bottom_pane::permission_view::PermissionView;
+use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
-use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::{
-    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction, PermissionAction,
-    PluginAction, TaskAction, WebAction,
+    BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction,
+    PermissionAction, PluginAction, TaskAction, WebAction,
 };
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
@@ -396,8 +396,7 @@ pub struct ChatWidget {
     /// mutates (an in-memory + skill-dir fs scan; block_on-safe). Kept separate
     /// from `orchestrator` because [`command_core::reload_skills::ReloadSkillsHandler`]
     /// takes the registry, NOT the handle.
-    command_registry:
-        Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
+    command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
     /// The ONE persistent `/goal` handler, built off the live handle in
     /// [`Self::set_orchestrator`] (`None` until then). [`command_core::goal::GoalHandler`]
     /// keeps the active goal in a handler-local `Arc<Mutex>`, so a fresh
@@ -487,10 +486,7 @@ impl ChatWidget {
     /// lose it — see the `goal_handler` field). Wired from the CLI `run_app`
     /// off the engine runtime; `None` (every test widget) keeps those commands
     /// as graceful no-ops.
-    pub fn set_orchestrator(
-        &mut self,
-        handle: std::sync::Arc<dyn traits::OrchestratorHandle>,
-    ) {
+    pub fn set_orchestrator(&mut self, handle: std::sync::Arc<dyn traits::OrchestratorHandle>) {
         self.goal_handler = Some(command_core::goal::GoalHandler::new(handle.clone()));
         self.orchestrator = Some(handle);
     }
@@ -550,14 +546,21 @@ impl ChatWidget {
     }
 
     /// Apply persisted UI preferences read from `settings.json` at startup:
-    /// `verbose` (transcript + pane) and `editorMode`/vim. Each is `None` when
-    /// unset. The live `/config` setter persists these same fields, so a value
-    /// set with `/config verbose=true` survives a restart. Best-effort — an
-    /// absent/unreadable settings file just leaves the session defaults.
-    pub fn apply_startup_prefs(&mut self, verbose: Option<bool>, vim: Option<bool>) {
+    /// `verbose`, `editorMode`/vim, and 2.1.208 `vimInsertModeRemaps`. Each is
+    /// `None` when unset. Best-effort — an absent/unreadable settings file just
+    /// leaves the session defaults.
+    pub fn apply_startup_prefs(
+        &mut self,
+        verbose: Option<bool>,
+        vim: Option<bool>,
+        vim_insert_mode_remaps: Option<BTreeMap<String, String>>,
+    ) {
         if let Some(v) = verbose {
             self.bottom_pane.set_verbose(v);
             self.transcript.set_verbose(v);
+        }
+        if let Some(remaps) = vim_insert_mode_remaps {
+            self.bottom_pane.set_vim_insert_mode_remaps(remaps);
         }
         if let Some(v) = vim {
             if self.bottom_pane.vim_enabled() != v {
@@ -816,7 +819,8 @@ impl ChatWidget {
                     .unwrap_or(false);
                 if !appended {
                     self.flush_or_discard_active();
-                    self.transcript.set_active(Box::new(ThinkingCell::new(delta)));
+                    self.transcript
+                        .set_active(Box::new(ThinkingCell::new(delta)));
                 }
             }
             TurnEvent::ToolUseStart { id, tool, input } => {
@@ -884,14 +888,15 @@ impl ChatWidget {
                     .map_or((None, None, None), |input| {
                         tui_core::active_turn::diff_inputs_for(&tool, &input)
                     });
-                self.transcript.push_message(RenderedMessage::UserToolResult {
-                    id,
-                    tool,
-                    result,
-                    old_string,
-                    new_string,
-                    file_path,
-                });
+                self.transcript
+                    .push_message(RenderedMessage::UserToolResult {
+                        id,
+                        tool,
+                        result,
+                        old_string,
+                        new_string,
+                        file_path,
+                    });
             }
             TurnEvent::TurnEnded(_) => {
                 self.finalize_collapse_group();
@@ -1246,10 +1251,14 @@ impl ChatWidget {
     /// `("(default)", "(default)")`), for the statusline payload's
     /// `model.id`/`model.display_name`.
     fn current_model_id_display(&self) -> (String, String) {
-        self.session.models.iter().find(|m| m.is_current).map_or_else(
-            || ("(default)".to_string(), "(default)".to_string()),
-            |m| (m.request_model.clone(), m.display.clone()),
-        )
+        self.session
+            .models
+            .iter()
+            .find(|m| m.is_current)
+            .map_or_else(
+                || ("(default)".to_string(), "(default)".to_string()),
+                |m| (m.request_model.clone(), m.display.clone()),
+            )
     }
 
     /// The current model's display string (falls back to `(default)`), reused
@@ -1564,7 +1573,11 @@ impl ChatWidget {
             None => (args, ""),
         };
         let action = action_raw.to_ascii_lowercase();
-        let target = if rest.is_empty() { "all".to_string() } else { rest.to_string() };
+        let target = if rest.is_empty() {
+            "all".to_string()
+        } else {
+            rest.to_string()
+        };
         if action != "reconnect" && action != "enable" && action != "disable" {
             return self.show_system_text(
                 &format!(
@@ -1596,7 +1609,11 @@ impl ChatWidget {
             let l: Vec<(String, traits::McpActionState)> = if is_all {
                 states.clone()
             } else {
-                states.iter().filter(|(name, _)| *name == target).cloned().collect()
+                states
+                    .iter()
+                    .filter(|(name, _)| *name == target)
+                    .cloned()
+                    .collect()
             };
             if l.is_empty() {
                 return (mcp_not_configured_msg(is_all, &target), false);
@@ -1604,8 +1621,14 @@ impl ChatWidget {
             if action == "reconnect" {
                 Self::mcp_do_reconnect(handle.as_ref(), &target, is_all, &l).await
             } else {
-                Self::mcp_do_enable_disable(handle.as_ref(), &target, is_all, action == "enable", &l)
-                    .await
+                Self::mcp_do_enable_disable(
+                    handle.as_ref(),
+                    &target,
+                    is_all,
+                    action == "enable",
+                    &l,
+                )
+                .await
             }
         });
         self.show_system_text(&message, is_error)
@@ -1692,12 +1715,18 @@ impl ChatWidget {
             Ok(names) => {
                 let verb = if enable { "Enabled" } else { "Disabled" };
                 (
-                    format!("{verb} {}. Takes effect for new sessions.", names.join(", ")),
+                    format!(
+                        "{verb} {}. Takes effect for new sessions.",
+                        names.join(", ")
+                    ),
                     false,
                 )
             }
             Err(e) => (
-                format!("/mcp {} failed: {e}", if enable { "enable" } else { "disable" }),
+                format!(
+                    "/mcp {} failed: {e}",
+                    if enable { "enable" } else { "disable" }
+                ),
                 true,
             ),
         }
@@ -1752,7 +1781,11 @@ impl ChatWidget {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/memory is unavailable (no engine handle wired)", true);
         };
-        self.run_core_command("memory", args, &command_core::memory::MemoryHandler::new(handle))
+        self.run_core_command(
+            "memory",
+            args,
+            &command_core::memory::MemoryHandler::new(handle),
+        )
     }
 
     /// `/status`: open the session status screen (snapshot facts + live
@@ -2346,7 +2379,9 @@ impl ChatWidget {
                     _ => self.submit_core_prompt(name, args, content),
                 }
             }
-            CommandResult::Done { display: Some(text) } => self.show_system_text(&text, false),
+            CommandResult::Done {
+                display: Some(text),
+            } => self.show_system_text(&text, false),
             CommandResult::Done { display: None } => ChatOutcome::Continue,
             // Only InjectMessage/Done commands are wired; guard the rest.
             CommandResult::EmitEffects { display, .. } => match display {
@@ -2527,8 +2562,7 @@ impl ChatWidget {
     /// grid.
     pub(crate) fn cmd_context(&mut self, _args: &str) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
-            return self
-                .show_system_text("/context is unavailable (no engine handle wired)", true);
+            return self.show_system_text("/context is unavailable (no engine handle wired)", true);
         };
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2614,7 +2648,11 @@ impl ChatWidget {
         let Some(handle) = self.orchestrator.clone() else {
             return self.show_system_text("/recap is unavailable (no engine handle wired)", true);
         };
-        self.run_core_command("recap", args, &command_core::recap::RecapHandler::new(handle))
+        self.run_core_command(
+            "recap",
+            args,
+            &command_core::recap::RecapHandler::new(handle),
+        )
     }
 
     /// `/btw <question>`: ask a quick side question answered by an isolated,
@@ -2851,7 +2889,14 @@ impl ChatWidget {
         use std::sync::atomic::Ordering;
         let now = !toggle.load(Ordering::Relaxed);
         toggle.store(now, Ordering::Relaxed);
-        self.show_system_text(if now { "sandbox enabled" } else { "sandbox disabled" }, false);
+        self.show_system_text(
+            if now {
+                "sandbox enabled"
+            } else {
+                "sandbox disabled"
+            },
+            false,
+        );
         ChatOutcome::SandboxAction(SandboxAction::SetEnabled(now))
     }
 
@@ -3018,14 +3063,10 @@ impl ChatWidget {
             BottomPaneOutcome::PastedImage(path) => self.push_image(&path),
             BottomPaneOutcome::RunWebAction(action) => ChatOutcome::WebAction(action),
             BottomPaneOutcome::RunConnectAction(action) => ChatOutcome::ConnectAction(action),
-            BottomPaneOutcome::RunPermissionAction(action) => {
-                ChatOutcome::PermissionAction(action)
-            }
+            BottomPaneOutcome::RunPermissionAction(action) => ChatOutcome::PermissionAction(action),
             BottomPaneOutcome::RunTaskAction(action) => ChatOutcome::TaskAction(action),
             BottomPaneOutcome::RunPluginAction(action) => ChatOutcome::PluginAction(action),
-            BottomPaneOutcome::Rewind { message, scope } => {
-                ChatOutcome::Rewind { message, scope }
-            }
+            BottomPaneOutcome::Rewind { message, scope } => ChatOutcome::Rewind { message, scope },
             BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
         }
     }
@@ -3041,9 +3082,10 @@ impl ChatWidget {
         if let Some(rest) = text.strip_prefix('!') {
             let command = rest.trim().to_string();
             if !command.is_empty() {
-                self.transcript.push_message(RenderedMessage::UserBashInput {
-                    command: command.clone(),
-                });
+                self.transcript
+                    .push_message(RenderedMessage::UserBashInput {
+                        command: command.clone(),
+                    });
                 return ChatOutcome::RunBash(command);
             }
         }
@@ -3252,14 +3294,12 @@ fn registry_slash_rows(
             )
         })
         .filter(|c| c.user_invocable != Some(false))
-        .map(
-            |c| crate::bottom_pane::completion_view::RegistrySlashRow {
-                name: with_slash(&c.name),
-                description: c.description.clone(),
-                menu_description: c.menu_description.clone(),
-                aliases: c.aliases.iter().map(|a| with_slash(a)).collect(),
-            },
-        )
+        .map(|c| crate::bottom_pane::completion_view::RegistrySlashRow {
+            name: with_slash(&c.name),
+            description: c.description.clone(),
+            menu_description: c.menu_description.clone(),
+            aliases: c.aliases.iter().map(|a| with_slash(a)).collect(),
+        })
         .collect()
 }
 
@@ -3398,7 +3438,9 @@ fn mcp_reconnect_single_msg(k: Option<traits::McpActionState>, target: &str) -> 
             )
         }
         None => (
-            format!("Couldn't reconnect \"{target}\". Check its config with `/mcp` in the terminal."),
+            format!(
+                "Couldn't reconnect \"{target}\". Check its config with `/mcp` in the terminal."
+            ),
             true,
         ),
     }
@@ -3527,7 +3569,8 @@ mod tests {
         assert_eq!(
             mcp_reconnect_single_msg(None, "sentry"),
             (
-                "Couldn't reconnect \"sentry\". Check its config with `/mcp` in the terminal.".to_string(),
+                "Couldn't reconnect \"sentry\". Check its config with `/mcp` in the terminal."
+                    .to_string(),
                 true
             )
         );
@@ -3543,10 +3586,22 @@ mod tests {
 
     #[test]
     fn mcp_already_messages_are_byte_exact() {
-        assert_eq!(mcp_already_msg(true, "all", true), "All MCP servers are already enabled.");
-        assert_eq!(mcp_already_msg(true, "all", false), "All MCP servers are already disabled.");
-        assert_eq!(mcp_already_msg(false, "sentry", true), "\"sentry\" is already enabled.");
-        assert_eq!(mcp_already_msg(false, "sentry", false), "\"sentry\" is already disabled.");
+        assert_eq!(
+            mcp_already_msg(true, "all", true),
+            "All MCP servers are already enabled."
+        );
+        assert_eq!(
+            mcp_already_msg(true, "all", false),
+            "All MCP servers are already disabled."
+        );
+        assert_eq!(
+            mcp_already_msg(false, "sentry", true),
+            "\"sentry\" is already enabled."
+        );
+        assert_eq!(
+            mcp_already_msg(false, "sentry", false),
+            "\"sentry\" is already disabled."
+        );
     }
 
     #[test]
@@ -3586,7 +3641,10 @@ mod tests {
         let ChatOutcome::Submit(_, images, _) = w.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert!(images.is_empty(), "queue drained; nothing leaks to later turns");
+        assert!(
+            images.is_empty(),
+            "queue drained; nothing leaks to later turns"
+        );
     }
 
     fn typ(widget: &mut ChatWidget, s: &str) {
@@ -3654,7 +3712,10 @@ mod tests {
             panic!("expected SandboxAction");
         };
         assert!(matches!(a, SandboxAction::SetEnabled(true)));
-        assert!(cell.load(Ordering::Relaxed), "the live cell flipped to true");
+        assert!(
+            cell.load(Ordering::Relaxed),
+            "the live cell flipped to true"
+        );
         // A second call flips back to false.
         let ChatOutcome::SandboxAction(a) = w.cmd_sandbox("") else {
             panic!("expected SandboxAction");
@@ -3692,7 +3753,10 @@ mod tests {
 
         // Bad bool value → the exact "takes true or false" error.
         let mut w = widget();
-        assert!(matches!(w.cmd_config("verbose=maybe"), ChatOutcome::Continue));
+        assert!(matches!(
+            w.cmd_config("verbose=maybe"),
+            ChatOutcome::Continue
+        ));
         let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
         assert_eq!(sys.body(), "verbose takes true or false, not \"maybe\"");
         assert!(sys.is_error());
@@ -3774,11 +3838,9 @@ mod tests {
         // `reconnect` without a wired handle → graceful "unavailable".
         let mut w = widget();
         assert!(matches!(w.cmd_mcp("reconnect"), ChatOutcome::Continue));
-        assert!(
-            cell::<crate::history_cell::system::SystemTextCell>(&w, 0)
-                .body()
-                .contains("unavailable")
-        );
+        assert!(cell::<crate::history_cell::system::SystemTextCell>(&w, 0)
+            .body()
+            .contains("unavailable"));
 
         // `enable`/`disable` are RECOGNIZED (route to the engine seam, not the
         // usage-line fallback) — without a wired handle they report "unavailable"
@@ -3788,7 +3850,10 @@ mod tests {
             assert!(matches!(w.cmd_mcp(cmd), ChatOutcome::Continue));
             let body = cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body();
             assert!(body.contains("unavailable"), "{cmd}: {body}");
-            assert!(!body.starts_with("Usage:"), "{cmd} must not hit usage: {body}");
+            assert!(
+                !body.starts_with("Usage:"),
+                "{cmd} must not hit usage: {body}"
+            );
         }
     }
 
@@ -3797,13 +3862,13 @@ mod tests {
         let mut w = widget();
         assert!(!w.bottom_pane().vim_enabled());
         // Persisted vim=true is applied at startup.
-        w.apply_startup_prefs(Some(true), Some(true));
+        w.apply_startup_prefs(Some(true), Some(true), None);
         assert!(w.bottom_pane().vim_enabled());
         // `None` (unset in settings) leaves the current state untouched.
-        w.apply_startup_prefs(None, None);
+        w.apply_startup_prefs(None, None, None);
         assert!(w.bottom_pane().vim_enabled());
         // Persisted vim=false turns it back off.
-        w.apply_startup_prefs(Some(false), Some(false));
+        w.apply_startup_prefs(Some(false), Some(false), None);
         assert!(!w.bottom_pane().vim_enabled());
     }
 
@@ -3840,7 +3905,10 @@ mod tests {
         let outcome = widget.cmd_version("");
         assert!(matches!(outcome, ChatOutcome::Continue));
         let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
-        assert!(!systext.body().is_empty(), "version output rendered as system text");
+        assert!(
+            !systext.body().is_empty(),
+            "version output rendered as system text"
+        );
         assert!(!systext.is_error(), "version output is not an error");
     }
 
@@ -3879,7 +3947,10 @@ mod tests {
         let outcome = widget.run_core_command("arg-echo", "fix the bug", &ArgEchoHandler);
         assert!(matches!(outcome, ChatOutcome::Continue));
         let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
-        assert!(body.contains("raw=[fix the bug]"), "raw_args forwarded verbatim: {body}");
+        assert!(
+            body.contains("raw=[fix the bug]"),
+            "raw_args forwarded verbatim: {body}"
+        );
         assert!(
             body.contains(r#"positional=["fix", "the", "bug"]"#),
             "positional_args whitespace-split: {body}"
@@ -3938,10 +4009,16 @@ mod tests {
             .bottom_pane()
             .view_stack()
             .active()
-            .and_then(|v| v.as_any().downcast_ref::<crate::bottom_pane::screen_view::ScreenView>())
+            .and_then(|v| {
+                v.as_any()
+                    .downcast_ref::<crate::bottom_pane::screen_view::ScreenView>()
+            })
             .expect("usage screen")
             .body_text();
-        assert!(body.contains("Session token usage"), "Usage tab shown: {body}");
+        assert!(
+            body.contains("Session token usage"),
+            "Usage tab shown: {body}"
+        );
     }
 
     /// The `/stats` alias opens the Usage screen on its Stats tab (claude-code
@@ -3963,8 +4040,14 @@ mod tests {
             .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
             .expect("usage screen")
             .body_text();
-        assert!(stats_body.contains("Total cost:"), "Stats tab first: {stats_body}");
-        assert!(stats_body.contains("‹Stats›"), "Stats tab active: {stats_body}");
+        assert!(
+            stats_body.contains("Total cost:"),
+            "Stats tab first: {stats_body}"
+        );
+        assert!(
+            stats_body.contains("‹Stats›"),
+            "Stats tab active: {stats_body}"
+        );
         // Tab cycles to the Usage tab.
         widget.handle_key(press(KeyCode::Tab));
         let usage_body = widget
@@ -3974,7 +4057,10 @@ mod tests {
             .and_then(|v| v.as_any().downcast_ref::<ScreenView>())
             .expect("usage screen")
             .body_text();
-        assert!(usage_body.contains("Session token usage"), "Tab → Usage: {usage_body}");
+        assert!(
+            usage_body.contains("Session token usage"),
+            "Tab → Usage: {usage_body}"
+        );
     }
 
     /// `/fork` dispatches to `ForkHandler` with the live handle: bare `/fork`
@@ -3990,7 +4076,10 @@ mod tests {
         );
 
         let (mut widget, _mock) = widget_with_orchestrator();
-        assert!(matches!(widget.cmd_fork("investigate the bug"), ChatOutcome::Continue));
+        assert!(matches!(
+            widget.cmd_fork("investigate the bug"),
+            ChatOutcome::Continue
+        ));
         assert_eq!(
             cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body(),
             "Cannot fork before the first conversation turn",
@@ -4004,7 +4093,10 @@ mod tests {
         let (mut widget, _mock) = widget_with_orchestrator();
         assert!(matches!(widget.cmd_recap(""), ChatOutcome::Continue));
         let sys = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
-        assert!(!sys.body().is_empty(), "/recap rendered text via the handler");
+        assert!(
+            !sys.body().is_empty(),
+            "/recap rendered text via the handler"
+        );
     }
 
     /// Unwired (no engine handle) → `/fork` and `/recap` are graceful error
@@ -4026,7 +4118,10 @@ mod tests {
     fn stop_command_shows_message_and_returns_quit() {
         let mut widget = widget();
         let outcome = widget.cmd_stop("");
-        assert!(matches!(outcome, ChatOutcome::Quit), "/stop must quit the app");
+        assert!(
+            matches!(outcome, ChatOutcome::Quit),
+            "/stop must quit the app"
+        );
         let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
         assert_eq!(systext.body(), "Session stopped.");
         assert!(!systext.is_error());
@@ -4106,9 +4201,8 @@ mod tests {
     #[test]
     fn reload_skills_reports_count_when_registry_wired() {
         let mut widget = widget();
-        let registry = std::sync::Arc::new(tokio::sync::RwLock::new(
-            command_api::CommandRegistry::new(),
-        ));
+        let registry =
+            std::sync::Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
         widget.set_command_registry(registry);
         let outcome = widget.cmd_reload_skills("");
         assert!(matches!(outcome, ChatOutcome::Continue));
@@ -4257,7 +4351,10 @@ mod tests {
             "a denied expansion must NOT submit a turn"
         );
         let sys = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
-        assert!(sys.is_error(), "expansion failure surfaced as an error cell");
+        assert!(
+            sys.is_error(),
+            "expansion failure surfaced as an error cell"
+        );
     }
 
     fn submit_command(widget: &mut ChatWidget, cmd: &str) -> ChatOutcome {
@@ -4373,7 +4470,10 @@ mod tests {
         // Exactly: user "run it" · ● Bash · ⎿ result — NO empty assistant cell.
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Bash");
-        assert!(cells(&widget)[2].as_any().downcast_ref::<ToolResultCell>().is_some());
+        assert!(cells(&widget)[2]
+            .as_any()
+            .downcast_ref::<ToolResultCell>()
+            .is_some());
         // The (empty) placeholder must not survive as an assistant cell.
         assert!(cells(&widget)
             .iter()
@@ -4433,7 +4533,11 @@ mod tests {
         // The `! echo hi` input row echoed into scrollback.
         let all = cells(&widget);
         let input: String = all[all.len() - 1]
-            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode::default(),
+            )
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -4445,7 +4549,11 @@ mod tests {
         });
         let all = cells(&widget);
         let out: String = all[all.len() - 1]
-            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode::default(),
+            )
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -4588,11 +4696,18 @@ mod tests {
         let all = cells(&widget);
         let last = all[all.len() - 1];
         let rendered: String = last
-            .display_lines(80, &Theme::dark(), crate::history_cell::RenderMode::default())
+            .display_lines(
+                80,
+                &Theme::dark(),
+                crate::history_cell::RenderMode::default(),
+            )
             .iter()
             .map(ToString::to_string)
             .collect();
-        assert!(rendered.contains("Interrupted"), "interrupt row: {rendered}");
+        assert!(
+            rendered.contains("Interrupted"),
+            "interrupt row: {rendered}"
+        );
     }
 
     #[test]
@@ -4624,18 +4739,19 @@ mod tests {
 
     #[test]
     fn slash_image_dispatches_with_arguments() {
-        let path = std::env::temp_dir().join(format!("tui-cw-slash-image-{}.png", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("tui-cw-slash-image-{}.png", std::process::id()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut widget = widget();
         let outcome = submit_command(&mut widget, &format!("/image {}", path.display()));
         assert!(matches!(outcome, ChatOutcome::Continue));
         assert_eq!(cells(&widget).len(), 1);
         let image = cell::<UserImageCell>(&widget, 0);
-        assert_eq!(image.source_path(), Some(path.display().to_string().as_str()));
         assert_eq!(
-            image.metadata(),
-            path.file_name().and_then(|n| n.to_str())
+            image.source_path(),
+            Some(path.display().to_string().as_str())
         );
+        assert_eq!(image.metadata(), path.file_name().and_then(|n| n.to_str()));
         std::fs::remove_file(&path).ok();
     }
 
@@ -4657,7 +4773,8 @@ mod tests {
     fn clear_transcript_drops_queued_images() {
         // Review #3: `/clear` removes the image cell from the screen, so the
         // queued path must not silently attach to a later message.
-        let path = std::env::temp_dir().join(format!("tui-cw-clear-image-{}.png", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("tui-cw-clear-image-{}.png", std::process::id()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("write fixture image");
         let mut widget = widget();
         widget.handle_paste(&path.display().to_string());
@@ -4667,7 +4784,10 @@ mod tests {
         let ChatOutcome::Submit(_, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert!(images.is_empty(), "cleared images must not ride a later turn");
+        assert!(
+            images.is_empty(),
+            "cleared images must not ride a later turn"
+        );
     }
 
     #[test]
@@ -4948,7 +5068,12 @@ mod tests {
         // by model id alone, mirroring the launch-time marker in mode.rs.
         widget.set_current_model("gpt-5.5", None);
         assert_eq!(
-            widget.session.models.iter().filter(|m| m.is_current).count(),
+            widget
+                .session
+                .models
+                .iter()
+                .filter(|m| m.is_current)
+                .count(),
             2,
             "profile-less switch falls back to model-only matching"
         );
@@ -4979,7 +5104,10 @@ mod tests {
             .contains::<ModelPickerView>());
         // The switch is echoed as a system message.
         let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
-        assert!(body.contains("Switching model to claude-opus-4-8"), "{body}");
+        assert!(
+            body.contains("Switching model to claude-opus-4-8"),
+            "{body}"
+        );
     }
 
     #[test]
@@ -5546,7 +5674,10 @@ mod tests {
             spinner::SPINNER_VERBS.contains(&verb),
             "expected a sampled pool verb, got {verb:?} in {text:?}"
         );
-        assert!(text.contains("… (0s"), "spinner should carry the live timer: {text}");
+        assert!(
+            text.contains("… (0s"),
+            "spinner should carry the live timer: {text}"
+        );
         // ToolUseStart swaps the verb for the activity label.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: protocol::ToolUseId::from("t1"),

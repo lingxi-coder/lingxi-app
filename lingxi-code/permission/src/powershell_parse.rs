@@ -27,7 +27,12 @@ pub const PS_PARSE_SCRIPT: &str = include_str!("powershell_parse.ps1");
 
 /// The `pwsh` argument vector preceding the encoded command (claude-code
 /// `["-NoProfile","-NonInteractive","-NoLogo","-EncodedCommand", …]`).
-pub const PWSH_ARGS: [&str; 4] = ["-NoProfile", "-NonInteractive", "-NoLogo", "-EncodedCommand"];
+pub const PWSH_ARGS: [&str; 4] = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-NoLogo",
+    "-EncodedCommand",
+];
 
 /// Build the PowerShell script to run for `command` (claude-code `afg`):
 /// `$EncodedCommand = '<base64-of-command>'` followed by [`PS_PARSE_SCRIPT`].
@@ -35,7 +40,10 @@ pub const PWSH_ARGS: [&str; 4] = ["-NoProfile", "-NonInteractive", "-NoLogo", "-
 /// `pwsh -EncodedCommand`.
 #[must_use]
 pub fn build_pwsh_script(command: &str) -> String {
-    format!("$EncodedCommand = '{}'\n{PS_PARSE_SCRIPT}", base64_std(command.as_bytes()))
+    format!(
+        "$EncodedCommand = '{}'\n{PS_PARSE_SCRIPT}",
+        base64_std(command.as_bytes())
+    )
 }
 
 /// Standard base64 (claude-code `Buffer.from(e,"utf8").toString("base64")`), for
@@ -53,8 +61,16 @@ pub fn base64_std(input: &[u8]) -> String {
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -142,7 +158,9 @@ fn br_map(node_type: &str, expr_type: Option<&str>) -> String {
         "VariableExpressionAst" => "Variable",
         "StringConstantExpressionAst" | "ConstantExpressionAst" => "StringConstant",
         "CommandParameterAst" => "Parameter",
-        "CommandExpressionAst" => return expr_type.map_or("Other".to_string(), |t| br_map(t, None)),
+        "CommandExpressionAst" => {
+            return expr_type.map_or("Other".to_string(), |t| br_map(t, None))
+        }
         _ => "Other",
     }
     .to_string()
@@ -159,7 +177,11 @@ struct Redir {
 /// `yBr` — transform a raw redirection JSON node.
 fn transform_redirection(raw: &Value) -> Redir {
     if str_field(raw, "type") == Some("MergingRedirectionAst") {
-        return Redir { operator: "2>&1".to_string(), target: String::new(), is_merging: true };
+        return Redir {
+            operator: "2>&1".to_string(),
+            target: String::new(),
+            is_merging: true,
+        };
     }
     let append = raw.get("append").and_then(Value::as_bool).unwrap_or(false);
     let from = str_field(raw, "fromStream").unwrap_or("Output");
@@ -218,11 +240,19 @@ fn transform_command(raw: &Value) -> PsCommand {
         .iter()
         .map(|r| {
             let t = transform_redirection(r);
-            PsRedirection { target: t.target, is_merging: t.is_merging }
+            PsRedirection {
+                target: t.target,
+                is_merging: t.is_merging,
+            }
         })
         .collect();
 
-    PsCommand { name, args, element_types, redirections }
+    PsCommand {
+        name,
+        args,
+        element_types,
+        redirections,
+    }
 }
 
 /// `ufg` — transform a raw statement into a [`PsStatement`].
@@ -279,7 +309,10 @@ fn transform_statement(raw: &Value) -> PsStatement {
         nested_commands,
         redirections: redirs
             .into_iter()
-            .map(|r| PsRedirection { target: r.target, is_merging: r.is_merging })
+            .map(|r| PsRedirection {
+                target: r.target,
+                is_merging: r.is_merging,
+            })
             .collect(),
     }
 }
@@ -294,13 +327,19 @@ pub fn parse_ps_ast_json(json: &str) -> ParseResult {
     };
     let valid = root.get("valid").and_then(Value::as_bool).unwrap_or(false);
     if !valid {
-        return ParseResult { valid: false, statements: Vec::new() };
+        return ParseResult {
+            valid: false,
+            statements: Vec::new(),
+        };
     }
     let statements = cae(root.get("statements"))
         .iter()
         .map(|s| transform_statement(s))
         .collect();
-    ParseResult { valid: true, statements }
+    ParseResult {
+        valid: true,
+        statements,
+    }
 }
 
 /// A capability that parses a PowerShell command into a [`ParseResult`]. Injected

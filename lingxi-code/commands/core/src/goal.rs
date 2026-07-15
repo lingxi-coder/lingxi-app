@@ -229,10 +229,7 @@ impl GoalHandler {
     /// The empty-arg status branch (binary: `` `Goal active: ${o.condition}
     /// (${s})${i}` `` / `"No goal set"`).
     fn status(&self) -> String {
-        let guard = self
-            .active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.as_ref() {
             None => NO_GOAL_SET.to_string(),
             Some(g) => {
@@ -250,10 +247,7 @@ impl GoalHandler {
     /// The clear-token branch (binary: `o===null?"No goal set":\`Goal
     /// cleared: ${o}\``).
     fn clear(&self) -> String {
-        let mut guard = self
-            .active
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.take() {
             None => NO_GOAL_SET.to_string(),
             Some(g) => {
@@ -279,10 +273,7 @@ impl GoalHandler {
             };
         }
         {
-            let mut guard = self
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
             *guard = Some(ActiveGoal {
                 condition: condition.to_string(),
                 set_at: Instant::now(),

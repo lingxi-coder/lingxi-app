@@ -38,9 +38,9 @@
 //! the common turn kinds (user/assistant text, tool-use, tool-result) replay in
 //! order.
 
-use tui_core::message::RenderedMessage;
 use protocol::{ContentBlock, ConversationMessage, ToolUseId};
 use std::collections::HashMap;
+use tui_core::message::RenderedMessage;
 
 /// Build the seeded scrollback for a resumed session from its persisted
 /// conversation history (in file/arrival order).

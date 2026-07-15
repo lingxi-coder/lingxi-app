@@ -346,31 +346,30 @@ impl Task for LocalAgentHandler {
                     status_sink
                         .set_status(&worker_task_id, TaskStatus::Running)
                         .await;
-                    let (agent_id, mut rx) =
-                        match streaming.spawn_persistent(request, inherit).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                let _ = output_manager
-                                    .append(&worker_spool_path, &e.to_string())
-                                    .await;
-                                status_sink
-                                    .set_status(&worker_task_id, TaskStatus::Failed)
-                                    .await;
-                                // Terminal (spawn never ran): judge the carried
-                                // isolation worktree so it never leaks.
-                                if let (Some(mgr), Some(handle)) =
-                                    (&worktree_manager, &agent_worktree)
-                                {
-                                    let _ = traits::worktree::agent_worktree_result(
-                                        mgr.as_ref(),
-                                        handle,
-                                    )
-                                    .await;
-                                }
-                                workers.lock().await.remove(&worker_task_id);
-                                return;
+                    let (agent_id, mut rx) = match streaming
+                        .spawn_persistent(request, inherit)
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = output_manager
+                                .append(&worker_spool_path, &e.to_string())
+                                .await;
+                            status_sink
+                                .set_status(&worker_task_id, TaskStatus::Failed)
+                                .await;
+                            // Terminal (spawn never ran): judge the carried
+                            // isolation worktree so it never leaks.
+                            if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
+                            {
+                                let _ =
+                                    traits::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                        .await;
                             }
-                        };
+                            workers.lock().await.remove(&worker_task_id);
+                            return;
+                        }
+                    };
                     // Register the live agent id so `send_message` can resume it.
                     agent_ids
                         .lock()
@@ -451,8 +450,7 @@ impl Task for LocalAgentHandler {
                     // run the worktree keep/cleanup judgment (claude-code
                     // `getWorktreeResult`): keep when dirty/ahead, else remove.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
-                        let _ =
-                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                        let _ = traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
                     }
                     agent_ids.lock().await.remove(&worker_task_id);
                     workers.lock().await.remove(&worker_task_id);
@@ -506,8 +504,7 @@ impl Task for LocalAgentHandler {
                     // — keep when dirty/ahead, else auto-remove). Runs for ANY
                     // outcome so a worktree never leaks on a failed/killed agent.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
-                        let _ =
-                            traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
+                        let _ = traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
                     }
 
                     // The subagent has terminated; drop the cancel record so a late
@@ -1471,13 +1468,9 @@ mod tests {
             changed_files: 0,
             commits: 0,
         }));
-        let handler = make_handler(
-            MockSpawner::new(CannedResult::Pending),
-            mgr,
-            sink.clone(),
-        )
-        .with_streaming_spawner(streaming)
-        .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
+        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
+            .with_streaming_spawner(streaming)
+            .with_worktree_manager(wt.clone() as Arc<dyn traits::worktree::WorktreeManager>);
         let workers = handler.workers_map();
 
         handler
@@ -1677,7 +1670,8 @@ mod tests {
 
         // Model the worker having reported a terminal status just before the
         // teardown races in (the record is still live in `workers`).
-        sink.set_status(&handle.task_id, TaskStatus::Completed).await;
+        sink.set_status(&handle.task_id, TaskStatus::Completed)
+            .await;
 
         // Cleanup moves the live record to pending_kill; drain then runs.
         (handle.cleanup.as_ref().unwrap())();

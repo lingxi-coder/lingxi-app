@@ -793,7 +793,10 @@ mod tests {
         // whose tool_call=false was a DATA error (it supports function calling).
         assert!(has("deepseek-chat"), "tool-capable model must remain");
         assert!(has("gpt-5.2"), "tool-capable OpenAI model must remain");
-        assert!(has("gpt-3.5-turbo"), "gpt-3.5-turbo supports tools — must remain");
+        assert!(
+            has("gpt-3.5-turbo"),
+            "gpt-3.5-turbo supports tools — must remain"
+        );
     }
 
     #[test]

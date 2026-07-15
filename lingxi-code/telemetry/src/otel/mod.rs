@@ -49,9 +49,7 @@ pub use config::{
     bool_env, env_truthy, int_env, ExporterKind, GateTimeouts, LogIncludeFlags, MetricsInclude,
     OtelConfig, OtlpExporterConfig, OtlpProtocol, Signal, ENV_ENABLE_TELEMETRY,
 };
-pub use headers_helper::{
-    ExecOutcome, HeadersHelperState, ResolveOutcome, validate_helper_output,
-};
+pub use headers_helper::{validate_helper_output, ExecOutcome, HeadersHelperState, ResolveOutcome};
 
 /// Whether the OpenTelemetry monitoring stack is enabled for this process
 /// (binary `o7u()`: `ct(process.env.CLAUDE_CODE_ENABLE_TELEMETRY)`, rebranded

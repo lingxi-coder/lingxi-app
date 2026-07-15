@@ -278,11 +278,9 @@ impl ShellPermissionGate for PolicyShellPermissionGate {
             .authorize_with_mode(tool_name, &input, self.mode)
         {
             PermissionResult::Allow { .. } => ShellPermissionDecision::Allow,
-            PermissionResult::Deny { explanation, .. } => {
-                ShellPermissionDecision::Deny {
-                    message: explanation,
-                }
-            }
+            PermissionResult::Deny { explanation, .. } => ShellPermissionDecision::Deny {
+                message: explanation,
+            },
             PermissionResult::Ask { prompt, .. } => ShellPermissionDecision::Deny {
                 message: Some(prompt.message),
             },
@@ -358,7 +356,11 @@ pub struct PromptShellExpansionProvider {
 }
 
 impl ShellExpansionProvider for PromptShellExpansionProvider {
-    fn build(&self, allowed_tools: &[String], _shell: Option<FrontmatterShell>) -> ShellExpansionCtx {
+    fn build(
+        &self,
+        allowed_tools: &[String],
+        _shell: Option<FrontmatterShell>,
+    ) -> ShellExpansionCtx {
         // NOTE: the `_shell` build-time hint is redundant with the per-command
         // `shell` that `execute_shell_commands_in_prompt` threads into both
         // `ShellPermissionGate::check` and `ShellRunner::run` (the SAME
@@ -372,8 +374,11 @@ impl ShellExpansionProvider for PromptShellExpansionProvider {
             platform: self.ctx.platform,
             sandbox_runner: self.ctx.sandbox_runner.clone(),
         });
-        let effective =
-            build_effective_policy(&self.ctx.permission_policy, self.ctx.permission_mode, allowed_tools);
+        let effective = build_effective_policy(
+            &self.ctx.permission_policy,
+            self.ctx.permission_mode,
+            allowed_tools,
+        );
         let gate = Arc::new(PolicyShellPermissionGate {
             policy: Arc::new(effective),
             mode: self.ctx.permission_mode,
@@ -398,10 +403,10 @@ pub fn build_prompt_shell_provider(ctx: &BuiltinToolContext) -> Arc<dyn ShellExp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
     use permission::filesystem::FsRoots;
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;
+    use tool_api::test_support::{ctx_for_file_tools, make_dummy_fs};
 
     fn test_ctx() -> BuiltinToolContext {
         ctx_for_file_tools(
@@ -529,8 +534,7 @@ mod tests {
 
         // The mixed compound → Allow (rule-allowed `gh pr view` + read-only `true`).
         assert_eq!(
-            gate
-                .permission_gate
+            gate.permission_gate
                 .check("gh pr view --json number 2>/dev/null || true", None),
             ShellPermissionDecision::Allow,
         );

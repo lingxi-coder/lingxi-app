@@ -916,22 +916,31 @@ mod tests {
             }
             None => serde_json::Value::Null,
         };
-        assert_ne!(expected, serde_json::Value::Null, "session thinking is ON by default");
+        assert_ne!(
+            expected,
+            serde_json::Value::Null,
+            "session thinking is ON by default"
+        );
         adapter
             .messages_create(model, None, None, vec![], vec![])
             .await
             .expect("messages_create");
         let body = transport.seen.lock().unwrap()[0].body_json.clone();
         assert_eq!(
-            body.get("thinking").cloned().unwrap_or(serde_json::Value::Null),
+            body.get("thinking")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
             expected,
             "subagent seam body inherits the session thinking config"
         );
 
         // Explicit session config (fixed budget): the subagent seam carries it too.
         let transport2 = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
-        let adapter2 = make_adapter(transport2.clone())
-            .with_thinking(crate::model::thinking::ThinkingConfig::Enabled { budget_tokens: 2_048 });
+        let adapter2 = make_adapter(transport2.clone()).with_thinking(
+            crate::model::thinking::ThinkingConfig::Enabled {
+                budget_tokens: 2_048,
+            },
+        );
         adapter2
             .messages_create(model, None, None, vec![], vec![])
             .await
@@ -1132,7 +1141,10 @@ mod tests {
         assert_eq!(merged["foo"], serde_json::json!("bar"));
         assert_eq!(merged["max_tokens"], serde_json::json!(99));
         let keys: Vec<&String> = merged.as_object().unwrap().keys().collect();
-        let mt = keys.iter().position(|k| *k == "max_tokens").expect("max_tokens");
+        let mt = keys
+            .iter()
+            .position(|k| *k == "max_tokens")
+            .expect("max_tokens");
         let foo = keys.iter().position(|k| *k == "foo").expect("foo");
         assert!(
             mt < foo,
@@ -2858,9 +2870,7 @@ mod tests {
     /// hung connection so the idle watchdog must fire.
     struct HangingFrames;
     impl crate::FrameStream for HangingFrames {
-        fn next_frame(
-            &mut self,
-        ) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
+        fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
             Box::pin(std::future::pending())
         }
     }
@@ -2912,7 +2922,10 @@ mod tests {
             )
             .await
             .expect("connect-phase 200 opens the stream");
-        let first = stream.next().await.expect("the watchdog yields an error item");
+        let first = stream
+            .next()
+            .await
+            .expect("the watchdog yields an error item");
         let err = first.expect_err("a hung stream must abort with an idle-timeout error");
         assert!(
             crate::model::stream_watchdog::is_stream_idle_timeout(&err),
@@ -4025,8 +4038,7 @@ mod tests {
 
     impl crate::aws_auth::AwsAuthRefresh for CountingAwsRefresh {
         fn refresh(&self) -> BoxFuture<'_, bool> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async { true })
         }
     }
@@ -4147,7 +4159,11 @@ mod tests {
             crate::aws_auth::AWS_AUTH_MAX_ATTEMPTS,
             "refresh bounded at Ygf=2"
         );
-        assert_eq!(transport.seen_count(), 3, "initial attempt + 2 refresh retries");
+        assert_eq!(
+            transport.seen_count(),
+            3,
+            "initial attempt + 2 refresh retries"
+        );
     }
 
     #[tokio::test]

@@ -330,21 +330,64 @@ impl ProcessRunner for PosixProcess {
         // the hook (claude-code `hooks.ts:1117-1166`).
         if let Some(async_timeout) = parse_async_first_line(&first_line, default_async_timeout) {
             let stderr = child.stderr.take();
+            let output_path = async_hook_output_path();
+            let output_path_string = output_path.to_string_lossy().into_owned();
+            let _ = std::fs::write(&output_path, b"async hook is still running\n");
             // Detach: drain remaining output (so the pipe never blocks the child)
             // and reap it, bounded by the async timeout; on timeout the child is
             // dropped → `kill_on_drop` SIGKILLs it.
             tokio::spawn(async move {
                 let mut child = child;
+                let output_path = output_path;
                 let drain_and_wait = async {
-                    let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
-                    if let Some(mut se) = stderr {
-                        let _ = tokio::io::copy(&mut se, &mut tokio::io::sink()).await;
-                    }
-                    let _ = child.wait().await;
+                    let mut stdout_buf = Vec::new();
+                    let mut stderr_buf = Vec::new();
+                    let stderr_read = async {
+                        if let Some(mut se) = stderr {
+                            se.read_to_end(&mut stderr_buf).await
+                        } else {
+                            Ok(0)
+                        }
+                    };
+                    let (stdout_res, stderr_res) =
+                        tokio::join!(reader.read_to_end(&mut stdout_buf), stderr_read);
+                    let status = child.wait().await;
+                    (stdout_buf, stderr_buf, stdout_res, stderr_res, status)
                 };
-                let _ = tokio::time::timeout(async_timeout, drain_and_wait).await;
+                let rendered = match tokio::time::timeout(async_timeout, drain_and_wait).await {
+                    Ok((stdout, stderr, stdout_res, stderr_res, status)) => {
+                        let mut s = String::new();
+                        s.push_str("stdout:\n");
+                        s.push_str(&String::from_utf8_lossy(&stdout));
+                        s.push_str("\nstderr:\n");
+                        s.push_str(&String::from_utf8_lossy(&stderr));
+                        if let Err(e) = stdout_res {
+                            s.push_str(&format!("\nstdout read error: {e}\n"));
+                        }
+                        if let Err(e) = stderr_res {
+                            s.push_str(&format!("\nstderr read error: {e}\n"));
+                        }
+                        match status {
+                            Ok(status) => {
+                                s.push_str(&format!(
+                                    "\nexit_code: {}\n",
+                                    status.code().unwrap_or(-1)
+                                ));
+                            }
+                            Err(e) => s.push_str(&format!("\nwait error: {e}\n")),
+                        }
+                        s
+                    }
+                    Err(_) => "async hook timed out; process was terminated\n".to_string(),
+                };
+                if let Some(parent) = output_path.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                let _ = tokio::fs::write(output_path, rendered).await;
             });
-            return Ok(HookRunOutcome::Backgrounded);
+            return Ok(HookRunOutcome::Backgrounded {
+                output_path: Some(output_path_string),
+            });
         }
 
         // Not async: read the rest of stdout and all of stderr CONCURRENTLY (as
@@ -361,8 +404,7 @@ impl ProcessRunner for PosixProcess {
                     Ok(0)
                 }
             };
-            let (rest_res, stderr_res) =
-                tokio::join!(reader.read_to_end(&mut rest), stderr_read);
+            let (rest_res, stderr_res) = tokio::join!(reader.read_to_end(&mut rest), stderr_read);
             rest_res.map_err(|e| ProcessError::Io(e.to_string()))?;
             stderr_res.map_err(|e| ProcessError::Io(e.to_string()))?;
             let status = child
@@ -477,6 +519,18 @@ fn parse_async_first_line(
     Some(timeout)
 }
 
+fn async_hook_output_path() -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "lingxi-async-hook-{}-{nanos}.log",
+        std::process::id()
+    ))
+}
+
 /// Generate a unique task id of the form `local_bash_<nanos-hex>`.
 fn generate_task_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -519,7 +573,10 @@ mod async_hook_tests {
         assert!(parse_async_first_line(b"{\"async\":false}\n", def).is_none());
         assert!(parse_async_first_line(b"", def).is_none());
         // Marker without timeout → default; with 0 → default; with N → N.
-        assert_eq!(parse_async_first_line(b"{\"async\":true}\n", def), Some(def));
+        assert_eq!(
+            parse_async_first_line(b"{\"async\":true}\n", def),
+            Some(def)
+        );
         assert_eq!(
             parse_async_first_line(b"{\"async\":true,\"asyncTimeout\":0}", def),
             Some(def)
@@ -544,7 +601,7 @@ mod async_hook_tests {
                 assert_eq!(o.stderr, "err1\n");
                 assert_eq!(o.exit_code, 3);
             }
-            HookRunOutcome::Backgrounded => panic!("normal hook must not background"),
+            HookRunOutcome::Backgrounded { .. } => panic!("normal hook must not background"),
         }
     }
 
@@ -560,7 +617,7 @@ mod async_hook_tests {
                 assert_eq!(o.stdout, "");
                 assert_eq!(o.exit_code, 0);
             }
-            HookRunOutcome::Backgrounded => panic!("empty hook must not background"),
+            HookRunOutcome::Backgrounded { .. } => panic!("empty hook must not background"),
         }
     }
 
@@ -574,12 +631,49 @@ mod async_hook_tests {
             .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
             .await
             .expect("runs");
-        assert!(matches!(outcome, HookRunOutcome::Backgrounded));
+        let HookRunOutcome::Backgrounded {
+            output_path: Some(output_path),
+        } = outcome
+        else {
+            panic!("async hook must background with retained output path");
+        };
+        assert!(
+            std::path::Path::new(&output_path).exists(),
+            "async hook output path should be readable immediately"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "async hook must not block the turn (took {:?})",
             start.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn async_marker_retains_eventual_stdout_and_stderr() {
+        let cmd = sh("echo '{\"async\":true,\"asyncTimeout\":1000}'; echo after; echo err 1>&2");
+        let outcome = PosixProcess::new()
+            .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
+            .await
+            .expect("runs");
+        let HookRunOutcome::Backgrounded {
+            output_path: Some(output_path),
+        } = outcome
+        else {
+            panic!("async hook must background with retained output path");
+        };
+
+        let mut body = String::new();
+        for _ in 0..20 {
+            body = tokio::fs::read_to_string(&output_path)
+                .await
+                .unwrap_or_default();
+            if body.contains("after") && body.contains("err") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(body.contains("stdout:\nafter"), "retained stdout: {body}");
+        assert!(body.contains("stderr:\nerr"), "retained stderr: {body}");
     }
 }
 

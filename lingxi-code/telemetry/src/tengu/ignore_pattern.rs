@@ -39,7 +39,10 @@ mod tests {
 
     #[test]
     fn event_name_is_byte_exact() {
-        assert_eq!(UNCOMPILABLE_IGNORE_PATTERN, "tengu_uncompilable_ignore_pattern");
+        assert_eq!(
+            UNCOMPILABLE_IGNORE_PATTERN,
+            "tengu_uncompilable_ignore_pattern"
+        );
     }
 
     #[test]

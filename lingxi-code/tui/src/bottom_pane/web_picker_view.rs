@@ -21,7 +21,9 @@ use crate::bottom_pane::dialog_view::centered_rect;
 use crate::bottom_pane::view::{BottomPaneView, ViewOutcome, WebAction};
 use crate::bottom_pane::web_config_view::WebConfigView;
 use crate::renderable::Renderable;
-use crate::web::picker::{handle_web_picker_key, WebConfigSnapshot, WebPickerOutcome, WebPickerState};
+use crate::web::picker::{
+    handle_web_picker_key, WebConfigSnapshot, WebPickerOutcome, WebPickerState,
+};
 
 /// The `/web` provider picker view.
 pub struct WebPickerView {
@@ -56,9 +58,7 @@ impl Renderable for WebPickerView {
             .min(area.width.saturating_sub(4))
             .max(30);
         let rows = visible.len().max(1);
-        let height = u16::try_from(rows + 6)
-            .unwrap_or(u16::MAX)
-            .min(area.height);
+        let height = u16::try_from(rows + 6).unwrap_or(u16::MAX).min(area.height);
         let rect = centered_rect(width, height, area);
 
         Clear.render(rect, buf);

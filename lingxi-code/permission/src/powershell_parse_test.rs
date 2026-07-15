@@ -100,7 +100,13 @@ fn transform_parameter_and_variable_element_types() {
             assert_eq!(c.args, vec!["-Path", "out.txt", "-Value", "$x"]);
             assert_eq!(
                 c.element_types,
-                vec!["StringConstant", "Parameter", "StringConstant", "Parameter", "Variable"]
+                vec![
+                    "StringConstant",
+                    "Parameter",
+                    "StringConstant",
+                    "Parameter",
+                    "Variable"
+                ]
             );
         }
         other => panic!("expected Command, got {other:?}"),
@@ -175,7 +181,9 @@ fn transform_redirection_and_merging() {
     let r = parse_ps_ast_json(json);
     let redirs = &r.statements[0].redirections;
     // File redirection to out.txt (not merging) + the merging one.
-    assert!(redirs.iter().any(|x| x.target == "out.txt" && !x.is_merging));
+    assert!(redirs
+        .iter()
+        .any(|x| x.target == "out.txt" && !x.is_merging));
     assert!(redirs.iter().any(|x| x.is_merging && x.target.is_empty()));
 }
 

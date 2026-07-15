@@ -333,7 +333,9 @@ mod tests {
 
     #[test]
     fn full_with_subagents_available_structure_and_locks() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Force the subagent-available path + deterministic counts.
         std::env::set_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT", "3");
         std::env::set_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT", "1");
@@ -347,7 +349,9 @@ mod tests {
         // Phase headers appear in order.
         phase_headers_in_order(&out);
         // Subagent Phase 1 variant + interpolated Explore count.
-        assert!(out.contains("Critical: In this phase you should only use the Explore subagent type."));
+        assert!(
+            out.contains("Critical: In this phase you should only use the Explore subagent type.")
+        );
         assert!(out.contains("**Launch up to 3 Explore agents IN PARALLEL**"));
         assert!(out.contains("Quality over quantity - 3 agents maximum"));
         // Subagent Phase 2 variant + interpolated Plan count; r==1 => no multi block.
@@ -366,7 +370,9 @@ mod tests {
 
     #[test]
     fn full_multi_agent_block_appears_when_count_gt_1() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT", "4");
         std::env::remove_var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS");
         let p = base("/tmp/plan.md");
@@ -379,7 +385,9 @@ mod tests {
 
     #[test]
     fn full_no_subagents_variant() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS", "1");
         let p = base("/tmp/plan.md");
         let out = render_full(&p);
@@ -398,7 +406,9 @@ mod tests {
 
     #[test]
     fn dispatch_routes_to_correct_variant() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sub = PlanReminderParams {
             is_subagent: true,
             reminder_type_sparse: true, // subagent wins over sparse
@@ -420,7 +430,9 @@ mod tests {
 
     #[test]
     fn count_helpers_respect_env_bounds() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT", "0"); // out of range
         assert_eq!(explore_agent_count(), 3);
         std::env::set_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT", "7");

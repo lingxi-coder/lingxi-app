@@ -769,15 +769,30 @@ mod tests {
         // Default (V2 tasks enabled) → "TaskCreate or Agent".
         std::env::remove_var("LINGXI_ENABLE_TASKS");
         let p = simple_prompt(&disabled_sandbox());
-        assert!(p.contains("- NEVER use the TaskCreate or Agent tools"), "default NEVER bullet");
-        assert!(p.contains("- DO NOT use the TaskCreate or Agent tools"), "default DO NOT bullet");
-        assert!(!p.contains("TodoWrite or Task tools"), "must not carry the stale hardcoded names");
+        assert!(
+            p.contains("- NEVER use the TaskCreate or Agent tools"),
+            "default NEVER bullet"
+        );
+        assert!(
+            p.contains("- DO NOT use the TaskCreate or Agent tools"),
+            "default DO NOT bullet"
+        );
+        assert!(
+            !p.contains("TodoWrite or Task tools"),
+            "must not carry the stale hardcoded names"
+        );
 
         // Defined-falsy LINGXI_ENABLE_TASKS → "TodoWrite or Agent".
         std::env::set_var("LINGXI_ENABLE_TASKS", "0");
         let p = simple_prompt(&disabled_sandbox());
-        assert!(p.contains("- NEVER use the TodoWrite or Agent tools"), "disabled NEVER bullet");
-        assert!(p.contains("- DO NOT use the TodoWrite or Agent tools"), "disabled DO NOT bullet");
+        assert!(
+            p.contains("- NEVER use the TodoWrite or Agent tools"),
+            "disabled NEVER bullet"
+        );
+        assert!(
+            p.contains("- DO NOT use the TodoWrite or Agent tools"),
+            "disabled DO NOT bullet"
+        );
         std::env::remove_var("LINGXI_ENABLE_TASKS");
     }
 

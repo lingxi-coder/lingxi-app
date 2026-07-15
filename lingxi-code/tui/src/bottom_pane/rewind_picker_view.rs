@@ -144,7 +144,11 @@ impl RewindPickerView {
 
         for (i, row) in self.rows.iter().enumerate() {
             let marker = if i == self.selected { "> " } else { "  " };
-            let title_style = if i == self.selected { accent } else { Style::default() };
+            let title_style = if i == self.selected {
+                accent
+            } else {
+                Style::default()
+            };
             lines.push(Line::from(vec![
                 Span::styled(marker.to_string(), title_style),
                 Span::styled(row.preview.clone(), title_style),
@@ -329,13 +333,19 @@ mod tests {
     #[test]
     fn esc_cancels() {
         let mut v = view(vec![row("a")]);
-        assert!(matches!(v.handle_key(press(KeyCode::Esc)), ViewOutcome::Cancelled));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
     }
 
     #[test]
     fn empty_state_enter_cancels() {
         let mut v = view(vec![]);
-        assert!(matches!(v.handle_key(press(KeyCode::Enter)), ViewOutcome::Cancelled));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Cancelled
+        ));
     }
 
     #[test]
@@ -366,4 +376,3 @@ mod tests {
         assert!(!text.contains("Restore: Restore"), "{text}");
     }
 }
-

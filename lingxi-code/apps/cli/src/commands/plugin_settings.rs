@@ -90,11 +90,7 @@ fn name_of(id: &str) -> &str {
 fn read_enabled(path: &Path) -> Map<String, Value> {
     read_settings_map(path)
         .ok()
-        .and_then(|m| {
-            m.get("enabledPlugins")
-                .and_then(Value::as_object)
-                .cloned()
-        })
+        .and_then(|m| m.get("enabledPlugins").and_then(Value::as_object).cloned())
         .unwrap_or_default()
 }
 
@@ -235,7 +231,10 @@ pub fn run_disable(
     }
 
     let Some(plugin) = plugin else {
-        return Err("✘ Failed to disable plugin: no plugin specified (pass a plugin id or --all)".to_string());
+        return Err(
+            "✘ Failed to disable plugin: no plugin specified (pass a plugin id or --all)"
+                .to_string(),
+        );
     };
     let id = resolve_id(plugin, home, cwd).map_err(|reason| fail("disable", plugin, &reason))?;
     // Auto-detect: the scope where the id is currently enabled (value == true).
@@ -303,7 +302,10 @@ mod tests {
         let e = env();
         let msg = run_enable("foo@bar", None, &e.home, &e.cwd).unwrap();
         assert_eq!(msg, "✔ Successfully enabled plugin: foo (scope: user)");
-        assert_eq!(user_settings(&e), json!({"enabledPlugins": {"foo@bar": true}}));
+        assert_eq!(
+            user_settings(&e),
+            json!({"enabledPlugins": {"foo@bar": true}})
+        );
     }
 
     #[test]
@@ -353,7 +355,10 @@ mod tests {
         .unwrap();
         let msg = run_enable("foo", None, &e.home, &e.cwd).unwrap();
         assert_eq!(msg, "✔ Successfully enabled plugin: foo (scope: user)");
-        assert_eq!(user_settings(&e), json!({"enabledPlugins": {"foo@bar": true}}));
+        assert_eq!(
+            user_settings(&e),
+            json!({"enabledPlugins": {"foo@bar": true}})
+        );
     }
 
     #[test]
@@ -362,7 +367,10 @@ mod tests {
         run_enable("foo@bar", None, &e.home, &e.cwd).unwrap();
         let msg = run_disable(Some("foo@bar"), None, false, &e.home, &e.cwd).unwrap();
         assert_eq!(msg, "✔ Successfully disabled plugin: foo (scope: user)");
-        assert_eq!(user_settings(&e), json!({"enabledPlugins": {"foo@bar": false}}));
+        assert_eq!(
+            user_settings(&e),
+            json!({"enabledPlugins": {"foo@bar": false}})
+        );
     }
 
     #[test]
@@ -409,6 +417,9 @@ mod tests {
     fn invalid_scope_errors() {
         let e = env();
         let err = run_enable("a@b", Some("bogus"), &e.home, &e.cwd).unwrap_err();
-        assert_eq!(err, "Invalid scope \"bogus\". Valid scopes: user, project, local");
+        assert_eq!(
+            err,
+            "Invalid scope \"bogus\". Valid scopes: user, project, local"
+        );
     }
 }

@@ -230,8 +230,8 @@ impl PasteBurst {
     /// began; the CALLER then removes the tail from the UI text (it is now
     /// in the burst buffer).
     pub fn decide_begin_buffer(&mut self, now: Instant, retro_tail: &str) -> bool {
-        let looks_pastey = retro_tail.chars().any(char::is_whitespace)
-            || retro_tail.chars().count() >= 16;
+        let looks_pastey =
+            retro_tail.chars().any(char::is_whitespace) || retro_tail.chars().count() >= 16;
         if looks_pastey {
             self.begin_with_retro_grabbed(retro_tail.to_string(), now);
         }
@@ -321,7 +321,10 @@ mod tests {
         pb.append_char_to_buffer('e', t0 + step);
         for (i, ch) in ['l', 'l', 'o'].into_iter().enumerate() {
             let at = t0 + step * (2 + u32::try_from(i).unwrap());
-            assert!(matches!(pb.on_plain_char(ch, at), CharDecision::BufferAppend));
+            assert!(matches!(
+                pb.on_plain_char(ch, at),
+                CharDecision::BufferAppend
+            ));
             pb.append_char_to_buffer(ch, at);
         }
         // Enter mid-burst appends a newline instead of submitting.

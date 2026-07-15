@@ -75,6 +75,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     let cfg = DesktopConfig {
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
+        api_key_helper: None,
         cwd: cwd.clone(),
         lingxi_home,
         default_model: "claude-sonnet-4-20250514".to_string(),

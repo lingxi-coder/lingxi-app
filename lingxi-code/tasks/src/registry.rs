@@ -9,7 +9,7 @@ use crate::handlers::{
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::state::{TaskState, TaskStateBase, TaskStatus};
-use crate::task_trait::{Task, TaskContext, TaskError, TaskSpawnInput};
+use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -25,8 +25,18 @@ use traits::{
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
 pub struct TaskRegistry {
     tasks: Arc<RwLock<HashMap<String, TaskState>>>,
+    /// Alternate addresses accepted by task tools (`agent_id`, named async
+    /// agents, `name@team`) mapped onto the canonical task id. Real task ids
+    /// still win on lookup; aliases only bridge claude-code's Agent return
+    /// surface to the task registry's `a…`/`t…` ids.
+    aliases: Arc<RwLock<HashMap<String, String>>>,
     handlers: HashMap<TaskType, Arc<dyn Task>>,
     handles: Arc<tokio::sync::Mutex<HashMap<String, BackgroundTaskHandle>>>,
+    /// Handler-returned cleanup hooks keyed by task id. Handler-spawned tasks
+    /// often own runtime work internally; preserving this hook lets the registry
+    /// participate in the same teardown path instead of dropping the only
+    /// synchronous cleanup handle.
+    cleanups: Arc<tokio::sync::Mutex<HashMap<String, TaskCleanup>>>,
     /// Handler-spawned task ids → their [`TaskType`], so [`Self::kill`] can
     /// dispatch teardown to the owning handler ([`Task::kill`]). Distinct from
     /// `handles`, which tracks the [`create`](Self::create) /
@@ -72,6 +82,8 @@ struct RestPayload {
     usage: Option<traits::task_registry::AgentRunUsage>,
 }
 
+type TaskCleanup = Arc<dyn Fn() + Send + Sync>;
+
 impl TaskRegistry {
     /// Construct an empty registry with no handlers yet registered.
     #[must_use]
@@ -82,8 +94,10 @@ impl TaskRegistry {
     ) -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            aliases: Arc::new(RwLock::new(HashMap::new())),
             handlers: HashMap::new(),
             handles: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             spawned: Arc::new(RwLock::new(HashMap::new())),
             runtime,
             fs,
@@ -118,6 +132,56 @@ impl TaskRegistry {
     /// Register a per-type handler.
     pub fn register_handler(&mut self, task_type: TaskType, handler: Arc<dyn Task>) {
         self.handlers.insert(task_type, handler);
+    }
+
+    /// Resolve `id_or_alias` to the canonical task id. A real task id wins over
+    /// an alias collision; stale aliases are ignored and cleaned best-effort.
+    pub async fn resolve_task_id(&self, id_or_alias: &str) -> Option<String> {
+        if self.tasks.read().await.contains_key(id_or_alias) {
+            return Some(id_or_alias.to_string());
+        }
+        let mapped = self.aliases.read().await.get(id_or_alias).cloned();
+        if let Some(task_id) = mapped {
+            if self.tasks.read().await.contains_key(&task_id) {
+                return Some(task_id);
+            }
+            self.aliases.write().await.remove(id_or_alias);
+        }
+        None
+    }
+
+    async fn canonical_or_raw(&self, id_or_alias: &str) -> String {
+        self.resolve_task_id(id_or_alias)
+            .await
+            .unwrap_or_else(|| id_or_alias.to_string())
+    }
+
+    /// Register an additional task address. Empty aliases and self aliases are
+    /// ignored; later registrations intentionally win so a reused async-agent
+    /// name points at the newest live task, matching claude-code's name map.
+    pub async fn register_task_alias(
+        &self,
+        task_id: &str,
+        alias: impl Into<String>,
+    ) -> Result<(), TaskError> {
+        if !self.tasks.read().await.contains_key(task_id) {
+            return Err(TaskError::NotFound(task_id.to_string()));
+        }
+        let alias = alias.into();
+        if alias.is_empty() || alias == task_id {
+            return Ok(());
+        }
+        self.aliases
+            .write()
+            .await
+            .insert(alias, task_id.to_string());
+        Ok(())
+    }
+
+    async fn register_spawn_aliases(&self, task_id: &str, input: &TaskSpawnInput) {
+        for alias in aliases_for_spawn(input) {
+            let _ = self.register_task_alias(task_id, alias).await;
+        }
     }
 
     /// Create a new task entry. Allocates the output file and returns the
@@ -244,8 +308,10 @@ impl TaskRegistry {
             fs: self.fs.clone(),
             runtime: self.runtime.clone(),
         };
-        let handle = handler.spawn(input.clone(), ctx).await?;
-        let id = handle.task_id;
+        let TaskHandle {
+            task_id: id,
+            cleanup,
+        } = handler.spawn(input.clone(), ctx).await?;
 
         // 3. Recover the spool path the handler ALREADY allocated (the path is a
         //    deterministic function of the id) and insert the typed state built
@@ -280,11 +346,15 @@ impl TaskRegistry {
         };
         let state = state_for_spawn(base, &input);
         self.tasks.write().await.insert(id.clone(), state);
+        self.register_spawn_aliases(&id, &input).await;
 
         // 4. Record the handler-spawned id so `kill` dispatches teardown back
         //    to the owning handler (it manages its own runtime task; the
         //    registry holds no `BackgroundTaskHandle` for it).
         self.spawned.write().await.insert(id.clone(), task_type);
+        if let Some(cleanup) = cleanup {
+            self.cleanups.lock().await.insert(id.clone(), cleanup);
+        }
 
         // Best-effort `TaskCreated` fire — the production task-creation path
         // (alongside `create`'s placeholder path). Both insert a new task row,
@@ -298,7 +368,8 @@ impl TaskRegistry {
 
     /// Look up a task by ID.
     pub async fn get(&self, task_id: &str) -> Option<TaskState> {
-        self.tasks.read().await.get(task_id).cloned()
+        let task_id = self.canonical_or_raw(task_id).await;
+        self.tasks.read().await.get(&task_id).cloned()
     }
 
     /// Return all known tasks.
@@ -330,15 +401,12 @@ impl TaskRegistry {
     /// projects it as `exit_code`/`done`. Non-bash variants are a benign
     /// no-op (only bash children carry an OS exit code). `NotFound` for an
     /// unknown id — the sink swallows it (racing teardown tolerance).
-    pub async fn set_bash_exit_code(
-        &self,
-        task_id: &str,
-        exit_code: i32,
-    ) -> Result<(), TaskError> {
+    pub async fn set_bash_exit_code(&self, task_id: &str, exit_code: i32) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
         let entry = map
-            .get_mut(task_id)
-            .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+            .get_mut(&task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
         if let TaskState::LocalBash(b) = entry {
             b.exit_code = Some(exit_code);
         }
@@ -386,11 +454,12 @@ impl TaskRegistry {
         task_id: &str,
         status: TaskStatus,
     ) -> Result<TaskState, TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
         let updated = {
             let mut map = self.tasks.write().await;
             let entry = map
-                .get_mut(task_id)
-                .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+                .get_mut(&task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
             match entry {
                 TaskState::LocalBash(b) => b.base.status = status,
                 TaskState::LocalAgent(a) => a.base.status = status,
@@ -447,57 +516,25 @@ impl TaskRegistry {
     /// the blocking terminal branch). Setting `notified` suppresses a later
     /// duplicate `<task-notification>` for a task the model has already seen.
     ///
-    /// Eagerly evicts the task when it is BOTH terminal and now notified —
-    /// claude-code's `evictTerminalTask` eager-GC path
-    /// (`framework.ts:120-143`): a terminal + notified task has been consumed and
-    /// is dropped from the map so memory is freed without waiting for the next
-    /// poll-loop iteration. A non-terminal (still pending/running) task keeps the
-    /// flag and stays in the map.
+    /// Terminal tasks are retained after notification so `TaskList`,
+    /// `TaskOutput`, and `TaskStop` can still address completed background work
+    /// until an explicit cleanup/delete path removes it.
     ///
     /// Returns [`TaskError::NotFound`] if the id is unknown.
     pub async fn mark_notified(&self, task_id: &str) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
         let mut map = self.tasks.write().await;
         let entry = map
-            .get_mut(task_id)
-            .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-        match entry {
-            TaskState::LocalBash(b) => b.base.notified = true,
-            TaskState::LocalAgent(a) => a.base.notified = true,
-            TaskState::RemoteAgent(r) => r.base.notified = true,
-            TaskState::InProcessTeammate(t) => t.base.notified = true,
-            TaskState::LocalWorkflow(w) => w.base.notified = true,
-            TaskState::MonitorMcp(m) => m.base.notified = true,
-            TaskState::Dream(d) => d.base.notified = true,
-        }
-        // Eager eviction (claude-code `evictTerminalTask`): a terminal + notified
-        // task is consumed and can be GC'd immediately.
-        if entry.base().status.is_terminal() {
-            map.remove(task_id);
-        }
+            .get_mut(&task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+        entry.base_mut().notified = true;
         Ok(())
     }
 
-    /// Drop every task that is BOTH terminal (completed / failed / killed) AND
-    /// `notified` — the lazy-GC safety net that mirrors claude-code's
-    /// `generateTaskAttachments` eviction sweep (`framework.ts:172-180`,
-    /// `applyTaskOffsetsAndEvictions:234-245`). The eager [`mark_notified`] path
-    /// already drops a task the moment it becomes terminal+notified; this sweep
-    /// catches any that became terminal AFTER they were notified (e.g. a notified
-    /// `pending`/`running` task that later finished). Returns the evicted ids.
+    /// Deprecated compatibility hook. Completed background tasks are retained
+    /// after notification; there is no implicit terminal-task GC here.
     pub async fn evict_terminal_tasks(&self) -> Vec<String> {
-        let mut map = self.tasks.write().await;
-        let evict: Vec<String> = map
-            .iter()
-            .filter(|(_, s)| {
-                let b = s.base();
-                b.notified && b.status.is_terminal()
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &evict {
-            map.remove(id);
-        }
-        evict
+        Vec::new()
     }
 
     /// Arm a one-shot "came to rest" notification for a PERSISTENT, still-alive
@@ -512,9 +549,12 @@ impl TaskRegistry {
         result: Option<String>,
         usage: Option<traits::task_registry::AgentRunUsage>,
     ) {
+        let Some(task_id) = self.resolve_task_id(task_id).await else {
+            return;
+        };
         {
             let map = self.tasks.read().await;
-            match map.get(task_id) {
+            match map.get(&task_id) {
                 Some(s) if !s.base().status.is_terminal() => {}
                 _ => return,
             }
@@ -522,12 +562,12 @@ impl TaskRegistry {
         self.pending_rest
             .write()
             .await
-            .insert(task_id.to_string(), RestPayload { result, usage });
+            .insert(task_id, RestPayload { result, usage });
     }
 
     /// Drain the terminal tasks not yet surfaced to the model, marking each
-    /// `notified` (and evicting it, since terminal + notified is GC-able) so a
-    /// completion is reported exactly once. Returns a [`TaskNotification`]
+    /// `notified` while retaining it so a completion is reported exactly once.
+    /// Returns a [`TaskNotification`]
     /// snapshot per drained task, in registry-iteration order.
     ///
     /// This is the turn-boundary equivalent of claude-code's per-task-type
@@ -559,7 +599,9 @@ impl TaskRegistry {
             .collect();
         let mut out = Vec::with_capacity(drain_ids.len());
         for id in drain_ids {
-            let Some(state) = map.get(&id) else { continue };
+            let Some(state) = map.get(&id) else {
+                continue;
+            };
             let b = state.base();
             // Per-type fields the renderer needs beyond the shared base.
             let exit_code = match state {
@@ -602,10 +644,12 @@ impl TaskRegistry {
                 worktree_path: None,
                 worktree_branch: None,
             });
-            // Mark notified + evict (terminal + notified is GC-able) so the
-            // completion surfaces exactly once. Mirrors `mark_notified`'s eager
-            // eviction without re-acquiring the lock.
-            map.remove(&id);
+            // Mark notified so the completion surfaces exactly once. The task
+            // itself stays addressable until an explicit cleanup/delete removes
+            // it.
+            if let Some(state) = map.get_mut(&id) {
+                state.base_mut().notified = true;
+            }
         }
 
         // Rest notifications: a PERSISTENT agent that came to rest (non-terminal,
@@ -674,36 +718,46 @@ impl TaskRegistry {
     /// Note: only Bash and Agent states currently carry a writable `status`
     /// field in the M1 surface; other variants are no-ops on cancel.
     pub async fn kill(&self, task_id: &str) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let task_id_ref = task_id.as_str();
+        // Preserve the handler's explicit kill path as the primary cancellation
+        // mechanism. The cleanup hook is a fallback/drop-owner hook; running it
+        // first can remove the handler's worker record before `Task::kill` gets a
+        // chance to cancel the live runtime work.
+        let cleanup = self.cleanups.lock().await.remove(task_id_ref);
         // Handler-spawned path: dispatch teardown to the owning handler.
-        let spawned_type = self.spawned.write().await.remove(task_id);
+        let spawned_type = self.spawned.write().await.remove(task_id_ref);
         if let Some(task_type) = spawned_type {
             if let Some(handler) = self.handlers.get(&task_type) {
                 let ctx = TaskContext {
                     fs: self.fs.clone(),
                     runtime: self.runtime.clone(),
                 };
-                handler.kill(task_id, ctx).await?;
+                handler.kill(task_id_ref, ctx).await?;
             }
             // Reflect the kill in the tracked state for any variant the M1
             // surface can write; the handler's status sink drives the rest.
-            if let Some(s) = self.tasks.write().await.get_mut(task_id) {
+            if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
                 match s {
                     TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
                     TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
                     _ => {}
                 }
             }
+            if let Some(cleanup) = cleanup {
+                cleanup();
+            }
             return Ok(());
         }
 
         let mut handles = self.handles.lock().await;
-        if let Some(h) = handles.remove(task_id) {
+        if let Some(h) = handles.remove(task_id_ref) {
             self.runtime
                 .cancel(&h)
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?;
         }
-        if let Some(s) = self.tasks.write().await.get_mut(task_id) {
+        if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
             // Mark killed for the variants whose status is exposed here.
             match s {
                 TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
@@ -711,6 +765,9 @@ impl TaskRegistry {
                 // Other variants intentionally fall through in M1.
                 _ => {}
             }
+        }
+        if let Some(cleanup) = cleanup {
+            cleanup();
         }
         Ok(())
     }
@@ -813,12 +870,12 @@ impl TeamSpawnSeam for TaskRegistry {
     }
 
     /// A teammate task is ALIVE while its stored state is present and
-    /// non-terminal. A terminal status (Completed / Failed / Killed) OR an
-    /// evicted (since-terminal) task both read as "gone" — the mailbox→runner
-    /// pump uses this on its park timeout to stop pumping a dead teammate (so
-    /// its mailbox can be unregistered) even if no message ever arrived to
-    /// surface `Terminated`. A resting PERSISTENT agent keeps a non-terminal
-    /// (Running) status, so it correctly reads as alive.
+    /// non-terminal. A terminal status (Completed / Failed / Killed) reads as
+    /// "gone" even though the retained task remains inspectable — the
+    /// mailbox→runner pump uses this on its park timeout to stop pumping a dead
+    /// teammate (so its mailbox can be unregistered) even if no message ever
+    /// arrived to surface `Terminated`. A resting PERSISTENT agent keeps a
+    /// non-terminal (Running) status, so it correctly reads as alive.
     async fn is_alive(&self, task_id: &str) -> bool {
         match self.get(task_id).await {
             Some(state) => !state.base().status.is_terminal(),
@@ -924,6 +981,43 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             })
         }
     }
+}
+
+fn aliases_for_spawn(input: &TaskSpawnInput) -> Vec<String> {
+    let mut aliases = Vec::new();
+    match input {
+        TaskSpawnInput::LocalAgent {
+            agent_id,
+            spawn_request,
+            ..
+        } => {
+            aliases.push(agent_id.to_string());
+            if let Some(request) = spawn_request {
+                if let Some(name) = request.name.as_deref().filter(|s| !s.is_empty()) {
+                    aliases.push(name.to_string());
+                    if let Some(team) = request.team_name.as_deref().filter(|s| !s.is_empty()) {
+                        aliases.push(format!("{name}@{team}"));
+                    }
+                }
+            }
+        }
+        TaskSpawnInput::InProcessTeammate {
+            agent_id,
+            name,
+            team_name,
+            ..
+        } => {
+            aliases.push(agent_id.to_string());
+            if !name.is_empty() {
+                aliases.push(name.clone());
+                if !team_name.is_empty() {
+                    aliases.push(format!("{name}@{team_name}"));
+                }
+            }
+        }
+        _ => {}
+    }
+    aliases
 }
 
 /// Register the M2 *self-contained* per-type handlers — the ones whose only

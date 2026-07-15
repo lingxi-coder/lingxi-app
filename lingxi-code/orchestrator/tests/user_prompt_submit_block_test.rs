@@ -112,7 +112,10 @@ async fn orch_with_blocking_hook(
     suppress: bool,
 ) -> (Arc<ConversationOrchestrator>, Arc<MockOutputStream>) {
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
-    registry.write().await.register(builtin_hook("block-prompt"));
+    registry
+        .write()
+        .await
+        .register(builtin_hook("block-prompt"));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(BlockingPromptHook {
         reason: reason.map(str::to_string),
@@ -193,8 +196,10 @@ async fn block_without_reason_uses_default() {
 
     let texts = output.text_events().await;
     assert!(
-        texts.iter().any(|t| t
-            == "UserPromptSubmit operation blocked by hook:\nBlocked by hook\n\nOriginal prompt: hi"),
+        texts.iter().any(|t| {
+            t
+            == "UserPromptSubmit operation blocked by hook:\nBlocked by hook\n\nOriginal prompt: hi"
+        }),
         "missing reason falls back to `Blocked by hook`, got {texts:?}"
     );
 }

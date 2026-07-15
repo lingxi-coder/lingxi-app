@@ -46,6 +46,9 @@ const MIN_COLUMN_WIDTH: usize = 3;
 /// provides better readability. (`MarkdownTable.tsx:25`)
 const MAX_ROW_LINES: usize = 4;
 
+/// Maximum number of markdown table body rows to render.
+pub const MAX_TABLE_ROWS: usize = 200;
+
 /// Column text alignment, mirroring claude-code's `token.align` entries
 /// (`'left' | 'center' | 'right'`, with the markdown default being left).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +226,7 @@ pub fn render_table(
     theme: &super::markdown::MarkdownTheme,
 ) -> Vec<StyledLine> {
     let _ = theme;
+    let rows = &rows[..rows.len().min(MAX_TABLE_ROWS)];
     let num_cols = headers.len();
     if num_cols == 0 {
         return Vec::new();
@@ -891,6 +895,18 @@ mod tests {
     fn empty_table_is_no_lines() {
         let lines = render_table(&[], &[], &[], 80, &theme());
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn table_body_rows_are_capped_at_200() {
+        let headers = header(&["id"]);
+        let rows: Vec<Vec<Vec<StyledSpan>>> = (0..=MAX_TABLE_ROWS)
+            .map(|idx| vec![cell(&format!("row-{idx}"))])
+            .collect();
+        let lines = render_table(&headers, &rows, &[ColumnAlign::Left], 80, &theme());
+        let plain = plain_lines(&lines).join("\n");
+        assert!(plain.contains("row-199"));
+        assert!(!plain.contains("row-200"));
     }
 
     /// Assert the cc 2.1.198 overflow clamp: no rendered line may exceed the

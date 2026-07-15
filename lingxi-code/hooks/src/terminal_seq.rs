@@ -256,9 +256,15 @@ mod tests {
     fn osc_9_body_beginning_with_a_bare_digit_is_rejected() {
         // ESC ] 9 ; 5 items done BEL — body "5 items done" begins with a digit
         // and is not the 9;4 progress form → rejected (claude-code `z7h`).
-        assert_eq!(validate_terminal_sequence("\u{001B}]9;5 items done\u{0007}"), None);
+        assert_eq!(
+            validate_terminal_sequence("\u{001B}]9;5 items done\u{0007}"),
+            None
+        );
         // A leading sign / leading whitespace before the digit is also rejected.
-        assert_eq!(validate_terminal_sequence("\u{001B}]9;-3 left\u{0007}"), None);
+        assert_eq!(
+            validate_terminal_sequence("\u{001B}]9;-3 left\u{0007}"),
+            None
+        );
         assert_eq!(validate_terminal_sequence("\u{001B}]9; 42%\u{0007}"), None);
     }
 

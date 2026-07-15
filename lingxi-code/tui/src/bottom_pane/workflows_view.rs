@@ -173,7 +173,11 @@ impl WorkflowsView {
     fn row_meta(row: &WorkflowRow) -> String {
         let mut parts = Vec::new();
         if row.agent_count > 0 {
-            let noun = if row.agent_count == 1 { "agent" } else { "agents" };
+            let noun = if row.agent_count == 1 {
+                "agent"
+            } else {
+                "agents"
+            };
             parts.push(format!("{} {noun}", row.agent_count));
         }
         if let Some(e) = row_elapsed(row) {
@@ -416,7 +420,10 @@ impl WorkflowDetailView {
         let error = crate::style_adapter::to_ratatui(self.theme.error);
         let dim_style = Style::default().fg(dim);
         let label = |k: &str, v: String| -> Line<'static> {
-            Line::from(vec![Span::styled(format!("{k:<10}"), dim_style), Span::raw(v)])
+            Line::from(vec![
+                Span::styled(format!("{k:<10}"), dim_style),
+                Span::raw(v),
+            ])
         };
 
         let mut lines = vec![
@@ -428,7 +435,10 @@ impl WorkflowDetailView {
             label("Status", self.row.status.clone()),
             label(
                 "Run id",
-                self.row.run_id.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+                self.row
+                    .run_id
+                    .clone()
+                    .unwrap_or_else(|| "\u{2014}".to_string()),
             ),
             label("Agents", self.row.agent_count.to_string()),
             label(
@@ -758,7 +768,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         v.render(area, &mut buf);
         let text = buf_text(&buf, area);
-        assert!(text.contains("No dynamic workflows in this session"), "{text}");
+        assert!(
+            text.contains("No dynamic workflows in this session"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -790,7 +803,11 @@ mod tests {
     fn windowing_shows_a_slice_with_more_above_below_indicators() {
         // 40 rows in a short viewport → only a window renders, with "N more
         // above"/"below" indicators, and the selected row stays visible.
-        let mut v = view((0..40).map(|i| row(&format!("w{i:02}"), "running", "r")).collect());
+        let mut v = view(
+            (0..40)
+                .map(|i| row(&format!("w{i:02}"), "running", "r"))
+                .collect(),
+        );
         let area = Rect::new(0, 0, 60, 15); // inner height ~13
         let render = |v: &WorkflowsView| {
             let mut buf = Buffer::empty(area);
@@ -800,16 +817,25 @@ mod tests {
         // Selection at top → nothing hidden above, some hidden below.
         let text = render(&v);
         assert!(!text.contains("more above"), "top: {text}");
-        assert!(text.contains("more below"), "top should hide rows below: {text}");
+        assert!(
+            text.contains("more below"),
+            "top should hide rows below: {text}"
+        );
         // Move selection to the end → rows hidden above, none below.
         v.selected = 39;
         let text = render(&v);
-        assert!(text.contains("more above"), "end should hide rows above: {text}");
+        assert!(
+            text.contains("more above"),
+            "end should hide rows above: {text}"
+        );
         assert!(!text.contains("more below"), "end: {text}");
         // The windowed slice is far smaller than all 40 rows.
         let (start, end, _, _) = v.window_bounds();
         assert!(end - start < 40, "window slices the list: {start}..{end}");
-        assert!(start <= v.selected && v.selected < end, "selected in window");
+        assert!(
+            start <= v.selected && v.selected < end,
+            "selected in window"
+        );
     }
 
     #[test]
@@ -844,7 +870,10 @@ mod tests {
         let text = buf_text(&buf, area);
         // Oracle gap is two spaces, no leading dot before the meta.
         assert!(text.contains("deploy-site  3 agents"), "{text}");
-        assert!(!text.contains("deploy-site  \u{00b7}"), "no spurious dot: {text}");
+        assert!(
+            !text.contains("deploy-site  \u{00b7}"),
+            "no spurious dot: {text}"
+        );
     }
 
     fn buf_text(buf: &Buffer, area: Rect) -> String {

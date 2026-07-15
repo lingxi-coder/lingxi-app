@@ -221,7 +221,7 @@ mod tests {
         let handler = RootsListHandler {
             cwd: PathBuf::from("/proj"),
             additional: vec![
-                PathBuf::from("/proj"),      // dup of cwd
+                PathBuf::from("/proj"), // dup of cwd
                 PathBuf::from("/tmp/extra"),
                 PathBuf::from("/tmp/extra"), // dup of an extra
             ],

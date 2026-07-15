@@ -92,7 +92,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // field (CC `settingsMergeCustomizer` special-cases only specific
         // arrays/objects, and none of these is one).
         force_login_method: next.force_login_method.or(prev.force_login_method),
-        force_login_gateway_url: next.force_login_gateway_url.or(prev.force_login_gateway_url),
+        force_login_gateway_url: next
+            .force_login_gateway_url
+            .or(prev.force_login_gateway_url),
         force_login_org_uuid: next.force_login_org_uuid.or(prev.force_login_org_uuid),
         parent_settings_behavior: next
             .parent_settings_behavior
@@ -109,14 +111,15 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .or(prev.force_remote_settings_refresh),
         // `companyAnnouncements` — array-merge (concat-dedup), matching CC's
         // `settingsMergeCustomizer` array customizer.
-        company_announcements: concat_dedup(
-            prev.company_announcements,
-            next.company_announcements,
-        ),
+        company_announcements: concat_dedup(prev.company_announcements, next.company_announcements),
         // `plansDirectory` / `apiKeyHelper` — scalar Override (later source wins),
         // same as `model`/`outputStyle`.
         plans_directory: next.plans_directory.or(prev.plans_directory),
         api_key_helper: next.api_key_helper.or(prev.api_key_helper),
+        vim_insert_mode_remaps: merge_string_map(
+            prev.vim_insert_mode_remaps,
+            next.vim_insert_mode_remaps,
+        ),
         // 2.1.207 `otelHeadersHelper` (H-BIN-06) — plain string, scalar Override.
         otel_headers_helper: next.otel_headers_helper.or(prev.otel_headers_helper),
         providers: deep_merge_object(prev.providers, next.providers),
@@ -420,7 +423,10 @@ mod tests {
             "org pin is scalar-override (source array wins, not concat)"
         );
         // Keys next left unset survive from prev.
-        assert_eq!(merged.parent_settings_behavior.as_deref(), Some("first-wins"));
+        assert_eq!(
+            merged.parent_settings_behavior.as_deref(),
+            Some("first-wins")
+        );
         assert_eq!(merged.force_remote_settings_refresh, Some(false));
     }
 

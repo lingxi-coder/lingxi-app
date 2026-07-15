@@ -447,7 +447,10 @@ mod tests {
     #[test]
     fn agent_name_property_carries_regex_pattern() {
         let expected = json!("^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$");
-        assert_eq!(AGENT_INPUT_SCHEMA["properties"]["name"]["pattern"], expected);
+        assert_eq!(
+            AGENT_INPUT_SCHEMA["properties"]["name"]["pattern"],
+            expected
+        );
         assert_eq!(
             AGENT_INPUT_SCHEMA_MODEL["properties"]["name"]["pattern"],
             expected
@@ -469,10 +472,20 @@ mod tests {
         assert!(matches_agent_name_pattern("main"));
         assert_eq!(
             validate_agent_name("main"),
-            Err("\"main\" is reserved \u{2014} SendMessage routes it to the main conversation".to_string())
+            Err(
+                "\"main\" is reserved \u{2014} SendMessage routes it to the main conversation"
+                    .to_string()
+            )
         );
         // Pattern violations → the regex message (checked before `.refine`).
-        for bad in ["", "-bad", "_lead", "has space", "a".repeat(65).as_str(), "e\u{0301}"] {
+        for bad in [
+            "",
+            "-bad",
+            "_lead",
+            "has space",
+            "a".repeat(65).as_str(),
+            "e\u{0301}",
+        ] {
             assert_eq!(
                 validate_agent_name(bad),
                 Err(
@@ -915,6 +928,104 @@ mod tests {
         );
         // Ownership transfer: the launch return must NOT judge/remove.
         assert!(wt.removed().is_empty(), "no cleanup at async launch");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn definition_isolation_worktree_created_when_input_omits_isolation() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        spawner.script_selection(traits::subagent_spawn::SelectedAgentMeta {
+            agent_type: "general-purpose".into(),
+            isolation: Some("worktree".into()),
+            ..traits::subagent_spawn::SelectedAgentMeta::default()
+        });
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        bctx.worktree = wt.clone();
+        let tool = AgentTool::new(bctx);
+
+        let result = tool
+            .call(
+                serde_json::json!({
+                    "description": "def iso",
+                    "subagent_type": "general-purpose",
+                    "prompt": "go"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("async launch ok");
+
+        assert_eq!(result.data["status"], "async_launched");
+        assert_eq!(
+            wt.created().len(),
+            1,
+            "definition isolation creates worktree"
+        );
+        let inv = spawner.invocations();
+        assert_eq!(inv[0].request.isolation.as_deref(), Some("worktree"));
+        assert!(inv[0].request.cwd.is_some(), "worktree cwd is threaded");
+        assert!(
+            inv[0].request.worktree.is_some(),
+            "worktree handle is carried"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn explicit_isolation_overrides_definition_isolation() {
+        let _g = BG_DISABLE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        let spawner = arc_mock_spawner();
+        spawner.script_selection(traits::subagent_spawn::SelectedAgentMeta {
+            agent_type: "general-purpose".into(),
+            isolation: Some("worktree".into()),
+            ..traits::subagent_spawn::SelectedAgentMeta::default()
+        });
+        let mut bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let wt = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        bctx.worktree = wt.clone();
+        let tool = AgentTool::new(bctx);
+
+        let result = tool
+            .call(
+                serde_json::json!({
+                    "description": "remote wins",
+                    "subagent_type": "general-purpose",
+                    "prompt": "go",
+                    "isolation": "remote"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("async launch ok");
+
+        assert_eq!(result.data["status"], "async_launched");
+        assert!(
+            wt.created().is_empty(),
+            "explicit remote suppresses worktree"
+        );
+        let inv = spawner.invocations();
+        assert_eq!(inv[0].request.isolation.as_deref(), Some("remote"));
+        assert!(inv[0].request.worktree.is_none());
     }
 
     // P1-01: a worktree-create failure on the (default) async path surfaces
@@ -2219,6 +2330,7 @@ mod tests {
             color: Some("blue".into()),
             is_built_in: true,
             background: false,
+            isolation: None,
         });
         spawner.script_completed_full(
             protocol::AgentId::new(),

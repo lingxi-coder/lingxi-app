@@ -1440,7 +1440,10 @@ mod tests {
     fn canonicalize_sonnet_5_before_sonnet_4_x() {
         // 2.1.198 `Bka`: includes("sonnet-5") → "claude-sonnet-5" precedes the
         // sonnet-4-6 catch. Dated / ARN forms resolve too.
-        assert_eq!(first_party_name_to_canonical("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(
+            first_party_name_to_canonical("claude-sonnet-5"),
+            "claude-sonnet-5"
+        );
         assert_eq!(
             first_party_name_to_canonical("claude-sonnet-5-20260203"),
             "claude-sonnet-5"
@@ -1456,7 +1459,10 @@ mod tests {
             first_party_name_to_canonical("claude-sonnet-4-5-20250929"),
             "claude-sonnet-4-5"
         );
-        assert_eq!(first_party_name_to_canonical("claude-sonnet-4-6"), "claude-sonnet-4-6");
+        assert_eq!(
+            first_party_name_to_canonical("claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
         assert_eq!(
             first_party_name_to_canonical("claude-3-5-sonnet-20241022"),
             "claude-3-5-sonnet"
@@ -1479,11 +1485,23 @@ mod tests {
                 "sonnet-5 must resolve exactly, got {res:?}"
             );
             assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 3_000);
-            assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 15_000);
-            assert_eq!(p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token, 3_750);
-            assert_eq!(p.token_rates[&TokenClass::CacheRead].nano_usd_per_token, 300);
+            assert_eq!(
+                p.token_rates[&TokenClass::Output].nano_usd_per_token,
+                15_000
+            );
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+                3_750
+            );
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+                300
+            );
             // 1h cache-write: yme sonnet tier → $6/Mtok.
-            assert_eq!(p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token, 6_000);
+            assert_eq!(
+                p.token_rates[&TokenClass::CacheWrite1h].nano_usd_per_token,
+                6_000
+            );
         }
     }
 }

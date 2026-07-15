@@ -265,7 +265,10 @@ mod tests {
             let h = AutocompactHandler::new();
             match h.handle(&args("")).await {
                 CommandResult::Done { display: Some(s) } => {
-                    assert!(s.starts_with("Auto-compact window: auto\n"), "bad={bad}: {s}");
+                    assert!(
+                        s.starts_with("Auto-compact window: auto\n"),
+                        "bad={bad}: {s}"
+                    );
                 }
                 other => panic!("expected Done, got {other:?}"),
             }

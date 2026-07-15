@@ -187,7 +187,13 @@ async fn resume_skips_synthetic_model_marker() {
         line(m1, None, "user", None, "hi"),
         line(m2, Some(m1), "assistant", Some("gpt-5.5"), "hi there"),
         // A synthetic error message closed the session.
-        line(m3, Some(m2), "assistant", Some("<synthetic>"), "invalid request: ..."),
+        line(
+            m3,
+            Some(m2),
+            "assistant",
+            Some("<synthetic>"),
+            "invalid request: ..."
+        ),
     );
     tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
         .await

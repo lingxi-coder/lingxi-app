@@ -536,7 +536,10 @@ mod tests {
         // tail here is the stray marker we avoid (and it prematurely grew the
         // viewport). The marker appears with the first streamed content.
         let empty = AssistantTextCell::new(String::new());
-        assert!(plain(&empty).is_empty(), "empty active cell renders no rows");
+        assert!(
+            plain(&empty).is_empty(),
+            "empty active cell renders no rows"
+        );
         assert_eq!(empty.desired_height(80, RenderMode::default()), 0);
         // Once content arrives, the `● …` reply renders normally.
         let filled = AssistantTextCell::new("hi".to_string());

@@ -15,7 +15,7 @@ use crate::api::SubagentApiClient;
 use crate::builtins::builtin_agent_definitions;
 use crate::context::SubagentContext;
 use crate::definition::{
-    AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
+    AgentDefinition, AgentIsolation, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
 use crate::display::{AgentColor, AgentDisplay};
 use crate::pool::StateMachinePool;
@@ -628,9 +628,9 @@ impl PoolSubagentSpawner {
         // The resolved subagent's own recursion depth — gates its `Agent` tool
         // at `depth < 5` (claude `e9t`). Threaded from `request.depth`.
         depth: u32,
-    ) -> (Vec<serde_json::Value>, Vec<String>) {
+    ) -> Result<(Vec<serde_json::Value>, Vec<String>), SubagentSpawnError> {
         let Some(registry) = self.tool_registry.get() else {
-            return (Vec::new(), Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         // Delegate to the shared resolver (single source of truth, also used by
         // the in-process teammate handler). The tool-wide deny names come from the
@@ -652,6 +652,7 @@ impl PoolSubagentSpawner {
             depth,
         )
         .await
+        .map_err(|e| SubagentSpawnError::Internal(e.to_string()))
     }
 
     /// Build the child context from a RESOLVED [`AgentDefinition`] and the
@@ -732,16 +733,13 @@ impl PoolSubagentSpawner {
         // non-fork path stays `None` (no body, no trailer).
         let rendered_system_prompt: Option<Arc<str>> = match &fork_parent_system_prompt {
             Some(parent) => Some(Arc::from(parent.as_str())),
-            None => def
-                .system_prompt
-                .as_deref()
-                .map(|body| {
-                    Arc::from(format!(
-                        "{body}\n\n{}\n\n{}",
-                        Self::SUBAGENT_CONSENT_PARAGRAPH,
-                        Self::SUBAGENT_NOTES_TRAILER
-                    ))
-                }),
+            None => def.system_prompt.as_deref().map(|body| {
+                Arc::from(format!(
+                    "{body}\n\n{}\n\n{}",
+                    Self::SUBAGENT_CONSENT_PARAGRAPH,
+                    Self::SUBAGENT_NOTES_TRAILER
+                ))
+            }),
         };
         // Fork path seeds prompt_messages EMPTY (the directive lives in the fork
         // prefix); non-fork path seeds it with the task prompt user message.
@@ -838,7 +836,7 @@ impl PoolSubagentSpawner {
         request: &SubagentSpawnRequest,
         inherit: SubagentInheritance,
         persistent: bool,
-    ) -> SubagentContext {
+    ) -> Result<SubagentContext, SubagentSpawnError> {
         // The parent / main-loop model this spawn resolves against: the request's
         // `parent_model_override` (the LIVE session model at top level / the
         // immediate parent subagent's resolved model when nested — threaded by
@@ -903,6 +901,24 @@ impl PoolSubagentSpawner {
                 def.effort = Some(parsed);
             }
         }
+        let is_fork_spawn =
+            request.fork_parent_system_prompt.is_some() || request.fork_context_messages.is_some();
+        let effective_permission_mode = if is_fork_spawn {
+            None
+        } else {
+            let requested = request
+                .mode
+                .as_deref()
+                .and_then(crate::permission_mode::parse_wire_mode);
+            crate::permission_mode::effective_child_mode(
+                requested,
+                self.permission_mode,
+                def.permission_mode,
+            )
+        };
+        if effective_permission_mode == Some(PermissionMode::Plan) {
+            def.permission_mode = AgentPermissionMode::Plan;
+        }
         // Fork carriers (codex #5): on the fork path `fork_context_messages`
         // carries the byte-exact forked prefix and `fork_parent_system_prompt`
         // the parent's rendered system prompt; both `None` for a normal spawn.
@@ -917,8 +933,6 @@ impl PoolSubagentSpawner {
         // parent's rendered prompt verbatim with no `enhanceSystemPromptWithEnvDetails`.
         // Rendered with THIS spawn's resolved model id so a model-override agent's
         // env line matches the model it actually runs as. Unfilled cell ⇒ no-op.
-        let is_fork_spawn =
-            request.fork_parent_system_prompt.is_some() || request.fork_context_messages.is_some();
         if !is_fork_spawn {
             if let (Some(render), Some(body)) = (
                 self.subagent_env_renderer.get(),
@@ -968,7 +982,7 @@ impl PoolSubagentSpawner {
         ctx.depth = request.depth;
         let (tool_schemas, allowed_tools) = self
             .resolve_tools(&ctx.agent_definition, request.depth)
-            .await;
+            .await?;
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
         ctx.schema = request.schema.clone();
@@ -986,23 +1000,13 @@ impl PoolSubagentSpawner {
         // → the gate's `PermissionCheckContext`). The fork path replays the parent's
         // rendered context verbatim, so it never applies a spawn-mode override
         // (mirrors `AgentTool` sending `mode: None` on fork).
-        if !is_fork_spawn {
-            let requested = request
-                .mode
-                .as_deref()
-                .and_then(crate::permission_mode::parse_wire_mode);
-            ctx.permission_mode_override = crate::permission_mode::effective_child_mode(
-                requested,
-                self.permission_mode,
-                ctx.agent_definition.permission_mode,
-            )
-            .map(|m| crate::permission_mode::wire_mode_str(m).to_string());
-        }
+        ctx.permission_mode_override =
+            effective_permission_mode.map(|m| crate::permission_mode::wire_mode_str(m).to_string());
         // A persistent (background/resumable) agent parks after each turn-set;
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;
         ctx.is_async = persistent;
-        ctx
+        Ok(ctx)
     }
 }
 
@@ -1041,7 +1045,7 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
-        let ctx = self.build_subagent_context(&request, inherit, true).await;
+        let ctx = self.build_subagent_context(&request, inherit, true).await?;
         let agent_id = ctx.agent_id;
         let (_aid, rx) = self
             .pool
@@ -1187,7 +1191,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Build the child context (non-persistent: the one-shot `spawn` returns
         // on the first terminal stop). The persistent/resumable variant is
         // `spawn_persistent` below.
-        let ctx = self.build_subagent_context(&request, inherit, false).await;
+        let ctx = self
+            .build_subagent_context(&request, inherit, false)
+            .await?;
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self
             .pool
@@ -1384,6 +1390,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
             // claude `selectedAgent.background` (AgentTool.tsx:426): the
             // definition's `background` frontmatter flag, folded into `is_async`.
             background: def.background,
+            isolation: def.isolation.as_ref().map(|mode| match mode {
+                AgentIsolation::Worktree => "worktree".to_string(),
+                AgentIsolation::Remote => "remote".to_string(),
+            }),
         }
     }
 
@@ -1665,7 +1675,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("unset registry should resolve to an empty tool set");
         assert!(schemas.is_empty());
         assert!(allowed.is_empty());
     }
@@ -1684,7 +1695,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("all policy should resolve");
         // Full set, and allow-list = resolved names — both in the faithful
         // `assembleToolPool` order (builtins sorted by name).
         let names: Vec<&str> = schemas
@@ -1711,13 +1723,34 @@ mod tests {
                 &agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])),
                 0,
             )
-            .await;
+            .await
+            .expect("explicit Read should resolve");
         let names: Vec<&str> = schemas
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["Read"]);
         assert_eq!(allowed, vec!["Read".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_explicit_unknown_tool_errors() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner =
+            PoolSubagentSpawner::new(pool).with_tool_registry(registry_with(&["Read", "Bash"]));
+
+        let err = spawner
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::Explicit(vec!["NoSuchTool".to_string()])),
+                0,
+            )
+            .await
+            .expect_err("unknown explicit tool must reject the spawn");
+        assert!(
+            err.to_string().contains("NoSuchTool"),
+            "error must name the unrecognized tool, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1738,7 +1771,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("all policy should resolve with tool-wide deny");
         let names: Vec<&str> = schemas
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -1775,7 +1809,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("all policy should resolve with mcp server deny");
         let names: Vec<&str> = schemas
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -1805,7 +1840,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("all policy should resolve without deny");
         let empty_deny = PoolSubagentSpawner::new(pool)
             .with_tool_registry(registry_with(&["Read", "Bash"]))
             .with_tool_wide_deny_names(vec![]);
@@ -1816,7 +1852,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("all policy should resolve with empty deny");
         assert_eq!(schemas_a, schemas_b, "empty deny → identical schemas");
         assert_eq!(allowed_a, allowed_b, "empty deny → identical allow-list");
     }
@@ -1845,7 +1882,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("all policy should resolve with aliases");
         // Advertised: canonical name only.
         let names: Vec<&str> = schemas
             .iter()
@@ -1879,7 +1917,10 @@ mod tests {
             })
         };
         // depth 0: Agent kept (0 < 5).
-        let (schemas0, allowed0) = spawner.resolve_tools(&policy(), 0).await;
+        let (schemas0, allowed0) = spawner
+            .resolve_tools(&policy(), 0)
+            .await
+            .expect("depth 0 should resolve");
         let names0: Vec<&str> = schemas0
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -1891,7 +1932,10 @@ mod tests {
             "alias in allow-list"
         );
         // depth 5: Agent gated → empty pool.
-        let (schemas5, allowed5) = spawner.resolve_tools(&policy(), 5).await;
+        let (schemas5, allowed5) = spawner
+            .resolve_tools(&policy(), 5)
+            .await
+            .expect("depth 5 should resolve");
         assert!(schemas5.is_empty(), "Agent gated at depth 5 → no schemas");
         assert!(
             allowed5.is_empty(),
@@ -1918,7 +1962,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("all policy should resolve at depth 0");
         let names: Vec<&str> = schemas
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -1948,7 +1993,8 @@ mod tests {
                 }),
                 0,
             )
-            .await;
+            .await
+            .expect("plan-mode all policy should resolve");
         let names: Vec<&str> = schemas
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -1981,7 +2027,8 @@ mod tests {
                 &agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])),
                 0,
             )
-            .await;
+            .await
+            .expect("except policy should resolve");
         let names: Vec<&str> = schemas
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -2148,9 +2195,7 @@ mod tests {
         let live_read = live.clone();
         let spawner = PoolSubagentSpawner::new(pool)
             .with_default_model("claude-opus-4-7")
-            .with_default_model_provider(Arc::new(move || {
-                Some(live_read.lock().unwrap().clone())
-            }));
+            .with_default_model_provider(Arc::new(move || Some(live_read.lock().unwrap().clone())));
         assert_eq!(
             spawner.resolved_default_model().as_deref(),
             Some("claude-sonnet-5"),
@@ -2168,9 +2213,8 @@ mod tests {
         // Simulate the orchestrator's live session model behind a provider.
         let live = Arc::new(std::sync::Mutex::new("claude-opus-4-7".to_string()));
         let live_read = live.clone();
-        let spawner = PoolSubagentSpawner::new(pool).with_default_model_provider(Arc::new(
-            move || Some(live_read.lock().unwrap().clone()),
-        ));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_default_model_provider(Arc::new(move || Some(live_read.lock().unwrap().clone())));
         // Before a /model switch: Inherit resolves to the current live model.
         let before = spawner.resolve_definition("general-purpose", None).await;
         assert!(matches!(&before.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
@@ -2253,7 +2297,10 @@ mod tests {
             tool_invoker: Arc::new(DummyInvoker),
             budget: Arc::new(DummyBudget),
         };
-        let ctx = spawner.build_subagent_context(&req, inherit, false).await;
+        let ctx = spawner
+            .build_subagent_context(&req, inherit, false)
+            .await
+            .expect("subagent context should build");
         assert!(
             matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"),
             "nested spawn inherits its immediate parent's resolved model, got {:?}",
@@ -2495,7 +2542,10 @@ mod tests {
         let spawner = PoolSubagentSpawner::new(pool)
             .with_tool_registry(registry_with(&["Read", "Grep", "Edit", "Write"]));
         let def = spawner.resolve_definition("Explore", None).await;
-        let (schemas, allowed) = spawner.resolve_tools(&def, 0).await;
+        let (schemas, allowed) = spawner
+            .resolve_tools(&def, 0)
+            .await
+            .expect("Explore tool set should resolve");
         let names: Vec<&str> = schemas
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -2745,7 +2795,8 @@ mod tests {
         plan_req.mode = Some("plan".to_string());
         let plan_ctx = spawner
             .build_subagent_context(&plan_req, mk_inherit(), false)
-            .await;
+            .await
+            .expect("plan-mode context should build");
         assert_eq!(
             plan_ctx.permission_mode_override.as_deref(),
             Some("plan"),
@@ -2756,7 +2807,8 @@ mod tests {
         // live/boot gate mode; byte-identical to pre-2.1.207).
         let none_ctx = spawner
             .build_subagent_context(&base_req(), mk_inherit(), false)
-            .await;
+            .await
+            .expect("default context should build");
         assert_eq!(
             none_ctx.permission_mode_override, None,
             "a mode-less spawn of a Bubble-default agent inherits the live mode"
@@ -2768,7 +2820,8 @@ mod tests {
         escalate_req.mode = Some("bypassPermissions".to_string());
         let escalate_ctx = spawner
             .build_subagent_context(&escalate_req, mk_inherit(), false)
-            .await;
+            .await
+            .expect("escalating context should still build");
         assert_eq!(
             escalate_ctx.permission_mode_override, None,
             "a child may not escalate to bypassPermissions above a Default parent"
@@ -2781,11 +2834,63 @@ mod tests {
         fork_req.fork_parent_system_prompt = Some("parent prompt".to_string());
         let fork_ctx = spawner
             .build_subagent_context(&fork_req, mk_inherit(), false)
-            .await;
+            .await
+            .expect("fork context should build");
         assert_eq!(
             fork_ctx.permission_mode_override, None,
             "the fork path never applies a spawn-mode override"
         );
+    }
+
+    #[tokio::test]
+    async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_permission_mode(PermissionMode::Default)
+            .with_tool_registry(registry_with(&["Read", "Bash", "Grep"]));
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: false,
+            name: None,
+            team_name: None,
+            mode: Some("plan".to_string()),
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: None,
+        };
+
+        let ctx = spawner
+            .build_subagent_context(&req, inherit, false)
+            .await
+            .expect("plan-mode context should build");
+        let names: Vec<&str> = ctx
+            .tool_schemas
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["Grep", "Read"]);
+        assert_eq!(ctx.permission_mode_override.as_deref(), Some("plan"));
+        assert!(!ctx.allowed_tools.contains(&"Bash".to_string()));
     }
 
     /// local_agent "resume" Phase 1: `build_subagent_context(persistent=true)`
@@ -2830,7 +2935,8 @@ mod tests {
 
         let persistent = spawner
             .build_subagent_context(&req, mk_inherit(), true)
-            .await;
+            .await
+            .expect("persistent context should build");
         assert!(
             persistent.persistent,
             "persistent agent must park (come to rest)"
@@ -2842,7 +2948,8 @@ mod tests {
 
         let one_shot = spawner
             .build_subagent_context(&req, mk_inherit(), false)
-            .await;
+            .await
+            .expect("one-shot context should build");
         assert!(
             !one_shot.persistent,
             "the one-shot spawn path must NOT park"
@@ -2903,7 +3010,8 @@ mod tests {
         // rendered with the resolved default model id.
         let ctx = spawner
             .build_subagent_context(&req, mk_inherit(), false)
-            .await;
+            .await
+            .expect("context should build");
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\nCWD: <none>\n</env>"),
@@ -2918,7 +3026,8 @@ mod tests {
         wt_req.cwd = Some("/repo/.lingxi/worktrees/agent-x".to_string());
         let wt_ctx = spawner
             .build_subagent_context(&wt_req, mk_inherit(), false)
-            .await;
+            .await
+            .expect("worktree cwd context should build");
         let wt_sys = wt_ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             wt_sys.contains("CWD: /repo/.lingxi/worktrees/agent-x"),
@@ -2934,7 +3043,8 @@ mod tests {
         req.fork_parent_system_prompt = Some("PARENT VERBATIM".to_string());
         let fork_ctx = spawner
             .build_subagent_context(&req, mk_inherit(), false)
-            .await;
+            .await
+            .expect("fork context should build");
         assert_eq!(
             fork_ctx.rendered_system_prompt.as_deref(),
             Some("PARENT VERBATIM"),
@@ -3042,6 +3152,23 @@ mod tests {
         assert_eq!(meta.source, "projectSettings");
         assert!(!meta.is_built_in);
         assert_eq!(meta.color.as_deref(), Some("green"));
+    }
+
+    #[tokio::test]
+    async fn resolve_selection_surfaces_definition_isolation() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let mut def = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        def.agent_type = "isolated-agent".into();
+        def.isolation = Some(AgentIsolation::Worktree);
+        let catalog = Arc::new(RwLock::new(vec![def]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+
+        let meta = spawner.resolve_selection("isolated-agent", None).await;
+
+        assert_eq!(meta.isolation.as_deref(), Some("worktree"));
     }
 
     // ── G14: name → agent-id registry round-trip ──

@@ -1253,8 +1253,7 @@ fn project_server_is_approved(
     enabled: &[String],
     disabled: &[String],
 ) -> bool {
-    !disabled.iter().any(|d| d == name)
-        && (enable_all || enabled.iter().any(|e| e == name))
+    !disabled.iter().any(|d| d == name) && (enable_all || enabled.iter().any(|e| e == name))
 }
 
 /// `mcp get`'s not-found message. Unlike `mcp remove` (which lists every
@@ -1661,7 +1660,10 @@ mod name_validation_tests {
     #[test]
     fn accepts_valid_name_chars() {
         for ok in ["srv", "my-server_1", "ABC123", "a", "___", "---"] {
-            assert!(validate_mcp_server_name(ok).is_ok(), "valid name rejected: {ok}");
+            assert!(
+                validate_mcp_server_name(ok).is_ok(),
+                "valid name rejected: {ok}"
+            );
         }
     }
 
@@ -1765,9 +1767,19 @@ mod pending_approval_tests {
         // enable-all.
         assert!(project_server_is_approved("s", true, &[], &[]));
         // Disabled overrides enable-all (explicit rejection wins).
-        assert!(!project_server_is_approved("s", true, &["s".into()], &["s".into()]));
+        assert!(!project_server_is_approved(
+            "s",
+            true,
+            &["s".into()],
+            &["s".into()]
+        ));
         // Neither enabled nor enable-all ⇒ not approved.
-        assert!(!project_server_is_approved("s", false, &["other".into()], &[]));
+        assert!(!project_server_is_approved(
+            "s",
+            false,
+            &["other".into()],
+            &[]
+        ));
     }
 
     /// TRUST-RESET: after `mcp reset-project-choices` clears every choice
@@ -1777,7 +1789,12 @@ mod pending_approval_tests {
     #[test]
     fn reset_project_choices_reverts_approved_server_to_pending() {
         // Before reset: enabled ⇒ approved.
-        assert!(project_server_is_approved("repo-srv", false, &["repo-srv".into()], &[]));
+        assert!(project_server_is_approved(
+            "repo-srv",
+            false,
+            &["repo-srv".into()],
+            &[]
+        ));
         // After reset: all choices cleared ⇒ not approved (pending).
         assert!(!project_server_is_approved("repo-srv", false, &[], &[]));
         // And the loaded project server would now be flagged pending.

@@ -1013,8 +1013,7 @@ async fn run_subagent_loop(
                             if !final_text_blocks(&history, &salvaged).is_empty() =>
                         {
                             let cutoff_note = build_cutoff_note(api_error_text);
-                            let result =
-                                build_recovered_result(&history, &salvaged, &cutoff_note);
+                            let result = build_recovered_result(&history, &salvaged, &cutoff_note);
                             let _ = out_tx
                                 .send(SubagentEvent::Completed {
                                     agent_id,

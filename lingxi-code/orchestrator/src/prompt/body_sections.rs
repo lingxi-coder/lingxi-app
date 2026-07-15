@@ -488,15 +488,64 @@ mod tests {
     fn doing_tasks_gated_on_keep_coding_instructions() {
         let tools: Vec<String> = Vec::new();
         // No active style ⇒ DOING present (the `c===null` arm), regardless of flag.
-        assert!(format(false, true, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
-        assert!(format(false, false, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
+        assert!(format(
+            false,
+            true,
+            &tools,
+            false,
+            false,
+            false,
+            "claude-opus-4-7",
+            false
+        )
+        .contains("# Doing tasks"));
+        assert!(format(
+            false,
+            false,
+            &tools,
+            false,
+            false,
+            false,
+            "claude-opus-4-7",
+            false
+        )
+        .contains("# Doing tasks"));
         // Active style with keepCodingInstructions:true ⇒ DOING present.
-        assert!(format(true, true, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
+        assert!(format(
+            true,
+            true,
+            &tools,
+            false,
+            false,
+            false,
+            "claude-opus-4-7",
+            false
+        )
+        .contains("# Doing tasks"));
         // Active style with keepCodingInstructions:false ⇒ DOING OMITTED (the
         // only case that diverges; binary `c.keepCodingInstructions===!0?…:null`).
-        assert!(!format(true, false, &tools, false, false, false, "claude-opus-4-7", false).contains("# Doing tasks"));
+        assert!(!format(
+            true,
+            false,
+            &tools,
+            false,
+            false,
+            false,
+            "claude-opus-4-7",
+            false
+        )
+        .contains("# Doing tasks"));
         // Omitting DOING must not disturb the neighbouring sections.
-        let omitted = format(true, false, &tools, false, false, false, "claude-opus-4-7", false);
+        let omitted = format(
+            true,
+            false,
+            &tools,
+            false,
+            false,
+            false,
+            "claude-opus-4-7",
+            false,
+        );
         assert!(omitted.contains("# Executing actions with care"));
         assert!(omitted.contains("# Tone and style"));
     }
@@ -507,8 +556,9 @@ mod tests {
         assert!(EXECUTING_ACTIONS_SECTION
             .contains("Examples of the kind of risky actions that warrant user confirmation:"));
         // 206/201 additions to the final paragraph (reversible-step + git-status/secrets).
-        assert!(EXECUTING_ACTIONS_SECTION
-            .contains("prefer a reversible step (move it aside, rename it, or stash it) over deleting"));
+        assert!(EXECUTING_ACTIONS_SECTION.contains(
+            "prefer a reversible step (move it aside, rename it, or stash it) over deleting"
+        ));
         assert!(EXECUTING_ACTIONS_SECTION
             .contains("run `git status` before any command that could discard uncommitted work"));
         assert!(EXECUTING_ACTIONS_SECTION.ends_with(
@@ -582,7 +632,16 @@ mod tests {
             "Agent".to_string(),
             "TodoWrite".to_string(),
         ];
-        let body = format(false, true, &tools, true, true, false, "claude-opus-4-7", false);
+        let body = format(
+            false,
+            true,
+            &tools,
+            true,
+            true,
+            false,
+            "claude-opus-4-7",
+            false,
+        );
         let i_open = body.find("You are an interactive agent").expect("opening");
         let i_system = body.find("# System").expect("system");
         let i_doing = body.find("# Doing tasks").expect("doing");
@@ -637,7 +696,16 @@ mod tests {
     #[test]
     fn text_output_section_present_in_full_body() {
         let tools: Vec<String> = Vec::new();
-        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7", false);
+        let body = format(
+            false,
+            true,
+            &tools,
+            false,
+            false,
+            false,
+            "claude-opus-4-7",
+            false,
+        );
         assert!(body.contains("# Text output (does not apply to tool calls)"));
     }
 
@@ -656,7 +724,12 @@ mod tests {
             assert!(is_communicating_model(m), "current-gen: {m}");
         }
         // Older models → fallback (# Text output).
-        for m in ["claude-opus-4-7", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o"] {
+        for m in [
+            "claude-opus-4-7",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+            "gpt-4o",
+        ] {
             assert!(!is_communicating_model(m), "older: {m}");
         }
         // r-variant (BJh): fable-5 / mythos-5 only.
@@ -723,7 +796,16 @@ mod tests {
         // `# Context management` is assembled in `mod.rs` AFTER the env block,
         // NOT inside the pre-env body block returned by `format()`.
         let tools: Vec<String> = Vec::new();
-        let body = format(false, true, &tools, false, false, false, "claude-opus-4-7", false);
+        let body = format(
+            false,
+            true,
+            &tools,
+            false,
+            false,
+            false,
+            "claude-opus-4-7",
+            false,
+        );
         assert!(
             !body.contains("# Context management"),
             "context management must not be in pre-env body block"

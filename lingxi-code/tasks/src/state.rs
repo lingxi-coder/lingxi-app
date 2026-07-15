@@ -90,6 +90,20 @@ impl TaskState {
             Self::Dream(s) => &s.base,
         }
     }
+
+    /// Mutably borrow the common base fields regardless of variant.
+    #[must_use]
+    pub fn base_mut(&mut self) -> &mut TaskStateBase {
+        match self {
+            Self::LocalBash(s) => &mut s.base,
+            Self::LocalAgent(s) => &mut s.base,
+            Self::RemoteAgent(s) => &mut s.base,
+            Self::InProcessTeammate(s) => &mut s.base,
+            Self::LocalWorkflow(s) => &mut s.base,
+            Self::MonitorMcp(s) => &mut s.base,
+            Self::Dream(s) => &mut s.base,
+        }
+    }
 }
 
 /// State specific to a local bash task.

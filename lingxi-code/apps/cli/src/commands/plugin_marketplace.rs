@@ -61,7 +61,11 @@ fn source_of(entry: &Value) -> Map<String, Value> {
 
 /// A source string field (`path` / `url` / `repo` / `ref`).
 fn str_field(source: &Map<String, Value>, key: &str) -> String {
-    source.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+    source
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// The `Source: …` human line for one entry, mirroring the binary's template.
@@ -98,10 +102,16 @@ fn json_entry(name: &str, entry: &Value) -> Value {
     out.insert("source".to_string(), Value::String(kind.clone()));
     match kind.as_str() {
         "directory" => {
-            out.insert("path".to_string(), Value::String(str_field(&source, "path")));
+            out.insert(
+                "path".to_string(),
+                Value::String(str_field(&source, "path")),
+            );
         }
         "github" => {
-            out.insert("repo".to_string(), Value::String(str_field(&source, "repo")));
+            out.insert(
+                "repo".to_string(),
+                Value::String(str_field(&source, "repo")),
+            );
         }
         // git + url both locate via `url`.
         _ => {
@@ -109,7 +119,10 @@ fn json_entry(name: &str, entry: &Value) -> Value {
         }
     }
     if let Some(loc) = entry.get("installLocation").and_then(Value::as_str) {
-        out.insert("installLocation".to_string(), Value::String(loc.to_string()));
+        out.insert(
+            "installLocation".to_string(),
+            Value::String(loc.to_string()),
+        );
     }
     Value::Object(out)
 }
@@ -123,7 +136,8 @@ pub fn run_list(plugins_dir: &Path, json: bool) -> String {
             .iter()
             .map(|(name, entry)| json_entry(name, entry))
             .collect();
-        return serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_else(|_| "[]".to_string());
+        return serde_json::to_string_pretty(&Value::Array(arr))
+            .unwrap_or_else(|_| "[]".to_string());
     }
 
     if registry.is_empty() {
@@ -149,11 +163,13 @@ fn iso_now() -> String {
 fn write_registry(plugins_dir: &Path, map: &Map<String, Value>) -> Result<(), String> {
     let path = registry_path(plugins_dir);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
     }
     let serialized = serde_json::to_string_pretty(&Value::Object(map.clone()))
         .map_err(|e| format!("Failed to serialize registry: {e}"))?;
-    std::fs::write(&path, serialized).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    std::fs::write(&path, serialized)
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
 /// The `extraKnownMarketplaces` declaration map from a scope's settings file.
@@ -169,10 +185,18 @@ fn read_extra(scope: Scope, home: &Path, cwd: &Path) -> Map<String, Value> {
 }
 
 /// Read-modify-write a scope's `extraKnownMarketplaces` map.
-fn write_extra(scope: Scope, home: &Path, cwd: &Path, map: Map<String, Value>) -> Result<(), String> {
+fn write_extra(
+    scope: Scope,
+    home: &Path,
+    cwd: &Path,
+    map: Map<String, Value>,
+) -> Result<(), String> {
     update_settings(
         &scope.path(home, cwd),
-        vec![("extraKnownMarketplaces".to_string(), Some(Value::Object(map)))],
+        vec![(
+            "extraKnownMarketplaces".to_string(),
+            Some(Value::Object(map)),
+        )],
     )
 }
 
@@ -202,11 +226,17 @@ enum Source {
     /// A local directory holding a `.lingxi-plugin/marketplace.json`.
     Directory(PathBuf),
     /// A GitHub `owner/repo` shorthand (cloned via `github.com`).
-    Github { repo: String, git_ref: Option<String> },
+    Github {
+        repo: String,
+        git_ref: Option<String>,
+    },
     /// A full git clone URL (SSH `git@…`, or an HTTP(S) URL ending `.git` /
     /// containing `/_git/`, or a `github.com/owner/repo` HTTP URL — `.git`
     /// appended).
-    Git { url: String, git_ref: Option<String> },
+    Git {
+        url: String,
+        git_ref: Option<String>,
+    },
     /// A hosted `marketplace.json` fetched over HTTP(S) (no git clone).
     Url { url: String },
 }
@@ -346,8 +376,8 @@ fn classify_source(source: &str) -> Result<Source, String> {
     //    resolved via the filesystem; only a directory is supported here (a
     //    `.json` file source is a residual — see module residuals).
     if t.starts_with("./") || t.starts_with("../") || t.starts_with('/') || t.starts_with('~') {
-        let abs =
-            std::fs::canonicalize(source).map_err(|_| format!("✘ Path does not exist: {source}"))?;
+        let abs = std::fs::canonicalize(source)
+            .map_err(|_| format!("✘ Path does not exist: {source}"))?;
         if !abs.is_dir() {
             return Err(format!("✘ Path does not exist: {source}"));
         }
@@ -366,7 +396,11 @@ fn classify_source(source: &str) -> Result<Source, String> {
                     let r = &t[i + 1..];
                     (
                         t[..i].to_string(),
-                        if r.is_empty() { None } else { Some(r.to_string()) },
+                        if r.is_empty() {
+                            None
+                        } else {
+                            Some(r.to_string())
+                        },
                     )
                 }
                 None => (t.to_string(), None),
@@ -461,7 +495,9 @@ fn add_directory(
     cwd: &Path,
 ) -> Result<String, String> {
     // From here the "Adding marketplace…" progress prefix is part of the line.
-    let manifest_path = abs.join(branding::PLUGIN_MANIFEST_DIR).join("marketplace.json");
+    let manifest_path = abs
+        .join(branding::PLUGIN_MANIFEST_DIR)
+        .join("marketplace.json");
     let raw = std::fs::read_to_string(&manifest_path).map_err(|_| {
         format!(
             "Adding marketplace…✘ Failed to add marketplace: Marketplace file not found at {}",
@@ -723,7 +759,10 @@ pub fn run_remove(
     }
 
     Ok(match requested {
-        Some(s) => format!("✔ Successfully removed marketplace: {name} (from {} settings)", s.label()),
+        Some(s) => format!(
+            "✔ Successfully removed marketplace: {name} (from {} settings)",
+            s.label()
+        ),
         None => format!("✔ Successfully removed marketplace: {name}"),
     })
 }
@@ -757,7 +796,11 @@ pub fn run_update(
             entry.insert("lastUpdated".to_string(), Value::String(iso_now()));
         }
         write_registry(plugins_dir, &registry)?;
-        let validating = if is_dir { "Validating local marketplace\n" } else { "" };
+        let validating = if is_dir {
+            "Validating local marketplace\n"
+        } else {
+            ""
+        };
         return Ok(format!(
             "Updating marketplace: {name}...{validating}✔ Successfully updated marketplace: {name}"
         ));
@@ -922,7 +965,10 @@ mod tests {
     fn add_directory_writes_registry_and_declaration() {
         let e = full_env();
         let src = e.market.to_string_lossy().to_string();
-        let abs = std::fs::canonicalize(&e.market).unwrap().display().to_string();
+        let abs = std::fs::canonicalize(&e.market)
+            .unwrap()
+            .display()
+            .to_string();
         let msg = run_add(&src, None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
         assert_eq!(
             msg,
@@ -930,12 +976,16 @@ mod tests {
         );
         // Registry entry (resolved).
         let reg = registry_of(&e);
-        assert_eq!(reg["mymkt"]["source"], json!({"source": "directory", "path": abs}));
+        assert_eq!(
+            reg["mymkt"]["source"],
+            json!({"source": "directory", "path": abs})
+        );
         assert_eq!(reg["mymkt"]["installLocation"], json!(abs));
         assert!(reg["mymkt"]["lastUpdated"].is_string());
         // Per-scope declaration (user settings).
         let user: Value =
-            serde_json::from_str(&std::fs::read_to_string(e.home.join("settings.json")).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(e.home.join("settings.json")).unwrap())
+                .unwrap();
         assert_eq!(
             user["extraKnownMarketplaces"]["mymkt"],
             json!({"source": {"source": "directory", "path": abs}})
@@ -982,7 +1032,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.starts_with("Adding marketplace…✘ Failed to add marketplace: Marketplace file not found at "),
+            err.starts_with(
+                "Adding marketplace…✘ Failed to add marketplace: Marketplace file not found at "
+            ),
             "got: {err}"
         );
     }
@@ -993,9 +1045,24 @@ mod tests {
         let bad = e._tmp.path().join("bad");
         let mdir = bad.join(branding::PLUGIN_MANIFEST_DIR);
         std::fs::create_dir_all(&mdir).unwrap();
-        std::fs::write(mdir.join("marketplace.json"), r#"{"name":"bad","plugins":[]}"#).unwrap();
-        let err = run_add(&bad.to_string_lossy(), None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
-        assert!(err.contains("owner: Invalid input: expected object, received undefined"), "got: {err}");
+        std::fs::write(
+            mdir.join("marketplace.json"),
+            r#"{"name":"bad","plugins":[]}"#,
+        )
+        .unwrap();
+        let err = run_add(
+            &bad.to_string_lossy(),
+            None,
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("owner: Invalid input: expected object, received undefined"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1020,7 +1087,10 @@ mod tests {
         run_add(&src, Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
         run_add(&src, Some("project"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
         let msg = run_remove("mymkt", Some("project"), &e.plugins, &e.home, &e.cwd).unwrap();
-        assert_eq!(msg, "✔ Successfully removed marketplace: mymkt (from project settings)");
+        assert_eq!(
+            msg,
+            "✔ Successfully removed marketplace: mymkt (from project settings)"
+        );
         // Still declared in user → registry kept.
         assert!(registry_of(&e).get("mymkt").is_some());
     }
@@ -1039,7 +1109,10 @@ mod tests {
     fn remove_not_configured_errors() {
         let e = full_env();
         let err = run_remove("ghost", None, &e.plugins, &e.home, &e.cwd).unwrap_err();
-        assert_eq!(err, "✘ Failed to remove marketplace: Marketplace 'ghost' not found");
+        assert_eq!(
+            err,
+            "✘ Failed to remove marketplace: Marketplace 'ghost' not found"
+        );
     }
 
     #[test]
@@ -1060,7 +1133,10 @@ mod tests {
         let src = e.market.to_string_lossy().to_string();
         run_add(&src, None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
         let msg = run_update(None, &e.plugins, &e.home, &e.cwd).unwrap();
-        assert_eq!(msg, "Updating 1 marketplace(s)...✔ Successfully updated 1 marketplace(s)");
+        assert_eq!(
+            msg,
+            "Updating 1 marketplace(s)...✔ Successfully updated 1 marketplace(s)"
+        );
     }
 
     // ---- source classification (pure, no network) ----
@@ -1077,11 +1153,17 @@ mod tests {
         // `#ref` and `@ref` both split off the ref.
         assert_eq!(
             classify_source("acme/plugins#v2").unwrap(),
-            Source::Github { repo: "acme/plugins".to_string(), git_ref: Some("v2".to_string()) }
+            Source::Github {
+                repo: "acme/plugins".to_string(),
+                git_ref: Some("v2".to_string())
+            }
         );
         assert_eq!(
             classify_source("acme/plugins@main").unwrap(),
-            Source::Github { repo: "acme/plugins".to_string(), git_ref: Some("main".to_string()) }
+            Source::Github {
+                repo: "acme/plugins".to_string(),
+                git_ref: Some("main".to_string())
+            }
         );
     }
 
@@ -1114,11 +1196,17 @@ mod tests {
     fn classify_ssh_git() {
         assert_eq!(
             classify_source("git@github.com:foo/bar.git").unwrap(),
-            Source::Git { url: "git@github.com:foo/bar.git".to_string(), git_ref: None }
+            Source::Git {
+                url: "git@github.com:foo/bar.git".to_string(),
+                git_ref: None
+            }
         );
         assert_eq!(
             classify_source("git@github.com:foo/bar.git#dev").unwrap(),
-            Source::Git { url: "git@github.com:foo/bar.git".to_string(), git_ref: Some("dev".to_string()) }
+            Source::Git {
+                url: "git@github.com:foo/bar.git".to_string(),
+                git_ref: Some("dev".to_string())
+            }
         );
     }
 
@@ -1135,17 +1223,26 @@ mod tests {
         // `www.` is stripped for the host test.
         assert_eq!(
             classify_source("https://www.github.com/o/r").unwrap(),
-            Source::Git { url: "https://www.github.com/o/r.git".to_string(), git_ref: None }
+            Source::Git {
+                url: "https://www.github.com/o/r.git".to_string(),
+                git_ref: None
+            }
         );
         // Any host ending `.git` → git (with `#ref` split off).
         assert_eq!(
             classify_source("https://gitlab.com/foo/bar.git#main").unwrap(),
-            Source::Git { url: "https://gitlab.com/foo/bar.git".to_string(), git_ref: Some("main".to_string()) }
+            Source::Git {
+                url: "https://gitlab.com/foo/bar.git".to_string(),
+                git_ref: Some("main".to_string())
+            }
         );
         // `/_git/` (Azure DevOps) → git.
         assert_eq!(
             classify_source("https://dev.azure.com/org/proj/_git/repo").unwrap(),
-            Source::Git { url: "https://dev.azure.com/org/proj/_git/repo".to_string(), git_ref: None }
+            Source::Git {
+                url: "https://dev.azure.com/org/proj/_git/repo".to_string(),
+                git_ref: None
+            }
         );
     }
 
@@ -1154,12 +1251,16 @@ mod tests {
         // Non-github host, no `.git` → hosted marketplace.json (url).
         assert_eq!(
             classify_source("https://example.com/marketplace.json").unwrap(),
-            Source::Url { url: "https://example.com/marketplace.json".to_string() }
+            Source::Url {
+                url: "https://example.com/marketplace.json".to_string()
+            }
         );
         // github.com WITHOUT an owner/repo path → url, not git.
         assert_eq!(
             classify_source("https://github.com/onlyone").unwrap(),
-            Source::Url { url: "https://github.com/onlyone".to_string() }
+            Source::Url {
+                url: "https://github.com/onlyone".to_string()
+            }
         );
     }
 
@@ -1182,23 +1283,37 @@ mod tests {
     #[test]
     fn source_object_shapes() {
         assert_eq!(
-            source_object(&Source::Github { repo: "a/b".to_string(), git_ref: None }),
+            source_object(&Source::Github {
+                repo: "a/b".to_string(),
+                git_ref: None
+            }),
             json!({"source": "github", "repo": "a/b"})
         );
         assert_eq!(
-            source_object(&Source::Github { repo: "a/b".to_string(), git_ref: Some("v1".to_string()) }),
+            source_object(&Source::Github {
+                repo: "a/b".to_string(),
+                git_ref: Some("v1".to_string())
+            }),
             json!({"source": "github", "repo": "a/b", "ref": "v1"})
         );
         assert_eq!(
-            source_object(&Source::Git { url: "https://x/y.git".to_string(), git_ref: None }),
+            source_object(&Source::Git {
+                url: "https://x/y.git".to_string(),
+                git_ref: None
+            }),
             json!({"source": "git", "url": "https://x/y.git"})
         );
         assert_eq!(
-            source_object(&Source::Git { url: "https://x/y.git".to_string(), git_ref: Some("dev".to_string()) }),
+            source_object(&Source::Git {
+                url: "https://x/y.git".to_string(),
+                git_ref: Some("dev".to_string())
+            }),
             json!({"source": "git", "url": "https://x/y.git", "ref": "dev"})
         );
         assert_eq!(
-            source_object(&Source::Url { url: "https://x/cat.json".to_string() }),
+            source_object(&Source::Url {
+                url: "https://x/cat.json".to_string()
+            }),
             json!({"source": "url", "url": "https://x/cat.json"})
         );
         assert_eq!(
@@ -1237,7 +1352,15 @@ mod tests {
         let e = full_env();
         // Classification error precedes even scope validation (like directory
         // path-not-exist) — no "Adding marketplace…" prefix.
-        let err = run_add("not a repo", Some("bogus"), &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        let err = run_add(
+            "not a repo",
+            Some("bogus"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "✘ Invalid marketplace source format. Try: owner/repo, https://..., or ./path"
@@ -1263,7 +1386,10 @@ mod tests {
         let (_, entry) = reg.as_object().unwrap().iter().next().unwrap();
         let kind = entry["source"]["source"].as_str().unwrap();
         assert!(matches!(kind, "git" | "github"), "kind: {kind}");
-        assert!(entry["installLocation"].as_str().unwrap().contains("marketplaces"));
+        assert!(entry["installLocation"]
+            .as_str()
+            .unwrap()
+            .contains("marketplaces"));
     }
 
     #[test]

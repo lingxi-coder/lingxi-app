@@ -655,7 +655,10 @@ mod tests {
             Some("x.txt".to_string()),
         );
         let lines = plain(&cell, false);
-        assert_eq!(lines[0], "  ⎿  Added 2 lines", "pure-add summary: {lines:?}");
+        assert_eq!(
+            lines[0], "  ⎿  Added 2 lines",
+            "pure-add summary: {lines:?}"
+        );
         let all = lines.join("\n");
         assert!(all.contains("line one"), "{all}");
         assert!(all.contains("line two"), "{all}");

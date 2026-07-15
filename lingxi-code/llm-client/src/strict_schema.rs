@@ -147,8 +147,9 @@ fn convert(e: &Value, depth: i32, remaining: &mut i64) -> Result<Value, &'static
             Value::Array(arr) => {
                 let ok = !arr.is_empty()
                     && arr.iter().all(|i| {
-                        i.as_str()
-                            .is_some_and(|s| ALLOWED_TYPES.contains(&s) && s != "object" && s != "array")
+                        i.as_str().is_some_and(|s| {
+                            ALLOWED_TYPES.contains(&s) && s != "object" && s != "array"
+                        })
                     })
                     && !has_duplicates(arr);
                 if !ok {
@@ -335,14 +336,19 @@ mod tests {
             "properties": { "color": { "enum": ["r", "g", "b"] } }
         });
         let strict = to_strict_schema(&schema).unwrap();
-        assert_eq!(strict["properties"]["color"]["enum"], json!(["r", "g", "b"]));
+        assert_eq!(
+            strict["properties"]["color"]["enum"],
+            json!(["r", "g", "b"])
+        );
     }
 
     #[test]
     fn rejects_enum_with_duplicates_or_non_primitive() {
         assert_eq!(
-            to_strict_schema(&json!({ "type": "object", "properties": { "x": { "enum": [1, 1] } } }))
-                .unwrap_err(),
+            to_strict_schema(
+                &json!({ "type": "object", "properties": { "x": { "enum": [1, 1] } } })
+            )
+            .unwrap_err(),
             "unsupported_enum"
         );
         assert_eq!(
@@ -371,7 +377,8 @@ mod tests {
     #[test]
     fn enforces_depth_budget() {
         // Build 40 nested single-property objects → exceeds MAX_DEPTH (32).
-        let mut schema = json!({ "type": "object", "properties": { "leaf": { "type": "string" } } });
+        let mut schema =
+            json!({ "type": "object", "properties": { "leaf": { "type": "string" } } });
         for _ in 0..40 {
             schema = json!({ "type": "object", "properties": { "child": schema } });
         }

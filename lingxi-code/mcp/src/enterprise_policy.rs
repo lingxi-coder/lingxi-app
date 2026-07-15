@@ -269,8 +269,11 @@ pub fn is_allowed(name: &str, config: &Value, policy: &McpPolicy) -> bool {
     }
     let has_cmd = allowed.iter().any(|m| m.server_command.is_some());
     let has_url = allowed.iter().any(|m| m.server_url.is_some());
-    let name_match =
-        || allowed.iter().any(|m| m.server_name.as_deref() == Some(name));
+    let name_match = || {
+        allowed
+            .iter()
+            .any(|m| m.server_name.as_deref() == Some(name))
+    };
 
     if let Some(cmd) = config_command(config) {
         if has_cmd {
@@ -549,7 +552,9 @@ mod tests {
     #[test]
     fn absent_file_is_not_active() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!enterprise_mcp_active_at(&dir.path().join("managed-mcp.json")));
+        assert!(!enterprise_mcp_active_at(
+            &dir.path().join("managed-mcp.json")
+        ));
     }
 
     #[test]
@@ -557,7 +562,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Any valid JSON object → config non-null → active (matches `$7t`,
         // which does not require an `mcpServers` key at this gate).
-        let p = write(&dir, "managed-mcp.json", r#"{"mcpServers":{"corp":{"type":"stdio","command":"c"}}}"#);
+        let p = write(
+            &dir,
+            "managed-mcp.json",
+            r#"{"mcpServers":{"corp":{"type":"stdio","command":"c"}}}"#,
+        );
         assert!(enterprise_mcp_active_at(&p));
         let p2 = write(&dir, "empty-obj.json", "{}");
         assert!(enterprise_mcp_active_at(&p2));
@@ -568,10 +577,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(!enterprise_mcp_active_at(&write(&dir, "empty.json", "")));
         assert!(!enterprise_mcp_active_at(&write(&dir, "ws.json", "   \n ")));
-        assert!(!enterprise_mcp_active_at(&write(&dir, "bad.json", "{not json")));
+        assert!(!enterprise_mcp_active_at(&write(
+            &dir,
+            "bad.json",
+            "{not json"
+        )));
         // A valid JSON value that is not an object → null config.
-        assert!(!enterprise_mcp_active_at(&write(&dir, "arr.json", "[1,2,3]")));
-        assert!(!enterprise_mcp_active_at(&write(&dir, "str.json", "\"hi\"")));
+        assert!(!enterprise_mcp_active_at(&write(
+            &dir, "arr.json", "[1,2,3]"
+        )));
+        assert!(!enterprise_mcp_active_at(&write(
+            &dir, "str.json", "\"hi\""
+        )));
     }
 
     #[test]
@@ -589,7 +606,10 @@ mod tests {
         // SAFETY: single-threaded test; restored immediately after.
         let prev = std::env::var_os(MANAGED_DIR_ENV);
         std::env::set_var(MANAGED_DIR_ENV, dir.path());
-        assert_eq!(managed_mcp_config_path(), dir.path().join("managed-mcp.json"));
+        assert_eq!(
+            managed_mcp_config_path(),
+            dir.path().join("managed-mcp.json")
+        );
         match prev {
             Some(v) => std::env::set_var(MANAGED_DIR_ENV, v),
             None => std::env::remove_var(MANAGED_DIR_ENV),
@@ -642,7 +662,10 @@ mod tests {
         assert!(!is_allowed(
             "x",
             &cfg,
-            &McpPolicy { denied: None, allowed: Some(vec![]) }
+            &McpPolicy {
+                denied: None,
+                allowed: Some(vec![])
+            }
         ));
         // allowlist has only name matchers (no command) ⇒ name fallback
         let p = McpPolicy {
@@ -686,8 +709,14 @@ mod tests {
     #[test]
     fn ufr_wildcards_host_port_path_protocol() {
         // host wildcard
-        assert!(url_matches("https://api.example.com/mcp", "https://*.example.com"));
-        assert!(!url_matches("https://example.com/mcp", "https://*.example.com"));
+        assert!(url_matches(
+            "https://api.example.com/mcp",
+            "https://*.example.com"
+        ));
+        assert!(!url_matches(
+            "https://example.com/mcp",
+            "https://*.example.com"
+        ));
         // protocol wildcard
         assert!(url_matches("http://a.com/x", "*://a.com"));
         assert!(url_matches("https://a.com/x", "*://a.com"));
@@ -695,13 +724,22 @@ mod tests {
         assert!(url_matches("https://a.com:1234/x", "https://a.com:*"));
         assert!(url_matches("https://a.com:9999/x", "https://a.com:*"));
         // path wildcard
-        assert!(url_matches("https://a.com/team/mcp", "https://a.com/team/*"));
-        assert!(!url_matches("https://a.com/other/mcp", "https://a.com/team/*"));
+        assert!(url_matches(
+            "https://a.com/team/mcp",
+            "https://a.com/team/*"
+        ));
+        assert!(!url_matches(
+            "https://a.com/other/mcp",
+            "https://a.com/team/*"
+        ));
     }
 
     #[test]
     fn ufr_case_insensitive_host_and_trailing_dot() {
-        assert!(url_matches("https://API.Example.COM/x", "https://api.example.com"));
+        assert!(url_matches(
+            "https://API.Example.COM/x",
+            "https://api.example.com"
+        ));
         assert!(url_matches("https://a.com./x", "https://a.com"));
     }
 
@@ -775,13 +813,18 @@ mod tests {
             denied: Some(matcher(r#"[{"serverName":"corp"}]"#)),
             allowed: None,
         };
-        assert!(!is_server_allowed(&cfg("corp", stdio_spec("c", &[])), &policy));
+        assert!(!is_server_allowed(
+            &cfg("corp", stdio_spec("c", &[])),
+            &policy
+        ));
         assert!(is_server_allowed(&cfg("ok", stdio_spec("c", &[])), &policy));
         // SDK-control servers are always kept (claude `type === "sdk"`).
         assert!(is_server_allowed(
             &cfg(
                 "corp",
-                McpTransportSpec::SdkControl { control_channel_id: "x".into() }
+                McpTransportSpec::SdkControl {
+                    control_channel_id: "x".into()
+                }
             ),
             &policy
         ));
@@ -798,6 +841,9 @@ mod tests {
             allowed: None,
         };
         list.retain(|c| is_server_allowed(c, &policy));
-        assert_eq!(list.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["keep"]);
+        assert_eq!(
+            list.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["keep"]
+        );
     }
 }

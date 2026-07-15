@@ -42,7 +42,10 @@ fn requires_input(provider: WebSearchProvider) -> bool {
 }
 
 fn is_masked(provider: WebSearchProvider) -> bool {
-    matches!(provider, WebSearchProvider::Tavily | WebSearchProvider::Brave)
+    matches!(
+        provider,
+        WebSearchProvider::Tavily | WebSearchProvider::Brave
+    )
 }
 
 /// The `/web` per-provider configuration view.
@@ -143,7 +146,9 @@ impl Renderable for WebConfigView {
         if !self.show_input() {
             return None;
         }
-        let inner = Block::new().borders(Borders::ALL).inner(self.block_rect(area));
+        let inner = Block::new()
+            .borders(Borders::ALL)
+            .inner(self.block_rect(area));
         if inner.width == 0 || inner.height < 2 {
             return None;
         }
@@ -277,7 +282,10 @@ mod tests {
     #[test]
     fn esc_cancels() {
         let mut v = WebConfigView::new(WebSearchProvider::Auto, WebConfigSnapshot::default());
-        assert!(matches!(v.handle_key(press(KeyCode::Esc)), ViewOutcome::Cancelled));
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
     }
 
     #[test]
@@ -300,7 +308,10 @@ mod tests {
         let text = render_text(&buf, area);
         assert!(text.contains("*********"), "{text}");
         assert!(!text.contains("secret123"), "{text}");
-        assert!(!text.contains("· t test"), "no test hint for Tavily: {text}");
+        assert!(
+            !text.contains("· t test"),
+            "no test hint for Tavily: {text}"
+        );
 
         let mut v = WebConfigView::new(WebSearchProvider::Searxng, WebConfigSnapshot::default());
         for ch in "https://s.example".chars() {
@@ -343,7 +354,9 @@ mod tests {
     fn claims_a_bar_cursor_on_the_input_row_and_nothing_for_keyless_providers() {
         let mut v = WebConfigView::new(WebSearchProvider::Tavily, WebConfigSnapshot::default());
         let area = Rect::new(0, 0, 80, 12);
-        let empty = v.cursor_pos(area).expect("an input provider claims a cursor");
+        let empty = v
+            .cursor_pos(area)
+            .expect("an input provider claims a cursor");
         for _ in 0..3 {
             v.handle_key(key_char('k'));
         }
@@ -352,7 +365,8 @@ mod tests {
         assert_eq!(filled.0, empty.0 + 3, "one column per typed char");
         assert!(matches!(v.cursor_style(area), SetCursorStyle::SteadyBar));
         // Keyless providers (Auto/DuckDuckGo) have no field → no cursor claim.
-        let keyless = WebConfigView::new(WebSearchProvider::DuckDuckGo, WebConfigSnapshot::default());
+        let keyless =
+            WebConfigView::new(WebSearchProvider::DuckDuckGo, WebConfigSnapshot::default());
         assert_eq!(keyless.cursor_pos(area), None);
     }
 

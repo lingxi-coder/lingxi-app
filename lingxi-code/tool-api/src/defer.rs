@@ -216,7 +216,9 @@ mod tests {
 
     #[test]
     fn mode_truthy_enables() {
-        for v in ["1", "true", "on", "yes", "TST", "tst", "tst-auto", "auto", "auto:0", "auto:100"] {
+        for v in [
+            "1", "true", "on", "yes", "TST", "tst", "tst-auto", "auto", "auto:0", "auto:100",
+        ] {
             assert_eq!(
                 mode_from_values(Some(v), false),
                 ToolSearchMode::Enabled,
@@ -239,8 +241,14 @@ mod tests {
     #[test]
     fn experimental_betas_kill_switch_forces_standard() {
         // Even an explicit enable is overridden by the kill switch.
-        assert_eq!(mode_from_values(Some("true"), true), ToolSearchMode::Standard);
-        assert_eq!(mode_from_values(Some("tst"), true), ToolSearchMode::Standard);
+        assert_eq!(
+            mode_from_values(Some("true"), true),
+            ToolSearchMode::Standard
+        );
+        assert_eq!(
+            mode_from_values(Some("tst"), true),
+            ToolSearchMode::Standard
+        );
     }
 
     #[test]

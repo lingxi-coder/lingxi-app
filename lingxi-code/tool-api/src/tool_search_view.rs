@@ -82,13 +82,19 @@ impl SharedToolSearchView {
 
     /// Replace the searchable entry set (called by the registry refresh).
     pub fn set_entries(&self, entries: Vec<ToolSearchEntry>) {
-        *self.entries.write().expect("tool-search view lock poisoned") = entries;
+        *self
+            .entries
+            .write()
+            .expect("tool-search view lock poisoned") = entries;
     }
 
     /// Number of searchable entries currently held (test/telemetry helper).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.read().expect("tool-search view lock poisoned").len()
+        self.entries
+            .read()
+            .expect("tool-search view lock poisoned")
+            .len()
     }
 
     /// Whether the view is empty.

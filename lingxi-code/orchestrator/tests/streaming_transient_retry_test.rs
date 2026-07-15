@@ -12,9 +12,7 @@ use orchestrator::test_support::{
     input_json_delta, message_start, message_stop, text_delta, thinking_delta, MockApiClient,
     MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
-use orchestrator::{
-    ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
-};
+use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use protocol::ToolUseId;
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -104,7 +104,10 @@ async fn run_teammate_pump_inner(
             // queueing into an undrained inbox). Otherwise re-park — no message
             // was dropped (the waker fires on every `deliver`).
             if !spawn_seam.is_alive(&task_id).await {
-                tracing::debug!(task_id, "teammate pump: task no longer alive, stopping pump");
+                tracing::debug!(
+                    task_id,
+                    "teammate pump: task no longer alive, stopping pump"
+                );
                 return;
             }
             continue;
@@ -410,18 +413,16 @@ mod tests {
         let mb = mailbox.clone();
 
         let pump = tokio::spawn(async move {
-            run_teammate_pump_inner(
-                mb,
-                "task-1".to_string(),
-                seam_dyn,
-                Duration::from_millis(5),
-            )
-            .await;
+            run_teammate_pump_inner(mb, "task-1".to_string(), seam_dyn, Duration::from_millis(5))
+                .await;
         });
 
         // Let several park timeouts elapse (each re-parks because is_alive=true).
         tokio::time::sleep(Duration::from_millis(40)).await;
-        assert!(!pump.is_finished(), "pump keeps running while the task is alive");
+        assert!(
+            !pump.is_finished(),
+            "pump keeps running while the task is alive"
+        );
 
         // A message delivered after the re-parks still lands.
         mailbox.deliver(msg("late")).unwrap();

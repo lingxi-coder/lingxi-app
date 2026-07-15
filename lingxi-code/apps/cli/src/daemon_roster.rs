@@ -184,7 +184,10 @@ pub struct Dispatch {
     #[serde(rename = "respawnFlags", default)]
     pub respawn_flags: Vec<String>,
     /// How many attach-stall respawns have happened.
-    #[serde(rename = "attachStallRespawns", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "attachStallRespawns",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub attach_stall_respawns: Option<i64>,
     /// Agent type driving the worker.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -456,11 +459,7 @@ fn issue_path_redacted(path: &[String]) -> String {
 /// `jur`). Best-effort — a rename failure is swallowed exactly like the binary
 /// (`.catch(He)`).
 pub fn quarantine(path: &Path) {
-    let target = format!(
-        "{}.corrupt.{}",
-        path.to_string_lossy(),
-        now_millis().max(0)
-    );
+    let target = format!("{}.corrupt.{}", path.to_string_lossy(), now_millis().max(0));
     let _ = std::fs::rename(path, &target);
 }
 
@@ -491,10 +490,7 @@ pub fn read_roster(runtime_dir: &Path, supervisor_pid: i32, emit_events: bool) -
                     emit_parse_failed(-1, 1, "E2BIG", None, None);
                 }
                 quarantine(&path);
-                return corrupt(
-                    supervisor_pid,
-                    ParseFailure::TooLarge { bytes: meta.len() },
-                );
+                return corrupt(supervisor_pid, ParseFailure::TooLarge { bytes: meta.len() });
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -650,9 +646,7 @@ fn emit_parse_failed(
 /// the common storage-exhaustion raw errnos (`ENOSPC` 28, `EROFS` 30, `EDQUOT`
 /// 69/122) that don't map to a stable `ErrorKind` on this toolchain.
 fn is_transient_write_errno(e: &std::io::Error) -> bool {
-    use std::io::ErrorKind::{
-        AlreadyExists, Interrupted, NotFound, PermissionDenied, WouldBlock,
-    };
+    use std::io::ErrorKind::{AlreadyExists, Interrupted, NotFound, PermissionDenied, WouldBlock};
     if matches!(
         e.kind(),
         NotFound | PermissionDenied | AlreadyExists | Interrupted | WouldBlock
@@ -834,10 +828,7 @@ pub fn adopt<P: ProcProbe>(probe: &P, record: &WorkerRecord) -> AdoptDecision {
 /// Drop every non-adoptable worker from `roster`, returning the `(short,
 /// reason)` pairs that were removed. Callers emit `tengu_bg_orphan_reap` /
 /// `tengu_bg_roster_orphan_adopted` off the result.
-pub fn retain_adoptable<P: ProcProbe>(
-    roster: &mut Roster,
-    probe: &P,
-) -> Vec<(String, DropReason)> {
+pub fn retain_adoptable<P: ProcProbe>(roster: &mut Roster, probe: &P) -> Vec<(String, DropReason)> {
     let mut dropped = Vec::new();
     let shorts: Vec<String> = roster.workers.keys().cloned().collect();
     for short in shorts {
@@ -931,15 +922,19 @@ mod tests {
     fn valid_roster_round_trips() {
         let dir = tmpdir();
         let mut roster = empty_roster(4242);
-        roster
-            .workers
-            .insert("abcd1234".to_string(), sample_worker(9000, Some("Mon Jan  1 00:00:00 2024")));
+        roster.workers.insert(
+            "abcd1234".to_string(),
+            sample_worker(9000, Some("Mon Jan  1 00:00:00 2024")),
+        );
         write_roster(&dir, &roster).unwrap();
 
         // pretty-JSON, 2-space indent, no `parseFailed` key.
         let body = std::fs::read_to_string(roster_path(&dir)).unwrap();
         assert!(body.contains("  \"proto\": 1"), "2-space pretty: {body}");
-        assert!(!body.contains("parseFailed"), "parseFailed stripped: {body}");
+        assert!(
+            !body.contains("parseFailed"),
+            "parseFailed stripped: {body}"
+        );
         assert!(body.contains("\"procStart\""));
 
         let out = read_roster(&dir, 1, true);
@@ -1055,7 +1050,10 @@ mod tests {
 
     #[test]
     fn count_workers_handles_non_objects() {
-        assert_eq!(count_workers(&serde_json::json!({"workers": {"a": 1, "b": 2}})), 2);
+        assert_eq!(
+            count_workers(&serde_json::json!({"workers": {"a": 1, "b": 2}})),
+            2
+        );
         assert_eq!(count_workers(&serde_json::json!({"workers": []})), 0);
         assert_eq!(count_workers(&serde_json::json!({"workers": 3})), 0);
         assert_eq!(count_workers(&serde_json::json!(42)), 0);
@@ -1118,7 +1116,10 @@ mod tests {
             start: HashMap::new(),
         };
         let rec = sample_worker(9000, Some("start-A"));
-        assert_eq!(adopt(&probe, &rec), AdoptDecision::Drop(DropReason::DeadPid));
+        assert_eq!(
+            adopt(&probe, &rec),
+            AdoptDecision::Drop(DropReason::DeadPid)
+        );
     }
 
     #[test]
@@ -1179,7 +1180,7 @@ mod tests {
         let mut alive = HashMap::new();
         alive.insert(100, true); // live, matches
         alive.insert(200, true); // live, recycled
-        // 300 dead (absent → false)
+                                 // 300 dead (absent → false)
         let mut start = HashMap::new();
         start.insert(100, "S-100".to_string());
         start.insert(200, "S-OTHER".to_string());

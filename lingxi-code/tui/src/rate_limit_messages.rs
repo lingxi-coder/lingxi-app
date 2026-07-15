@@ -338,7 +338,11 @@ pub fn using_overage_text(info: &RateLimitInfo, sub: &SubscriptionSnapshot) -> S
         _ => "",
     };
     let o = sub.is_usage_based_billing();
-    let i = if o { "your usage allocation" } else { "usage credits" };
+    let i = if o {
+        "your usage allocation"
+    } else {
+        "usage credits"
+    };
     // `!n` → the bare copy, BEFORE any reset suffix.
     if n.is_empty() {
         return format!("Now using {i}");
@@ -1587,7 +1591,10 @@ mod tests {
         let got = compose_with(&info, &sub, false).unwrap();
         assert_eq!(
             got.text,
-            format!("You've hit your org's monthly usage limit \u{b7} resets {}", reset(ts))
+            format!(
+                "You've hit your org's monthly usage limit \u{b7} resets {}",
+                reset(ts)
+            )
         );
 
         // No overageResetsAt → no reset suffix.
@@ -1697,12 +1704,7 @@ mod tests {
     fn pro_subscriber_sonnet_limit_reads_weekly_limit() {
         // "For pro and enterprise, Sonnet limit is the same as weekly" —
         // rateLimitMessages.ts:175-182.
-        let got = compose_with(
-            &rejected(Some("seven_day_sonnet"), None),
-            &pro(),
-            false,
-        )
-        .unwrap();
+        let got = compose_with(&rejected(Some("seven_day_sonnet"), None), &pro(), false).unwrap();
         assert_eq!(got.text, "You've hit your weekly limit");
         // End-to-end wiring pin: a subscriber's rejected notice carries the
         // error upsell out of compose_with (TSX :36-38 — pro without the
@@ -1897,7 +1899,10 @@ mod tests {
     #[test]
     fn server_hides_overage_derives_from_upgrade_paths_membership() {
         // `mle!==void 0&&!mle.includes("overage")`.
-        assert!(!server_hides_overage(&RateLimitInfo::default()), "absent upgrade_paths");
+        assert!(
+            !server_hides_overage(&RateLimitInfo::default()),
+            "absent upgrade_paths"
+        );
         assert!(!server_hides_overage(&RateLimitInfo {
             upgrade_paths: Some(vec!["overage".into()]),
             ..RateLimitInfo::default()
@@ -1917,7 +1922,10 @@ mod tests {
         // `mle!==void 0&&!mle.includes("upgrade_plan")` OR `Pee()`
         // (idle_amber_finch — documented false, so this reduces to the
         // upgrade_paths membership test alone in this port).
-        assert!(!server_hides_upgrade(&RateLimitInfo::default()), "absent upgrade_paths");
+        assert!(
+            !server_hides_upgrade(&RateLimitInfo::default()),
+            "absent upgrade_paths"
+        );
         assert!(!server_hides_upgrade(&RateLimitInfo {
             upgrade_paths: Some(vec!["upgrade_plan".into()]),
             ..RateLimitInfo::default()
@@ -1953,7 +1961,11 @@ mod tests {
             &billed_personal,
             true
         ));
-        assert!(!spend_limit_nudge_path(&info, &team(false, Some("admin")), true));
+        assert!(!spend_limit_nudge_path(
+            &info,
+            &team(false, Some("admin")),
+            true
+        ));
         assert!(!spend_limit_nudge_path(&info, &billed_personal, false));
     }
 
@@ -2063,12 +2075,8 @@ mod tests {
             ..SubscriptionSnapshot::default()
         };
         let ts = ts_in(3600);
-        let got = compose_with(
-            &warning(Some("overage"), Some(0.9), Some(ts)),
-            &sub,
-            false,
-        )
-        .unwrap();
+        let got =
+            compose_with(&warning(Some("overage"), Some(0.9), Some(ts)), &sub, false).unwrap();
         assert_eq!(got.text, "You've used 90% of your usage");
     }
 
@@ -2085,7 +2093,12 @@ mod tests {
     #[test]
     fn jcg_seven_day_overage_included_reads_fable_5_limit() {
         // NEW in 206: `case"seven_day_overage_included":t="Fable 5 limit"`.
-        let got = compose(&warning(Some("seven_day_overage_included"), Some(0.75), None)).unwrap();
+        let got = compose(&warning(
+            Some("seven_day_overage_included"),
+            Some(0.75),
+            None,
+        ))
+        .unwrap();
         assert_eq!(got.text, "You've used 75% of your Fable 5 limit");
     }
 
@@ -2208,12 +2221,8 @@ mod tests {
     #[test]
     fn weekly_warning_never_has_upsell() {
         // "Weekly limit warnings don't show upsell per spec" — TS :295-296.
-        let got = compose_with(
-            &warning(Some("seven_day"), Some(0.8), None),
-            &pro(),
-            false,
-        )
-        .unwrap();
+        let got =
+            compose_with(&warning(Some("seven_day"), Some(0.8), None), &pro(), false).unwrap();
         assert_eq!(got.text, "You've used 80% of your weekly limit");
     }
 
@@ -2388,7 +2397,10 @@ mod tests {
             USAGE_CREDITS_ASK_ADMIN,
             "Run /usage-credits to ask your admin for more"
         );
-        assert_eq!(USAGE_CREDITS_RAISE_CAP, "Run /usage-credits to raise the cap");
+        assert_eq!(
+            USAGE_CREDITS_RAISE_CAP,
+            "Run /usage-credits to raise the cap"
+        );
         assert_eq!(UPGRADE_KEEP_USING, "/upgrade to keep using LingXi");
         for s in [
             USAGE_CREDITS_TURN_ON,

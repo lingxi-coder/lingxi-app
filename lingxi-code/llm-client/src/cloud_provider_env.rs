@@ -182,9 +182,7 @@ pub fn foundry_base_host(base_url: Option<&str>, resource: Option<&str>) -> Opti
     match base_url {
         Some(u) if !u.is_empty() => Some(u.to_string()),
         _ => match resource {
-            Some(r) if !r.is_empty() => {
-                Some(format!("https://{r}.services.ai.azure.com"))
-            }
+            Some(r) if !r.is_empty() => Some(format!("https://{r}.services.ai.azure.com")),
             _ => None,
         },
     }
@@ -264,26 +262,41 @@ pub fn vertex_region_for_model_from_env(model: &str) -> String {
 pub fn vertex_codec_base_url_from_env(model: &str) -> Option<String> {
     let project = env_nonempty("ANTHROPIC_VERTEX_PROJECT_ID")?;
     let region = vertex_region_for_model_from_env(model);
-    let host = vertex_base_host_url(env_nonempty("ANTHROPIC_VERTEX_BASE_URL").as_deref(), &region);
+    let host = vertex_base_host_url(
+        env_nonempty("ANTHROPIC_VERTEX_BASE_URL").as_deref(),
+        &region,
+    );
     Some(vertex_codec_base_url(&host, &project, &region))
 }
 
 /// `CLAUDE_CODE_SKIP_VERTEX_AUTH` truthiness.
 #[must_use]
 pub fn skip_vertex_auth() -> bool {
-    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_SKIP_VERTEX_AUTH").ok().as_deref())
+    traits::env::is_env_truthy(
+        std::env::var("CLAUDE_CODE_SKIP_VERTEX_AUTH")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// `CLAUDE_CODE_SKIP_FOUNDRY_AUTH` truthiness.
 #[must_use]
 pub fn skip_foundry_auth() -> bool {
-    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_SKIP_FOUNDRY_AUTH").ok().as_deref())
+    traits::env::is_env_truthy(
+        std::env::var("CLAUDE_CODE_SKIP_FOUNDRY_AUTH")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// `CLAUDE_CODE_SKIP_BEDROCK_AUTH` truthiness.
 #[must_use]
 pub fn skip_bedrock_auth() -> bool {
-    traits::env::is_env_truthy(std::env::var("CLAUDE_CODE_SKIP_BEDROCK_AUTH").ok().as_deref())
+    traits::env::is_env_truthy(
+        std::env::var("CLAUDE_CODE_SKIP_BEDROCK_AUTH")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// `ANTHROPIC_BEDROCK_BASE_URL` override (`getBaseURL()`'s `case"bedrock"` head),

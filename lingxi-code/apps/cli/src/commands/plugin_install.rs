@@ -317,15 +317,25 @@ pub fn run_install(
         .join(sanitize(name, false))
         .join(sanitize(&version, true));
     let _ = std::fs::remove_dir_all(&dest);
-    copy_dir(&plugin_src, &dest)
-        .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e.to_string())))?;
+    copy_dir(&plugin_src, &dest).map_err(|e| {
+        format!(
+            "Installing plugin \"{arg}\"...{}",
+            fail("install", arg, &e.to_string())
+        )
+    })?;
 
     // Record (v2) — `projectPath` is the LAST field, present only for
     // project/local scope (matching the binary's on-disk shape).
     let now = iso_now();
     let mut record = serde_json::Map::new();
-    record.insert("scope".to_string(), Value::String(scope.label().to_string()));
-    record.insert("installPath".to_string(), Value::String(dest.display().to_string()));
+    record.insert(
+        "scope".to_string(),
+        Value::String(scope.label().to_string()),
+    );
+    record.insert(
+        "installPath".to_string(),
+        Value::String(dest.display().to_string()),
+    );
     record.insert("version".to_string(), Value::String(version.clone()));
     record.insert("installedAt".to_string(), Value::String(now.clone()));
     record.insert("lastUpdated".to_string(), Value::String(now));
@@ -401,7 +411,10 @@ pub fn run_uninstall(
         .collect();
     if matching.is_empty() {
         let mut other: Vec<&str> = Vec::new();
-        for s in records.iter().filter_map(|r| r.get("scope").and_then(Value::as_str)) {
+        for s in records
+            .iter()
+            .filter_map(|r| r.get("scope").and_then(Value::as_str))
+        {
             if !other.contains(&s) {
                 other.push(s);
             }
@@ -595,7 +608,9 @@ fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Resul
                 Some(p) => format!("{scope} ({p})"),
                 None => scope.to_string(),
             };
-            return Err(format!("Plugin \"{name}\" is not installed at scope {disp}"));
+            return Err(format!(
+                "Plugin \"{name}\" is not installed at scope {disp}"
+            ));
         }
         let idx = scoped
             .iter()
@@ -731,7 +746,10 @@ mod tests {
         .unwrap();
         std::fs::write(pdir.join("commands").join("hi.md"), "# hi").unwrap();
         // Register the marketplace (directory source).
-        let abs = std::fs::canonicalize(&market).unwrap().display().to_string();
+        let abs = std::fs::canonicalize(&market)
+            .unwrap()
+            .display()
+            .to_string();
         std::fs::write(
             plugins.join("known_marketplaces.json"),
             serde_json::to_string_pretty(&serde_json::json!({
@@ -750,7 +768,8 @@ mod tests {
     }
 
     fn user_settings(e: &Env) -> Value {
-        serde_json::from_str(&std::fs::read_to_string(e.home.join("settings.json")).unwrap()).unwrap()
+        serde_json::from_str(&std::fs::read_to_string(e.home.join("settings.json")).unwrap())
+            .unwrap()
     }
 
     fn installed_db(e: &Env) -> Value {
@@ -777,7 +796,10 @@ mod tests {
         assert_eq!(rec["installPath"], cached.display().to_string());
         assert!(rec["installedAt"].is_string());
         // Enabled.
-        assert_eq!(user_settings(&e)["enabledPlugins"]["hello@mymkt"], Value::Bool(true));
+        assert_eq!(
+            user_settings(&e)["enabledPlugins"]["hello@mymkt"],
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -825,30 +847,54 @@ mod tests {
     #[test]
     fn install_invalid_scope() {
         let e = env();
-        let err = run_install("hello@mymkt", Some("bogus"), &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        let err = run_install(
+            "hello@mymkt",
+            Some("bogus"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
         // Bare scope error — NO "Installing plugin …" prefix (matches the binary).
-        assert_eq!(err, "Invalid scope: bogus. Must be one of: user, project, local.");
+        assert_eq!(
+            err,
+            "Invalid scope: bogus. Must be one of: user, project, local."
+        );
     }
 
     #[test]
     fn uninstall_removes_record_deletes_key_and_orphans() {
         let e = env();
         run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
-        let msg = run_uninstall("hello", None, false, false, true, &e.plugins, &e.home, &e.cwd).unwrap();
-        assert_eq!(msg, "✔ Successfully uninstalled plugin: hello (scope: user)");
+        let msg = run_uninstall(
+            "hello", None, false, false, true, &e.plugins, &e.home, &e.cwd,
+        )
+        .unwrap();
+        assert_eq!(
+            msg,
+            "✔ Successfully uninstalled plugin: hello (scope: user)"
+        );
         // Record gone.
         assert_eq!(installed_db(&e)["plugins"], serde_json::json!({}));
         // enabledPlugins KEY DELETED (not set false).
         assert_eq!(user_settings(&e)["enabledPlugins"], serde_json::json!({}));
         // Cache orphaned (marker written, tree kept).
-        assert!(e.plugins.join("cache/mymkt/hello/1.2.3/.orphaned_at").exists());
-        assert!(e.plugins.join("cache/mymkt/hello/1.2.3/commands/hi.md").exists());
+        assert!(e
+            .plugins
+            .join("cache/mymkt/hello/1.2.3/.orphaned_at")
+            .exists());
+        assert!(e
+            .plugins
+            .join("cache/mymkt/hello/1.2.3/commands/hi.md")
+            .exists());
     }
 
     #[test]
     fn uninstall_not_installed() {
         let e = env();
-        let err = run_uninstall("foo", None, false, false, true, &e.plugins, &e.home, &e.cwd).unwrap_err();
+        let err = run_uninstall("foo", None, false, false, true, &e.plugins, &e.home, &e.cwd)
+            .unwrap_err();
         assert_eq!(
             err,
             "✘ Failed to uninstall plugin \"foo\": Plugin \"foo\" not found in installed plugins"
@@ -867,7 +913,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            e.market.join("plugins").join("hello").join("commands").join("new.md"),
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join("commands")
+                .join("new.md"),
             "# new",
         )
         .unwrap();
@@ -891,8 +941,14 @@ mod tests {
         let new_cache = e.plugins.join("cache/mymkt/hello/2.0.0");
         assert!(new_cache.join(".lingxi-plugin/plugin.json").exists());
         assert!(new_cache.join("commands/new.md").exists());
-        assert!(e.plugins.join("cache/mymkt/hello/1.2.3/.orphaned_at").exists());
-        assert!(e.plugins.join("cache/mymkt/hello/1.2.3/commands/hi.md").exists());
+        assert!(e
+            .plugins
+            .join("cache/mymkt/hello/1.2.3/.orphaned_at")
+            .exists());
+        assert!(e
+            .plugins
+            .join("cache/mymkt/hello/1.2.3/commands/hi.md")
+            .exists());
 
         // Record bumped: version + installPath + lastUpdated changed; installedAt kept.
         let db = installed_db(&e);
@@ -903,7 +959,10 @@ mod tests {
         assert_eq!(rec["installedAt"], installed_at); // installedAt preserved
         assert!(rec["lastUpdated"].is_string());
         // enabledPlugins untouched by update.
-        assert_eq!(user_settings(&e)["enabledPlugins"]["hello@mymkt"], Value::Bool(true));
+        assert_eq!(
+            user_settings(&e)["enabledPlugins"]["hello@mymkt"],
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -998,9 +1057,28 @@ mod tests {
     #[test]
     fn install_second_scope_appends_with_project_path() {
         let e = env();
-        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
-        let msg = run_install("hello@mymkt", Some("project"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
-        assert!(msg.contains("Successfully installed plugin: hello@mymkt (scope: project)"), "{msg}");
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let msg = run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert!(
+            msg.contains("Successfully installed plugin: hello@mymkt (scope: project)"),
+            "{msg}"
+        );
         let db = installed_db(&e);
         let arr = db["plugins"]["hello@mymkt"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -1014,16 +1092,50 @@ mod tests {
     #[test]
     fn install_same_scope_twice_is_already_installed() {
         let e = env();
-        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
-        let msg = run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let msg = run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         assert!(msg.contains("already installed (scope: user)"), "{msg}");
     }
 
     #[test]
     fn uninstall_scope_mismatch_names_actual_scope() {
         let e = env();
-        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
-        let err = run_uninstall("hello@mymkt", Some("project"), false, false, true, &e.plugins, &e.home, &e.cwd).unwrap_err();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let err = run_uninstall(
+            "hello@mymkt",
+            Some("project"),
+            false,
+            false,
+            true,
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "✘ Failed to uninstall plugin \"hello@mymkt\": Plugin \"hello@mymkt\" is installed in user scope, not project. Use --scope user to uninstall."
@@ -1035,9 +1147,35 @@ mod tests {
     #[test]
     fn uninstall_removes_only_matching_scope() {
         let e = env();
-        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
-        run_install("hello@mymkt", Some("project"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
-        run_uninstall("hello@mymkt", Some("project"), false, false, true, &e.plugins, &e.home, &e.cwd).unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        run_uninstall(
+            "hello@mymkt",
+            Some("project"),
+            false,
+            false,
+            true,
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         let db = installed_db(&e);
         let arr = db["plugins"]["hello@mymkt"].as_array().unwrap();
         assert_eq!(arr.len(), 1);

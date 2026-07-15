@@ -482,6 +482,12 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_helper: Option<String>,
 
+    /// Object-merge field. `vimInsertModeRemaps`: two-key insert-mode sequences
+    /// to key names. Claude Code 2.1.208 uses this for common Vim insert-exit
+    /// mappings, for example `{ "jj": "Escape" }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vim_insert_mode_remaps: Option<BTreeMap<String, String>>,
+
     /// Scalar field (later source wins). `otelHeadersHelper`: path to (or shell
     /// command for) a script whose stdout is a JSON object of OTLP export header
     /// `k:v` strings — used to inject short-lived bearer tokens into the
@@ -745,7 +751,10 @@ mod tests {
         let odd: SettingsJson =
             serde_json::from_str(r#"{"viewMode":"bogus","model":"x"}"#).expect("catch tolerance");
         assert_eq!(odd.view_mode.as_deref(), Some("bogus"));
-        assert!(odd.model.is_some(), "sibling fields survive an odd viewMode");
+        assert!(
+            odd.model.is_some(),
+            "sibling fields survive an odd viewMode"
+        );
         // Absent ⇒ None, and NOT emitted on re-serialize (skip_serializing_if).
         let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
         assert_eq!(absent.view_mode, None);
@@ -921,7 +930,10 @@ mod tests {
         // modelOverrides deep-merges (CC leaves objects to lodash recursive
         // merge); availableModels/enforceAvailableModels are scalar-override.
         assert!(
-            matches!(strategy_for("modelOverrides"), Some(MergeStrategy::DeepMerge)),
+            matches!(
+                strategy_for("modelOverrides"),
+                Some(MergeStrategy::DeepMerge)
+            ),
             "modelOverrides must deep-merge"
         );
         assert!(
@@ -983,7 +995,10 @@ mod tests {
             "requiredMaximumVersion",
             "forceRemoteSettingsRefresh",
         ] {
-            assert!(back.contains(&format!("\"{key}\"")), "{key} missing in {back}");
+            assert!(
+                back.contains(&format!("\"{key}\"")),
+                "{key} missing in {back}"
+            );
             // All scalar-override merge (later source wins).
             assert!(
                 strategy_for(key).is_none(),
@@ -1065,8 +1080,7 @@ mod tests {
         assert!(!serde_json::to_string(&absent)
             .unwrap()
             .contains("allowedHttpHookUrls"));
-        let empty: SettingsJson =
-            serde_json::from_str(r#"{"allowedHttpHookUrls":[]}"#).unwrap();
+        let empty: SettingsJson = serde_json::from_str(r#"{"allowedHttpHookUrls":[]}"#).unwrap();
         assert_eq!(empty.allowed_http_hook_urls.as_deref(), Some(&[][..]));
     }
 
@@ -1084,7 +1098,10 @@ mod tests {
         assert!(parsed.model.is_some());
         // camelCase on the wire; round-trips.
         let back = serde_json::to_string(&parsed).expect("serialize");
-        assert!(back.contains("\"companyAnnouncements\":[\"hi\",\"there\"]"), "{back}");
+        assert!(
+            back.contains("\"companyAnnouncements\":[\"hi\",\"there\"]"),
+            "{back}"
+        );
         // Absent ⇒ None, not emitted.
         let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
         assert_eq!(absent.company_announcements, None);
@@ -1093,7 +1110,10 @@ mod tests {
             .contains("companyAnnouncements"));
         // Array-merge (concat-dedup), matching CC's array customizer.
         assert!(
-            matches!(strategy_for("companyAnnouncements"), Some(MergeStrategy::ConcatDedup)),
+            matches!(
+                strategy_for("companyAnnouncements"),
+                Some(MergeStrategy::ConcatDedup)
+            ),
             "companyAnnouncements must be ConcatDedup"
         );
     }
@@ -1112,7 +1132,10 @@ mod tests {
         // camelCase on the wire.
         let back = serde_json::to_string(&parsed).expect("serialize");
         assert!(back.contains("\"plansDirectory\":\"docs/plans\""), "{back}");
-        assert!(back.contains("\"apiKeyHelper\":\"/usr/local/bin/get-key.sh\""), "{back}");
+        assert!(
+            back.contains("\"apiKeyHelper\":\"/usr/local/bin/get-key.sh\""),
+            "{back}"
+        );
         // Absent ⇒ None, not emitted.
         let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
         assert_eq!(absent.plans_directory, None);

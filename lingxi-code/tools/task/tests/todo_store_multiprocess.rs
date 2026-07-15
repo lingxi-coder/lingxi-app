@@ -137,7 +137,8 @@ async fn child_update(dir: &Path) -> i32 {
 }
 
 fn read_task(dir: &Path, id: &str) -> TodoTask {
-    let content = std::fs::read_to_string(dir.join(format!("{id}.json"))).expect("read shared task");
+    let content =
+        std::fs::read_to_string(dir.join(format!("{id}.json"))).expect("read shared task");
     serde_json::from_str(&content).expect("shared task JSON")
 }
 

@@ -177,7 +177,11 @@ mod tests {
         let h = CommitHandler::new();
         assert_eq!(
             h.allowed_tools(),
-            &["Bash(git add:*)", "Bash(git status:*)", "Bash(git commit:*)"]
+            &[
+                "Bash(git add:*)",
+                "Bash(git status:*)",
+                "Bash(git commit:*)"
+            ]
         );
     }
 }

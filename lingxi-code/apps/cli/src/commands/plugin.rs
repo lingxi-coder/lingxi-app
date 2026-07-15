@@ -539,8 +539,12 @@ fn market_result(res: Result<String, String>) -> i32 {
 fn run_enable(args: &EnableArgs) -> i32 {
     let home = crate::run::lingxi_home_dir();
     let cwd = scope_cwd();
-    match crate::commands::plugin_settings::run_enable(&args.plugin, args.scope.as_deref(), &home, &cwd)
-    {
+    match crate::commands::plugin_settings::run_enable(
+        &args.plugin,
+        args.scope.as_deref(),
+        &home,
+        &cwd,
+    ) {
         Ok(msg) => {
             println!("{msg}");
             SUCCESS

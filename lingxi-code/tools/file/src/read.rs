@@ -15,7 +15,7 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -23,6 +23,7 @@ use telemetry::tengu::tool::{
     FILE_READ_DEDUP, FILE_READ_LIMITS_OVERRIDE, FILE_READ_REREAD, READ_COMPLETED, READ_FAILED,
     READ_STARTED, SESSION_FILE_READ,
 };
+use tokio::io::AsyncReadExt;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -55,6 +56,8 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 25_000;
 
 /// LingXi env tier for Claude-compatible per-call file-reading limits.
 pub const MAX_OUTPUT_TOKENS_ENV: &str = "LINGXI_FILE_READ_MAX_OUTPUT_TOKENS";
+
+const STREAMING_READ_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Effective per-call token budget. Invalid, missing, or zero env values preserve
 /// the byte-locked default.
@@ -318,6 +321,143 @@ pub(crate) fn format_file_size(size_in_bytes: u64) -> String {
     }
     let gb = mb / 1024.0;
     format!("{}GB", trim(gb))
+}
+
+struct StreamedTextRange {
+    content: String,
+    total_lines: u64,
+    read_lines: u64,
+}
+
+fn format_line_too_long(path: &Path, line: u64) -> String {
+    format!(
+        "File {} contains a line longer than {} at or after requested line {line}. Use Grep to find a smaller section, or use Bash tools that can stream the file.",
+        path.display(),
+        format_file_size(MAX_FILE_READ_SIZE),
+    )
+}
+
+async fn read_text_range_streaming(
+    canon: &Path,
+    offset: u64,
+    limit: u64,
+    ext: Option<&str>,
+    max_output_tokens: u64,
+) -> Result<StreamedTextRange, ToolError> {
+    let mut file = tokio::fs::File::open(canon)
+        .await
+        .map_err(|e| ToolError::Io(e.to_string()))?;
+    let mut buf = [0_u8; STREAMING_READ_CHUNK_BYTES];
+    let end_line = offset.saturating_add(limit);
+    let max_line_bytes = MAX_FILE_READ_SIZE as usize;
+    let bytes_per_token = bytes_per_token_for_file_type(ext);
+    let max_selected_bytes = usize::try_from(max_output_tokens.saturating_mul(bytes_per_token))
+        .unwrap_or(usize::MAX)
+        .max(max_line_bytes.saturating_add(1));
+
+    let mut selected = Vec::new();
+    let mut current_line = 1_u64;
+    let mut selected_line_bytes = 0_usize;
+    let mut read_lines = 0_u64;
+    let mut newline_count = 0_u64;
+    let mut total_bytes_read = 0_usize;
+    let mut nul_scan_remaining = NUL_SCAN_WINDOW;
+    let mut utf8_tail: Vec<u8> = Vec::new();
+
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| ToolError::Io(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n];
+        total_bytes_read += n;
+
+        let scan = nul_scan_remaining.min(n);
+        if scan > 0 {
+            if looks_binary(&chunk[..scan]) {
+                return Err(ToolError::Io(format_binary(canon)));
+            }
+            nul_scan_remaining -= scan;
+        }
+
+        validate_utf8_stream_chunk(&mut utf8_tail, chunk)
+            .map_err(|()| ToolError::Io(format!("File {} is not valid UTF-8", canon.display())))?;
+
+        for &byte in chunk {
+            let selecting = current_line >= offset && current_line < end_line;
+            if selecting {
+                selected.push(byte);
+                selected_line_bytes += 1;
+                if selected_line_bytes > max_line_bytes {
+                    return Err(ToolError::Io(format_line_too_long(canon, current_line)));
+                }
+                if selected.len() > max_selected_bytes {
+                    let estimate = u64::try_from(selected.len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(bytes_per_token / 2)
+                        / bytes_per_token;
+                    return Err(ToolError::Io(format_max_tokens_exceeded(
+                        estimate,
+                        max_output_tokens,
+                    )));
+                }
+            }
+            if byte == b'\n' {
+                newline_count += 1;
+                if selecting {
+                    read_lines += 1;
+                }
+                current_line += 1;
+                selected_line_bytes = 0;
+            }
+        }
+    }
+
+    if !utf8_tail.is_empty() {
+        return Err(ToolError::Io(format!(
+            "File {} is not valid UTF-8",
+            canon.display()
+        )));
+    }
+    if selected_line_bytes > 0 && current_line >= offset && current_line < end_line {
+        read_lines += 1;
+    }
+
+    let content = String::from_utf8(selected)
+        .map_err(|_| ToolError::Io(format!("File {} is not valid UTF-8", canon.display())))?;
+    let total_lines = if total_bytes_read == 0 {
+        0
+    } else {
+        newline_count + 1
+    };
+    Ok(StreamedTextRange {
+        content,
+        total_lines,
+        read_lines,
+    })
+}
+
+fn validate_utf8_stream_chunk(tail: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ()> {
+    tail.extend_from_slice(chunk);
+    match std::str::from_utf8(tail) {
+        Ok(_) => {
+            tail.clear();
+            Ok(())
+        }
+        Err(e) if e.error_len().is_none() => {
+            let valid = e.valid_up_to();
+            let suffix = tail[valid..].to_vec();
+            if suffix.len() > 4 {
+                return Err(());
+            }
+            *tail = suffix;
+            Ok(())
+        }
+        Err(_) => Err(()),
+    }
 }
 
 /// Turn rendered page JPEGs into (image sources, tool-result data). Each page is
@@ -1742,6 +1882,102 @@ impl Tool for FileReadTool {
             return Err(ToolError::Io(format_too_large(&canon, size)));
         }
 
+        let ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        let max_output_tokens = effective_max_output_tokens();
+
+        if !is_image
+            && !is_pdf
+            && ext.as_deref() != Some("ipynb")
+            && input_limit.is_some()
+            && size > MAX_FILE_READ_SIZE
+        {
+            let streamed = match read_text_range_streaming(
+                &canon,
+                offset,
+                input_limit.expect("checked is_some"),
+                ext.as_deref(),
+                max_output_tokens,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    self.emit_failed(&invocation_id, "streaming_range_read")
+                        .await;
+                    return Err(e);
+                }
+            };
+
+            let mut slice = streamed.content;
+            let total_lines = streamed.total_lines;
+            let line_range_start = offset;
+            let read_lines = streamed.read_lines;
+            let token_estimate = rough_token_count_estimation_for_file_type(&slice, ext.as_deref());
+            if token_estimate != 0
+                && token_estimate > max_output_tokens / 4
+                && token_estimate > max_output_tokens
+            {
+                self.emit_failed(&invocation_id, "max_tokens_exceeded")
+                    .await;
+                return Err(ToolError::Io(format_max_tokens_exceeded(
+                    token_estimate,
+                    max_output_tokens,
+                )));
+            }
+
+            let duration_ms = started.elapsed().as_millis() as u64;
+            self.emit_completed(&invocation_id, size, duration_ms).await;
+            tool_api::read_file_state::set(
+                &self.ctx.read_file_state,
+                canon.clone(),
+                tool_api::read_file_state::ReadFileEntry {
+                    content: slice.clone(),
+                    mtime_ms,
+                    offset: input_offset,
+                    limit: input_limit,
+                    from_read: true,
+                },
+            );
+            self.emit_session_file_read(
+                &canon,
+                total_lines,
+                read_lines,
+                size,
+                slice.len() as u64,
+                offset,
+                input_limit,
+            )
+            .await;
+
+            let model_content = if slice.is_empty() {
+                if total_lines == 0 {
+                    EMPTY_FILE_WARNING.to_string()
+                } else {
+                    format_offset_beyond_eof(offset, total_lines)
+                }
+            } else {
+                add_line_numbers(&slice, offset)
+            };
+            let file = json!({
+                "filePath": canon.display().to_string(),
+                "content": std::mem::take(&mut slice),
+                "numLines": read_lines,
+                "startLine": line_range_start,
+                "totalLines": total_lines,
+            });
+            return Ok(ToolCallResult {
+                data: json!({ "type": "text", "file": file }),
+                model_content: Some(model_content),
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            });
+        }
+
         let bytes = match tokio::fs::read(&canon).await {
             Ok(b) => b,
             Err(e) => {
@@ -1804,11 +2040,6 @@ impl Tool for FileReadTool {
         // the same case-insensitive `.ipynb` test FileEditTool uses to route to
         // NotebookEdit. A parse failure surfaces the JSON error (TS's
         // `jsonParse` throws → propagates out of `call`).
-        let ext = std::path::Path::new(file_path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase);
-        let max_output_tokens = effective_max_output_tokens();
         if ext.as_deref() == Some("ipynb") {
             let cells = match crate::notebook_read::read_notebook(&content) {
                 Ok(c) => c,
@@ -2322,11 +2553,7 @@ mod tests {
 
         let tool = FileReadTool::new(ctx);
         let result = tool
-            .call(
-                json!({ "file_path": "rel.txt" }),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({ "file_path": "rel.txt" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
         assert_eq!(
@@ -2348,11 +2575,7 @@ mod tests {
 
         let tool = FileReadTool::new(ctx);
         let result = tool
-            .call(
-                json!({ "file_path": "rel.txt" }),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({ "file_path": "rel.txt" }), fresh_ctx(), fresh_tx())
             .await
             .unwrap();
         assert_eq!(result.data["file"]["content"], "at the boot cwd\n");
@@ -2405,6 +2628,26 @@ mod tests {
             .await
             .expect("ranged read of an oversize file must succeed");
         assert_eq!(result.data["file"]["content"], "second\nthird\n");
+    }
+
+    #[tokio::test]
+    async fn ranged_read_of_oversize_single_line_returns_bounded_error() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("huge_single_line.txt");
+        std::fs::write(&target, "x".repeat((MAX_FILE_READ_SIZE as usize) + 1024)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 1 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("oversize single-line range must fail without loading the whole line");
+        let msg = err.to_string();
+        assert!(msg.contains("line longer than"), "got: {msg}");
+        assert!(msg.contains("Use Grep"), "got: {msg}");
     }
 
     #[tokio::test]
@@ -3688,7 +3931,9 @@ mod tests {
         // present here — and the image must NOT also ride an injected message.
         assert_eq!(res.data["type"], "image");
         assert_eq!(res.data["file"]["type"], "image/png");
-        assert!(res.data["file"]["base64"].as_str().is_some_and(|b| !b.is_empty()));
+        assert!(res.data["file"]["base64"]
+            .as_str()
+            .is_some_and(|b| !b.is_empty()));
         // An 8x8 PNG is not resized → no dimensions, no resize-note message.
         assert!(res.data["file"].get("dimensions").is_none());
         assert!(

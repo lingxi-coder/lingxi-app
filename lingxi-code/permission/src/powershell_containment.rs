@@ -255,8 +255,24 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-passthru", "-force", "-whatif", "-confirm", "-usetransaction", "-nonewline", "-asbytestream"],
-            &["-value", "-filter", "-include", "-exclude", "-credential", "-encoding", "-stream"],
+            &[
+                "-passthru",
+                "-force",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+                "-nonewline",
+                "-asbytestream",
+            ],
+            &[
+                "-value",
+                "-filter",
+                "-include",
+                "-exclude",
+                "-credential",
+                "-encoding",
+                "-stream",
+            ],
         ),
     );
     m.insert(
@@ -264,8 +280,24 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-passthru", "-force", "-whatif", "-confirm", "-usetransaction", "-nonewline", "-asbytestream"],
-            &["-value", "-filter", "-include", "-exclude", "-credential", "-encoding", "-stream"],
+            &[
+                "-passthru",
+                "-force",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+                "-nonewline",
+                "-asbytestream",
+            ],
+            &[
+                "-value",
+                "-filter",
+                "-include",
+                "-exclude",
+                "-credential",
+                "-encoding",
+                "-stream",
+            ],
         ),
     );
     m.insert(
@@ -273,7 +305,13 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-recurse", "-force", "-whatif", "-confirm", "-usetransaction"],
+            &[
+                "-recurse",
+                "-force",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+            ],
             &["-filter", "-include", "-exclude", "-credential", "-stream"],
         ),
     );
@@ -291,7 +329,14 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             &["-filepath", "-path", "-literalpath", "-pspath", "-lp"],
-            &["-append", "-force", "-noclobber", "-nonewline", "-whatif", "-confirm"],
+            &[
+                "-append",
+                "-force",
+                "-noclobber",
+                "-nonewline",
+                "-whatif",
+                "-confirm",
+            ],
             &["-inputobject", "-encoding", "-width"],
         ),
     );
@@ -309,8 +354,24 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-append", "-force", "-noclobber", "-notypeinformation", "-includetypeinformation", "-useculture", "-noheader", "-whatif", "-confirm"],
-            &["-inputobject", "-delimiter", "-encoding", "-quotefields", "-usequotes"],
+            &[
+                "-append",
+                "-force",
+                "-noclobber",
+                "-notypeinformation",
+                "-includetypeinformation",
+                "-useculture",
+                "-noheader",
+                "-whatif",
+                "-confirm",
+            ],
+            &[
+                "-inputobject",
+                "-delimiter",
+                "-encoding",
+                "-quotefields",
+                "-usequotes",
+            ],
         ),
     );
     m.insert(
@@ -337,8 +398,23 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             &["-path", "-literalpath", "-pspath", "-lp", "-destination"],
-            &["-container", "-force", "-passthru", "-recurse", "-whatif", "-confirm", "-usetransaction"],
-            &["-filter", "-include", "-exclude", "-credential", "-fromsession", "-tosession"],
+            &[
+                "-container",
+                "-force",
+                "-passthru",
+                "-recurse",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+            ],
+            &[
+                "-filter",
+                "-include",
+                "-exclude",
+                "-credential",
+                "-fromsession",
+                "-tosession",
+            ],
         ),
     );
     m.insert(
@@ -346,7 +422,13 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             &["-path", "-literalpath", "-pspath", "-lp", "-destination"],
-            &["-force", "-passthru", "-whatif", "-confirm", "-usetransaction"],
+            &[
+                "-force",
+                "-passthru",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+            ],
             &["-filter", "-include", "-exclude", "-credential"],
         ),
     );
@@ -355,7 +437,13 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-force", "-passthru", "-whatif", "-confirm", "-usetransaction"],
+            &[
+                "-force",
+                "-passthru",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+            ],
             &["-newname", "-credential", "-filter", "-include", "-exclude"],
         ),
     );
@@ -364,7 +452,13 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-force", "-passthru", "-whatif", "-confirm", "-usetransaction"],
+            &[
+                "-force",
+                "-passthru",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+            ],
             &["-value", "-credential", "-filter", "-include", "-exclude"],
         ),
     );
@@ -373,8 +467,28 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Read,
             pp,
-            &["-force", "-usetransaction", "-wait", "-raw", "-asbytestream"],
-            &["-readcount", "-totalcount", "-tail", "-first", "-head", "-last", "-filter", "-include", "-exclude", "-credential", "-delimiter", "-encoding", "-stream"],
+            &[
+                "-force",
+                "-usetransaction",
+                "-wait",
+                "-raw",
+                "-asbytestream",
+            ],
+            &[
+                "-readcount",
+                "-totalcount",
+                "-tail",
+                "-first",
+                "-head",
+                "-last",
+                "-filter",
+                "-include",
+                "-exclude",
+                "-credential",
+                "-delimiter",
+                "-encoding",
+                "-stream",
+            ],
         ),
     );
     m.insert(
@@ -382,8 +496,26 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Read,
             pp,
-            &["-recurse", "-force", "-name", "-usetransaction", "-followsymlink", "-directory", "-file", "-hidden", "-readonly", "-system"],
-            &["-filter", "-include", "-exclude", "-depth", "-attributes", "-credential"],
+            &[
+                "-recurse",
+                "-force",
+                "-name",
+                "-usetransaction",
+                "-followsymlink",
+                "-directory",
+                "-file",
+                "-hidden",
+                "-readonly",
+                "-system",
+            ],
+            &[
+                "-filter",
+                "-include",
+                "-exclude",
+                "-depth",
+                "-attributes",
+                "-credential",
+            ],
         ),
     );
     m.insert(
@@ -450,7 +582,15 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
             Read,
             pp,
             &["-isvalid", "-usetransaction"],
-            &["-filter", "-include", "-exclude", "-pathtype", "-credential", "-olderthan", "-newerthan"],
+            &[
+                "-filter",
+                "-include",
+                "-exclude",
+                "-pathtype",
+                "-credential",
+                "-olderthan",
+                "-newerthan",
+            ],
         ),
     );
     m.insert(
@@ -471,8 +611,25 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Read,
             pp,
-            &["-simplematch", "-casesensitive", "-quiet", "-list", "-notmatch", "-allmatches", "-noemphasis", "-raw"],
-            &["-inputobject", "-pattern", "-include", "-exclude", "-encoding", "-context", "-culture"],
+            &[
+                "-simplematch",
+                "-casesensitive",
+                "-quiet",
+                "-list",
+                "-notmatch",
+                "-allmatches",
+                "-noemphasis",
+                "-raw",
+            ],
+            &[
+                "-inputobject",
+                "-pattern",
+                "-include",
+                "-exclude",
+                "-encoding",
+                "-context",
+                "-culture",
+            ],
         ),
     );
     m.insert(
@@ -485,7 +642,12 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
     );
     m.insert(
         "pop-location",
-        FkEntry::new(Read, &[], &["-passthru", "-usetransaction"], &["-stackname"]),
+        FkEntry::new(
+            Read,
+            &[],
+            &["-passthru", "-usetransaction"],
+            &["-stackname"],
+        ),
     );
     m.insert(
         "select-xml",
@@ -497,7 +659,18 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
             Read,
             &["-path"],
             &["-force", "-oldest"],
-            &["-listlog", "-logname", "-listprovider", "-providername", "-maxevents", "-computername", "-credential", "-filterxpath", "-filterxml", "-filterhashtable"],
+            &[
+                "-listlog",
+                "-logname",
+                "-listprovider",
+                "-providername",
+                "-maxevents",
+                "-computername",
+                "-credential",
+                "-filterxpath",
+                "-filterxml",
+                "-filterhashtable",
+            ],
         ),
     );
     m.insert(
@@ -505,8 +678,44 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             &["-outfile", "-infile"],
-            &["-allowinsecureredirect", "-allowunencryptedauthentication", "-disablekeepalive", "-nobodyprogress", "-passthru", "-preservefileauthorizationmetadata", "-resume", "-skipcertificatecheck", "-skipheadervalidation", "-skiphttperrorcheck", "-usebasicparsing", "-usedefaultcredentials"],
-            &["-uri", "-method", "-body", "-contenttype", "-headers", "-maximumredirection", "-maximumretrycount", "-proxy", "-proxycredential", "-retryintervalsec", "-sessionvariable", "-timeoutsec", "-token", "-transferencoding", "-useragent", "-websession", "-credential", "-authentication", "-certificate", "-certificatethumbprint", "-form", "-httpversion"],
+            &[
+                "-allowinsecureredirect",
+                "-allowunencryptedauthentication",
+                "-disablekeepalive",
+                "-nobodyprogress",
+                "-passthru",
+                "-preservefileauthorizationmetadata",
+                "-resume",
+                "-skipcertificatecheck",
+                "-skipheadervalidation",
+                "-skiphttperrorcheck",
+                "-usebasicparsing",
+                "-usedefaultcredentials",
+            ],
+            &[
+                "-uri",
+                "-method",
+                "-body",
+                "-contenttype",
+                "-headers",
+                "-maximumredirection",
+                "-maximumretrycount",
+                "-proxy",
+                "-proxycredential",
+                "-retryintervalsec",
+                "-sessionvariable",
+                "-timeoutsec",
+                "-token",
+                "-transferencoding",
+                "-useragent",
+                "-websession",
+                "-credential",
+                "-authentication",
+                "-certificate",
+                "-certificatethumbprint",
+                "-form",
+                "-httpversion",
+            ],
         )
         .skip(1)
         .opt_write(),
@@ -516,8 +725,48 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             &["-outfile", "-infile"],
-            &["-allowinsecureredirect", "-allowunencryptedauthentication", "-disablekeepalive", "-followrellink", "-nobodyprogress", "-passthru", "-preservefileauthorizationmetadata", "-resume", "-skipcertificatecheck", "-skipheadervalidation", "-skiphttperrorcheck", "-usebasicparsing", "-usedefaultcredentials"],
-            &["-uri", "-method", "-body", "-contenttype", "-headers", "-maximumfollowrellink", "-maximumredirection", "-maximumretrycount", "-proxy", "-proxycredential", "-responseheaderstvariable", "-retryintervalsec", "-sessionvariable", "-statuscodevariable", "-timeoutsec", "-token", "-transferencoding", "-useragent", "-websession", "-credential", "-authentication", "-certificate", "-certificatethumbprint", "-form", "-httpversion"],
+            &[
+                "-allowinsecureredirect",
+                "-allowunencryptedauthentication",
+                "-disablekeepalive",
+                "-followrellink",
+                "-nobodyprogress",
+                "-passthru",
+                "-preservefileauthorizationmetadata",
+                "-resume",
+                "-skipcertificatecheck",
+                "-skipheadervalidation",
+                "-skiphttperrorcheck",
+                "-usebasicparsing",
+                "-usedefaultcredentials",
+            ],
+            &[
+                "-uri",
+                "-method",
+                "-body",
+                "-contenttype",
+                "-headers",
+                "-maximumfollowrellink",
+                "-maximumredirection",
+                "-maximumretrycount",
+                "-proxy",
+                "-proxycredential",
+                "-responseheaderstvariable",
+                "-retryintervalsec",
+                "-sessionvariable",
+                "-statuscodevariable",
+                "-timeoutsec",
+                "-token",
+                "-transferencoding",
+                "-useragent",
+                "-websession",
+                "-credential",
+                "-authentication",
+                "-certificate",
+                "-certificatethumbprint",
+                "-form",
+                "-httpversion",
+            ],
         )
         .skip(1)
         .opt_write(),
@@ -526,7 +775,13 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         "expand-archive",
         FkEntry::new(
             Write,
-            &["-path", "-literalpath", "-pspath", "-lp", "-destinationpath"],
+            &[
+                "-path",
+                "-literalpath",
+                "-pspath",
+                "-lp",
+                "-destinationpath",
+            ],
             &["-force", "-passthru", "-whatif", "-confirm"],
             &[],
         ),
@@ -535,7 +790,13 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         "compress-archive",
         FkEntry::new(
             Write,
-            &["-path", "-literalpath", "-pspath", "-lp", "-destinationpath"],
+            &[
+                "-path",
+                "-literalpath",
+                "-pspath",
+                "-lp",
+                "-destinationpath",
+            ],
             &["-force", "-update", "-passthru", "-whatif", "-confirm"],
             &["-compressionlevel"],
         ),
@@ -545,8 +806,23 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-passthru", "-force", "-whatif", "-confirm", "-usetransaction"],
-            &["-name", "-value", "-type", "-filter", "-include", "-exclude", "-credential", "-inputobject"],
+            &[
+                "-passthru",
+                "-force",
+                "-whatif",
+                "-confirm",
+                "-usetransaction",
+            ],
+            &[
+                "-name",
+                "-value",
+                "-type",
+                "-filter",
+                "-include",
+                "-exclude",
+                "-credential",
+                "-inputobject",
+            ],
         ),
     );
     m.insert(
@@ -555,7 +831,16 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
             Write,
             pp,
             &["-force", "-whatif", "-confirm", "-usetransaction"],
-            &["-name", "-value", "-propertytype", "-type", "-filter", "-include", "-exclude", "-credential"],
+            &[
+                "-name",
+                "-value",
+                "-propertytype",
+                "-type",
+                "-filter",
+                "-include",
+                "-exclude",
+                "-credential",
+            ],
         ),
     );
     m.insert(
@@ -581,7 +866,14 @@ pub static FKN: LazyLock<HashMap<&'static str, FkEntry>> = LazyLock::new(|| {
         FkEntry::new(
             Write,
             pp,
-            &["-append", "-force", "-noclobber", "-passthru", "-whatif", "-confirm"],
+            &[
+                "-append",
+                "-force",
+                "-noclobber",
+                "-passthru",
+                "-whatif",
+                "-confirm",
+            ],
             &["-name", "-description", "-scope", "-as"],
         ),
     );
@@ -718,10 +1010,24 @@ fn is_quote_char(c: char) -> bool {
 fn is_ps_leading_ws(c: char) -> bool {
     matches!(
         c,
-        '\u{0009}' | '\u{000A}' | '\u{000B}' | '\u{000C}' | '\u{000D}' | '\u{0020}'
-            | '\u{0085}' | '\u{00A0}' | '\u{1680}' | '\u{180E}'
-            | '\u{2000}'..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}'
-            | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+        '\u{0009}'
+            | '\u{000A}'
+            | '\u{000B}'
+            | '\u{000C}'
+            | '\u{000D}'
+            | '\u{0020}'
+            | '\u{0085}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{180E}'
+            | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
     )
 }
 
@@ -730,7 +1036,9 @@ fn is_ps_leading_ws(c: char) -> bool {
 fn strip_surrounding_quotes(s: &str) -> &str {
     let start = s.find(|c| !is_quote_char(c)).unwrap_or(s.len());
     let t = &s[start..];
-    let end = t.rfind(|c| !is_quote_char(c)).map_or(0, |i| i + t[i..].chars().next().unwrap().len_utf8());
+    let end = t
+        .rfind(|c| !is_quote_char(c))
+        .map_or(0, |i| i + t[i..].chars().next().unwrap().len_utf8());
     &t[..end]
 }
 
@@ -801,7 +1109,12 @@ pub fn extract_paths(cmd: &PsCommand) -> PathExtraction {
         };
     };
     let switches: Vec<&str> = entry.known_switches.iter().chain(WWI).copied().collect();
-    let value_params: Vec<&str> = entry.known_value_params.iter().chain(GWI).copied().collect();
+    let value_params: Vec<&str> = entry
+        .known_value_params
+        .iter()
+        .chain(GWI)
+        .copied()
+        .collect();
 
     let s = &cmd.args;
     // element type of args[p] lives at element_types[p + 1] (index 0 = cmd name).
@@ -820,9 +1133,8 @@ pub fn extract_paths(cmd: &PsCommand) -> PathExtraction {
         }
         // `d(p)`: mark unvalidatable when the arg-at-p's element type is known and
         // not one of the statically-validatable types (StringConstant/Parameter).
-        let peek_unvalidatable = |idx: usize| -> bool {
-            matches!(elem_type(idx), Some(t) if !AGG.contains(t))
-        };
+        let peek_unvalidatable =
+            |idx: usize| -> bool { matches!(elem_type(idx), Some(t) if !AGG.contains(t)) };
 
         if is_parameter(f, elem_type(p)) {
             // Normalize the leading (possibly Unicode) dash to a single "-" and
@@ -831,7 +1143,10 @@ pub fn extract_paths(cmd: &PsCommand) -> PathExtraction {
             let first_len = f.chars().next().map_or(0, char::len_utf8);
             let rest = &f[first_len..];
             let (sname, colon_value): (String, Option<&str>) = match rest.find(':') {
-                Some(ci) => (format!("-{}", &rest[..ci]).to_lowercase(), Some(&rest[ci + 1..])),
+                Some(ci) => (
+                    format!("-{}", &rest[..ci]).to_lowercase(),
+                    Some(&rest[ci + 1..]),
+                ),
                 None => (format!("-{rest}").to_lowercase(), None),
             };
 
@@ -952,7 +1267,10 @@ const DIR_LIST_MAX: usize = 5;
 pub fn format_dir_list(dirs: &[String]) -> String {
     let quoted = |d: &str| format!("'{d}'");
     if dirs.len() <= DIR_LIST_MAX {
-        dirs.iter().map(|d| quoted(d)).collect::<Vec<_>>().join(", ")
+        dirs.iter()
+            .map(|d| quoted(d))
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         let head = dirs[..DIR_LIST_MAX]
             .iter()
@@ -1134,7 +1452,9 @@ pub fn glob_base_dir(path: &str) -> String {
 /// dotless-i (U+0131) → `i` and long-s (U+017F) → `s`.
 #[must_use]
 pub fn casefold_path(path: &str) -> String {
-    path.to_lowercase().replace('\u{0131}', "i").replace('\u{017F}', "s")
+    path.to_lowercase()
+        .replace('\u{0131}', "i")
+        .replace('\u{017F}', "s")
 }
 
 /// Classification of a single PowerShell path argument by the `NKn` string-guard
@@ -1305,7 +1625,10 @@ pub fn check_ps_path(
     additional: &[std::path::PathBuf],
     is_windows: bool,
 ) -> PsPathOutcome {
-    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+    let home = roots
+        .home
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
     match classify_ps_path(raw, op, is_windows, home.as_deref()) {
         PsPathClass::Blocked { resolved, reason } => PsPathOutcome::AskReason { resolved, reason },
         PsPathClass::Proceed { normalized } => {
@@ -1365,7 +1688,11 @@ fn is_protected_removal_resolved(path: &str, home: Option<&str>, is_macos: bool)
         c.to_string()
     };
     let o = normalize_private(&t);
-    let i = if o == "/" { o.clone() } else { o.trim_end_matches('/').to_string() };
+    let i = if o == "/" {
+        o.clone()
+    } else {
+        o.trim_end_matches('/').to_string()
+    };
     if i == "/" {
         return true;
     }
@@ -1597,7 +1924,10 @@ fn run_ps_command(
     ask: &mut Option<PsContainmentResult>,
 ) -> Option<PsContainmentResult> {
     let roots = ctx.roots;
-    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+    let home = roots
+        .home
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
     let extraction = extract_paths(l);
     let f = normalize_cmdlet(&l.name);
     let is_path_cmdlet = FKN.contains_key(f.as_str());
@@ -1652,8 +1982,13 @@ fn run_ps_command(
         if is_remove && is_protected_removal_raw(path, home.as_deref(), ctx.is_macos) {
             return Some(deny_removal(path));
         }
-        let outcome =
-            check_ps_path(path, extraction.operation_type, roots, ctx.additional, ctx.is_windows);
+        let outcome = check_ps_path(
+            path,
+            extraction.operation_type,
+            roots,
+            ctx.additional,
+            ctx.is_windows,
+        );
         let resolved = match &outcome {
             PsPathOutcome::Allowed { resolved }
             | PsPathOutcome::AskReason { resolved, .. }
@@ -1695,7 +2030,13 @@ fn check_redirections(
         if r.is_merging || r.target.is_empty() {
             continue;
         }
-        match check_ps_path(&r.target, PsOperation::Create, ctx.roots, ctx.additional, ctx.is_windows) {
+        match check_ps_path(
+            &r.target,
+            PsOperation::Create,
+            ctx.roots,
+            ctx.additional,
+            ctx.is_windows,
+        ) {
             PsPathOutcome::Allowed { .. } => {}
             PsPathOutcome::AskReason { reason, .. } => {
                 if ask.is_none() {

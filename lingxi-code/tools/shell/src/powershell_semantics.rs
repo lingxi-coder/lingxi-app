@@ -25,10 +25,7 @@ use crate::command_semantics::CommandInterpretation;
 /// command-specific semantics. The TS signature also receives
 /// `stdout`/`stderr` but no handler consults them.
 #[must_use]
-pub fn interpret_powershell_command_result(
-    command: &str,
-    exit_code: i32,
-) -> CommandInterpretation {
+pub fn interpret_powershell_command_result(command: &str, exit_code: i32) -> CommandInterpretation {
     let seg = last_segment(command);
     let base = base_command(&seg);
     if base == "git" {
@@ -43,8 +40,7 @@ pub fn interpret_powershell_command_result(
         "robocopy" => robocopy_semantics(exit_code),
         _ => CommandInterpretation {
             is_error: exit_code != 0,
-            message: (exit_code != 0)
-                .then(|| format!("Command failed with exit code {exit_code}")),
+            message: (exit_code != 0).then(|| format!("Command failed with exit code {exit_code}")),
         },
     }
 }
@@ -128,10 +124,7 @@ pub fn last_segment(command: &str) -> String {
             i += 1;
             continue;
         }
-        if c == b'#'
-            && (i == 0
-                || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'\r'))
-        {
+        if c == b'#' && (i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'\r')) {
             segments.push((start, i));
             // Skip to the char BEFORE the next newline (JS `while` on s+1).
             while i + 1 < len && bytes[i + 1] != b'\n' && bytes[i + 1] != b'\r' {
@@ -303,7 +296,10 @@ mod tests {
             let ok = interpret_powershell_command_result(cmd, 0);
             assert!(!ok.is_error);
             assert_eq!(ok.message, None);
-            assert!(interpret_powershell_command_result(cmd, 2).is_error, "{cmd}");
+            assert!(
+                interpret_powershell_command_result(cmd, 2).is_error,
+                "{cmd}"
+            );
         }
     }
 
@@ -325,7 +321,10 @@ mod tests {
         // Other git subcommands keep the default semantic.
         let s = interpret_powershell_command_result("git status", 1);
         assert!(s.is_error);
-        assert_eq!(s.message.as_deref(), Some("Command failed with exit code 1"));
+        assert_eq!(
+            s.message.as_deref(),
+            Some("Command failed with exit code 1")
+        );
     }
 
     /// The 2.1.196 headline case: a `|` INSIDE a quoted pattern must not be
@@ -354,7 +353,10 @@ mod tests {
         assert_eq!(r.message.as_deref(), Some("Files differ"));
 
         let r2 = interpret_powershell_command_result("git diff && Write-Output done", 1);
-        assert!(r2.is_error, "last stage is Write-Output → default semantics");
+        assert!(
+            r2.is_error,
+            "last stage is Write-Output → default semantics"
+        );
 
         // A trailing comment does not hide the real last statement.
         let r3 = interpret_powershell_command_result("git grep x # searching", 1);
@@ -382,7 +384,10 @@ mod tests {
     fn robocopy_grades() {
         let zero = interpret_powershell_command_result("robocopy src dst", 0);
         assert!(!zero.is_error);
-        assert_eq!(zero.message.as_deref(), Some("No files copied (already in sync)"));
+        assert_eq!(
+            zero.message.as_deref(),
+            Some("No files copied (already in sync)")
+        );
 
         let one = interpret_powershell_command_result("robocopy src dst", 1);
         assert!(!one.is_error);
@@ -390,7 +395,10 @@ mod tests {
 
         let two = interpret_powershell_command_result("robocopy src dst", 2);
         assert!(!two.is_error);
-        assert_eq!(two.message.as_deref(), Some("Robocopy completed (no errors)"));
+        assert_eq!(
+            two.message.as_deref(),
+            Some("Robocopy completed (no errors)")
+        );
 
         let three = interpret_powershell_command_result("robocopy src dst", 3);
         assert!(!three.is_error);
@@ -412,11 +420,17 @@ mod tests {
 
         let bad = interpret_powershell_command_result("Get-ChildItem", 1);
         assert!(bad.is_error);
-        assert_eq!(bad.message.as_deref(), Some("Command failed with exit code 1"));
+        assert_eq!(
+            bad.message.as_deref(),
+            Some("Command failed with exit code 1")
+        );
 
         let worse = interpret_powershell_command_result("cargo build", 101);
         assert!(worse.is_error);
-        assert_eq!(worse.message.as_deref(), Some("Command failed with exit code 101"));
+        assert_eq!(
+            worse.message.as_deref(),
+            Some("Command failed with exit code 101")
+        );
     }
 
     #[test]

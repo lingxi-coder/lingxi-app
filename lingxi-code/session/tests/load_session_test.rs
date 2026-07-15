@@ -762,7 +762,13 @@ async fn compact_boundary_preserved_tail_resplices_after_summary() {
     let uuids: Vec<&str> = messages.iter().map(|m| m.uuid.as_str()).collect();
     assert_eq!(
         uuids,
-        vec![b5.as_str(), s6.as_str(), u3.as_str(), a4.as_str(), a7.as_str()],
+        vec![
+            b5.as_str(),
+            s6.as_str(),
+            u3.as_str(),
+            a4.as_str(),
+            a7.as_str()
+        ],
         "preserved tail must re-splice after the summary; summarized prefix dropped"
     );
     // The spliced tail head's parentUuid is patched onto the anchor (summary).

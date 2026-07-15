@@ -303,7 +303,8 @@ impl DefaultLlmClient {
         let is_reasoning_block = |b: &crate::ContentBlock| {
             matches!(
                 b,
-                crate::ContentBlock::Reasoning { .. } | crate::ContentBlock::RedactedThinking { .. }
+                crate::ContentBlock::Reasoning { .. }
+                    | crate::ContentBlock::RedactedThinking { .. }
             )
         };
         let needs_degrade = !resolved_route.capabilities.reasoning
@@ -345,7 +346,10 @@ impl DefaultLlmClient {
             entry.codec.clone()
         } else {
             // The only override we synthesize is Responses (Copilot GPT-5.x/codex).
-            debug_assert!(matches!(effective_protocol, ProtocolFamily::OpenAiResponses));
+            debug_assert!(matches!(
+                effective_protocol,
+                ProtocolFamily::OpenAiResponses
+            ));
             Box::new(crate::OpenAiResponsesCodec::new(entry.base_url.clone()))
         };
 
@@ -1645,16 +1649,28 @@ pub(crate) fn append_beta(existing: Option<&str>, beta: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        append_beta, copilot_responses_override, is_gpt5_or_newer, ProtocolFamily,
-    };
+    use super::{append_beta, copilot_responses_override, is_gpt5_or_newer, ProtocolFamily};
 
     #[test]
     fn gpt5_plus_detection_covers_majors_and_variants() {
-        for yes in ["gpt-5", "gpt-5.5", "gpt-5-mini", "gpt-5.2-codex", "gpt-6", "gpt-10"] {
+        for yes in [
+            "gpt-5",
+            "gpt-5.5",
+            "gpt-5-mini",
+            "gpt-5.2-codex",
+            "gpt-6",
+            "gpt-10",
+        ] {
             assert!(is_gpt5_or_newer(yes), "{yes} should be gpt-5+");
         }
-        for no in ["gpt-4o", "gpt-4.1", "gpt-4-turbo", "o3", "claude-opus-4-8", ""] {
+        for no in [
+            "gpt-4o",
+            "gpt-4.1",
+            "gpt-4-turbo",
+            "o3",
+            "claude-opus-4-8",
+            "",
+        ] {
             assert!(!is_gpt5_or_newer(no), "{no} should NOT be gpt-5+");
         }
     }

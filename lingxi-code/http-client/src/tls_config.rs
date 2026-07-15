@@ -374,7 +374,10 @@ mod tests {
         let client = settings
             .apply_to_builder(reqwest::Client::builder())
             .build();
-        assert!(client.is_ok(), "default TLS settings must build: {client:?}");
+        assert!(
+            client.is_ok(),
+            "default TLS settings must build: {client:?}"
+        );
     }
 
     /// A passphrase-protected PKCS#8 key (openssl `-topk8`, PBES2/PBKDF2/
@@ -547,7 +550,11 @@ mod tests {
             .apply_to_builder(reqwest::Client::builder().resolve(host, addr))
             .build()
             .unwrap();
-        let resp = client.get(&url).send().await.expect("mTLS request must connect");
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .expect("mTLS request must connect");
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(resp.text().await.unwrap(), "ok");
 

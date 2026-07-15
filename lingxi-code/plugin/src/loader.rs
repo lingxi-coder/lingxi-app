@@ -279,10 +279,7 @@ mod tests {
     #[tokio::test]
     async fn nonsensitive_falls_back_to_default() {
         let (_s, cm) = creds();
-        let m = manifest_with(vec![(
-            "PORT",
-            field(false, true, Some(Value::from(8080))),
-        )]);
+        let m = manifest_with(vec![("PORT", field(false, true, Some(Value::from(8080))))]);
         let out = resolve_user_config(&m, "weather@acme", &Map::new(), &cm)
             .await
             .unwrap();

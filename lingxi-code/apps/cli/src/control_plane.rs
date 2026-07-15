@@ -34,7 +34,7 @@ use permission::{
     PermissionRuleSource, PermissionRuleValue, PermissionUpdate, PermissionUpdateDestination,
 };
 
-use crate::stream_json::{serialize_ndjson_line, OutboundTx};
+use crate::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
 
 /// Cap on the resolved-tool-use dedup ring (claude-code
 /// `MAX_RESOLVED_TOOL_USE_IDS`, oldest-evicted).
@@ -140,7 +140,9 @@ impl StdioControlPlane {
             "type": "control_cancel_request",
             "request_id": request_id,
         });
-        let _ = self.outbound_tx.send(serialize_ndjson_line(&frame));
+        let _ = self
+            .outbound_tx
+            .send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
     }
 
     /// Emit a CLI-originated `control_request` and return a receiver resolved
@@ -172,7 +174,9 @@ impl StdioControlPlane {
         }
         // Enqueue AFTER registering so a (theoretically) instant response can't
         // race the insert. The drain task serializes to stdout.
-        let _ = self.outbound_tx.send(serialize_ndjson_line(&frame));
+        let _ = self
+            .outbound_tx
+            .send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
         (request_id, rx)
     }
 
@@ -745,9 +749,16 @@ mod tests {
 
     /// Build a plane wired to an in-memory outbound channel; the receiver lets a
     /// test read the frames the plane emits (simulating the host on stdin).
-    fn plane_with_channel() -> (Arc<StdioControlPlane>, mpsc::UnboundedReceiver<String>) {
-        let (tx, rx) = mpsc::unbounded_channel::<String>();
+    fn plane_with_channel() -> (Arc<StdioControlPlane>, mpsc::UnboundedReceiver<OutboundMsg>) {
+        let (tx, rx) = mpsc::unbounded_channel::<OutboundMsg>();
         (StdioControlPlane::new(Arc::new(tx)), rx)
+    }
+
+    fn outbound_line(msg: OutboundMsg) -> String {
+        match msg {
+            OutboundMsg::Line(line) => line,
+            OutboundMsg::Flush(_) => panic!("unexpected flush message"),
+        }
     }
 
     fn success_response(request_id: &str, payload: Value) -> Value {
@@ -771,7 +782,7 @@ mod tests {
             )
             .await;
 
-        let line = rx.recv().await.expect("frame emitted");
+        let line = outbound_line(rx.recv().await.expect("frame emitted"));
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(frame["type"], "control_request");
         assert_eq!(frame["request"]["tool_name"], "Bash");
@@ -824,7 +835,7 @@ mod tests {
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
         // Drain the can_use_tool request, then abort the turn.
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         assert_eq!(
             serde_json::from_str::<Value>(&line).unwrap()["request"]["subtype"],
             "can_use_tool"
@@ -838,7 +849,7 @@ mod tests {
             }
         );
         // A control_cancel_request frame is emitted to the host.
-        let cancel_line = rx.recv().await.expect("cancel frame emitted");
+        let cancel_line = outbound_line(rx.recv().await.expect("cancel frame emitted"));
         let cancel: Value = serde_json::from_str(&cancel_line).unwrap();
         assert_eq!(cancel["type"], "control_cancel_request");
         assert!(cancel["request_id"].is_string());
@@ -983,7 +994,7 @@ mod tests {
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({"command": "ls"});
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let frame: Value = serde_json::from_str(&line).unwrap();
         let req_id = frame["request_id"].as_str().unwrap().to_string();
         let tuid = frame["request"]["tool_use_id"]
@@ -1020,7 +1031,7 @@ mod tests {
         let input = json!({"command": "ls"});
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(frame["request"]["subtype"], "can_use_tool");
         assert_eq!(frame["request"]["tool_name"], "Bash");
@@ -1043,7 +1054,7 @@ mod tests {
         let input = json!({});
         let check = tokio::spawn(async move { gate.check("Write", &input).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()
             .unwrap()
@@ -1071,7 +1082,7 @@ mod tests {
         let input = json!({});
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()
             .unwrap()
@@ -1098,7 +1109,7 @@ mod tests {
         let input = json!({});
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()
             .unwrap()
@@ -1129,7 +1140,7 @@ mod tests {
         let check =
             tokio::spawn(async move { gate.check_with_worker("Bash", &input, Some(worker)).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(frame["request"]["agent_id"], "researcher");
         let req_id = frame["request_id"].as_str().unwrap().to_string();
@@ -1157,7 +1168,7 @@ mod tests {
         let check =
             tokio::spawn(async move { gate.check_with_context("Bash", &input, &ctx).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
             frame["request"]["tool_use_id"], "toolu_real_42",
@@ -1200,7 +1211,7 @@ mod tests {
         let check =
             tokio::spawn(async move { gate.check_with_context("Bash", &input, &ctx).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(
             frame["request"]["permission_suggestions"][0]["type"],
@@ -1229,7 +1240,7 @@ mod tests {
         let input = json!({});
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let frame: Value = serde_json::from_str(&line).unwrap();
         assert!(
             frame["request"].get("permission_suggestions").is_none(),
@@ -1261,7 +1272,7 @@ mod tests {
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({});
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()
             .unwrap()
@@ -1301,7 +1312,7 @@ mod tests {
             let gate = StdioControlPermissionGate::new(plane.clone());
             let input = json!({});
             let check = tokio::spawn(async move { gate.check("Bash", &input).await });
-            let line = rx.recv().await.unwrap();
+            let line = outbound_line(rx.recv().await.unwrap());
             let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
                 .as_str()
                 .unwrap()
@@ -1413,7 +1424,7 @@ mod tests {
             gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
                 .await
         });
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()
             .unwrap()
@@ -1452,7 +1463,7 @@ mod tests {
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({});
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()
             .unwrap()
@@ -1483,7 +1494,7 @@ mod tests {
             gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
                 .await
         });
-        let line = rx.recv().await.unwrap();
+        let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
             .as_str()
             .unwrap()

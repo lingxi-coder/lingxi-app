@@ -66,9 +66,9 @@ use traits::OrchestratorHandle;
 
 /// Execute the chosen mode. Returns the process exit code.
 ///
-/// `Mode::Print` and `Mode::StdioRepl` call into the existing v0.6.0
-/// code paths unchanged. `Mode::Tui` calls into the new `lingxi-tui`
-/// entry point.
+/// `Mode::Print` uses the caller-provided runtime. Interactive modes own their
+/// runtime construction so callers can route to them without pre-building and
+/// discarding a generic runtime.
 pub async fn dispatch(
     mode: Mode,
     argv: &Argv,
@@ -83,127 +83,127 @@ pub async fn dispatch(
             crate::run::run_oneshot(argv, runtime, sink.as_ref()).await
         }
         Mode::StdioRepl => {
-            // v0.6.0 REPL path. `repl::run_repl` rebuilds the runtime
-            // internally (it owns its own sink/orchestrator construction
-            // for the streaming-stdout case). Pass argv through and
-            // ignore the `runtime` arg in this arm.
-            let _ = runtime; // intentionally unused in this arm
-            let _ = sink; // intentionally unused (repl mints its own)
-            crate::repl::run_repl(argv).await
+            let _ = runtime;
+            let _ = sink;
+            run_stdio_repl(argv).await
         }
-        Mode::Tui => {
-            // M6-03 path: rebuild the runtime with `BridgeOutputStream` as
-            // the orchestrator's output, then pass the bridge_rx into
-            // `run_tui_session` so streaming events route into AppState.
-            //
-            // The `runtime` arg here was built with the standard
-            // sink-adapter output (for one-shot / NDJSON modes); we
-            // discard it and construct a TUI-specific build. The original
-            // sink is therefore unused in this arm.
-            let _ = runtime; // intentionally unused — we mint a TUI build
-            let _ = sink; // intentionally unused
-            let tui_build = match crate::init::build_runtime_for_tui(argv).await {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("lingxi-cli: tui init failed: {e}");
-                    return exit_codes::RUNTIME_ERROR;
-                }
-            };
-            // (Task 3) Startup project-trust dialog (`TrustDialog`, shown by
-            // `showSetupScreens` BEFORE the REPL/session and BEFORE any
-            // tool/hook/plugin runs). TTY-only — this `Mode::Tui` arm is only
-            // reached when stdin+stdout are terminals (`mode::decide_mode_with`
-            // falls back to `StdioRepl` otherwise), so the raw-mode mount is
-            // safe AND "non-interactive ⇒ no dialog" is satisfied for free.
-            // Placed BEFORE the bypass gate: trust is the outermost "may I
-            // touch this folder at all" gate. Already-accepted (incl.
-            // parent-walk-trusted) ⇒ skip ⇒ byte-identical to today.
-            match trust_gate().await {
-                TrustGateOutcome::Proceed => {}
-                TrustGateOutcome::Decline => {
-                    // "No, exit" / Esc → exit 1 (`TrustDialog.tsx:158-160`
-                    // `gracefulShutdownSync(1)`; matches the REPL gate).
-                    return exit_codes::RUNTIME_ERROR;
-                }
-            }
-            // (Task 8) Startup bypass-permissions confirmation dialog
-            // (`BypassPermissionsModeDialog`, shown by `showSetupScreens` BEFORE
-            // the REPL). TTY-only — this arm is only reached when stdin+stdout
-            // are terminals (`mode::decide_mode`), so the raw-mode mount is safe
-            // here. Gated on bypass-mode resolved AND no settings tier already
-            // carrying `skipDangerousModePermissionPrompt`.
-            let (bypass_mode, _) = crate::resolve_permission_mode(argv);
-            let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
-            let skip_set = read_skip_dangerous_prompt();
-            if tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
-                match tui::startup_bypass::mount_bypass_dialog().await {
-                    Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
-                        // Persist so subsequent launches skip the prompt
-                        // (`onConfirm` → `saveCurrentProjectConfig`). Best-effort.
-                        persist_skip_dangerous_prompt();
-                        // TELEMETRY (`tengu_bypass_permissions_mode_dialog_accept`,
-                        // registered in Task 6): DEFERRED. There is no pre-session
-                        // analytics sink wired at this seam (same situation as the
-                        // startup migrations, which emit with `bus: None`). Emitting
-                        // here would buffer onto a bus that is never flushed pre-REPL
-                        // — an honest no-op is preferable to a call that looks wired
-                        // but silently drops. The event name is registered and the
-                        // emit lands once a pre-session sink exists.
-                    }
-                    Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
-                        // User declined (or pressed Esc): exit 1 (TS `process.exit(1)`).
-                        return exit_codes::RUNTIME_ERROR;
-                    }
-                    Err(e) => {
-                        eprintln!("lingxi-cli: bypass dialog failed: {e}");
-                        return exit_codes::RUNTIME_ERROR;
-                    }
-                }
-            }
-            // (M7 cc2.1.198) Register this interactive session in the
-            // cross-process live-session registry
-            // (`~/.lingxi/sessions/<pid>.json`) so `lingxi-cli agents --json`
-            // and the agents view can list it — the binary registers every
-            // process the same way (observed `sessions/<pid>.json` shape).
-            // Best-effort: a write failure never blocks the session; the
-            // record is unlinked when the TUI returns.
-            //
-            // (M8 cc2.1.198) Live status refreshes: the registration is
-            // shared (`Arc`) with the ratatui mount, whose channel forwarders
-            // rewrite `status`/`updatedAt`/`statusUpdatedAt` on idle ↔ busy ↔
-            // waiting transitions (binary `mvn`, fed by the REPL status
-            // effect @222989611).
-            // Capture the freshly-launched session id up front: it seeds the
-            // switch loop's failed-switch fallback (finding #2) so a `/resume` to
-            // an unloadable target re-mounts THIS session instead of exiting.
-            let initial_session_id = tui_build.runtime.orchestrator.current_session_id().await;
-            let session_registration = {
-                let name = std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-                Arc::new(crate::agents_registry::SessionRegistration::register(
-                    &crate::run::lingxi_home_dir(),
-                    Some(initial_session_id.to_string()).as_deref(),
-                    name.as_deref(),
-                ))
-            };
-            // FRESH launch: ratatui (`tui-rata`) is the only TUI backend. It
-            // drives the live orchestrator directly via `tui_build`'s bridge
-            // channel; no replayed scrollback (empty seed).
-            let outcome =
-                run_ratatui(tui_build, Some(session_registration.clone()), Vec::new()).await;
-            // Unlink NOW (idempotent with Drop): the status forwarders may still
-            // hold `Arc` clones inside detached tasks, and the record must not
-            // outlive the interactive session.
-            session_registration.deregister();
-            // Follow an in-session `/resume` switch by re-mounting the chosen
-            // session in-process (writer retargeted) until the user quits. A
-            // switch re-mounts WITHOUT re-registering (resume never registers,
-            // matching the existing `--resume` behavior).
-            crate::run::drive_tui_switch_loop(argv, outcome, Some(initial_session_id.as_uuid()))
-                .await
+        Mode::Tui => run_tui(argv).await,
+    }
+}
+
+pub(crate) async fn dispatch_interactive(mode: Mode, argv: &Argv) -> i32 {
+    match mode {
+        Mode::StdioRepl => run_stdio_repl(argv).await,
+        Mode::Tui => run_tui(argv).await,
+        Mode::Print(_) => {
+            eprintln!("lingxi-cli: internal error: print mode requires a runtime");
+            exit_codes::RUNTIME_ERROR
         }
     }
+}
+
+async fn run_stdio_repl(argv: &Argv) -> i32 {
+    crate::startup_trace::mark("stdio_repl_start");
+    crate::repl::run_repl(argv).await
+}
+
+async fn run_tui(argv: &Argv) -> i32 {
+    crate::startup_trace::mark("tui_start");
+    let tui_build = match crate::init::build_runtime_for_tui(argv).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("lingxi-cli: tui init failed: {e}");
+            return exit_codes::RUNTIME_ERROR;
+        }
+    };
+    // (Task 3) Startup project-trust dialog (`TrustDialog`, shown by
+    // `showSetupScreens` BEFORE the REPL/session and BEFORE any tool/hook/plugin
+    // runs). TTY-only — this `Mode::Tui` arm is only reached when stdin+stdout
+    // are terminals (`mode::decide_mode_with` falls back to `StdioRepl`
+    // otherwise), so the raw-mode mount is safe AND "non-interactive ⇒ no
+    // dialog" is satisfied for free. Placed BEFORE the bypass gate: trust is the
+    // outermost "may I touch this folder at all" gate. Already-accepted (incl.
+    // parent-walk-trusted) ⇒ skip ⇒ byte-identical to today.
+    match trust_gate().await {
+        TrustGateOutcome::Proceed => {}
+        TrustGateOutcome::Decline => {
+            // "No, exit" / Esc → exit 1 (`TrustDialog.tsx:158-160`
+            // `gracefulShutdownSync(1)`; matches the REPL gate).
+            return exit_codes::RUNTIME_ERROR;
+        }
+    }
+    // (Task 8) Startup bypass-permissions confirmation dialog
+    // (`BypassPermissionsModeDialog`, shown by `showSetupScreens` BEFORE the
+    // REPL). TTY-only — this arm is only reached when stdin+stdout are terminals
+    // (`mode::decide_mode`), so the raw-mode mount is safe here. Gated on
+    // bypass-mode resolved AND no settings tier already carrying
+    // `skipDangerousModePermissionPrompt`.
+    let (bypass_mode, _) = crate::resolve_permission_mode(argv);
+    let is_bypass = bypass_mode == permission::PermissionMode::BypassPermissions;
+    let skip_set = read_skip_dangerous_prompt();
+    if tui::startup_bypass::should_show_bypass_dialog(is_bypass, skip_set) {
+        match tui::startup_bypass::mount_bypass_dialog().await {
+            Ok(tui::startup_bypass::BypassDialogOutcome::Accept) => {
+                // Persist so subsequent launches skip the prompt
+                // (`onConfirm` → `saveCurrentProjectConfig`). Best-effort.
+                persist_skip_dangerous_prompt();
+                // TELEMETRY (`tengu_bypass_permissions_mode_dialog_accept`,
+                // registered in Task 6): DEFERRED. There is no pre-session
+                // analytics sink wired at this seam (same situation as the
+                // startup migrations, which emit with `bus: None`). Emitting here
+                // would buffer onto a bus that is never flushed pre-REPL — an
+                // honest no-op is preferable to a call that looks wired but
+                // silently drops. The event name is registered and the emit lands
+                // once a pre-session sink exists.
+            }
+            Ok(tui::startup_bypass::BypassDialogOutcome::Decline) => {
+                // User declined (or pressed Esc): exit 1 (TS `process.exit(1)`).
+                return exit_codes::RUNTIME_ERROR;
+            }
+            Err(e) => {
+                eprintln!("lingxi-cli: bypass dialog failed: {e}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        }
+    }
+    // (M7 cc2.1.198) Register this interactive session in the cross-process
+    // live-session registry (`~/.lingxi/sessions/<pid>.json`) so
+    // `lingxi-cli agents --json` and the agents view can list it — the binary
+    // registers every process the same way (observed `sessions/<pid>.json`
+    // shape). Best-effort: a write failure never blocks the session; the record
+    // is unlinked when the TUI returns.
+    //
+    // (M8 cc2.1.198) Live status refreshes: the registration is shared (`Arc`)
+    // with the ratatui mount, whose channel forwarders rewrite
+    // `status`/`updatedAt`/`statusUpdatedAt` on idle ↔ busy ↔ waiting transitions
+    // (binary `mvn`, fed by the REPL status effect @222989611).
+    // Capture the freshly-launched session id up front: it seeds the switch
+    // loop's failed-switch fallback (finding #2) so a `/resume` to an unloadable
+    // target re-mounts THIS session instead of exiting.
+    let initial_session_id = tui_build.runtime.orchestrator.current_session_id().await;
+    let session_registration = {
+        let name = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        Arc::new(crate::agents_registry::SessionRegistration::register(
+            &crate::run::lingxi_home_dir(),
+            Some(initial_session_id.to_string()).as_deref(),
+            name.as_deref(),
+        ))
+    };
+    // FRESH launch: ratatui (`tui-rata`) is the only TUI backend. It drives the
+    // live orchestrator directly via `tui_build`'s bridge channel; no replayed
+    // scrollback (empty seed).
+    let outcome = run_ratatui(tui_build, Some(session_registration.clone()), Vec::new()).await;
+    // Unlink NOW (idempotent with Drop): the status forwarders may still hold
+    // `Arc` clones inside detached tasks, and the record must not outlive the
+    // interactive session.
+    session_registration.deregister();
+    // Follow an in-session `/resume` switch by re-mounting the chosen session
+    // in-process (writer retargeted) until the user quits. A switch re-mounts
+    // WITHOUT re-registering (resume never registers, matching the existing
+    // `--resume` behavior).
+    crate::run::drive_tui_switch_loop(argv, outcome, Some(initial_session_id.as_uuid())).await
 }
 
 /// (iocraft → ratatui migration) Launch the `tui-rata` interactive chat wired

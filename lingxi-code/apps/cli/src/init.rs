@@ -831,9 +831,11 @@ pub async fn build_runtime_from_config(
     cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
 ) -> Result<Runtime, InitError> {
+    crate::startup_trace::mark("runtime_build_start");
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(NoopPermissionRequestSink);
     let rt = build(cfg, output, permission_sink).await?;
+    crate::startup_trace::mark("runtime_build_end");
     // Boot-time connected-provider fallback notice: one stderr line, emitted at
     // the shared choke point every mode's runtime flows through — before the
     // interactive TUI enters the alt-screen, and off stdout so `--print`/
@@ -899,6 +901,7 @@ pub async fn build_runtime_for_tui_inner(
     argv: &Argv,
     resume_session_id: Option<uuid::Uuid>,
 ) -> Result<TuiBuild, InitError> {
+    crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
     // (MULTIMODAL.1) Clone the sender BEFORE it is moved into the
     // `BridgeOutputStream` so the TUI's turn-spawn pump can emit
@@ -947,6 +950,7 @@ pub async fn build_runtime_for_tui_inner(
         Some(gate as std::sync::Arc<dyn permission::gate::PermissionGate>);
 
     let runtime = build_runtime_from_config(cfg, bridge).await?;
+    crate::startup_trace::mark("tui_runtime_build_end");
     Ok(TuiBuild {
         runtime,
         bridge_rx,

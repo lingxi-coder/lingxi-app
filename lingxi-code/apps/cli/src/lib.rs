@@ -79,6 +79,7 @@ pub mod repl_loop;
 pub mod run;
 pub mod session_cost;
 pub mod sigint;
+mod startup_trace;
 pub mod stream_json;
 pub mod stream_json_input;
 pub mod structured_output;
@@ -268,6 +269,7 @@ fn commander_error(e: &clap::Error, args: &[OsString]) -> Option<String> {
 
 /// Top-level entrypoint. Returns the process exit code.
 pub async fn run_cli(args: Vec<OsString>) -> i32 {
+    startup_trace::start();
     let parsed = match Argv::from_iter(args.clone()) {
         Ok(a) => a,
         Err(e) => {
@@ -290,6 +292,8 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             };
         }
     };
+    startup_trace::init(parsed.debug_filter());
+    startup_trace::mark("argv_parse");
 
     // `--debug` is now `Option<String>` (optional category filter); collapse to
     // on/off for logging init. `--mcp-debug` (deprecated alias) and `--debug-file`
@@ -299,6 +303,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // (mcp/auth/…) or print/stdio mode keeps the normal stderr logger.
     let interactive_tui = parsed.command.is_none()
         && matches!(crate::mode::decide_mode(&parsed), crate::mode::Mode::Tui);
+    startup_trace::mark("mode_decide_for_logging");
     logging::init(parsed.debug_enabled(), interactive_tui);
     tracing::debug!(?parsed, "argv parsed");
 
@@ -627,39 +632,13 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return run::run_json_print(&parsed, &runtime, stream, permission_mode).await;
     }
 
-    // Pick the sink first so we can install it on the orchestrator at
-    // construction time. `--json` with a slash command uses `JsonSink` so the
-    // old `{"event":"command_output",...}` format is preserved. All other
-    // modes use `PlainSink` (the `--json` + normal-prompt path already returned
-    // above via `run_json_print`).
-    let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
-        Arc::new(output::JsonSink::new(protocol::SessionId::new()))
-    } else {
-        Arc::new(output::PlainSink::new())
-    };
-    let adapter: Arc<dyn traits::OutputStream> =
-        Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
+    let chosen = mode::decide_mode(&parsed);
+    startup_trace::mark("mode_decide");
 
-    // For `Mode::Print` we still need the runtime; for `Mode::StdioRepl`
-    // and `Mode::Tui` we also build it once so `mode::dispatch` can pass
-    // the orchestrator's session id into the TUI. Building the runtime
-    // is cheap (no API calls until `run_turn`).
-    let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("lingxi-cli: {e}");
-            return exit_codes::RUNTIME_ERROR;
-        }
-    };
-
-    // (2.1.201) Resolve + cache the accessibility screen-reader gate ONCE, in
-    // the binary's `uNi.isEnabled()` precedence: `--ax-screen-reader` flag →
-    // `LINGXI_AX_SCREEN_READER` env → settings `axScreenReader === true`. The
-    // gate then drives the startup announcement (below), the classic-renderer
-    // forcing, and the child-process env propagation (`ax_screen_reader::
-    // subprocess_env`). Resolving here — after settings are loadable and before
-    // mode dispatch — matches the binary, which reads `IO()` on the first
-    // startup line for every mode.
+    // (2.1.201) Resolve + cache the accessibility screen-reader gate ONCE. This
+    // is independent of the engine runtime, so keep it before the mode-specific
+    // runtime build instead of forcing fresh TUI/REPL paths to pre-build and
+    // discard a generic runtime.
     let ax_config = init::load_settings_ax_screen_reader(&parsed);
     ax_screen_reader::init(parsed.ax_screen_reader, ax_config);
     // `if(!L && process.stdout.isTTY && IO()) console.log("[Accessible screen
@@ -759,6 +738,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         });
     }
 
+    let make_sink = || -> Arc<dyn output::OutputSink> {
+        if parsed.is_json_output() {
+            Arc::new(output::JsonSink::new(protocol::SessionId::new()))
+        } else {
+            Arc::new(output::PlainSink::new())
+        }
+    };
+
     // `-c/--continue` resumes the MOST-RECENT conversation in the current cwd's
     // project dir (claude-code `main.tsx`: `options.continue` →
     // `loadConversationForResume(undefined)`; errors `No conversation found to
@@ -766,6 +753,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // path is honored. `--continue --resume <id>` is rejected upstream
     // (lib.rs:315 cross-flag rule), so the two never collide here.
     if parsed.continue_session {
+        let sink = make_sink();
+        let adapter: Arc<dyn traits::OutputStream> =
+            Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
+        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("lingxi-cli: {e}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
         return run::run_continue(&parsed, &runtime, sink.as_ref()).await;
     }
 
@@ -774,6 +771,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     //   (none) + TTY      → iocraft Resume screen
     //   (none) + --no-tui → M5-08 stdio picker (unchanged fallback)
     if parsed.resume.is_some() {
+        let sink = make_sink();
+        let adapter: Arc<dyn traits::OutputStream> =
+            Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
+        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("lingxi-cli: {e}");
+                return exit_codes::RUNTIME_ERROR;
+            }
+        };
         return run::run_resume(&parsed, &runtime, sink.as_ref()).await;
     }
 
@@ -783,11 +790,28 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // no narrowing). `--resume` wins when both are given (its branch runs
     // first in the binary's session-source resolution too).
     if parsed.from_pr.is_some() {
+        let sink = make_sink();
         return run::run_from_pr(&parsed, sink.as_ref()).await;
     }
 
-    let chosen = mode::decide_mode(&parsed);
-    mode::dispatch(chosen, &parsed, &runtime, sink).await
+    match chosen {
+        mode::Mode::Tui | mode::Mode::StdioRepl => {
+            mode::dispatch_interactive(chosen, &parsed).await
+        }
+        mode::Mode::Print(_) => {
+            let sink = make_sink();
+            let adapter: Arc<dyn traits::OutputStream> =
+                Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
+            let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("lingxi-cli: {e}");
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            mode::dispatch(chosen, &parsed, &runtime, sink).await
+        }
+    }
 }
 
 /// Resolve the session permission mode (and any suppression notice) from CLI

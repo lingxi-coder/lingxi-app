@@ -220,6 +220,7 @@ pub struct BottomPane {
     /// Session accent color (`/color`): tints the composer's `›` gutter
     /// prompt when set. `None` → the theme default (no tint).
     accent: Option<tui_core::render::StyleColor>,
+    attached_image_labels: Vec<String>,
     /// Snapshot of the registry-backed slash commands (user commands, skills,
     /// plugin/bundled commands) merged into the completion popup alongside the
     /// static builtins. Empty until the command registry is wired
@@ -256,6 +257,7 @@ impl BottomPane {
             context_pressure: None,
             theme,
             accent: None,
+            attached_image_labels: Vec::new(),
             registry_commands: Vec::new(),
         }
     }
@@ -629,6 +631,10 @@ impl BottomPane {
     /// composer's `›` gutter prompt.
     pub fn set_accent(&mut self, accent: Option<tui_core::render::StyleColor>) {
         self.accent = accent;
+    }
+
+    pub fn set_attached_image_labels(&mut self, labels: Vec<String>) {
+        self.attached_image_labels = labels;
     }
 
     /// The session accent color, when one is set (`/color`).
@@ -1253,7 +1259,9 @@ impl BottomPane {
     /// freshly computed value instead.
     #[must_use]
     pub fn desired_height_for(&self, width: u16, running: bool) -> u16 {
-        let composer = ComposerView::new(&self.composer).desired_height(width);
+        let composer = ComposerView::new(&self.composer)
+            .with_attached_images(&self.attached_image_labels)
+            .desired_height(width);
         let preview = self.pending_input_preview.desired_height(width);
         let banner = u16::from(self.context_pressure.is_some());
         let running = u16::from(running);
@@ -1293,6 +1301,7 @@ impl Renderable for BottomPane {
         }
         self.pending_input_preview.render(zones[2], buf);
         ComposerView::new(&self.composer)
+            .with_attached_images(&self.attached_image_labels)
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
             .render(zones[3], buf);
         let below = zones[4];
@@ -1348,7 +1357,7 @@ impl Renderable for BottomPane {
         {
             return Some(pos);
         }
-        ComposerView::new(&self.composer).cursor_pos(self.zones(area)[3])
+        ComposerView::new(&self.composer).with_attached_images(&self.attached_image_labels).cursor_pos(self.zones(area)[3])
     }
 
     fn cursor_style(&self, area: Rect) -> SetCursorStyle {
@@ -1360,7 +1369,7 @@ impl Renderable for BottomPane {
                 return view.cursor_style(area);
             }
         }
-        ComposerView::new(&self.composer).cursor_style(self.zones(area)[3])
+        ComposerView::new(&self.composer).with_attached_images(&self.attached_image_labels).cursor_style(self.zones(area)[3])
     }
 }
 

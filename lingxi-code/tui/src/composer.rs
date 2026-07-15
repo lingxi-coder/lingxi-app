@@ -701,6 +701,10 @@ impl Composer {
 /// DISPLAY columns (CJK/wide chars are 2 columns), clamped inside the inset
 /// textarea.
 ///
+/// When [`Self::attached_images`] is non-empty, dim `📎 label` indicator rows
+/// are drawn above the prompt — claude-code input attachment parity. The
+/// composer's height grows by one row per attached image.
+///
 /// Extracted from the former `RataApp::render_viewport`'s composer zone (plan
 /// Phase 2): the view renders into `(Rect, &mut Buffer)`; only the terminal
 /// draw boundary ([`crate::chat_widget::ChatWidget::render_frame`]) adapts a
@@ -710,6 +714,9 @@ pub struct ComposerView<'a> {
     /// Session accent tint (`/color`): there is no border to tint since the
     /// borderless-composer rework (Task 3) — it now tints the `›` prompt.
     accent: Option<ratatui::style::Color>,
+    /// Attached image labels shown as dim indicators above the text input.
+    /// Empty when no images are attached (the default). claude-code parity.
+    attached_images: &'a [String],
 }
 
 impl<'a> ComposerView<'a> {
@@ -719,6 +726,7 @@ impl<'a> ComposerView<'a> {
         Self {
             composer,
             accent: None,
+            attached_images: &[],
         }
     }
 
@@ -730,10 +738,47 @@ impl<'a> ComposerView<'a> {
         self
     }
 
+    /// Attach image labels shown as dim lines above the text input — one per
+    /// image, each prefixed with `📎` and the label. Empty clears the row.
+    #[must_use]
+    pub fn with_attached_images(mut self, images: &'a [String]) -> Self {
+        self.attached_images = images;
+        self
+    }
+
     /// The first visible visual row when only `visible_rows` rows fit: scrolls
     /// just enough to keep the cursor's visual row inside the window.
     fn first_visible_row(cursor_row: usize, visible_rows: usize) -> usize {
         cursor_row.saturating_sub(visible_rows.saturating_sub(1))
+    }
+
+    /// Render attachment indicator lines above the text input. Each line is a
+    /// dim `📎 label`. The attachment rows consume the TOP of the area, and the
+    /// text prompt + gutter shift down by the row count. Returns the number of
+    /// rows consumed.
+    fn render_attachments(&self, area: Rect, buf: &mut Buffer) -> u16 {
+        if self.attached_images.is_empty() {
+            return 0;
+        }
+        let dim = ratatui::style::Style::default()
+            .fg(ratatui::style::Color::Rgb(0x88, 0x88, 0x88));
+        let style = crate::style::user_message_style();
+        for (i, label) in self.attached_images.iter().enumerate() {
+            let y = area.y + u16::try_from(i).unwrap_or(0);
+            // Background-fill the row with user-message style so it sits inside
+            // the composer block visually.
+            ratatui::widgets::Block::default()
+                .style(style)
+                .render(Rect::new(area.x, y, area.width, 1), buf);
+            let line = format!("📎 {}", label);
+            let truncated: String = line
+                .chars()
+                .take(usize::from(area.width.saturating_sub(4)))
+                .collect();
+            let span = Span::styled(truncated, dim);
+            buf.set_span(area.x + 2, y, &span, area.width.saturating_sub(3));
+        }
+        u16::try_from(self.attached_images.len()).unwrap_or(0)
     }
 }
 
@@ -756,7 +801,16 @@ impl Renderable for ComposerView<'_> {
         ratatui::widgets::Block::default()
             .style(style)
             .render(area, buf);
-        let inner = inner_rect(area);
+        // Attachment indicators consume the top rows; shift the text area down.
+        let attach_rows = self.render_attachments(area, buf);
+        // Remaining area for the text input.
+        let text_area = Rect {
+            x: area.x,
+            y: area.y + attach_rows,
+            width: area.width,
+            height: area.height.saturating_sub(attach_rows),
+        };
+        let inner = inner_rect(text_area);
         if inner.width == 0 || inner.height == 0 {
             return;
         }
@@ -795,7 +849,8 @@ impl Renderable for ComposerView<'_> {
     }
 
     /// Visual (soft-wrapped) lines at `width`, clamped to
-    /// [`MAX_VISIBLE_LINES`], plus the 2 padding rows.
+    /// [`MAX_VISIBLE_LINES`], plus the 2 padding rows, plus attachment
+    /// indicator rows.
     fn desired_height(&self, width: u16) -> u16 {
         // Derive the inner width from `inner_rect` so the gutter/margin inset
         // has a single source of truth (the height fed in is irrelevant).
@@ -805,11 +860,24 @@ impl Renderable for ComposerView<'_> {
             .rows_for(inner_w)
             .len()
             .clamp(1, MAX_VISIBLE_LINES);
-        u16::try_from(content + 2).unwrap_or(u16::MAX)
+        let attach_rows = u16::try_from(self.attached_images.len()).unwrap_or(0);
+        u16::try_from(content + 2 + attach_rows as usize).unwrap_or(u16::MAX)
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        let inner = inner_rect(area);
+        let attach_rows = self
+            .attached_images
+            .is_empty()
+            .then_some(0u16)
+            .map(|_| 0)
+            .unwrap_or(u16::try_from(self.attached_images.len()).unwrap_or(0));
+        let text_area = Rect {
+            x: area.x,
+            y: area.y + attach_rows,
+            width: area.width,
+            height: area.height.saturating_sub(attach_rows),
+        };
+        let inner = inner_rect(text_area);
         if inner.width == 0 || inner.height == 0 {
             return None;
         }
@@ -1097,6 +1165,10 @@ mod tests {
             .collect()
     }
 
+    fn labels(s: &[&str]) -> Vec<String> {
+        s.iter().map(|s| (*s).to_string()).collect()
+    }
+
     #[test]
     fn composer_renders_codex_shape_gutter_prompt_no_borders() {
         let c = typed("hi");
@@ -1329,5 +1401,33 @@ mod tests {
         assert_eq!(c.cursor_row_col(), (1, 2));
         c.down();
         assert_eq!(c.cursor_row_col(), (2, 6), "sticky col restored downward");
+    }
+
+    #[test]
+    fn attached_images_render_as_dim_indicators_and_shift_prompt_down() {
+        let c = typed("hi");
+        let imgs = labels(&["photo.png", "screenshot.jpg"]);
+        let view = ComposerView::new(&c).with_attached_images(&imgs);
+        let area = Rect::new(0, 0, 40, 6); // 2 attach + 2 pad + 2 text = 6
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        // Row 0 & 1: attachment indicators with 📎
+        let row0 = buffer_row(&buf, 0); assert!(row0.contains("📎") && row0.contains("photo.png"), "row0: {row0:?}");
+        let row1 = buffer_row(&buf, 1); assert!(row1.contains("📎") && row1.contains("screenshot.jpg"), "row1: {row1:?}");
+        // Row 2: padding, row 3: prompt + text
+        let row3 = buffer_row(&buf, 3); assert!(row3.contains("› hi"), "row3: {row3:?}");
+        // Height includes attachment rows
+        assert_eq!(view.desired_height(80), 5); // 1 content + 2 pad + 2 attach
+    }
+
+    #[test]
+    fn attached_images_cursor_pos_adjusts_for_attachment_offset() {
+        let c = typed("ab");
+        let imgs = labels(&["img.png"]);
+        let view = ComposerView::new(&c).with_attached_images(&imgs);
+        let area = Rect::new(0, 0, 40, 5);
+        let pos = view.cursor_pos(area);
+        // inner.x = 2, disp width of "ab" = 2, y = 1 (top pad) + 1 (attach row offset) = 2
+        assert_eq!(pos, Some((4, 2)));
     }
 }

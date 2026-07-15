@@ -2287,6 +2287,7 @@ impl ChatWidget {
         // The queued-image cells just vanished from the screen; keeping the
         // paths would silently attach them to a later unrelated message.
         self.pending_images.clear();
+        self.bottom_pane.set_attached_image_labels(Vec::new());
     }
 
     /// `/image <path>`: record an image message for `path` so a graphics
@@ -3155,6 +3156,11 @@ impl ChatWidget {
         // Queue the file for the next submitted turn: the transcript cell is
         // display-only — without this the model never receives the image.
         self.pending_images.push(std::path::PathBuf::from(path));
+        // Update the composer attachment indicators.
+        let labels: Vec<String> = self.pending_images.iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+            .collect();
+        self.bottom_pane.set_attached_image_labels(labels);
         ChatOutcome::Continue
     }
 
@@ -3162,7 +3168,9 @@ impl ChatWidget {
     /// images, `/image`) into the [`ChatOutcome::Submit`] payload; the paths
     /// ride along to `run_turn_streaming_with_images`.
     fn take_pending_images(&mut self) -> Vec<std::path::PathBuf> {
-        std::mem::take(&mut self.pending_images)
+        let images = std::mem::take(&mut self.pending_images);
+        self.bottom_pane.set_attached_image_labels(Vec::new());
+        images
     }
 
     /// Surface the oldest queued permission once no prompt is open (called

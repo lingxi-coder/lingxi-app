@@ -18,6 +18,7 @@ use futures::StreamExt;
 use jsonrpc::messages::Message as JsonRpcMessage;
 use jsonrpc::{BrokerError, Connection, ConnectionError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use traits::mcp::McpError;
@@ -53,6 +54,7 @@ impl From<HttpConnectError> for McpError {
 fn build_headers<H>(
     auth_token: Option<&str>,
     extra_headers: &H,
+    session_id: Option<&str>,
 ) -> Result<HeaderMap, HttpConnectError>
 where
     for<'a> &'a H: IntoIterator<Item = (&'a String, &'a String)>,
@@ -76,6 +78,11 @@ where
         let val = HeaderValue::try_from(v.as_str())
             .map_err(|e| HttpConnectError::Transport(format!("bad header value: {e}")))?;
         h.insert(name, val);
+    }
+    if let Some(sid) = session_id {
+        let v = HeaderValue::try_from(sid)
+            .map_err(|e| HttpConnectError::Transport(format!("bad session id: {e}")))?;
+        h.insert(HeaderName::from_static("mcp-session-id"), v);
     }
     Ok(h)
 }
@@ -112,7 +119,7 @@ where
 
     // Validate header construction eagerly so configuration errors surface at
     // connect-time rather than on the first POST.
-    let _ = build_headers(auth_token, extra_headers)?;
+    let _ = build_headers(auth_token, extra_headers, None)?;
 
     // Inbound: frames produced by the POST writer task (from JSON or SSE
     // response bodies). Outbound: frames the Connection wants to POST.
@@ -123,13 +130,23 @@ where
     let post_auth = auth_token.map(str::to_string);
     let post_extra = extra_headers.clone();
 
+    // MCP Streamable HTTP session ID: captured from the `mcp-session-id`
+    // response header on the initialize response and included as
+    // `Mcp-Session-Id` in every subsequent request (1:1 with claude-code's
+    // `StreamableHTTPClientTransport` session tracking).
+    let session_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let writer_sid = Arc::clone(&session_id);
+
     tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
-            let headers = match build_headers(post_auth.as_deref(), &post_extra) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!(error = %e, "mcp http: failed to build POST headers");
-                    continue;
+            let headers = {
+                let sid = writer_sid.lock().unwrap();
+                match build_headers(post_auth.as_deref(), &post_extra, sid.as_deref()) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::error!(error = %e, "mcp http: failed to build POST headers");
+                        continue;
+                    }
                 }
             };
 
@@ -146,6 +163,14 @@ where
                     continue;
                 }
             };
+
+            // Capture MCP session ID from response headers for subsequent
+            // requests (MCP Streamable HTTP §session).
+            if let Some(sid_val) = response.headers().get("mcp-session-id") {
+                if let Ok(val) = sid_val.to_str() {
+                    *writer_sid.lock().unwrap() = Some(val.to_string());
+                }
+            }
 
             if !response.status().is_success() {
                 tracing::warn!(status = %response.status(), "mcp http: non-success response");

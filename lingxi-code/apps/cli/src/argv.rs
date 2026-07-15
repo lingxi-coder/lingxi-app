@@ -433,10 +433,8 @@ pub struct Argv {
     #[arg(long = "no-tui")]
     pub no_tui: bool,
 
-    /// SECURITY-SENSITIVE: bypass all permission prompts for the session
-    // (claude-code `--dangerously-skip-permissions`). Resolves to
-    // `PermissionMode::BypassPermissions` subject to the safety guards
-    // (root refusal; ant sandbox/no-internet) in `permission::bypass_guard`.
+    /// Bypass all permission checks. Recommended only for sandboxes with no
+    /// internet access.
     #[arg(long = "dangerously-skip-permissions")]
     pub dangerously_skip_permissions: bool,
 

@@ -704,6 +704,7 @@ pub(crate) fn resolve_desktop_config(
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
         // threaded in by `run_cli`.
         permission_mode,
+        allow_dangerously_skip_permissions: argv.allow_dangerously_skip_permissions,
         // Plan 3c: the tui supplies the masked-key prompt via the credential
         // store + `pump_store_provider_key`, not this engine port — so the
         // engine `/connect` text-command path uses the headless no-op default.

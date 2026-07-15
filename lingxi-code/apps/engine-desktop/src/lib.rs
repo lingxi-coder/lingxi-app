@@ -1592,6 +1592,12 @@ pub struct DesktopConfig {
     /// all-allow — but it still drives `BuiltinToolContext.permission_mode`
     /// state. The CLI flag deliberately does NOT switch enforcement on.
     pub permission_mode: permission::PermissionMode,
+    /// Make `BypassPermissions` mode available in the session permission
+    /// mode cycle (claude-code `--allow-dangerously-skip-permissions`).
+    /// When `true`, `Plan` mode bypasses permissions, and the runtime
+    /// `set_permission_mode("bypassPermissions")` gate accepts the mode.
+    /// Default `false`.
+    pub allow_dangerously_skip_permissions: bool,
     /// Plan 3c: host secure-input port for `/connect <api-key-provider>`. The tui
     /// supplies its masked-input widget; `None` → a headless no-op prompt
     /// (`crate::connect::NoopKeyPrompt`) that cancels.
@@ -1938,6 +1944,7 @@ impl Default for DesktopConfig {
             session_started_as_coordinator: false,
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            allow_dangerously_skip_permissions: false,
             connect_prompt: None,
             system_prompt_override: None,
             append_system_prompt: None,
@@ -5591,6 +5598,7 @@ pub async fn build(
         permission_policy: boot_permission_policy.clone().unwrap_or_else(|| {
             Arc::new(
                 permission::PermissionPolicy::new(cfg.permission_mode)
+                .with_bypass_available(cfg.allow_dangerously_skip_permissions)
                     .with_roots(permission::FsRoots {
                         cwd: cwd.clone(),
                         home: dirs::home_dir(),
@@ -7342,6 +7350,7 @@ mod tests {
             // Boot tests stay deterministic: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            allow_dangerously_skip_permissions: false,
             connect_prompt: None,
             system_prompt_override: None,
             append_system_prompt: None,

@@ -53,11 +53,11 @@ impl PermissionMode {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Default | Self::Bubble => "Manual",
-            Self::Plan => "Plan Mode",
+            Self::Plan => "Plan",
             Self::AcceptEdits => "Accept edits",
             Self::BypassPermissions => "Bypass Permissions",
             Self::DontAsk => "Don't Ask",
-            Self::Auto => "Auto mode",
+            Self::Auto => "Auto",
         }
     }
 }
@@ -124,6 +124,21 @@ mod tests {
     #[test]
     fn default_is_external() {
         assert!(PermissionMode::Default.is_external());
+    }
+
+    #[test]
+    fn titles_match_2_1_211_mode_config_map() {
+        // MODE-TITLE-BYTES-05: the 2.1.211 `tyl` map gives plan.title="Plan"
+        // and auto.title="Auto" (NOT "Plan Mode"/"Auto mode"); these titles are
+        // interpolated verbatim into the `Current permission mode (${title})
+        // requires approval for this ${tool} command` ask message.
+        assert_eq!(PermissionMode::Default.title(), "Manual");
+        assert_eq!(PermissionMode::Bubble.title(), "Manual");
+        assert_eq!(PermissionMode::Plan.title(), "Plan");
+        assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
+        assert_eq!(PermissionMode::BypassPermissions.title(), "Bypass Permissions");
+        assert_eq!(PermissionMode::DontAsk.title(), "Don't Ask");
+        assert_eq!(PermissionMode::Auto.title(), "Auto");
     }
 
     #[test]

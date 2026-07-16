@@ -45,6 +45,12 @@ struct SettingsTop {
     /// top-level sibling. Consumed via [`auto_mode_disabled_from_settings_json`].
     #[serde(default, rename = "disableAutoMode")]
     disable_auto_mode: Option<String>,
+    /// TOP-LEVEL `skipDangerousModePermissionPrompt` — set true once the user has
+    /// accepted the Bypass Permissions disclaimer interactively (claude-code
+    /// `Pq()` reads it at the top level of each settings tier). Consumed via
+    /// [`skip_dangerous_mode_permission_prompt_from_settings_json`].
+    #[serde(default, rename = "skipDangerousModePermissionPrompt")]
+    skip_dangerous_mode_permission_prompt: Option<bool>,
 }
 
 /// The `permissions` block. `allow`/`deny`/`ask` are arrays of rule strings;
@@ -205,6 +211,24 @@ pub fn auto_mode_disabled_from_settings_json(raw: &str) -> bool {
     top.permissions.and_then(|p| p.disable_auto_mode).as_deref() == Some("disable")
 }
 
+/// `MODE-BG-DISCLAIMER-02`: does this settings file set
+/// `skipDangerousModePermissionPrompt` truthy at the TOP LEVEL?
+///
+/// 1:1 with claude-code `Pq()`'s per-tier
+/// `getSettings(tier)?.skipDangerousModePermissionPrompt` read. The flag is
+/// persisted once the user accepts the Bypass Permissions disclaimer
+/// interactively; when ANY tier has it set, a background session's requested
+/// `bypassPermissions` is NOT downgraded (the disclaimer was already accepted).
+/// Returns `false` when the field or the JSON is absent/invalid (best-effort;
+/// failing closed here means the bg gate MAY trip, which over-asks safely).
+#[must_use]
+pub fn skip_dangerous_mode_permission_prompt_from_settings_json(raw: &str) -> bool {
+    serde_json::from_str::<SettingsTop>(raw)
+        .ok()
+        .and_then(|t| t.skip_dangerous_mode_permission_prompt)
+        .unwrap_or(false)
+}
+
 /// Parse `permissions.additionalDirectories` (a string array of extra working
 /// directories) from one settings file's raw JSON. These are the dirs beyond
 /// `cwd` inside which `acceptEdits` mode auto-allows safe file edits.
@@ -273,6 +297,22 @@ mod tests {
         assert!(!auto_mode_grantable_by_source(PermissionRuleSource::CliArg));
         assert!(!auto_mode_grantable_by_source(PermissionRuleSource::Command));
         assert!(!auto_mode_grantable_by_source(PermissionRuleSource::Session));
+    }
+
+    #[test]
+    fn skip_dangerous_mode_permission_prompt_reads_top_level_flag() {
+        // MODE-BG-DISCLAIMER-02: top-level truthy flag.
+        assert!(skip_dangerous_mode_permission_prompt_from_settings_json(
+            r#"{"skipDangerousModePermissionPrompt": true}"#
+        ));
+        assert!(!skip_dangerous_mode_permission_prompt_from_settings_json(
+            r#"{"skipDangerousModePermissionPrompt": false}"#
+        ));
+        // Absent / empty / malformed → false (fail-closed = bg gate may trip).
+        assert!(!skip_dangerous_mode_permission_prompt_from_settings_json("{}"));
+        assert!(!skip_dangerous_mode_permission_prompt_from_settings_json(
+            "not json"
+        ));
     }
 
     #[test]

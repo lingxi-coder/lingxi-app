@@ -47,6 +47,38 @@ pub struct CliModeSettings {
     /// driven auto-accept). Irrelevant for the five external modes, which may be
     /// set from any tier.
     pub auto_default_from_trusted: bool,
+    /// `MODE-BG-DISCLAIMER-02`: is this a background session
+    /// (`LINGXI_SESSION_KIND == "bg"`, claude-code `CLAUDE_CODE_SESSION_KIND`)?
+    /// The bg-disclaimer downgrade only applies in background sessions
+    /// (`xlc()` short-circuits `!Pi()` → false otherwise).
+    pub is_bg_session: bool,
+    /// `MODE-BG-DISCLAIMER-02`: does ANY settings tier set
+    /// `skipDangerousModePermissionPrompt` truthy (claude-code `Pq()`)? When set,
+    /// the user has already accepted the Bypass Permissions disclaimer, so the
+    /// bg-session downgrade does NOT apply.
+    pub skip_dangerous_mode_permission_prompt: bool,
+    /// `MODE-BG-DISCLAIMER-02`: the persisted global-config
+    /// `bypassPermissionsModeAccepted` flag (claude-code
+    /// `St().bypassPermissionsModeAccepted`). When true, bypass was accepted
+    /// interactively and the bg downgrade does NOT apply.
+    pub bypass_permissions_mode_accepted: bool,
+}
+
+impl CliModeSettings {
+    /// `xlc("bypassPermissions")` (claude-code): does the bg-session disclaimer
+    /// gate downgrade a requested `bypassPermissions` to `default`?
+    ///
+    /// `xlc(e){if(!Pi())return!1;if(e==="bypassPermissions")return!Pq()&&
+    /// !St().bypassPermissionsModeAccepted;return!1}` — i.e. true iff this is a
+    /// background session AND no tier set `skipDangerousModePermissionPrompt`
+    /// AND `bypassPermissionsModeAccepted` is unset. A `--bg` daemon cannot show
+    /// the interactive disclaimer, so bypass must be earned beforehand.
+    #[must_use]
+    fn bg_bypass_disclaimer_gate_trips(&self) -> bool {
+        self.is_bg_session
+            && !self.skip_dangerous_mode_permission_prompt
+            && !self.bypass_permissions_mode_accepted
+    }
 }
 
 /// `permissionModeFromString` (`PermissionMode.ts:117-121`): the valid set is
@@ -78,6 +110,12 @@ pub fn permission_mode_from_cli_string(s: &str) -> PermissionMode {
 /// (the subprocess-env scrub is `LINGXI_SUBPROCESS_ENV_SCRUB` in this port,
 /// `platforms/posix/src/process/runner.rs`). Em-dash is U+2014.
 pub(crate) const ENV_SCRUB_FORCED_TO_DEFAULT_MSG: &str = "Permission mode forced to default \u{2014} LINGXI_SUBPROCESS_ENV_SCRUB is set (allowed_non_write_users hardening). Declare allowedTools explicitly, or set LINGXI_SUBPROCESS_ENV_SCRUB=0 to opt out.";
+
+/// `MODE-BG-DISCLAIMER-02`: byte-exact claude-code `Rlc` — the notice shown when
+/// a background session's requested `bypassPermissions` is downgraded to
+/// `default` because the disclaimer was never accepted interactively. Em-dash is
+/// U+2014.
+pub(crate) const BYPASS_DISCLAIMER_DOWNGRADE_MSG: &str = "Permission mode downgraded to default \u{2014} bypass requires accepting the disclaimer interactively first";
 
 /// `initialPermissionModeFromCLI` (`permissionSetup.ts:689-812`): resolve the
 /// session permission mode from CLI flags + settings, returning the mode plus
@@ -122,14 +160,35 @@ pub fn initial_permission_mode_from_cli(
 
     // Modes in order of priority (TS `orderedModes`).
     let mut ordered: Vec<PermissionMode> = Vec::new();
+    let mut notification: Option<String> = None;
+
+    // MODE-BG-DISCLAIMER-02: in a background session that never accepted the
+    // Bypass Permissions disclaimer, a requested `bypassPermissions` (from the
+    // skip flag OR from --permission-mode) is downgraded to `default` at push
+    // time (claude-code `xlc()`), carrying the `Rlc` notice. A `--bg` daemon
+    // cannot show the interactive disclaimer, so it must not silently run with
+    // full bypass.
+    let bg_bypass_downgrade = settings.bg_bypass_disclaimer_gate_trips();
+
     if dangerously_skip {
-        ordered.push(PermissionMode::BypassPermissions);
+        if bg_bypass_downgrade {
+            notification = Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG.to_string());
+            ordered.push(PermissionMode::Default);
+        } else {
+            ordered.push(PermissionMode::BypassPermissions);
+        }
     }
     if let Some(cli) = cli_mode {
-        ordered.push(cli);
+        if cli == PermissionMode::BypassPermissions && bg_bypass_downgrade {
+            notification = Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG.to_string());
+            ordered.push(PermissionMode::Default);
+        } else {
+            ordered.push(cli);
+        }
     }
     // MODE-FRONTMATTER-04: agent frontmatter permissionMode sits between the
-    // CLI flag and the settings defaultMode.
+    // CLI flag and the settings defaultMode. (claude-code does NOT run the bg
+    // disclaimer gate `xlc` on the frontmatter mode.)
     if let Some(frontmatter) = agent_frontmatter_mode {
         ordered.push(frontmatter);
     }
@@ -147,7 +206,6 @@ pub fn initial_permission_mode_from_cli(
         }
     }
 
-    let mut notification: Option<String> = None;
     for mode in ordered {
         if mode == PermissionMode::BypassPermissions && settings.bypass_disabled {
             // TS: skip this mode, carry the notice forward.
@@ -170,6 +228,9 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         }
     }
 
@@ -253,6 +314,9 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::AcceptEdits);
@@ -265,6 +329,9 @@ mod tests {
             bypass_disabled: true,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &s);
         assert_eq!(mode, PermissionMode::Default);
@@ -283,6 +350,9 @@ mod tests {
             bypass_disabled: true,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, None, false, &s);
         assert_eq!(mode, PermissionMode::Plan);
@@ -317,6 +387,9 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, notice) =
             initial_permission_mode_from_cli(Some("plan"), false, None, true, &s);
@@ -380,6 +453,9 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, _) = initial_permission_mode_from_cli(
             None,
@@ -450,6 +526,9 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::Default);
@@ -464,6 +543,9 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: true,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::Auto);
@@ -483,6 +565,9 @@ mod tests {
                 bypass_disabled: false,
                 auto_mode_disabled: false,
                 auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
             };
             let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
             assert_eq!(mode, m);
@@ -498,8 +583,102 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
             auto_default_from_trusted: false,
+            is_bg_session: false,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
         };
         let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, None, false, &s);
         assert_eq!(mode, PermissionMode::Plan);
+    }
+
+    // ---- MODE-BG-DISCLAIMER-02 ----
+
+    /// A background session with the disclaimer NOT yet accepted (gate trips).
+    fn bg_gate_tripping() -> CliModeSettings {
+        CliModeSettings {
+            default_mode: None,
+            bypass_disabled: false,
+            auto_mode_disabled: false,
+            auto_default_from_trusted: false,
+            is_bg_session: true,
+            skip_dangerous_mode_permission_prompt: false,
+            bypass_permissions_mode_accepted: false,
+        }
+    }
+
+    #[test]
+    fn bg_session_downgrades_skip_bypass_to_default() {
+        let (mode, notice) =
+            initial_permission_mode_from_cli(None, true, None, false, &bg_gate_tripping());
+        assert_eq!(mode, PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG));
+    }
+
+    #[test]
+    fn bg_session_downgrades_cli_bypass_to_default() {
+        let (mode, notice) = initial_permission_mode_from_cli(
+            Some("bypassPermissions"),
+            false,
+            None,
+            false,
+            &bg_gate_tripping(),
+        );
+        assert_eq!(mode, PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some(BYPASS_DISCLAIMER_DOWNGRADE_MSG));
+    }
+
+    #[test]
+    fn bg_session_does_not_downgrade_non_bypass_cli_mode() {
+        // The gate only downgrades bypassPermissions; a `plan` CLI mode is
+        // untouched even in a bg session.
+        let (mode, notice) =
+            initial_permission_mode_from_cli(Some("plan"), false, None, false, &bg_gate_tripping());
+        assert_eq!(mode, PermissionMode::Plan);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn non_bg_session_keeps_bypass() {
+        // Not a bg session → gate never trips → bypass is honored.
+        let s = CliModeSettings {
+            is_bg_session: false,
+            ..bg_gate_tripping()
+        };
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &s);
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn bg_session_with_skip_dangerous_prompt_keeps_bypass() {
+        // skipDangerousModePermissionPrompt set in a tier ⇒ disclaimer already
+        // accepted ⇒ no downgrade.
+        let s = CliModeSettings {
+            skip_dangerous_mode_permission_prompt: true,
+            ..bg_gate_tripping()
+        };
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &s);
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn bg_session_with_accepted_flag_keeps_bypass() {
+        // bypassPermissionsModeAccepted persisted ⇒ no downgrade.
+        let s = CliModeSettings {
+            bypass_permissions_mode_accepted: true,
+            ..bg_gate_tripping()
+        };
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &s);
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn bg_downgrade_message_is_byte_exact() {
+        assert_eq!(
+            BYPASS_DISCLAIMER_DOWNGRADE_MSG,
+            "Permission mode downgraded to default \u{2014} bypass requires accepting the disclaimer interactively first"
+        );
     }
 }

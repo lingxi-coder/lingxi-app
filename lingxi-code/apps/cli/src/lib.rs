@@ -915,6 +915,8 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     // resolver drops it (a committed project settings file cannot enable
     // classifier-driven auto-accept mode).
     let mut auto_default_from_trusted = false;
+    // MODE-BG-DISCLAIMER-02: sticky across tiers (any tier accepting wins — `Pq()`).
+    let mut skip_dangerous_mode_permission_prompt = false;
     let home = incl_user
         .then(|| crate::run::lingxi_home_dir().join("settings.json"))
         .map(|p| (p, permission::PermissionRuleSource::UserSettings));
@@ -940,13 +942,29 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
             if permission::auto_mode_disabled_from_settings_json(&raw) {
                 auto_mode_disabled = true;
             }
+            if permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(&raw) {
+                skip_dangerous_mode_permission_prompt = true;
+            }
         }
     }
+    // MODE-BG-DISCLAIMER-02: bg-session downgrade inputs. `is_bg_session` is
+    // `LINGXI_SESSION_KIND == "bg"` (claude-code `CLAUDE_CODE_SESSION_KIND`);
+    // `bypass_permissions_mode_accepted` is the persisted global-config flag
+    // (`St().bypassPermissionsModeAccepted`), read best-effort (absent ⇒ false,
+    // i.e. the gate may trip — over-ask safe).
+    let is_bg_session = std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg");
+    let bypass_permissions_mode_accepted = migrations::global_config::global_config_path()
+        .and_then(|p| migrations::global_config::read_map(&p).ok())
+        .and_then(|m| m.get("bypassPermissionsModeAccepted").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
     permission::CliModeSettings {
         default_mode,
         bypass_disabled,
         auto_mode_disabled,
         auto_default_from_trusted,
+        is_bg_session,
+        skip_dangerous_mode_permission_prompt,
+        bypass_permissions_mode_accepted,
     }
 }
 

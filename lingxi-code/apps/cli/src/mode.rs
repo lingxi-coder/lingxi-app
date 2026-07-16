@@ -1869,6 +1869,11 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
     let skills = skills_rows(&cwd, &crate::run::lingxi_home_dir());
     let memory = dirs::home_dir().map_or_else(Vec::new, |home| memory_rows(&cwd, &home));
 
+    // Managed `availableModels` allowlist for the `/model` picker filter (parity
+    // 2.1.207 H-BIN-08): reads the same policy tier the boot default-model
+    // constraint uses. `None` (default install) leaves the picker unfiltered.
+    let (model_allowlist, model_overrides) = engine_desktop::managed_model_allowlist().await;
+
     SessionInfo {
         doctor: DoctorInfo::capture(mcp_configured, mcp_connected),
         mcp,
@@ -1877,6 +1882,8 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         skills,
         memory,
         models,
+        model_allowlist,
+        model_overrides,
     }
 }
 

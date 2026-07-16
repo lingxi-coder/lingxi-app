@@ -251,6 +251,84 @@ pub fn first_allowed_model(
     None
 }
 
+/// The numeric version tuple that follows a family token in a model id, used to
+/// order candidates by recency for [`newest_permitted_in_family`]. Returns
+/// `None` when `model` does not carry `family` at a token boundary.
+///
+/// - `"claude-opus-4-8"` / family `"opus"` ⇒ `Some([4, 8])`
+/// - `"claude-sonnet-4-5-20250929"` / `"sonnet"` ⇒ `Some([4, 5, 20250929])`
+/// - `"claude-haiku-4-5"` / `"opus"` ⇒ `None` (different family)
+///
+/// The tuple compares lexicographically, so `[4, 8] > [4, 6]` and a dated
+/// variant `[4, 5, 20250929]` outranks the bare `[4, 5]`.
+#[must_use]
+fn family_version_key(model: &str, family: &str) -> Option<Vec<u64>> {
+    let m = normalize(model);
+    if family.is_empty() {
+        return None;
+    }
+    let bytes = m.as_bytes();
+    let flen = family.len();
+    let mut start = 0;
+    while let Some(pos) = m[start..].find(family) {
+        let at = start + pos;
+        let left_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        let end = at + flen;
+        let right_ok = end == m.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            let nums: Vec<u64> = m[end..]
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            return Some(nums);
+        }
+        start = at + 1;
+    }
+    None
+}
+
+/// The newest catalog model of a given family that the allowlist permits — the
+/// env-free arm of the binary `j5()`/`ykr()` "newest permitted" selection used by
+/// the plan-mode upgrade swap (binary `RF`). `family` must be a bare family alias
+/// (`opus`/`sonnet`/`haiku`/`fable`); any other input yields `None`.
+///
+/// Candidates are filtered to that family AND to those [`is_model_allowed`]
+/// permits, then the highest [`family_version_key`] wins (ties keep the earliest
+/// catalog entry). Returns `None` when the family or catalog is empty or nothing
+/// in the family is permitted (the caller then falls back to the resting model).
+///
+/// The `[1m]` long-context re-tag and the `model_access` entitlement guard (`P4`)
+/// arms of the binary `j5()` are the documented deferred remainder — only the
+/// `availableModels` allowlist path is modeled here (consistent with the landed
+/// matcher's env-free scope).
+#[must_use]
+pub fn newest_permitted_in_family(
+    family: &str,
+    candidates: &[String],
+    allowlist: Option<&[String]>,
+    overrides: Option<&BTreeMap<String, String>>,
+) -> Option<String> {
+    let fam = normalize(family);
+    if !is_family_alias(&fam) {
+        return None;
+    }
+    let mut best: Option<(Vec<u64>, &String)> = None;
+    for cand in candidates {
+        let Some(key) = family_version_key(cand, &fam) else {
+            continue;
+        };
+        if !is_model_allowed(cand, allowlist, overrides) {
+            continue;
+        }
+        match &best {
+            Some((best_key, _)) if *best_key >= key => {}
+            _ => best = Some((key, cand)),
+        }
+    }
+    best.map(|(_, cand)| cand.clone())
+}
+
 // ── enforceAvailableModels policy-provenance (binary `ROn`) ────────────────
 
 /// Byte-exact warning strings (binary), emitted deduplicated by the caller.
@@ -272,6 +350,26 @@ pub mod warnings {
     /// A teammate model is not allowlisted; use the default teammate model.
     pub const NOT_IN_ALLOWLIST_TEAMMATE: &str =
         "\" is not in the availableModels allowlist; using the default teammate model instead";
+    /// A server refusal-fallback target is not allowlisted; decline the swap.
+    pub const NOT_IN_ALLOWLIST_SWAP_DECLINE: &str =
+        "\" is not in the availableModels allowlist; declining the swap";
+
+    // ── Plan-mode upgrade-model gating (binary `RF`) ───────────────────────
+    //
+    // Plan mode swaps a resting `opusplan` setting up to Opus (and a `haiku`
+    // setting up to Sonnet). When that upgrade model is barred by the managed
+    // restriction the binary picks the newest permitted model of the same family
+    // (`newest_permitted_in_family`), else falls back to the resting model — each
+    // path emitting one of these byte-exact strings.
+
+    /// `opusplan` upgrade barred; a newer permitted Opus was substituted.
+    pub const PLAN_OPUSPLAN_NEWEST: &str = "Plan mode: the opusplan upgrade model is not permitted by the org model restrictions (availableModels allowlist or model_access entitlement); planning uses the newest permitted Opus instead";
+    /// `opusplan` upgrade barred and no permitted Opus exists; use the resting model.
+    pub const PLAN_OPUSPLAN_RESTING: &str = "Plan mode: the opusplan upgrade model is not permitted by the org model restrictions (availableModels allowlist or model_access entitlement); planning uses the resting model instead";
+    /// `haiku` plan upgrade (to Sonnet) barred; a newer permitted Sonnet was substituted.
+    pub const PLAN_HAIKU_NEWEST: &str = "Plan mode: the haiku plan upgrade model is not permitted by the org model restrictions (availableModels allowlist or model_access entitlement); planning uses the newest permitted Sonnet instead";
+    /// `haiku` plan upgrade barred and no permitted Sonnet exists; use the resting model.
+    pub const PLAN_HAIKU_RESTING: &str = "Plan mode: the haiku plan upgrade model is not permitted by the org model restrictions (availableModels allowlist or model_access entitlement); planning uses the resting model instead";
 }
 
 /// The policy (managed / `policySettings`) view of the model-restriction keys.
@@ -488,6 +586,84 @@ mod tests {
         let allow = vec!["opus".to_string()];
         let catalog = vec!["gpt-5.5".to_string(), "gemini-2.0".to_string()];
         assert_eq!(first_allowed_model(&allow, &catalog, None), None);
+    }
+
+    // ── newest_permitted_in_family (binary j5/ykr env-free arm) ─────────────
+
+    fn cat(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn newest_permitted_picks_highest_allowed_version() {
+        let catalog = cat(&[
+            "claude-opus-4-1-20250805",
+            "claude-opus-4-6",
+            "claude-opus-4-8",
+            "claude-sonnet-4-5-20250929",
+        ]);
+        // The whole opus family is allowed → the newest opus (4-8) wins.
+        let allow = cat(&["opus"]);
+        assert_eq!(
+            newest_permitted_in_family("opus", &catalog, Some(&allow), None).as_deref(),
+            Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn newest_permitted_respects_a_narrower_allowlist() {
+        let catalog = cat(&["claude-opus-4-1-20250805", "claude-opus-4-6", "claude-opus-4-8"]);
+        // Only 4-6 is permitted → newest permitted opus is 4-6 (NOT the newer 4-8).
+        let allow = cat(&["opus-4-6"]);
+        assert_eq!(
+            newest_permitted_in_family("opus", &catalog, Some(&allow), None).as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn newest_permitted_none_when_family_absent_from_allowlist() {
+        let catalog = cat(&["claude-opus-4-8", "claude-sonnet-4-5-20250929"]);
+        // Allowlist permits only sonnet → no permitted opus.
+        let allow = cat(&["sonnet"]);
+        assert_eq!(newest_permitted_in_family("opus", &catalog, Some(&allow), None), None);
+    }
+
+    #[test]
+    fn newest_permitted_rejects_non_family_alias_input() {
+        let catalog = cat(&["claude-opus-4-8"]);
+        let allow = cat(&["opus"]);
+        // "opusplan" / "best" / a full id are not bare family aliases → None.
+        assert_eq!(newest_permitted_in_family("opusplan", &catalog, Some(&allow), None), None);
+        assert_eq!(newest_permitted_in_family("claude-opus-4-8", &catalog, Some(&allow), None), None);
+    }
+
+    #[test]
+    fn newest_permitted_dated_variant_outranks_bare() {
+        // A dated build sorts newer than the bare version of the same tuple prefix.
+        let catalog = cat(&["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"]);
+        let allow = cat(&["sonnet"]);
+        assert_eq!(
+            newest_permitted_in_family("sonnet", &catalog, Some(&allow), None).as_deref(),
+            Some("claude-sonnet-4-5-20250929")
+        );
+    }
+
+    #[test]
+    fn newest_permitted_reverse_maps_overrides() {
+        // The catalog carries a Bedrock ARN; the allowlist permits the Anthropic id.
+        let catalog = cat(&["arn:aws:bedrock:us-east-1::inference-profile/opus-4-8"]);
+        let allow = cat(&["claude-opus-4-8"]);
+        let mut ov = BTreeMap::new();
+        ov.insert(
+            "claude-opus-4-8".to_string(),
+            "arn:aws:bedrock:us-east-1::inference-profile/opus-4-8".to_string(),
+        );
+        // The ARN carries the `opus` family token AND reverse-maps to an allowed id.
+        assert_eq!(
+            newest_permitted_in_family("opus", &catalog, Some(&allow), Some(&ov)).as_deref(),
+            Some("arn:aws:bedrock:us-east-1::inference-profile/opus-4-8")
+        );
     }
 
     // ── enforceAvailableModels policy-provenance ──────────────────────────

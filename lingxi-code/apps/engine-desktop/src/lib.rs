@@ -565,6 +565,31 @@ fn managed_model_policy_source(
     PolicySource::Loaded(view)
 }
 
+/// The MANAGED `availableModels` allowlist + `modelOverrides` in effect for the
+/// selection-restriction consumer surfaces (`/model` picker filter, subagent /
+/// plan-mode model resolution — parity 2.1.207 H-BIN-08), or `(None, empty)`
+/// when no policy restriction is active.
+///
+/// Reads the SAME managed policy tier the boot default-model constraint resolves
+/// (`managed_model_policy_source` → `resolve_enforcement`); warnings are
+/// suppressed here since the boot path already emits them once. A `Refused`
+/// (policy failed to parse) or `Inactive` source yields `(None, empty)`, leaving
+/// the consumer unrestricted — the boot default-model constraint owns the
+/// fail-closed behavior for the parse-failure case.
+pub async fn managed_model_allowlist(
+) -> (Option<Vec<String>>, std::collections::BTreeMap<String, String>) {
+    use llm_client::model::allowlist::{self, ModelEnforcement};
+    let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+    let source = managed_model_policy_source(&managed_tiers);
+    match allowlist::resolve_enforcement(&source, &mut |_| {}) {
+        ModelEnforcement::Active {
+            allowlist,
+            overrides,
+        } => (Some(allowlist), overrides),
+        _ => (None, std::collections::BTreeMap::new()),
+    }
+}
+
 /// Whether the live cron scheduler should run. Faithful to claude-code's
 /// `isKairosCronEnabled` LOCAL kill-switch (`ScheduleCronTool/prompt.ts:34/38`):
 /// the `LINGXI_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
@@ -3855,6 +3880,14 @@ pub async fn build(
     // entry instead." The enforce flag is inert without a policy-OWNED
     // allowlist, and a managed source that fails to parse refuses cascade-trust
     // mode (fail-closed). Consumed via `llm_client::model::allowlist`.
+    // The managed `availableModels` restriction threaded into the subagent /
+    // plan-mode spawn path (parity 2.1.207 H-BIN-08). Populated from the resolved
+    // enforcement below when an active policy allowlist exists; `None` (default
+    // install) leaves subagent / plan-mode resolution unrestricted.
+    let mut session_model_restriction: Option<(
+        llm_client::model::allowlist::ModelEnforcement,
+        Vec<String>,
+    )> = None;
     {
         use llm_client::model::allowlist;
         let managed_model_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
@@ -3867,6 +3900,15 @@ pub async fn build(
                 tracing::warn!("{m}");
             }
         });
+        // Retain an ACTIVE enforcement (+ the concrete catalog) for the spawner
+        // so subagent inherit-on-barred + the plan-mode upgrade gate can fire.
+        if matches!(enforcement, allowlist::ModelEnforcement::Active { .. }) {
+            let catalog: Vec<String> = default_listings
+                .iter()
+                .map(|m| m.request_model.clone())
+                .collect();
+            session_model_restriction = Some((enforcement.clone(), catalog));
+        }
         if allowlist::model_allowed_under(&enforcement, &default_model_id) == Some(false) {
             if let allowlist::ModelEnforcement::Active {
                 allowlist: al,
@@ -4286,6 +4328,12 @@ pub async fn build(
         // swap must not resurrect the disconnected anthropic route).
         .with_permission_mode(cfg.permission_mode)
         .with_model_setting(model_setting_for_spawns.clone())
+        // (parity 2.1.207 H-BIN-08) Managed availableModels restriction: a
+        // subagent whose explicitly-requested model is policy-barred inherits the
+        // parent/runtime model (binary `Qly`), and the plan-mode `opusplan`→Opus /
+        // `haiku`→Sonnet upgrade is gated to the newest permitted family model
+        // (binary `RF`). `None` (default install) ⇒ unrestricted (legacy).
+        .with_model_restriction_opt(session_model_restriction.clone())
         // (M10 cc2.1.198) Explore `GAe` firstParty gate, multi-provider half:
         // a non-Anthropic default profile behaves like the TS non-firstParty
         // branch (Explore → inherit, never the opus cap).

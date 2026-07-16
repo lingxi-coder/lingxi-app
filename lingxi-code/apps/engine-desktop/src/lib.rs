@@ -590,6 +590,19 @@ pub async fn managed_model_allowlist(
     }
 }
 
+/// The MANAGED `forceLoginOrgUUID` org pin in effect for the interactive
+/// Anthropic OAuth login (parity 2.1.207 H-BIN-09). Reads the managed policy
+/// tiers (the SAME `managed_settings_raw_tiers` the permission + model-allowlist
+/// policies read) and folds `forceLoginOrgUUID` via
+/// [`engine::settings::enterprise::fold_force_login_org_pin`] — the
+/// highest-priority tier that sets it wins. `Unset` when no policy pins login
+/// (the common case: login stays unrestricted). Read fresh at each login so a
+/// mid-session managed-settings edit takes effect on the next sign-in.
+pub async fn managed_force_login_org_pin() -> engine::settings::enterprise::ForceLoginOrgPin {
+    let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
+    engine::settings::enterprise::fold_force_login_org_pin(&managed_tiers)
+}
+
 /// Whether the live cron scheduler should run. Faithful to claude-code's
 /// `isKairosCronEnabled` LOCAL kill-switch (`ScheduleCronTool/prompt.ts:34/38`):
 /// the `LINGXI_DISABLE_CRON` env override (truthy ⇒ cron OFF) "wins over"
@@ -2039,7 +2052,16 @@ pub async fn desktop_command_registry(
     let cron_enabled = cron_scheduler_enabled(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
     command_core::register_bundled_skills(&mut reg, cron_enabled);
     register_core_batch_1(&mut reg, handle.clone());
-    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_2(&mut reg, handle.clone(), auth.clone());
+    // (H-BIN-09) Override the generic `/login` handler with one that enforces the
+    // managed `forceLoginOrgUUID` org pin — the SAME pin `/connect` enforces via
+    // `EngineOAuthConnect`. `register_builtin_handler` overwrites in place, so this
+    // wins over the plain handler `register_core_batch_2` just registered. Hosts
+    // without a managed policy tier (mobile) keep the plain, unrestricted handler.
+    reg.register_builtin_handler(Arc::new(
+        command_core::LoginHandler::new(auth)
+            .with_org_policy(Arc::new(crate::connect::DesktopLoginOrgPolicy)),
+    ));
     register_core_batch_4(&mut reg, handle.clone());
     register_core_batch_5(&mut reg, handle.clone());
     // Plan 3c: wire `/connect` over the engine-supplied credential-writer +

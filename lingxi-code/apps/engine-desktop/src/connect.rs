@@ -64,6 +64,7 @@ impl ConnectCredentialWriter for EngineCredentialWriter {
 use command_core::{
     ChatGptConnectDriver, CopilotConnectDriver, CopilotConnectStep, OAuthConnectDriver,
 };
+use engine::settings::enterprise::{check_org_membership, ForceLoginOrgPin, OrgMembershipCheck};
 use llm_client::copilot::{CopilotHttp, CopilotLogin, DeviceCodeResponse, PollOutcome};
 use llm_client::oauth::openai as openai_oauth;
 use llm_client::transport::BoxFuture;
@@ -385,13 +386,40 @@ impl ChatGptConnectDriver for EngineChatGptConnect {
 pub struct EngineOAuthConnect {
     auth: Arc<dyn AuthHandle>,
     chatgpt: Arc<dyn ChatGptConnectDriver>,
+    /// Test seam: a fixed `forceLoginOrgUUID` pin. `None` in production — the pin
+    /// is read fresh from managed settings at each login via
+    /// [`crate::managed_force_login_org_pin`].
+    org_pin_override: Option<ForceLoginOrgPin>,
 }
 
 impl EngineOAuthConnect {
     /// Construct over the Anthropic auth handle + the ChatGPT connect driver.
     #[must_use]
     pub fn new(auth: Arc<dyn AuthHandle>, chatgpt: Arc<dyn ChatGptConnectDriver>) -> Self {
-        Self { auth, chatgpt }
+        Self {
+            auth,
+            chatgpt,
+            org_pin_override: None,
+        }
+    }
+
+    /// (test seam) Force a fixed `forceLoginOrgUUID` pin instead of reading the
+    /// managed policy tiers, so the org-membership enforcement is exercisable
+    /// without a live managed-settings directory.
+    #[cfg(test)]
+    #[must_use]
+    fn with_org_pin_override(mut self, pin: ForceLoginOrgPin) -> Self {
+        self.org_pin_override = Some(pin);
+        self
+    }
+
+    /// Resolve the `forceLoginOrgUUID` pin: the test override if set, else the
+    /// live managed policy tiers.
+    async fn resolve_org_pin(&self) -> ForceLoginOrgPin {
+        match &self.org_pin_override {
+            Some(p) => p.clone(),
+            None => crate::managed_force_login_org_pin().await,
+        }
     }
 }
 
@@ -400,7 +428,25 @@ impl OAuthConnectDriver for EngineOAuthConnect {
     async fn login(&self, provider_id: &str) -> Result<String, ConnectError> {
         match provider_id {
             "anthropic" => match self.auth.login().await {
-                Ok(info) => Ok(format!("Connected Anthropic ({}).", info.email)),
+                // (H-BIN-09) Enforce the managed `forceLoginOrgUUID` org pin: a
+                // completed sign-in whose resolved organization is not permitted
+                // is REJECTED, and its just-persisted credential rolled back, so
+                // the user is never left authenticated to a forbidden org. The
+                // account's resolved org (`LoginInfo.org_id`) is the single-member
+                // membership set the pin is checked against.
+                Ok(info) => {
+                    let pin = self.resolve_org_pin().await;
+                    match check_org_membership(&pin, std::slice::from_ref(&info.org_id)) {
+                        OrgMembershipCheck::Permitted => {
+                            Ok(format!("Connected Anthropic ({}).", info.email))
+                        }
+                        OrgMembershipCheck::Denied(message) => {
+                            // Best-effort rollback of the credential handle wrote.
+                            let _ = self.auth.logout().await;
+                            Err(ConnectError::LoginPolicyDenied(message))
+                        }
+                    }
+                }
                 Err(traits::AuthError::Cancelled) => Err(ConnectError::Cancelled),
                 Err(e) => Err(ConnectError::Network(e.to_string())),
             },
@@ -412,9 +458,31 @@ impl OAuthConnectDriver for EngineOAuthConnect {
     }
 }
 
+/// Managed `forceLoginOrgUUID` enforcement for the interactive `/login` slash
+/// command (parity 2.1.207 H-BIN-09). The `/connect` picker enforces the pin
+/// inline in [`EngineOAuthConnect::login`]; `/login` ([`command_core::LoginHandler`])
+/// is a distinct surface driving the same Anthropic `auth` handle, so it gets
+/// the SAME policy injected via [`command_core::LoginOrgPolicy`]. Reads the pin
+/// fresh at each login from the managed policy tiers
+/// ([`crate::managed_force_login_org_pin`]) and defers to the landed
+/// [`check_org_membership`].
+pub struct DesktopLoginOrgPolicy;
+
+#[async_trait]
+impl command_core::LoginOrgPolicy for DesktopLoginOrgPolicy {
+    async fn check(&self, account_org_ids: &[String]) -> Result<(), String> {
+        let pin = crate::managed_force_login_org_pin().await;
+        match check_org_membership(&pin, account_org_ids) {
+            OrgMembershipCheck::Permitted => Ok(()),
+            OrgMembershipCheck::Denied(message) => Err(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod oauth_connect_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use traits::{AuthError, AuthHandle, LoginInfo};
 
     struct OkAuth;
@@ -427,6 +495,42 @@ mod oauth_connect_tests {
             })
         }
         async fn logout(&self) -> Result<(), AuthError> {
+            Ok(())
+        }
+        async fn current_user(&self) -> Option<LoginInfo> {
+            None
+        }
+    }
+
+    /// Auth double that returns a configurable `(email, org_id)` and records
+    /// whether `logout` (the org-pin rollback) was called.
+    struct RecordingAuth {
+        email: String,
+        org_id: String,
+        logged_out: AtomicBool,
+    }
+    impl RecordingAuth {
+        fn new(email: &str, org_id: &str) -> Self {
+            Self {
+                email: email.into(),
+                org_id: org_id.into(),
+                logged_out: AtomicBool::new(false),
+            }
+        }
+        fn was_logged_out(&self) -> bool {
+            self.logged_out.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait]
+    impl AuthHandle for RecordingAuth {
+        async fn login(&self) -> Result<LoginInfo, AuthError> {
+            Ok(LoginInfo {
+                email: self.email.clone(),
+                org_id: self.org_id.clone(),
+            })
+        }
+        async fn logout(&self) -> Result<(), AuthError> {
+            self.logged_out.store(true, Ordering::SeqCst);
             Ok(())
         }
         async fn current_user(&self) -> Option<LoginInfo> {
@@ -456,7 +560,9 @@ mod oauth_connect_tests {
 
     #[tokio::test]
     async fn dispatches_by_provider_id() {
-        let d = EngineOAuthConnect::new(Arc::new(OkAuth), Arc::new(OkChatGpt));
+        // Unset pin override keeps the test hermetic (no managed-settings read).
+        let d = EngineOAuthConnect::new(Arc::new(OkAuth), Arc::new(OkChatGpt))
+            .with_org_pin_override(ForceLoginOrgPin::Unset);
         assert!(d
             .login("anthropic")
             .await
@@ -477,6 +583,100 @@ mod oauth_connect_tests {
             d.login("anthropic").await,
             Err(ConnectError::Cancelled)
         ));
+    }
+
+    // ── forceLoginOrgUUID org-pin enforcement (H-BIN-09) ─────────────────────
+
+    #[tokio::test]
+    async fn org_pin_permits_member_and_keeps_credential() {
+        let auth = Arc::new(RecordingAuth::new("me@example.com", "org_ok"));
+        let d = EngineOAuthConnect::new(auth.clone(), Arc::new(OkChatGpt)).with_org_pin_override(
+            ForceLoginOrgPin::Pinned(vec!["org_ok".into(), "org_other".into()]),
+        );
+        assert_eq!(
+            d.login("anthropic").await.unwrap(),
+            "Connected Anthropic (me@example.com)."
+        );
+        assert!(!auth.was_logged_out(), "a permitted login is not rolled back");
+    }
+
+    #[tokio::test]
+    async fn org_pin_unset_is_unrestricted() {
+        let auth = Arc::new(RecordingAuth::new("me@example.com", "any_org"));
+        let d = EngineOAuthConnect::new(auth.clone(), Arc::new(OkChatGpt))
+            .with_org_pin_override(ForceLoginOrgPin::Unset);
+        assert!(d
+            .login("anthropic")
+            .await
+            .unwrap()
+            .contains("me@example.com"));
+        assert!(!auth.was_logged_out());
+    }
+
+    #[tokio::test]
+    async fn org_pin_denies_nonmember_and_rolls_back_byte_exact() {
+        let auth = Arc::new(RecordingAuth::new("me@example.com", "org_bad"));
+        let d = EngineOAuthConnect::new(auth.clone(), Arc::new(OkChatGpt))
+            .with_org_pin_override(ForceLoginOrgPin::Pinned(vec!["org_ok".into()]));
+        match d.login("anthropic").await {
+            Err(ConnectError::LoginPolicyDenied(m)) => assert_eq!(
+                m,
+                "Your authentication token belongs to organization org_bad,\n\
+but this machine requires organization org_ok.\n\n\
+Please log in with a permitted organization: lingxi-cli auth login"
+            ),
+            other => panic!("expected LoginPolicyDenied, got {other:?}"),
+        }
+        assert!(
+            auth.was_logged_out(),
+            "a forbidden login must roll back the persisted credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_pin_array_mismatch_uses_plural_clause() {
+        let auth = Arc::new(RecordingAuth::new("me@example.com", "org_bad"));
+        let d = EngineOAuthConnect::new(auth, Arc::new(OkChatGpt)).with_org_pin_override(
+            ForceLoginOrgPin::Pinned(vec!["org_a".into(), "org_b".into()]),
+        );
+        match d.login("anthropic").await {
+            Err(ConnectError::LoginPolicyDenied(m)) => assert!(
+                m.contains("but this machine requires one of these organizations: org_a, org_b."),
+                "{m}"
+            ),
+            other => panic!("expected LoginPolicyDenied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn org_pin_empty_array_is_admin_error() {
+        let auth = Arc::new(RecordingAuth::new("me@example.com", "org_bad"));
+        let d = EngineOAuthConnect::new(auth.clone(), Arc::new(OkChatGpt))
+            .with_org_pin_override(ForceLoginOrgPin::EmptyArray);
+        match d.login("anthropic").await {
+            Err(ConnectError::LoginPolicyDenied(m)) => assert_eq!(
+                m,
+                "forceLoginOrgUUID in managed settings is set to an empty array.\n\
+No organizations are permitted. This is almost certainly a misconfiguration.\n\
+Contact your administrator."
+            ),
+            other => panic!("expected LoginPolicyDenied, got {other:?}"),
+        }
+        assert!(auth.was_logged_out());
+    }
+
+    #[tokio::test]
+    async fn org_pin_invalid_is_admin_error() {
+        let auth = Arc::new(RecordingAuth::new("me@example.com", "org_bad"));
+        let d = EngineOAuthConnect::new(auth, Arc::new(OkChatGpt))
+            .with_org_pin_override(ForceLoginOrgPin::Invalid);
+        match d.login("anthropic").await {
+            Err(ConnectError::LoginPolicyDenied(m)) => assert_eq!(
+                m,
+                "\"forceLoginOrgUUID\" was present but invalid; no organization is permitted to log in until it is fixed."
+            ),
+            other => panic!("expected LoginPolicyDenied, got {other:?}"),
+        }
     }
 }
 

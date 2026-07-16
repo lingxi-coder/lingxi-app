@@ -1692,6 +1692,14 @@ async fn run_connect_action(
                     notice(body, false);
                     connected(provider_id);
                 }
+                // (H-BIN-09) A managed `forceLoginOrgUUID` org pin rejected the
+                // sign-in: surface the admin message VERBATIM. No "network error"
+                // prefix and no API-key fallback hint — a non-OAuth credential
+                // cannot satisfy the org pin either, and the login already rolled
+                // back its persisted token.
+                Err(command_core::ConnectError::LoginPolicyDenied(message)) => {
+                    notice(message, true);
+                }
                 Err(e) => notice(
                     format!("✗ Sign-in failed: {e}. Try connecting with an API key instead."),
                     true,

@@ -710,6 +710,11 @@ lazy_re!(
 );
 // jq `system(` detector inside extractSafeCatHeredoc (ast.ts:1773): `/\bsystem\s*\(/`.
 lazy_re!(jq_system_re, r"\bsystem\s*\(");
+// walkString zsh `$name:mod` modifier differential: `/^:[a-zA-Z&]/`.
+lazy_re!(zsh_colon_mod_re, r"^:[a-zA-Z&]");
+// walkString zsh `$name[expr]` / `$name:mod` on a special var: `/^\w*(\[|:[a-zA-Z&])/`
+// (JS `\w` → ASCII `[A-Za-z0-9_]`).
+lazy_re!(zsh_name_subscript_re, r"^[A-Za-z0-9_]*(\[|:[a-zA-Z&])");
 // awk program battery (TS `YVc`, permissionSetup.ts). The regex-crate has no
 // lookbehind, so `(?<![A-Za-z_])` is emulated with `(?:^|[^A-Za-z_])` — we only
 // test `is_match`, so consuming the guard char is harmless.
@@ -2555,9 +2560,12 @@ pub(crate) fn walk_string(
 ) -> Result<String, ParseForSecurityResult> {
     let mut result = String::new();
     let mut cursor: i64 = -1;
-    let mut saw_dynamic = false;
-    let mut saw_literal = false;
-    for child in children(node) {
+    let mut saw_dynamic = false; // TS `s`: a placeholder part is present
+    let mut saw_literal = false; // TS `a`: a non-empty literal part is present
+    let mut saw_empty = false; // TS `l`: a part resolved to the empty string
+    let kids = children(node);
+    for (idx, child) in kids.iter().enumerate() {
+        let child = *child;
         // Index gap = dropped literal newline(s). Skipped before the first child
         // (cursor == -1) and before a `"` delimiter (whitespace-only quirk).
         if cursor != -1 && (child.start_byte() as i64) > cursor && child.kind() != "\"" {
@@ -2605,10 +2613,32 @@ pub(crate) fn walk_string(
             },
             "simple_expansion" => {
                 let v = resolve_simple_expansion(child, src, var_scope, true)?;
-                if v == VAR_PLACEHOLDER {
+                // SECURITY (zsh differential): `"$name[expr]"` / `"$name:mod"` —
+                // when the next sibling is a string_content that begins a subscript
+                // or a `:modifier`, zsh recursively evaluates it.
+                if let Some(d) = kids.get(idx + 1) {
+                    if d.kind() == "string_content" {
+                        let dt = node_text(*d, src);
+                        let is_special =
+                            children(child).iter().any(|f| f.kind() == "special_variable_name");
+                        if dt.starts_with('[')
+                            || zsh_colon_mod_re().is_match(dt)
+                            || (is_special && zsh_name_subscript_re().is_match(dt))
+                        {
+                            return Err(ParseForSecurityResult::TooComplex {
+                                reason:
+                                    "zsh \"$name[expr]\" / \"$name:mod\" inside double-quotes — recursive eval"
+                                        .to_string(),
+                            });
+                        }
+                    }
+                }
+                if contains_any_placeholder(&v) {
                     saw_dynamic = true;
-                } else {
+                } else if !v.is_empty() {
                     saw_literal = true;
+                } else {
+                    saw_empty = true;
                 }
                 result.push_str(&v);
             }
@@ -2623,15 +2653,31 @@ pub(crate) fn walk_string(
             _ => return Err(too_complex(child)),
         }
     }
-    // Guard A: solo-placeholder string (`"$(cmd)"` / `"$VAR"`) → reject.
-    if saw_dynamic && !saw_literal {
-        return Err(too_complex(node));
+    // Guard A: a string mixing a dynamic part with ≤1 char of literal residue
+    // (`"x$(cmd)"`) cannot be safely path/rule-matched → reject.
+    if saw_dynamic {
+        let residue = result.replace(CMDSUB_PLACEHOLDER, "").replace(VAR_PLACEHOLDER, "");
+        if residue.chars().count() <= 1 {
+            return Err(too_complex(node));
+        }
     }
-    // Guard B: whitespace-only-string quirk — no content children but the source
-    // span is longer than bare `""` (text byte-len > 2).
-    let text_len = node.end_byte() - node.start_byte();
-    if !saw_literal && !saw_dynamic && text_len > 2 {
-        return Err(too_complex(node));
+    // Guard B: a delimiters-only string node (hidden text, no parsed parts). Return
+    // the inner slice UNLESS it hides an unparsed command substitution.
+    if !saw_literal && !saw_dynamic && !saw_empty {
+        let text = node_text(node, src);
+        if text.chars().count() > 2 {
+            let mut ch = text.chars();
+            ch.next();
+            ch.next_back();
+            let inner = ch.as_str().to_string();
+            if inner.contains('`') || inner.contains("$(") {
+                return Err(ParseForSecurityResult::TooComplex {
+                    reason: "Delimiters-only string node contains unparsed command substitution"
+                        .to_string(),
+                });
+            }
+            return Ok(inner);
+        }
     }
     Ok(result)
 }
@@ -4371,12 +4417,11 @@ mod tests {
 
     #[test]
     fn walk_string_whitespace_only_quirk_rejects() {
-        // tree-sitter attributes a whitespace-only `" "` to the closing quote →
-        // no content children. Guard B (text len > 2) → reject.
-        assert_eq!(
-            cmd_argvs(r#"echo " ""#),
-            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
-        );
+        // 2.1.211: tree-sitter attributes a whitespace-only `" "` to the closing
+        // quote → no content children. Guard B now RETURNS the inner slice (a
+        // literal space) since it hides no command substitution.
+        let argvs = cmd_argvs(r#"echo " ""#).expect("simple");
+        assert_eq!(argvs[0], vec!["echo".to_string(), " ".to_string()]);
         // Genuine empty `""` (len == 2) is fine → argv element "".
         let argvs = cmd_argvs(r#"echo """#).expect("simple");
         assert_eq!(argvs[0], vec!["echo".to_string(), String::new()]);
@@ -5583,6 +5628,35 @@ EOF
         assert_eq!(
             pfs("V=lit; if echo x | read V; then echo hi; fi"),
             Err("'read V' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal 'lit'".to_string())
+        );
+    }
+
+    // ── PERM-AST-STRING-01: walkString guards ──
+
+    #[test]
+    fn string_literal_residue_one_char_rejected() {
+        // `"x$(cmd)"`: one literal char + a cmdsub → residue ≤ 1 → reject
+        // (previously accepted = under-ask).
+        assert_eq!(
+            cmd_argvs(r#"echo "x$(id)""#),
+            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
+        );
+        // Two literal chars survive.
+        let argvs = cmd_argvs(r#"echo "xy$(id)""#).expect("simple");
+        // inner id extracted first, then the outer echo command.
+        assert_eq!(argvs.last().unwrap()[0], "echo");
+        assert_eq!(argvs.last().unwrap()[1], format!("xy{CMDSUB_PLACEHOLDER}"));
+    }
+
+    #[test]
+    fn string_zsh_subscript_modifier_rejected() {
+        // `"$name[0]"` — next sibling string_content starts with `[` → recursive
+        // eval differential.
+        let scope_cmd = r#"echo "$HOME[0]""#;
+        assert_eq!(
+            cmd_argvs(scope_cmd),
+            Err("zsh \"$name[expr]\" / \"$name:mod\" inside double-quotes — recursive eval"
+                .to_string())
         );
     }
 }

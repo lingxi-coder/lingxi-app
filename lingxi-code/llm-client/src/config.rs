@@ -127,6 +127,8 @@ pub enum ProtocolFamily {
     VertexClaude,
     /// Bedrock Claude route family.
     BedrockClaude,
+    /// Azure AI Foundry Claude route family (Anthropic Messages wire on Azure).
+    FoundryClaude,
     /// Azure `OpenAI` route family.
     AzureOpenAi,
 }

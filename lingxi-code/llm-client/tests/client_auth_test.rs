@@ -924,3 +924,98 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
         "x-amz-content-sha256 must match independent hash of body bytes"
     );
 }
+
+// ── Azure AI Foundry Claude (parity 2.1.207 H-BIN-10) ────────────────────────
+
+/// A Foundry Claude profile with a plain API key sends `x-api-key` (CC 2.1.207
+/// `AnthropicFoundry.authHeaders()`: string `apiKey` ⇒ `{"x-api-key": apiKey}`)
+/// and routes the request to `{base}/v1/messages` via the Foundry codec — NOT a
+/// `Bearer` token and NOT a Vertex-style URL. Guards the previously-absent
+/// Foundry transport.
+#[tokio::test]
+async fn foundry_claude_api_key_uses_x_api_key_header_and_messages_url() {
+    std::env::set_var("LLM_CLIENT_AUTH_TEST_FOUNDRY_KEY", "foundry-secret");
+    let client = client_with(
+        ProviderId::FoundryClaude,
+        ProtocolFamily::FoundryClaude,
+        "https://my-res.services.ai.azure.com/anthropic/",
+        AuthStrategy::ApiKey,
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_FOUNDRY_KEY".to_string(),
+        },
+    );
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
+
+    // x-api-key header (Anthropic-style), NOT Authorization: Bearer.
+    assert_eq!(
+        prepared
+            .provider_request
+            .headers
+            .get("x-api-key")
+            .map(String::as_str),
+        Some("foundry-secret"),
+        "Foundry API key must be sent as x-api-key"
+    );
+    assert!(
+        !prepared.provider_request.headers.contains_key("Authorization"),
+        "Foundry API-key auth must NOT set Authorization"
+    );
+
+    // Routed through the Foundry codec: {base}/v1/messages.
+    assert_eq!(
+        prepared.provider_request.url,
+        "https://my-res.services.ai.azure.com/anthropic/v1/messages",
+        "Foundry request must target {{base}}/v1/messages"
+    );
+    // Standard anthropic-version header (not the Vertex in-body version).
+    assert_eq!(
+        prepared
+            .provider_request
+            .headers
+            .get("anthropic-version")
+            .map(String::as_str),
+        Some("2023-06-01"),
+    );
+}
+
+/// A Foundry profile configured with an AAD token (`AuthStrategy::Bearer`) sends
+/// `Authorization: Bearer` (CC's `azureADTokenProvider` function path), still
+/// routed to the Foundry `{base}/v1/messages` endpoint.
+#[tokio::test]
+async fn foundry_claude_aad_token_uses_bearer_header() {
+    std::env::set_var("LLM_CLIENT_AUTH_TEST_FOUNDRY_AAD", "aad-token");
+    let client = client_with(
+        ProviderId::FoundryClaude,
+        ProtocolFamily::FoundryClaude,
+        "https://my-res.services.ai.azure.com/anthropic/",
+        AuthStrategy::Bearer,
+        CredentialConfig::Env {
+            var: "LLM_CLIENT_AUTH_TEST_FOUNDRY_AAD".to_string(),
+        },
+    );
+    let prepared = client
+        .prepare(&LlmRequest::new("p-model"))
+        .await
+        .expect("prepare");
+
+    assert_eq!(
+        prepared
+            .provider_request
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
+        Some("Bearer aad-token"),
+        "Foundry AAD token must be sent as Authorization: Bearer"
+    );
+    assert!(
+        !prepared.provider_request.headers.contains_key("x-api-key"),
+        "Foundry AAD auth must NOT set x-api-key"
+    );
+    assert_eq!(
+        prepared.provider_request.url,
+        "https://my-res.services.ai.azure.com/anthropic/v1/messages",
+    );
+}

@@ -81,6 +81,9 @@ fn cost_provider_id(profile_name: &str, provider_id: &LlmProviderId) -> CostProv
             CostProviderId::GoogleGemini
         }
         LlmProviderId::BedrockClaude => CostProviderId::AmazonBedrock,
+        // Foundry hosts Claude — price via Anthropic (also the normalized value
+        // from `pricing_provider_id_for_profile`, so this arm is defensive).
+        LlmProviderId::FoundryClaude => CostProviderId::Anthropic,
         LlmProviderId::OpenAICompatible { name } | LlmProviderId::Custom { name } => {
             CostProviderId::OpenAICompatible { name }
         }

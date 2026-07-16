@@ -1032,6 +1032,7 @@ impl ApiService {
             crate::ProtocolFamily::AnthropicMessages
                 | crate::ProtocolFamily::BedrockClaude
                 | crate::ProtocolFamily::VertexClaude
+                | crate::ProtocolFamily::FoundryClaude
         )
     }
 

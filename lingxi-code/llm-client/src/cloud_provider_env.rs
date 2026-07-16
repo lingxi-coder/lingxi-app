@@ -55,14 +55,22 @@
 //!   token. [`VertexClaudeCodec`](crate::VertexClaudeCodec) already accepts a
 //!   static bearer via [`AuthStrategy::GcpToken`](crate::AuthStrategy); wiring an
 //!   ADC token source that feeds it is future work.
-//! - **Foundry transport codec**: there is no `ProtocolFamily`/codec for
-//!   Anthropic-on-Foundry yet (`azure_openai.rs` is the `OpenAI` protocol, not the
-//!   Foundry Messages API), so the Foundry base URL here has no consumer beyond
-//!   these helpers.
 //! - **Boot-time route synthesis**: assembling a [`ProviderProfile`] from these
-//!   values at client build time (so `CLAUDE_CODE_USE_VERTEX=1` actually routes
-//!   through [`VertexClaudeCodec`]) and the `/setup-vertex` /`/setup-bedrock`
-//!   reconfigure commands.
+//!   values at client build time (so `CLAUDE_CODE_USE_VERTEX=1` /
+//!   `CLAUDE_CODE_USE_FOUNDRY=1` actually route through the managed-cloud codec)
+//!   and the `/setup-vertex` /`/setup-bedrock` reconfigure commands.
+//!
+//! ## Landed since (parity 2.1.207 H-BIN-10)
+//!
+//! - **Foundry transport codec**: [`FoundryClaudeCodec`](crate::FoundryClaudeCodec)
+//!   speaks the Anthropic Messages wire at
+//!   [`foundry_messages_base_url`]'s `.../anthropic/` root, reachable via a
+//!   `foundry-claude` [`ProviderProfile`] ([`ProtocolFamily::FoundryClaude`]);
+//!   [`FoundryCredential::ApiKey`] → `x-api-key`, [`FoundryCredential::AuthToken`]
+//!   (AAD) → `Authorization: Bearer`. (`azure_openai.rs` remains the `OpenAI`
+//!   protocol, unrelated to the Foundry Messages API.)
+//!
+//! [`ProtocolFamily::FoundryClaude`]: crate::ProtocolFamily::FoundryClaude
 //!
 //! [`ProviderProfile`]: crate::ProviderProfile
 
@@ -213,9 +221,12 @@ pub fn foundry_messages_base_url(base_url: Option<&str>, resource: Option<&str>)
 /// present (mirrors the Foundry SDK `apiKey ?? authToken` precedence).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FoundryCredential {
-    /// `ANTHROPIC_FOUNDRY_API_KEY` (Azure `api-key` header).
+    /// `ANTHROPIC_FOUNDRY_API_KEY` — sent as the `x-api-key` header (CC 2.1.207
+    /// `AnthropicFoundry.authHeaders()`: a string `apiKey` ⇒
+    /// `{"x-api-key": apiKey}`, the same header first-party Anthropic uses).
     ApiKey(String),
-    /// `ANTHROPIC_FOUNDRY_AUTH_TOKEN` (AAD `Authorization: Bearer` token).
+    /// `ANTHROPIC_FOUNDRY_AUTH_TOKEN` (AAD `Authorization: Bearer` token — the
+    /// SDK's `azureADTokenProvider` function path).
     AuthToken(String),
     /// Neither set — auth deferred (see [`skip_foundry_auth`]).
     None,

@@ -1089,6 +1089,15 @@ impl DefaultLlmClient {
                     (AuthStrategy::ApiKey, ProtocolFamily::AnthropicMessages) => {
                         Box::new(ApiKeyAuthenticator::new(secret))
                     }
+                    // Azure AI Foundry: a plain API key is sent as `x-api-key`
+                    // (CC 2.1.207 `AnthropicFoundry.authHeaders()`:
+                    // string apiKey ⇒ `{"x-api-key": apiKey}`). AAD-token Foundry
+                    // profiles use `AuthStrategy::Bearer` (the `_` arm) which
+                    // emits `Authorization: Bearer`, matching the SDK's
+                    // `azureADTokenProvider` (function) path.
+                    (AuthStrategy::ApiKey, ProtocolFamily::FoundryClaude) => {
+                        Box::new(ApiKeyAuthenticator::new(secret))
+                    }
                     (AuthStrategy::ApiKey, ProtocolFamily::GeminiGenerateContent) => Box::new(
                         ApiKeyAuthenticator::with_header_name("x-goog-api-key", secret),
                     ),
@@ -1292,6 +1301,9 @@ fn build_codec(provider: &crate::ProviderProfile) -> Result<Box<dyn WireCodec>, 
             provider.base_url.clone(),
         ))),
         crate::ProtocolFamily::BedrockClaude => Ok(Box::new(crate::BedrockClaudeCodec::new(
+            provider.base_url.clone(),
+        ))),
+        crate::ProtocolFamily::FoundryClaude => Ok(Box::new(crate::FoundryClaudeCodec::new(
             provider.base_url.clone(),
         ))),
         crate::ProtocolFamily::OpenAiResponses => Ok(Box::new(crate::OpenAiResponsesCodec::new(

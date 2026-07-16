@@ -5,6 +5,8 @@ mod azure_openai;
 #[allow(missing_docs)]
 pub mod bedrock_claude;
 #[allow(missing_docs)]
+pub mod foundry_claude;
+#[allow(missing_docs)]
 mod gemini;
 pub mod gemini_files;
 #[allow(missing_docs)]
@@ -23,6 +25,7 @@ use crate::{LlmError, StreamDecoder, WireCodec};
 pub use anthropic::AnthropicMessagesCodec;
 pub use azure_openai::AzureOpenAiCodec;
 pub use bedrock_claude::BedrockClaudeCodec;
+pub use foundry_claude::FoundryClaudeCodec;
 pub use gemini::GeminiCodec;
 pub use gemini_files::GeminiFile;
 pub use openai::OpenAiChatCodec;

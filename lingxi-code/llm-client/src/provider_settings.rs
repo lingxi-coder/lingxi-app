@@ -15,7 +15,7 @@ use crate::{
 };
 
 const SUPPORTED_PROVIDER_TYPES: &str =
-    "openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini";
+    "openai, openai-responses, anthropic, gemini, azure-openai, bedrock-claude, vertex-claude, vertex-gemini, foundry-claude";
 
 /// Provider kinds accepted in `settings.providers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,8 @@ pub enum ProviderKind {
     VertexClaude,
     /// Gemini on Vertex AI.
     VertexGemini,
+    /// Anthropic Claude on Azure AI Foundry.
+    FoundryClaude,
 }
 
 impl ProviderKind {
@@ -49,6 +51,7 @@ impl ProviderKind {
             "bedrock-claude" => Some(Self::BedrockClaude),
             "vertex-claude" => Some(Self::VertexClaude),
             "vertex-gemini" => Some(Self::VertexGemini),
+            "foundry-claude" => Some(Self::FoundryClaude),
             _ => None,
         }
     }
@@ -63,6 +66,7 @@ impl ProviderKind {
             Self::BedrockClaude => ProtocolFamily::BedrockClaude,
             Self::VertexClaude => ProtocolFamily::VertexClaude,
             Self::VertexGemini => ProtocolFamily::VertexGemini,
+            Self::FoundryClaude => ProtocolFamily::FoundryClaude,
         }
     }
 
@@ -71,6 +75,11 @@ impl ProviderKind {
             Self::AzureOpenAi => AuthStrategy::AzureToken,
             Self::BedrockClaude => AuthStrategy::AwsSigV4,
             Self::VertexClaude | Self::VertexGemini => AuthStrategy::GcpToken,
+            // Foundry: a plain API key uses `x-api-key` (Anthropic-style) — the
+            // default. AAD-token (`Authorization: Bearer`) profiles set
+            // `auth = Bearer` explicitly. See `foundry_claude` codec docs and
+            // the `(ApiKey, FoundryClaude)` auth arm in `client.rs`.
+            Self::FoundryClaude => AuthStrategy::ApiKey,
             Self::OpenAi | Self::OpenAiResponses | Self::Anthropic | Self::Gemini => {
                 AuthStrategy::ApiKey
             }
@@ -88,6 +97,7 @@ impl ProviderKind {
             Self::BedrockClaude => ProviderId::BedrockClaude,
             Self::VertexClaude => ProviderId::VertexClaude,
             Self::VertexGemini => ProviderId::VertexGemini,
+            Self::FoundryClaude => ProviderId::FoundryClaude,
         }
     }
 
@@ -779,7 +789,10 @@ pub fn pricing_provider_id_for_profile(profile_name: &str, provider_id: &Provide
                 ProviderId::Gemini
             }
             ProviderId::BedrockClaude => ProviderId::BedrockClaude,
-            ProviderId::AnthropicFirstParty => ProviderId::AnthropicFirstParty,
+            // Foundry hosts Claude models — price them via the Anthropic catalog.
+            ProviderId::FoundryClaude | ProviderId::AnthropicFirstParty => {
+                ProviderId::AnthropicFirstParty
+            }
             ProviderId::OpenAICompatible { name } => {
                 ProviderId::OpenAICompatible { name: name.clone() }
             }
@@ -924,6 +937,38 @@ mod tests {
                 .as_ref()
                 .map(|s| s.service.as_str()),
             Some("bedrock")
+        );
+    }
+
+    /// `foundry-claude` parses to the Foundry identity/protocol with `x-api-key`
+    /// (ApiKey) auth (parity 2.1.207 H-BIN-10). Pricing normalizes to Anthropic.
+    #[test]
+    fn foundry_claude_kind_parses_to_foundry_identity() {
+        let providers = one(
+            "foundry_user",
+            json!({
+                "type": "foundry-claude",
+                "baseUrl": "https://my-res.services.ai.azure.com/anthropic/",
+                "apiKeyEnv": "ANTHROPIC_FOUNDRY_API_KEY",
+                "models": [{"id": "claude-sonnet-4-5"}]
+            }),
+        );
+
+        let parsed = parse_provider_profiles_strict(&providers, ProviderParseOptions::strict_env())
+            .expect("providers parse");
+        let profile = &parsed[0].profile;
+
+        assert_eq!(profile.provider_id, ProviderId::FoundryClaude);
+        assert_eq!(profile.protocol, ProtocolFamily::FoundryClaude);
+        assert_eq!(profile.auth, AuthStrategy::ApiKey);
+        assert_eq!(
+            profile.base_url,
+            "https://my-res.services.ai.azure.com/anthropic/"
+        );
+        // Claude-on-Foundry bills through the Anthropic pricing namespace.
+        assert_eq!(
+            pricing_provider_id_for_profile("foundry_user", &profile.provider_id),
+            ProviderId::AnthropicFirstParty
         );
     }
 

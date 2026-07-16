@@ -89,8 +89,8 @@ pub use provider_settings::{
     ParsedUserProvider, ProviderCredentialMode, ProviderKind, ProviderParseOptions,
 };
 pub use providers::{
-    AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, GeminiCodec, GeminiFile,
-    OpenAiChatCodec, OpenAiResponsesCodec, VertexClaudeCodec, VertexGeminiCodec,
+    AnthropicMessagesCodec, AzureOpenAiCodec, BedrockClaudeCodec, FoundryClaudeCodec, GeminiCodec,
+    GeminiFile, OpenAiChatCodec, OpenAiResponsesCodec, VertexClaudeCodec, VertexGeminiCodec,
 };
 pub use redaction::Redactor;
 pub use registry::{ModelListing, ModelRegistry, ResolvedRoute};

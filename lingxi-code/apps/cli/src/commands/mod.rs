@@ -36,6 +36,7 @@ pub mod plugin_prune;
 pub mod plugin_settings;
 pub mod plugin_tag;
 pub mod project;
+pub mod rm;
 pub mod setup_token;
 pub mod ultrareview;
 pub mod update;
@@ -71,6 +72,9 @@ pub enum Commands {
     SetupToken(setup_token::Cli),
     /// Manage background agents
     Agents(agents::Cli),
+    /// Delete a background session and its worktree. Unlike `stop`, works on
+    /// already-exited sessions.
+    Rm(rm::Cli),
     /// Run a cloud-hosted multi-agent code review of the current branch (or a
     /// PR number / base branch) and print the findings
     Ultrareview(ultrareview::Cli),
@@ -104,6 +108,7 @@ impl Commands {
             Commands::Project(_) => "project",
             Commands::SetupToken(_) => "setup-token",
             Commands::Agents(_) => "agents",
+            Commands::Rm(_) => "rm",
             Commands::Ultrareview(_) => "ultrareview",
             Commands::Update(_) => "update",
             Commands::Daemon(_) => "daemon",
@@ -124,6 +129,7 @@ impl Commands {
             Commands::Project(c) => project::run(c).await,
             Commands::SetupToken(c) => setup_token::run(c).await,
             Commands::Agents(c) => agents::run(c).await,
+            Commands::Rm(c) => rm::run(c).await,
             Commands::Ultrareview(c) => ultrareview::run(c).await,
             Commands::Update(c) => update::run(c).await,
             Commands::Daemon(c) => daemon::run(c).await,

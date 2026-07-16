@@ -552,6 +552,49 @@ fn session_has_live_worker(home: &Path, session_id: &str) -> bool {
     })
 }
 
+/// Delete the background session driving `session_id` (the FleetView Ctrl-X
+/// two-press confirm): resolve its `jobs/<short>`, stop a live worker, and
+/// remove the job state (+ a managed worktree, kept on failure). Emits
+/// `tengu_bg_agent_action{action:"delete",source:"fleet"}` via
+/// [`crate::commands::rm::perform_delete`]. Best-effort — a session with no
+/// job row (e.g. a live-only interactive session) is left untouched.
+fn delete_agent(home: &Path, session_id: &str) {
+    use crate::agents_registry as reg;
+    let jobs = reg::read_jobs(&reg::jobs_dir(home));
+    if let Some((short, job)) = jobs
+        .iter()
+        .find(|(_, j)| j.session_id.as_deref() == Some(session_id))
+    {
+        let _ = crate::commands::rm::stop_worker(job);
+        let _ = crate::commands::rm::perform_delete(home, short, job, "fleet");
+    }
+}
+
+/// Stop every running background worker (the FleetView `Ctrl+X Ctrl+K` chord):
+/// `SIGTERM` each job whose recorded `workerPid` is still alive. Emits
+/// `tengu_bg_agent_action{action:"stop",source:"fleet"}` per stopped worker.
+/// Job state is NOT removed — stop-all only halts the live work.
+fn stop_all_agents(home: &Path) {
+    use crate::agents_registry as reg;
+    let jobs = reg::read_jobs(&reg::jobs_dir(home));
+    for (short, job) in &jobs {
+        let probe = crate::daemon_roster::SystemProbe;
+        let alive = job
+            .worker_pid
+            .is_some_and(|pid| crate::daemon_roster::ProcProbe::is_alive(&probe, pid));
+        if !alive {
+            continue;
+        }
+        let _ = crate::commands::rm::stop_worker(job);
+        tracing::info!(
+            event = "tengu_bg_agent_action",
+            action = "stop",
+            source = "fleet",
+            short = short.as_str()
+        );
+    }
+}
+
 /// Mount the agents view: draw/event loop on the alternate screen; `Enter`
 /// attaches (terminal restored, `lingxi-cli --resume <sid>` runs to
 /// completion, view remounts with FRESH registry rows — the 2.1.198 "return
@@ -633,6 +676,19 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
                     eprintln!("lingxi-cli agents: attach failed: {e}");
                     return crate::exit_codes::RUNTIME_ERROR;
                 }
+                watcher.observe();
+                state.reload(load_view_rows(cli));
+            }
+            Ok(AgentsOutcome::Delete(session_id)) => {
+                // Two-press Ctrl-X: kill the live worker (if any) and remove
+                // the job state, then remount with fresh rows.
+                delete_agent(&crate::run::lingxi_home_dir(), &session_id);
+                watcher.observe();
+                state.reload(load_view_rows(cli));
+            }
+            Ok(AgentsOutcome::StopAll) => {
+                // Ctrl+X Ctrl+K: stop all running agents + background work.
+                stop_all_agents(&crate::run::lingxi_home_dir());
                 watcher.observe();
                 state.reload(load_view_rows(cli));
             }

@@ -350,6 +350,7 @@ mod tests {
             in_flight: None,
             backend: Some("daemon"),
             initial_prompt: Some(prompt),
+            detail: None,
             worker_pid: None,
         };
         write_job_state(home, short, &job).unwrap();

@@ -590,6 +590,13 @@ pub struct JobStateWrite<'a> {
     /// First prompt of the job session.
     #[serde(rename = "initialPrompt", skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<&'a str>,
+    /// Failure/status detail line surfaced in the agent view (e.g. the
+    /// `spawn_cwd_gone` "working directory no longer exists…" message the daemon
+    /// stamps when it fails a job whose cwd vanished). Omitted (`None`) for a
+    /// fresh `--bg` job — `skip_serializing_if` keeps a fresh job's `state.json`
+    /// byte-unchanged, and the reader tolerates the additive key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<&'a str>,
     /// OS pid of the live worker executing this job (recorded by the daemon
     /// supervisor on spawn; cleared — omitted — when the job reaches a terminal
     /// state). Serialized LAST so the pinned observed key order (through
@@ -658,6 +665,34 @@ pub fn update_job_state(
     new_state: &str,
     worker_pid: Option<i32>,
 ) -> std::io::Result<()> {
+    update_job_state_inner(config_home, short, new_state, worker_pid, None)
+}
+
+/// [`update_job_state`] that also stamps a `detail` line on the job. Used by the
+/// daemon supervisor to record WHY a job failed — e.g. the byte-faithful
+/// `spawn_cwd_gone` detail `working directory no longer exists or is not
+/// accessible: <cwd>` (CC's `settleCwdGone`) — so the agent view can surface it.
+pub fn update_job_state_with_detail(
+    config_home: &Path,
+    short: &str,
+    new_state: &str,
+    worker_pid: Option<i32>,
+    detail: &str,
+) -> std::io::Result<()> {
+    update_job_state_inner(config_home, short, new_state, worker_pid, Some(detail))
+}
+
+/// Read-modify-write core shared by [`update_job_state`] /
+/// [`update_job_state_with_detail`]. `detail: None` preserves the fixed
+/// (detail-less) write shape existing callers depend on; `Some` stamps the
+/// detail line.
+fn update_job_state_inner(
+    config_home: &Path,
+    short: &str,
+    new_state: &str,
+    worker_pid: Option<i32>,
+    detail: Option<&str>,
+) -> std::io::Result<()> {
     let existing = read_job(config_home, short).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -686,6 +721,7 @@ pub fn update_job_state(
         in_flight: existing.in_flight.as_ref(),
         backend: existing.backend.as_deref(),
         initial_prompt: existing.initial_prompt.as_deref(),
+        detail,
         worker_pid,
     };
     write_job_state(config_home, short, &job)
@@ -1214,6 +1250,7 @@ mod tests {
             in_flight: None,
             backend: Some("daemon"),
             initial_prompt: Some(prompt),
+            detail: None,
             worker_pid: None,
         }
     }
@@ -1371,6 +1408,33 @@ mod tests {
         let f = read_job(home, "aaaa1111").unwrap();
         assert!(job_is_terminal(&f));
         assert_eq!(merged_state(&f, None), "failed");
+        // The detail-less writer never emits a `detail` key (fresh-job shape).
+        let raw = std::fs::read_to_string(jobs_dir(home).join("aaaa1111/state.json")).unwrap();
+        assert!(!raw.contains(r#""detail""#));
+    }
+
+    #[test]
+    fn update_job_state_with_detail_stamps_the_detail_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let respawn: Vec<String> = Vec::new();
+        let job = fresh_bg_job("s", "/w", "2026-07-04T00:00:00.000Z", "i", "p", &respawn);
+        write_job_state(home, "beef0001", &job).unwrap();
+        update_job_state_with_detail(
+            home,
+            "beef0001",
+            "failed",
+            None,
+            "working directory no longer exists or is not accessible: /w",
+        )
+        .unwrap();
+        let f = read_job(home, "beef0001").unwrap();
+        assert!(job_is_terminal(&f));
+        assert_eq!(
+            f.detail.as_deref(),
+            Some("working directory no longer exists or is not accessible: /w")
+        );
+        assert_eq!(f.worker_pid, None);
     }
 
     #[test]

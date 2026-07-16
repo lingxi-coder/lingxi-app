@@ -160,6 +160,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         in_flight: None,
         backend: Some("daemon"),
         initial_prompt: argv.prompt.as_deref(),
+        detail: None,
         // No live worker yet — the supervisor records the worker pid on spawn.
         worker_pid: None,
     };

@@ -4594,6 +4594,15 @@ pub async fn build(
     // `None` only when enforcement is off (no boot policy is built) — the
     // `tool_ctx` literal then falls back to a Default-mode policy with roots.
     let mut boot_permission_policy: Option<Arc<permission::PermissionPolicy>> = None;
+    // H-CHG-02: capture the enforcing gate's set-once LIVE-model cell (cycle-break)
+    // so it can be filled once the orchestrator (owner of the live `session.model`)
+    // exists — the live `set_permission_mode` auto gate then evaluates `dUe(wi())`
+    // against the CURRENT model (mutated by `/model` switches / resume), mirroring
+    // claude-code `Nle` reading `wi()`. `None` when enforcement is off (no
+    // `PolicyPermissionGate` is built, so there is no live surface to gate).
+    let mut live_model_provider_cell: Option<
+        Arc<std::sync::OnceLock<permission::LiveModelProvider>>,
+    > = None;
     // The session's additional working directories (settings
     // `additionalDirectories` union CLI `--add-dir`), captured out of the
     // enforcement branch so BOTH the file-tool `trusted_dirs` (below) and the
@@ -4732,7 +4741,12 @@ pub async fn build(
             mode = ?mode,
             "permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0)"
         );
-        Arc::new(permission::PolicyPermissionGate::new(policy, perms))
+        // Grab the LIVE-model cell BEFORE coercing to `Arc<dyn PermissionGate>`
+        // (the concrete handle is only reachable pre-coercion); it is filled once
+        // the orchestrator exists (below).
+        let enforcing = permission::PolicyPermissionGate::new(policy, perms);
+        live_model_provider_cell = Some(enforcing.live_model_provider_handle());
+        Arc::new(enforcing)
     } else {
         // Enforcement off: the settings `additionalDirectories` tiers are not
         // loaded here, but the CLI `--add-dir` dirs still widen file-tool access
@@ -6359,6 +6373,17 @@ pub async fn build(
     {
         let session = orch.session();
         let _ = subagent_default_model_provider_cell.set(std::sync::Arc::new(move || {
+            session.try_lock().ok().map(|s| s.model.clone())
+        }));
+    }
+    // H-CHG-02: wire the enforcing gate's live `set_permission_mode` auto gate to
+    // the SAME live `session.model` source, so a runtime switch to `auto` after a
+    // `/model` to an auto-unsupported model is rejected (`dUe(wi())` — claude-code
+    // `Nle`) instead of silently accepted. Non-blocking read (`try_lock`); a
+    // contended read returns `None` and the model check is skipped (fail-open).
+    if let Some(cell) = live_model_provider_cell.as_ref() {
+        let session = orch.session();
+        let _ = cell.set(std::sync::Arc::new(move || {
             session.try_lock().ok().map(|s| s.model.clone())
         }));
     }

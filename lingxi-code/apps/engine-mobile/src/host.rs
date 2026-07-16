@@ -710,6 +710,13 @@ pub async fn build_mobile_inner(
     // shares the SAME base policy the model-facing gate enforces (the prompt
     // shell-expansion provider reads it as the base for embedded `!`cmd`` bodies).
     let mut boot_permission_policy: Option<Arc<permission::PermissionPolicy>> = None;
+    // H-CHG-02: capture the enforcing gate's set-once LIVE-model cell (cycle-break),
+    // filled once the orchestrator (owner of the live `session.model`) exists, so
+    // the live `set_permission_mode` auto gate evaluates `dUe(wi())` against the
+    // CURRENT model — mirrors the desktop composition root.
+    let mut live_model_provider_cell: Option<
+        Arc<std::sync::OnceLock<permission::LiveModelProvider>>,
+    > = None;
     let perms: Arc<dyn PermissionGate> = {
         let mut rules = Vec::new();
         let mut mode = PermissionMode::Default;
@@ -815,10 +822,12 @@ pub async fn build_mobile_inner(
         // Share the boot policy into `tool_ctx` for the prompt shell-expansion
         // gate (clone the `Arc` BEFORE `policy` moves into the gate below).
         boot_permission_policy = Some(policy.clone());
-        Arc::new(permission::PolicyPermissionGate::new(
-            policy,
-            adapter_gate.clone(),
-        ))
+        // Grab the LIVE-model cell BEFORE coercing to `Arc<dyn PermissionGate>`;
+        // filled once the orchestrator exists (below).
+        let enforcing =
+            permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
+        live_model_provider_cell = Some(enforcing.live_model_provider_handle());
+        Arc::new(enforcing)
     };
 
     // (6) Hook executor + memory provider.
@@ -1203,6 +1212,18 @@ pub async fn build_mobile_inner(
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
     }
     let orch = Arc::new(orch_inner);
+
+    // H-CHG-02: wire the enforcing gate's live `set_permission_mode` auto gate to
+    // the LIVE `session.model` (mutated by `/model` switches / resume), so a
+    // runtime switch to `auto` on an auto-unsupported model is rejected
+    // (`dUe(wi())` — claude-code `Nle`). Non-blocking `try_lock`; a contended read
+    // returns `None` and the model check is skipped (fail-open). Desktop mirror.
+    if let Some(cell) = live_model_provider_cell.as_ref() {
+        let session = orch.session();
+        let _ = cell.set(std::sync::Arc::new(move || {
+            session.try_lock().ok().map(|s| s.model.clone())
+        }));
+    }
 
     // (8) Command registry through the mobile composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();

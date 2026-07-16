@@ -1887,14 +1887,24 @@ pub fn validate_ps_statement(
         if !RGG.contains(normalize_cmdlet(&l.name).as_str()) {
             non_readonly_seen = true;
         }
-        if let Some(deny) = run_ps_command(l, ctx, &dirs, pipeline_source, prev, &mut ask) {
+        if let Some(deny) = run_ps_command(l, ctx, &dirs, pipeline_source, prev, false, false, &mut ask)
+        {
             return deny;
         }
     }
+    // Whether the main pipeline contained a non-CommandAst expression element
+    // (claude-code `i`) — used only by the nested-command loop below.
+    let stmt_has_expression = pipeline_source;
 
-    // Nested commands (script blocks / control flow).
+    // Nested commands (script blocks / control flow). claude-code's nested-command
+    // loop (`RRg`) differs from the main loop: it does NOT run the pipeline-source
+    // ask, the upstream-pipeline ask, or the `Remove-Item -Recurse` cwd check, and
+    // it ends each command with the control-flow ask when the main pipeline held an
+    // expression source (`stmt_has_expression`).
     for l in &stmt.nested_commands {
-        if let Some(deny) = run_ps_command(l, ctx, &dirs, false, false, &mut ask) {
+        if let Some(deny) =
+            run_ps_command(l, ctx, &dirs, false, false, true, stmt_has_expression, &mut ask)
+        {
             return deny;
         }
     }
@@ -1915,12 +1925,20 @@ pub fn validate_ps_statement(
 /// Run one command's path checks (claude-code `xgg`'s per-command body). Returns
 /// `Some(deny)` on a `Remove-Item` protected-path hit; otherwise updates the
 /// first-ask accumulator.
+///
+/// `nested` selects claude-code's nested-command loop shape: it suppresses the
+/// `Remove-Item -Recurse` working-directory check (which claude-code runs only in
+/// the main pipeline loop) and, when `stmt_has_expression` is set, appends the
+/// control-flow/chain ask after the path loop.
+#[allow(clippy::too_many_arguments)]
 fn run_ps_command(
     l: &PsCommand,
     ctx: &PsCtx,
     dirs: &[String],
     pipeline_source: bool,
     prev_non_readonly: bool,
+    nested: bool,
+    stmt_has_expression: bool,
     ask: &mut Option<PsContainmentResult>,
 ) -> Option<PsContainmentResult> {
     let roots = ctx.roots;
@@ -1959,7 +1977,10 @@ fn run_ps_command(
     }
 
     let is_remove = f == "remove-item";
-    if is_remove && l.args.iter().any(|a| is_recurse_flag(a)) {
+    // claude-code runs the `-Recurse` cwd guard ONLY in the main pipeline loop —
+    // the nested-command loop omits it. Gating on `!nested` removes the port's
+    // anti-parity extra ask for nested `Remove-Item -Recurse`.
+    if !nested && is_remove && l.args.iter().any(|a| is_recurse_flag(a)) {
         let cwd_fold = casefold_path(&roots.cwd.to_string_lossy());
         for b in &extraction.paths {
             let v = expand_tilde(&short_name_expand(b, ctx.is_windows), home.as_deref())
@@ -2004,6 +2025,15 @@ fn run_ps_command(
                 set_first_ask(ask, cmdlet_containment_message(&f, &resolved, dirs));
             }
         }
+    }
+
+    // claude-code nested-command loop tail (`if(i)o??=…`): when the statement's
+    // main pipeline contained a non-CommandAst expression source, each nested
+    // command ends with the control-flow/chain ask.
+    if nested && stmt_has_expression {
+        set_first_ask(ask, format!(
+            "{f} appears inside a control-flow or chain statement where piped expression sources cannot be statically validated and requires manual approval"
+        ));
     }
     None
 }

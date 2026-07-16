@@ -5822,6 +5822,7 @@ dependencies = [
  "once_cell",
  "permission",
  "protocol",
+ "regex",
  "serde",
  "serde_json",
  "telemetry",
@@ -5831,6 +5832,7 @@ dependencies = [
  "tool-api",
  "tracing",
  "traits",
+ "unicode-normalization",
 ]
 
 [[package]]

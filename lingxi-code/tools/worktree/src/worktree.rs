@@ -15,11 +15,13 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
-use permission::result::PermissionMetadata;
+use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use unicode_normalization::UnicodeNormalization;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -364,6 +366,134 @@ fn pii_tagged(s: impl Into<String>) -> AnalyticsValue {
     AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(s.into()).into_inner())
 }
 
+/// Display-sanitizer control/format/spacing class — byte-faithful port of the
+/// 2.1.207 binary's `wIy` regex used by `Dxs`:
+/// `/[\p{Cc}\p{Cf}\p{Cn}\p{Co}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}⠀]|(?! )\p{Zs}/gu`.
+/// The JS negative-lookahead `(?! )\p{Zs}` (a space-separator that is not
+/// U+0020) is expressed with a class intersection `[\p{Zs}&&[^\x{20}]]`, which
+/// the `regex` crate supports directly (it has no lookaround). Every match is
+/// replaced with U+FFFD so a model-supplied worktree path can never smuggle
+/// control chars, bidi overrides, zero-width joiners, or exotic spaces into the
+/// confirmation prompt (anti-spoofing). Matches CC exactly because `regex`
+/// bundles the same Unicode general-category + `Default_Ignorable_Code_Point`
+/// tables.
+static DISPLAY_CTRL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"[\p{Cc}\p{Cf}\p{Cn}\p{Co}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\x{2800}[\p{Zs}&&[^\x{20}]]]",
+    )
+    .expect("worktree display-sanitizer control regex must compile")
+});
+
+/// Display-sanitizer fancy-quote class — byte-faithful port of the 2.1.207
+/// binary's `AIy` regex applied by `n(l)=Dxs(l).replace(AIy,"�")`:
+/// `/["“”‟″‶＂〝〞〟ʺˮ˝״]/g`.
+/// Replaces the ASCII double-quote and a set of look-alike quote glyphs with
+/// U+FFFD so a path cannot forge the `"…"` delimiters wrapping it in the prompt.
+static DISPLAY_QUOTE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new("[\"\u{201C}\u{201D}\u{201F}\u{2033}\u{2036}\u{FF02}\u{301D}\u{301E}\u{301F}\u{02BA}\u{02EE}\u{02DD}\u{05F4}]")
+        .expect("worktree display-sanitizer quote regex must compile")
+});
+
+/// Sanitize a path for display in the `EnterWorktree` confirmation prompt —
+/// 2.1.207 `n(l) = Dxs(l).replace(AIy, "�")`: first the control/format
+/// class ([`DISPLAY_CTRL_RE`]), then the fancy-quote class ([`DISPLAY_QUOTE_RE`]),
+/// each collapsed to U+FFFD. A clean ASCII/normal path passes through unchanged.
+#[must_use]
+fn sanitize_display(s: &str) -> String {
+    let step1 = DISPLAY_CTRL_RE.replace_all(s, "\u{FFFD}");
+    DISPLAY_QUOTE_RE.replace_all(&step1, "\u{FFFD}").into_owned()
+}
+
+/// Lexically normalize a path (collapse `.`/`..`/duplicate separators) WITHOUT
+/// touching the filesystem — the normalization half of Node's `path.resolve`.
+/// A leading `..` at (or above) the root is dropped, matching Node.
+#[must_use]
+fn normalize_lexically(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(comp),
+            },
+            other => out.push(other),
+        }
+    }
+    let mut pb = PathBuf::new();
+    for comp in out {
+        pb.push(comp.as_os_str());
+    }
+    pb
+}
+
+/// Byte-faithful port of the 2.1.207 binary's `jYr.resolve(Ct(), e.path)` — the
+/// LEXICAL resolve of a model-supplied worktree path against the session cwd
+/// (`r` in the checkPermissions closure). An absolute `path` is normalized
+/// as-is; a relative one is joined onto `cwd` first. Never resolves symlinks
+/// (that is the separate realpath step — see [`resolve_enter_target`]).
+#[must_use]
+fn lexical_resolve(cwd: &Path, path: &str) -> PathBuf {
+    let p = Path::new(path);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
+    normalize_lexically(&joined)
+}
+
+/// Walk up from `start` to the nearest ancestor holding a `.git` entry (file or
+/// directory) — the port's stand-in for the binary's `em(cwd)` git top-level
+/// (`git rev-parse --show-toplevel`). A `.git` FILE marks a linked worktree's
+/// root; a `.git` DIRECTORY marks the main checkout. Returns `None` outside any
+/// git repository (then no path can be "managed" and the confirmation always
+/// fires).
+#[must_use]
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// Result of resolving a worktree-entry `path` against the filesystem — the
+/// port's analog of the 2.1.207 binary's `N6i(e.path)` return `{targetReal,
+/// managed}`. `target_real` is the realpath of the (lexically resolved) target
+/// when it exists on disk, else `None` (the binary's `t === null` case, where
+/// the prompt omits the "resolves to" clause). `managed` is `true` only when
+/// that realpath lives strictly under the repo's `.lingxi/worktrees/` managed
+/// root — the silent-allow case.
+struct EnterTargetInfo {
+    target_real: Option<PathBuf>,
+    managed: bool,
+}
+
+/// Resolve a lexically-resolved worktree target to its realpath + managed flag
+/// (2.1.207 `N6i`). `managed` requires the realpath to sit strictly beneath the
+/// realpath of `<repo_root>/.lingxi/worktrees/` (the binary's
+/// `phe(o).startsWith(phe(l + sep))` under a symlink-free managed root); a
+/// target that IS the managed root itself, or lives outside it, is not managed.
+fn resolve_enter_target(cwd: &Path, resolved: &Path) -> EnterTargetInfo {
+    let target_real = std::fs::canonicalize(resolved).ok();
+    let managed = match (target_real.as_ref(), find_repo_root(cwd)) {
+        (Some(real), Some(repo_root)) => std::fs::canonicalize(
+            repo_root.join(WORKTREE_PATH_SEGMENT),
+        )
+        .ok()
+        .is_some_and(|root_real| real.starts_with(&root_real) && *real != root_real),
+        _ => false,
+    };
+    EnterTargetInfo {
+        target_real,
+        managed,
+    }
+}
+
 /// `EnterWorktreeTool` — creates a disposable worktree via the M2-01
 /// `WorktreeManager` trait. Branch + path layout are byte-locked.
 pub struct EnterWorktreeTool {
@@ -681,13 +811,111 @@ impl Tool for EnterWorktreeTool {
         InterruptBehavior::Block
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        PermissionResult::Allow {
-            reason: PermissionDecisionReason::Other {
-                reason: "EnterWorktree gated by M2-01 WorktreeManager".into(),
+    /// 2.1.206/207 `checkPermissions` (byte-extracted from the binary tool
+    /// object). Three outcomes:
+    /// - No `path` (create) ⇒ `allow` — creating a worktree under the managed
+    ///   `.lingxi/worktrees/` root never relocates the permission root to an
+    ///   untrusted place.
+    /// - `path` resolving strictly UNDER the repo's `.lingxi/worktrees/`
+    ///   (`t?.managed`) ⇒ `allow`, with the input's `path` rewritten to the
+    ///   realpath (`updatedInput:{...e, path:t.targetReal}`).
+    /// - Any other `path` ⇒ `ask` with the byte-exact relocation confirmation
+    ///   (`.claude/worktrees/`→`.lingxi/worktrees/` and `CLAUDE.md`→`LINGXI.md`
+    ///   per this module's rebrand rule), tagged
+    ///   [`PermissionDecisionReason::SafetyCheck`] with
+    ///   `classifier_approvable: false` (206 `classifierApprovable:!1`) so no
+    ///   classifier or allow-rule can auto-approve a model-supplied worktree
+    ///   outside the managed root. The displayed path is passed through
+    ///   [`sanitize_display`] and gains a ` (resolves to "…")` clause when the
+    ///   realpath differs from the lexical resolve and a
+    ///   ` (path sanitized for display)` clause when sanitization changed it —
+    ///   byte-faithful to the binary's `${o}${a}${s}` assembly.
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        // 206 `e.path` is a JS truthiness check — an empty string is falsy and
+        // counts as "no path" (create). `!e.path` ⇒ allow (create branch).
+        let Some(path) = input
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+        else {
+            return PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "EnterWorktree create stays under the managed worktrees root".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            };
+        };
+
+        // `Ct()` — a pinned/isolated subagent resolves against its own cwd
+        // override, the main session against the shared session cwd.
+        let cwd = ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd());
+        let resolved = lexical_resolve(&cwd, path); // 206 `r = jYr.resolve(Ct(), e.path)`
+        let target = resolve_enter_target(&cwd, &resolved); // 206 `t = N6i(e.path)`
+
+        // 206 `if(t?.managed)` ⇒ allow, rewriting `path` to the realpath.
+        if target.managed {
+            let real = target
+                .target_real
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            let mut updated = input.clone();
+            if let (Some(obj), Some(real)) = (updated.as_object_mut(), real) {
+                obj.insert("path".into(), Value::String(real));
+            }
+            return PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "EnterWorktree target is under the managed worktrees root".into(),
+                },
+                updated_input: Some(updated),
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            };
+        }
+
+        // 206 ask branch: assemble `${o}${a}${s}` from the sanitized lexical
+        // resolve (`o`), an optional "resolves to" clause (`a`), and an optional
+        // "path sanitized for display" clause (`s`).
+        let resolved_str = resolved.to_string_lossy().into_owned(); // 206 `r`
+        let o = sanitize_display(&resolved_str); // 206 `o = n(r)`
+        let target_real_str = target
+            .target_real
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        let i = target_real_str.as_deref().map(sanitize_display); // 206 `i = t ? n(t.targetReal) : null`
+
+        // 206 `s = o!==r || (t && i!==t.targetReal) ? " (path sanitized for display)" : ""`.
+        let sanitized_changed = o != resolved_str
+            || matches!((target_real_str.as_deref(), i.as_deref()), (Some(tr), Some(is)) if is != tr);
+        let s = if sanitized_changed {
+            " (path sanitized for display)"
+        } else {
+            ""
+        };
+        // 206 `a = i!==null && NFC(i)!==NFC(o) ? ` (resolves to "${i}")` : ""`.
+        let a = match &i {
+            Some(is) if is.nfc().ne(o.nfc()) => format!(" (resolves to \"{is}\")"),
+            _ => String::new(),
+        };
+
+        let message = format!(
+            "Enter the worktree at \"{o}\"{a}{s}? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location."
+        );
+        let reason = format!(
+            "permission-root relocation to \"{o}\"{a}{s} \u{2014} a model-supplied worktree outside .lingxi/worktrees/"
+        );
+        PermissionResult::Ask {
+            reason: PermissionDecisionReason::SafetyCheck {
+                reason,
+                classifier_approvable: false,
             },
-            updated_input: None,
-            update_destination: None,
+            prompt: PermissionPrompt {
+                title: ENTER_TOOL_NAME.into(),
+                message,
+                options: vec![],
+            },
+            pending_classifier_check: None,
             metadata: PermissionMetadata::default(),
         }
     }
@@ -2962,5 +3190,188 @@ mod tests {
             bctx.worktree_session.lock().unwrap().is_none(),
             "session cleared after exit"
         );
+    }
+
+    // ===== 206/207 EnterWorktree::check_permissions relocation gate (H-CHG-P3A) =
+
+    /// A context whose live session cwd is `cwd` (trusted set = `[cwd]`). The
+    /// mock worktree manager is unused here — `check_permissions` never touches
+    /// it (it reads only cwd + the filesystem).
+    fn bctx_at(cwd: PathBuf) -> BuiltinToolContext {
+        ctx_for_file_tools(make_dummy_fs(), Arc::new(AnalyticsBus::new()), vec![cwd])
+    }
+
+    /// A git-repo scaffold on disk (`<root>/.git`, `<root>/.lingxi/worktrees/`),
+    /// with `root` already canonicalized so the tests' expected strings are
+    /// symlink-free (macOS `/var`→`/private/var`).
+    fn scaffold_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".lingxi/worktrees")).unwrap();
+        (dir, root)
+    }
+
+    /// No `path` (create) ⇒ the tool self-allows: creating a worktree under the
+    /// managed root never relocates the permission root (206 `!e.path`).
+    #[tokio::test]
+    async fn check_permissions_create_allows() {
+        let (_d, root) = scaffold_repo();
+        let tool = EnterWorktreeTool::new(bctx_at(root));
+        let res = tool
+            .check_permissions(&json!({ "name": "feat" }), &fresh_ctx())
+            .await;
+        assert!(
+            matches!(res, PermissionResult::Allow { .. }),
+            "create must allow, got {res:?}"
+        );
+    }
+
+    /// A `path` resolving strictly under `<repo>/.lingxi/worktrees/` ⇒ allow,
+    /// with `path` rewritten to the realpath (206 `t?.managed` branch,
+    /// `updatedInput:{...e, path:t.targetReal}`).
+    #[tokio::test]
+    async fn check_permissions_managed_path_allows_with_realpath_rewrite() {
+        let (_d, root) = scaffold_repo();
+        let wt = root.join(".lingxi/worktrees/foo");
+        std::fs::create_dir_all(&wt).unwrap();
+        let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
+        let res = tool
+            .check_permissions(&json!({ "path": wt.to_str().unwrap() }), &fresh_ctx())
+            .await;
+        match res {
+            PermissionResult::Allow { updated_input, .. } => {
+                let updated = updated_input.expect("managed allow rewrites `path` to realpath");
+                assert_eq!(updated["path"], json!(wt.to_string_lossy().into_owned()));
+            }
+            other => panic!("managed path must allow, got {other:?}"),
+        }
+    }
+
+    /// A `path` outside the managed root ⇒ ask, with the byte-exact 206/207
+    /// relocation confirmation + `SafetyCheck` reason (`classifierApprovable:!1`).
+    #[tokio::test]
+    async fn check_permissions_unmanaged_path_asks_byte_exact() {
+        let (_d, root) = scaffold_repo();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
+        let res = tool
+            .check_permissions(&json!({ "path": outside.to_str().unwrap() }), &fresh_ctx())
+            .await;
+        let o = outside.to_string_lossy();
+        match res {
+            PermissionResult::Ask {
+                reason,
+                prompt,
+                pending_classifier_check,
+                ..
+            } => {
+                assert_eq!(prompt.title, "EnterWorktree");
+                assert!(prompt.options.is_empty());
+                assert_eq!(
+                    prompt.message,
+                    format!(
+                        "Enter the worktree at \"{o}\"? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location."
+                    )
+                );
+                match reason {
+                    PermissionDecisionReason::SafetyCheck {
+                        reason,
+                        classifier_approvable,
+                    } => {
+                        assert!(!classifier_approvable, "must not be classifier-approvable");
+                        assert_eq!(
+                            reason,
+                            format!(
+                                "permission-root relocation to \"{o}\" \u{2014} a model-supplied worktree outside .lingxi/worktrees/"
+                            )
+                        );
+                    }
+                    other => panic!("expected SafetyCheck reason, got {other:?}"),
+                }
+                assert!(pending_classifier_check.is_none());
+            }
+            other => panic!("unmanaged path must ask, got {other:?}"),
+        }
+    }
+
+    /// A `path` carrying a control/format char is displayed sanitized (each such
+    /// char → U+FFFD) AND flagged ` (path sanitized for display)` — 206 `s`
+    /// clause. The exotic char makes the target non-existent, so there is no
+    /// realpath and no "resolves to" clause.
+    #[tokio::test]
+    async fn check_permissions_sanitizes_display_and_flags_it() {
+        let (_d, root) = scaffold_repo();
+        // U+200B ZERO WIDTH SPACE (general category Cf).
+        let raw = format!("{}/wt\u{200B}x", root.to_string_lossy());
+        let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
+        let res = tool
+            .check_permissions(&json!({ "path": raw }), &fresh_ctx())
+            .await;
+        let sanitized = format!("{}/wt\u{FFFD}x", root.to_string_lossy());
+        match res {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                format!(
+                    "Enter the worktree at \"{sanitized}\" (path sanitized for display)? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location."
+                )
+            ),
+            other => panic!("must ask, got {other:?}"),
+        }
+    }
+
+    /// When the realpath differs from the lexical resolve (a symlinked target),
+    /// the prompt gains the ` (resolves to "…")` clause — 206 `a` clause.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_permissions_shows_resolves_to_for_symlinked_target() {
+        let (_d, root) = scaffold_repo();
+        let real_target = root.join("real_wt");
+        std::fs::create_dir_all(&real_target).unwrap();
+        let link = root.join("link_wt");
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+        let tool = EnterWorktreeTool::new(bctx_at(root.clone()));
+        let res = tool
+            .check_permissions(&json!({ "path": link.to_str().unwrap() }), &fresh_ctx())
+            .await;
+        let o = link.to_string_lossy();
+        let i = real_target.to_string_lossy();
+        match res {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                format!(
+                    "Enter the worktree at \"{o}\" (resolves to \"{i}\")? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location."
+                )
+            ),
+            other => panic!("must ask, got {other:?}"),
+        }
+    }
+
+    /// [`sanitize_display`] — byte-faithful `Dxs`+`AIy`: clean paths pass
+    /// through; control/format/exotic-space chars and fancy/ASCII quotes become
+    /// U+FFFD; a plain U+0020 space is preserved.
+    #[test]
+    fn sanitize_display_matches_dxs_aiy() {
+        assert_eq!(sanitize_display("/repo/clean-path_1.2"), "/repo/clean-path_1.2");
+        assert_eq!(sanitize_display("a\u{200B}b"), "a\u{FFFD}b"); // Cf zero-width space
+        assert_eq!(sanitize_display("a\u{202E}b"), "a\u{FFFD}b"); // Cf RTL override
+        assert_eq!(sanitize_display("a\u{00A0}b"), "a\u{FFFD}b"); // Zs no-break space
+        assert_eq!(sanitize_display("a\u{2800}b"), "a\u{FFFD}b"); // braille blank
+        assert_eq!(sanitize_display("a b"), "a b"); // U+0020 kept
+        assert_eq!(sanitize_display("a\u{201C}b\u{201D}c"), "a\u{FFFD}b\u{FFFD}c"); // fancy quotes
+        assert_eq!(sanitize_display("say \"hi\""), "say \u{FFFD}hi\u{FFFD}"); // ASCII dquote
+    }
+
+    /// [`lexical_resolve`] mirrors Node `path.resolve(cwd, p)`: collapses
+    /// `.`/`..`/dup-separators without touching the filesystem; an absolute `p`
+    /// ignores `cwd`.
+    #[test]
+    fn lexical_resolve_matches_node_semantics() {
+        let cwd = Path::new("/repo/sub");
+        assert_eq!(lexical_resolve(cwd, "../foo"), PathBuf::from("/repo/foo"));
+        assert_eq!(lexical_resolve(cwd, "./x/./y"), PathBuf::from("/repo/sub/x/y"));
+        assert_eq!(lexical_resolve(cwd, "/abs/./path/.."), PathBuf::from("/abs"));
+        assert_eq!(lexical_resolve(cwd, "a/b/../c"), PathBuf::from("/repo/sub/a/c"));
     }
 }

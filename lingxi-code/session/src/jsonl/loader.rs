@@ -695,6 +695,33 @@ pub async fn load_session(
     Ok(chain)
 }
 
+/// (P2-02 cc2.1.207) Read the persisted `agent-setting` for `session_id` from its
+/// transcript, if present — the resume read side of claude's
+/// `agentSettings.get(sessionId)` lookup that feeds `rVe`. Returns the stored
+/// `agentSetting` string (the applied agent's `agentType`), or `None` when the
+/// transcript is absent/unreadable, carries no `agent-setting` record for this
+/// session, or the record's `agentSetting` is not a string.
+///
+/// `transcript_path` is the session's `<uuid>.jsonl` file; `session_id` MUST be
+/// the bare uuid stem the writer keyed the record by (see
+/// [`crate::jsonl::writer::JsonlWriter::append_agent_setting`]).
+pub async fn read_agent_setting(
+    transcript_path: &Path,
+    fs: Arc<dyn FileSystem>,
+    session_id: &str,
+) -> Option<String> {
+    if !tokio::fs::try_exists(transcript_path).await.unwrap_or(false) {
+        return None;
+    }
+    let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);
+    let loaded = reader.read_routed().await.ok()?;
+    loaded
+        .agent_settings
+        .get(session_id)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Interactive line-based session picker (OQ-6 stdio fallback for the Ink TUI).
 ///
 /// Renders:

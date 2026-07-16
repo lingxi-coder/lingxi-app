@@ -277,14 +277,18 @@ pub struct Argv {
     // `model` overrides the main loop (`jb(Zo(model))`) unless `--model` was
     // given, and the frontmatter `hooks` register as `mainThreadAgentHooks`
     // (`Rft`→`o_n`, `is_agent=false` so Stop stays Stop; gated by the `g9e`
-    // trusted-source set) BEFORE the SessionStart fire.
+    // trusted-source set) BEFORE the SessionStart fire. The applied `agentType`
+    // is PERSISTED as an `agent-setting` transcript record, so a later `--resume`
+    // with NO `--agent` re-adopts it via `rVe` (prompt + tools + model + hooks
+    // re-applied; a byte-exact `Resumed session had agent "X" but it is no longer
+    // available. Using default behavior.` warning + default fallback on a miss).
+    // A re-passed `--agent` on `--resume` wins (`rVe`'s `if(t)return`).
     // RESIDUAL (blocked on LingXi substrate, not CC parity): frontmatter
     // `mcpServers` swap (scope `"agent"`) — the composition-root MCP tool build
-    // Arc-seals the `ToolRegistry` before the final agent catalog is assembled,
-    // so a late `connect_all` cannot surface the servers' tools; and resume
-    // restoration (`rVe`) of the PERSISTED `agentSetting` with NO re-passed
-    // `--agent` — needs a JSONL agent-setting record (LingXi resume replays
-    // JSONL). Re-passing `--agent` on `--resume` already re-applies fully.
+    // Arc-seals the `Arc<ToolRegistry>` before the final agent catalog is
+    // assembled, so a late `connect_all` cannot surface the servers' tools to the
+    // model (the same limitation plugin MCP servers already have; no
+    // runtime-mutable tool registry exists).
     #[arg(long = "agent", value_name = "agent")]
     pub agent: Option<String>,
 

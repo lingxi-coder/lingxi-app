@@ -6327,6 +6327,13 @@ pub async fn build(
     // executor writes through the SHARED `Arc<RwLock<HookRegistry>>`, so a
     // registration on this clone is visible to the orchestrator's own executor.
     let main_thread_agent_hook_executor = hooks.clone();
+    // (P2-02 cc2.1.207) `main_jsonl_writer` MOVES into the orchestrator builder
+    // below (when `session_persistence`); capture a clone so the `--agent` block
+    // can persist the applied `agentType` as an `agent-setting` transcript record
+    // (claude `{type:"agent-setting",agentSetting,sessionId}`) for `rVe` resume
+    // restoration. Same shared-`Arc` file target, so the record lands in the SAME
+    // `<uuid>.jsonl` the orchestrator appends messages to.
+    let main_agent_setting_writer = main_jsonl_writer.clone();
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -6758,19 +6765,44 @@ pub async fn build(
     // `agentType`, and AFTER the default-model seed above so the override wins.
     //   • frontmatter `hooks` — registered as `mainThreadAgentHooks` (claude
     //     `Rft`→`o_n`), gated by [`agent_source_is_trusted`] (`g9e`), BELOW.
-    // RESIDUAL seam (follow-up, same `mainThreadAgentType`): frontmatter
-    // `mcpServers` (scope `"agent"`) — blocked on the composition-root MCP tool
-    // build, which snapshots the registry into the Arc-sealed `ToolRegistry`
-    // (~L6180) BEFORE this final catalog is assembled (plugin agents land
-    // ~L6720), so a late `connect_all` here could not surface the servers'
-    // tools; and resume restoration (`rVe`) of the PERSISTED `agentSetting`
-    // without a re-passed `--agent` — blocked on a JSONL agent-setting record
-    // (LingXi resume replays JSONL, not the unwired `SessionStorage` header).
-    // Re-passing `--agent` on `--resume` already re-applies through THIS block.
+    //   • RESUME restoration (`rVe`) — when NO `--agent` is passed on a `--resume`
+    //     (`cfg.session_id_override` set), the applied `agentType` persisted at
+    //     the ORIGINAL boot is read back from this session's transcript
+    //     (`agentSettings.get(sessionId)`) and re-adopted through the SAME block
+    //     (prompt + tools + model + hooks). A miss emits the byte-exact
+    //     `Resumed session had agent "X" but it is no longer available. Using
+    //     default behavior.` warning (claude `rVe`) and falls back to default. A
+    //     re-passed `--agent` wins (claude `rVe`'s `if(t)return`) — it is applied
+    //     via the explicit arm below and the resume read is skipped.
+    // RESIDUAL seam: frontmatter `mcpServers` (scope `"agent"`) — blocked on the
+    // composition-root MCP tool build, which snapshots the registry into the
+    // Arc-sealed `Arc<ToolRegistry>` (~L6130) BEFORE this final catalog is
+    // assembled (plugin agents land ~L6720), so a late `connect_all` here could
+    // not surface the servers' tools to the model (the SAME limitation plugin MCP
+    // servers already have — there is no runtime-mutable tool registry). Deferred
+    // until a mutable tool registry / earlier agent-resolution seam exists.
     // (Built-in agent defs live in the subagent spawner, not this catalog, so
     // their names are absent from the miss warning's "Available agents" list —
     // residual.)
-    if let Some(wanted) = cfg.cli_agent.as_deref() {
+    //
+    // (P2-02 cc2.1.207) The agent to apply: an EXPLICIT `--agent` (fresh boot or
+    // re-passed on `--resume`) wins; otherwise, on a resume with no `--agent`, the
+    // persisted `agentSetting` (`rVe` restoration). `from_resume` selects the miss
+    // warning + suppresses the re-persist (the record is already on disk).
+    let (wanted_agent, from_resume): (Option<String>, bool) = match cfg.cli_agent.clone() {
+        Some(w) => (Some(w), false),
+        None if cfg.session_id_override.is_some() => {
+            let persisted = session::jsonl::loader::read_agent_setting(
+                &main_transcript_path,
+                Arc::new(PosixFileSystem::new(watch_cwd.clone())) as Arc<dyn traits::FileSystem>,
+                &main_session_uuid,
+            )
+            .await;
+            (persisted, true)
+        }
+        None => (None, false),
+    };
+    if let Some(wanted) = wanted_agent {
         // Resolve against the FINAL catalog, extracting what the main thread
         // applies (agentType + system prompt + tool policy + model) so the
         // catalog read lock is released before we mutate the orchestrator seam.
@@ -6785,7 +6817,8 @@ pub async fn build(
                     // claude `if(!userSpecifiedModel&&y.model&&y.model!=="inherit")
                     // {jb(Zo(y.model))}`. `Zo` = `resolve_user_specified_model`
                     // (alias→wire id). Frontmatter never yields `Explicit`, but
-                    // handle both alias/explicit arms for completeness.
+                    // handle both alias/explicit arms for completeness. This is
+                    // ALSO the resume model reset (`rVe` applies the same `jb`).
                     let model_override = if cfg.default_model_explicit {
                         None
                     } else {
@@ -6810,13 +6843,21 @@ pub async fn build(
                     ))
                 }
                 None => {
-                    tracing::warn!(
-                        "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
-                        cat.iter()
-                            .map(|a| a.agent_type.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
+                    if from_resume {
+                        // claude `rVe`: the persisted agent is gone from the final
+                        // catalog → byte-exact warn, then fall back to default.
+                        tracing::warn!(
+                            "Resumed session had agent \"{wanted}\" but it is no longer available. Using default behavior."
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Warning: agent \"{wanted}\" not found. Available agents: {}. Using default behavior.",
+                            cat.iter()
+                                .map(|a| a.agent_type.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                     None
                 }
             }
@@ -6831,7 +6872,23 @@ pub async fn build(
             source,
         )) = applied
         {
-            tracing::debug!(agent = %agent_type, "--agent applied to main thread");
+            tracing::debug!(agent = %agent_type, from_resume, "--agent applied to main thread");
+            // (P2-02 cc2.1.207) Persist the applied `agentType` as an
+            // `agent-setting` transcript record (claude
+            // `{type:"agent-setting",agentSetting:currentSessionAgentSetting,
+            // sessionId}`) so a later `--resume` with no `--agent` re-adopts it via
+            // `rVe`. Only on the EXPLICIT path (`!from_resume`) — the resume replay
+            // already read this record — and only when the session is persisted
+            // (no writer ⇒ nothing to resume from). Borrows `agent_type` before it
+            // moves into `set_main_thread_agent`.
+            if !from_resume && cfg.session_persistence {
+                if let Err(e) = main_agent_setting_writer
+                    .append_agent_setting(&main_session_uuid, &agent_type)
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to persist --agent agent-setting record");
+                }
+            }
             orch.set_main_thread_agent(
                 agent_type,
                 system_prompt,
@@ -9142,6 +9199,121 @@ mod tests {
         assert!(
             !hooks.iter().any(|h| h.event == "SubagentStop"),
             "is_agent=false must NOT retarget the main-thread agent's Stop hook: {hooks:?}"
+        );
+    }
+
+    /// (P2-02 cc2.1.207) `rVe` resume restoration round-trip: an EXPLICIT
+    /// `--agent` boot PERSISTS the applied `agentType` as an `agent-setting`
+    /// transcript record; a subsequent `--resume` of the SAME session with NO
+    /// `--agent` reads it back and re-adopts the agent (`bde`+`Rft`) — proven by
+    /// the agent's frontmatter `Stop` hook being re-registered on the resumed
+    /// boot even though `cli_agent` is `None`. Both boots share one
+    /// `cwd`/`lingxi_home`/`session_id_override` so the second reads the first's
+    /// on-disk `<uuid>.jsonl`.
+    #[tokio::test]
+    async fn build_persists_and_restores_agent_setting_on_resume() {
+        use traits::OrchestratorHandle as _;
+
+        let (_tmp, mut cfg) = test_config(true);
+        let agents = r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "hooks": { "Stop": [ { "hooks": [
+                    { "type": "command", "command": "true" }
+                ] } ] }
+            } }"#;
+        cfg.cli_agents_json = Some(agents.to_string());
+        // Pin a fixed session id so the resume boot targets the same transcript.
+        let session_id = "33333333-4444-5555-6666-777777777777";
+        cfg.session_id_override = Some(session_id.to_string());
+
+        // Second boot's config: identical paths + session, agent STILL in the
+        // catalog (`activeAgents`), but NO `--agent` — restoration must come from
+        // the persisted `agent-setting` record.
+        let mut resume_cfg = cfg.clone();
+        resume_cfg.cli_agent = None;
+
+        // First boot: `--agent tester` applies + persists the `agent-setting`.
+        cfg.cli_agent = Some("tester".to_string());
+        let output1: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let _rt1 = build(cfg, output1, perm1)
+            .await
+            .expect("first boot with --agent must succeed");
+
+        // Resume boot: no `--agent`; `rVe` reads the persisted record and re-adopts.
+        let output2: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt2 = build(resume_cfg, output2, perm2)
+            .await
+            .expect("resume boot must succeed and restore the agent");
+
+        let hooks = rt2.orchestrator.list_hooks().await;
+        assert!(
+            hooks.iter().any(|h| h.event == "Stop"),
+            "resume `rVe` must re-register the persisted agent's frontmatter Stop \
+             hook without a re-passed --agent: {hooks:?}"
+        );
+        assert!(
+            !hooks.iter().any(|h| h.event == "SubagentStop"),
+            "resume restoration is main-thread (is_agent=false): {hooks:?}"
+        );
+    }
+
+    /// (P2-02 cc2.1.207) `rVe` miss branch: when the persisted agent is GONE from
+    /// the resumed catalog (`activeAgents` no longer lists it), restoration falls
+    /// back to default behavior (no agent re-adopted) — the boot still succeeds
+    /// and no frontmatter `Stop` hook is installed. (The byte-exact
+    /// `Resumed session had agent "X" but it is no longer available. Using default
+    /// behavior.` warning is emitted via `tracing::warn`.)
+    #[tokio::test]
+    async fn build_resume_missing_agent_falls_back_to_default() {
+        use traits::OrchestratorHandle as _;
+
+        let (_tmp, mut cfg) = test_config(true);
+        let agents = r#"{ "tester": {
+                "description": "a test agent",
+                "prompt": "you are the tester",
+                "hooks": { "Stop": [ { "hooks": [
+                    { "type": "command", "command": "true" }
+                ] } ] }
+            } }"#;
+        cfg.cli_agents_json = Some(agents.to_string());
+        let session_id = "44444444-5555-6666-7777-888888888888";
+        cfg.session_id_override = Some(session_id.to_string());
+
+        // Resume config: same session, but the agent catalog is EMPTY (the agent
+        // is no longer available) and no `--agent` is passed.
+        let mut resume_cfg = cfg.clone();
+        resume_cfg.cli_agent = None;
+        resume_cfg.cli_agents_json = None;
+
+        cfg.cli_agent = Some("tester".to_string());
+        let output1: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm1: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let _rt1 = build(cfg, output1, perm1)
+            .await
+            .expect("first boot with --agent must succeed");
+
+        let output2: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm2: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt2 = build(resume_cfg, output2, perm2)
+            .await
+            .expect("resume boot with a missing agent must still succeed");
+
+        let hooks = rt2.orchestrator.list_hooks().await;
+        assert!(
+            !hooks.iter().any(|h| h.event == "Stop"),
+            "a resumed-but-unavailable agent must NOT install its frontmatter hook \
+             (default fallback): {hooks:?}"
         );
     }
 

@@ -92,3 +92,4 @@ green-lit.
 | **ExitWorktree model message = 206 `data.message`** (fixed mis-ported TUI-render surface) | `ae1c7ebde` |
 | **Residual #1: `--tmux` native-mode pre-flight** (not-Windows + tmux-installed for bare `--tmux`; classic skips) | `a69b9fb44` |
 | **Residual #2: ExitWorktree missing-original-cwd fallback** (206 `xCd`/`kAs`; fallback `[worktree, $HOME, tmp]`) | `fcf56f46e` |
+| **`Created tmux session` launch print** (found writing QA checklist; 206 `console.log` on success, stderr in port) | `5e7a08314` |

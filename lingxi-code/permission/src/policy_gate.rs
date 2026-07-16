@@ -656,7 +656,12 @@ fn deny_reason_string(reason: &PermissionDecisionReason, tool_name: &str) -> Str
 
 /// Shared guidance appended to certain permission denials (`messages.ts:226`),
 /// instructing the model on acceptable workarounds.
-const DENIAL_WORKAROUND_GUIDANCE: &str = "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.";
+///
+/// This is claude-code's `Rws` (`lDd` + the "If you believe this capability is
+/// essential…" suffix). `GRu(tool)` — the headless deny message — is
+/// `` `Permission to use ${tool} has been denied. ${Rws}` `` (see
+/// [`crate::headless_gate::DenyOnAskGate`]).
+pub(crate) const DENIAL_WORKAROUND_GUIDANCE: &str = "IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.";
 
 /// Serialize a [`PermissionDecisionReason`] to the free-text `decision_reason`
 /// string a stdio `can_use_tool` control_request carries — 1:1 with claude-code

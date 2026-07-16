@@ -12,8 +12,20 @@
 //! all resolved by [`crate::PolicyPermissionGate`] BEFORE it delegates here, so
 //! this gate only ever turns an otherwise-unresolvable `Ask` into a denial —
 //! never overriding an explicit allow rule or a read-only tool.
+//!
+//! ## Byte-exact deny message (`GRu`)
+//!
+//! claude-code 2.1.211 denies an unpromptable ask
+//! (`shouldAvoidPermissionPrompts`) with
+//! `decisionReason:{type:"asyncAgent",reason:"Permission prompts are not
+//! available in this context"}` and `message:GRu(e.name)`, where
+//! `` GRu(e) = `Permission to use ${e} has been denied. ${Rws}` `` and `Rws`
+//! is the shared workaround-guidance block
+//! ([`crate::policy_gate::DENIAL_WORKAROUND_GUIDANCE`]). This gate reproduces
+//! that message byte-for-byte.
 
 use crate::gate::{PermissionDecision, PermissionGate};
+use crate::policy_gate::DENIAL_WORKAROUND_GUIDANCE;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -23,15 +35,17 @@ use serde_json::Value;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DenyOnAskGate;
 
+/// The byte-exact claude-code `GRu(tool)` headless deny message:
+/// `` `Permission to use ${tool} has been denied. ${Rws}` ``.
+pub fn headless_deny_message(name: &str) -> String {
+    format!("Permission to use {name} has been denied. {DENIAL_WORKAROUND_GUIDANCE}")
+}
+
 #[async_trait]
 impl PermissionGate for DenyOnAskGate {
     async fn check(&self, name: &str, _input: &Value) -> PermissionDecision {
         PermissionDecision::Deny {
-            reason: format!(
-                "{name} requires permission, but this is a non-interactive session and no \
-                 allow rule matched. Add a permission rule (settings.json `permissions.allow`) \
-                 or run interactively to approve it."
-            ),
+            reason: headless_deny_message(name),
         }
     }
 }
@@ -41,17 +55,29 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn denies_with_tool_named_reason() {
+    async fn denies_with_byte_exact_gru_message() {
         let gate = DenyOnAskGate;
         match gate.check("Bash", &serde_json::json!({})).await {
             PermissionDecision::Deny { reason } => {
+                // GRu("Bash") = "Permission to use Bash has been denied. " + Rws
                 assert!(
-                    reason.contains("Bash"),
-                    "reason should name the tool: {reason}"
+                    reason.starts_with("Permission to use Bash has been denied. "),
+                    "reason must be the byte-exact GRu message: {reason}"
                 );
                 assert!(
-                    reason.contains("non-interactive"),
-                    "reason should explain the non-interactive denial: {reason}"
+                    reason.contains(
+                        "IMPORTANT: You *may* attempt to accomplish this action using other tools"
+                    ),
+                    "reason must carry the workaround guidance block: {reason}"
+                );
+                assert!(
+                    reason.ends_with("Let the user decide how to proceed."),
+                    "reason must end with the Rws suffix: {reason}"
+                );
+                // No trace of the fabricated legacy wording.
+                assert!(
+                    !reason.contains("non-interactive session"),
+                    "the invented message must be gone: {reason}"
                 );
             }
             PermissionDecision::Allow => panic!("DenyOnAskGate must never allow"),

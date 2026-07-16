@@ -1630,7 +1630,21 @@ pub fn check_ps_path(
         .as_deref()
         .map(|p| p.to_string_lossy().into_owned());
     match classify_ps_path(raw, op, is_windows, home.as_deref()) {
-        PsPathClass::Blocked { resolved, reason } => PsPathOutcome::AskReason { resolved, reason },
+        PsPathClass::Blocked { resolved, reason } => {
+            // PERM-PS-RM-05: claude-code `yeo`'s traversal branch reports
+            // `resolvedPath: c8.resolve(cwd, i)` (all other guards report the raw
+            // normalized path). The resolved path feeds the `Remove-Item` d7t
+            // protected check, so a relative `../..` that resolves into a protected
+            // root hard-denies rather than degrading to the traversal ask.
+            let resolved = if reason == ps_path_reasons::TRAVERSAL {
+                crate::filesystem::expand_path(&resolved, roots)
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                resolved
+            };
+            PsPathOutcome::AskReason { resolved, reason }
+        }
         PsPathClass::Proceed { normalized } => {
             let resolved = crate::filesystem::expand_path(&normalized, roots);
             let mut work_dirs = Vec::with_capacity(1 + additional.len());
@@ -1745,15 +1759,50 @@ fn is_drive_child(i: &str) -> bool {
         && !i[3..].contains('/')
 }
 
-/// The raw-path protected check (claude-code `ZBr`): strip quotes, drop a `::`
-/// prefix, expand `~`, normalize backslashes, then [`is_protected_removal_resolved`].
+/// The raw-path protected check (claude-code `O5r`): strip quotes, drop a `::`
+/// prefix, expand `~`, normalize backslashes, lexically normalize an ABSOLUTE
+/// path (collapsing `.`/`..`, matching Node `path.normalize`), then
+/// [`is_protected_removal_resolved`].
 fn is_protected_removal_raw(path: &str, home: Option<&str>, is_macos: bool) -> bool {
     let mut t = strip_surrounding_quotes(path).to_string();
     if let Some(idx) = t.find("::") {
         t = t[idx + 2..].to_string();
     }
-    let t = expand_tilde(&t, home).replace('\\', "/");
+    let mut t = expand_tilde(&t, home).replace('\\', "/");
+    // PERM-PS-RM-05: `if(c8.isAbsolute(t))t=c8.normalize(t)` — collapse `..`/`.`
+    // for an absolute path so `Remove-Item /a/b/../..` (→ `/a`) is seen as its
+    // protected root. Relative paths are left untouched (Node `normalize` keeps a
+    // leading `..`), matching the oracle.
+    if std::path::Path::new(&t).is_absolute() {
+        t = node_normalize_absolute(&t);
+    }
     is_protected_removal_resolved(&t, home, is_macos)
+}
+
+/// Node `path.normalize` for an absolute POSIX path (claude-code `c8.normalize`):
+/// collapse `.` and `..` segments (a `..` above the root is dropped) and duplicate
+/// separators, keeping the leading `/`. Only called on an absolute path.
+fn node_normalize_absolute(t: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let mut out = PathBuf::new();
+    for comp in Path::new(t).components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
+                // At (or above) root Node drops the `..` entirely.
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    let s = out.to_string_lossy().into_owned();
+    if s.is_empty() {
+        "/".to_string()
+    } else {
+        s
+    }
 }
 
 /// Whether an argument is a `-Recurse` parameter (claude-code's inline test in

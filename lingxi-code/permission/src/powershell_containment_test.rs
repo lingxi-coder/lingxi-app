@@ -632,6 +632,60 @@ fn xgg_remove_item_protected_path_denies() {
     ));
 }
 
+// ── PERM-PS-RM-05: normalize/resolve `..` before the protected-path check ──
+
+#[test]
+fn xgg_remove_absolute_traversal_into_protected_root_denies() {
+    // `Remove-Item /Users/x/proj/../..` → O5r normalizes the absolute path to
+    // `/Users` (a protected top-level dir) → hard deny, not the traversal ask.
+    let roots = ps_roots();
+    match validate_ps_statement(
+        &one_cmd_stmt(cmd("Remove-Item", &["/Users/x/proj/../.."])),
+        &ctx_of(&roots, &[]),
+        false,
+    ) {
+        PsContainmentResult::Deny { message, .. } => {
+            assert!(message.contains("is blocked"), "{message}");
+        }
+        other => panic!("expected Deny, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_remove_relative_traversal_into_protected_root_denies() {
+    // `Remove-Item proj/../../..` from cwd `/proj/work` resolves to `/` — yeo's
+    // traversal branch reports the cwd-resolved path so the resolved d7t check
+    // hard-denies rather than degrading to the traversal ask.
+    let roots = ps_roots();
+    match validate_ps_statement(
+        &one_cmd_stmt(cmd("Remove-Item", &["proj/../../.."])),
+        &ctx_of(&roots, &[]),
+        false,
+    ) {
+        PsContainmentResult::Deny { message, .. } => {
+            assert!(message.contains("is blocked"), "{message}");
+        }
+        other => panic!("expected Deny, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_remove_relative_traversal_inside_cwd_asks_not_denies() {
+    // A traversal that resolves back inside cwd is NOT protected → the traversal
+    // ask fires (no over-deny).
+    let roots = ps_roots();
+    match validate_ps_statement(
+        &one_cmd_stmt(cmd("Remove-Item", &["sub/../notes.txt"])),
+        &ctx_of(&roots, &[]),
+        false,
+    ) {
+        PsContainmentResult::Ask { message, .. } => {
+            assert_eq!(message, ps_path_reasons::TRAVERSAL);
+        }
+        other => panic!("expected traversal Ask, got {other:?}"),
+    }
+}
+
 #[test]
 fn xgg_remove_recurse_targeting_cwd_asks() {
     // Remove-Item -Recurse of the working directory (or an ancestor) → ask.

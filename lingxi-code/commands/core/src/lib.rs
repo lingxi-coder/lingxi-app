@@ -88,7 +88,7 @@ pub use init_verifiers::InitVerifiersHandler;
 pub use insights::InsightsHandler;
 pub use interactive_only::InteractiveOnlyHandler;
 pub use keybindings::KeybindingsHandler;
-pub use login::LoginHandler;
+pub use login::{LoginHandler, LoginOrgPolicy};
 pub use logout::LogoutHandler;
 pub use mcp::McpHandler;
 pub use memory::MemoryHandler;

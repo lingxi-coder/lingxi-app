@@ -72,6 +72,27 @@ pub fn connected_model_rows(
     all: &[ModelRow],
     availability: &std::collections::BTreeMap<String, bool>,
 ) -> Vec<ModelRow> {
+    connected_model_rows_restricted(all, availability, None, None)
+}
+
+/// [`connected_model_rows`] with the managed `availableModels` allowlist filter
+/// the binary applies to the `/model` picker (parity 2.1.207 H-BIN-08). After the
+/// connectivity/curation pass, a row whose `request_model` is BARRED by the
+/// managed allowlist (binary `sl()`) is dropped so the user cannot select it —
+/// EXCEPT the currently-active row, which stays selectable (matching the
+/// `is_current` carve-out the eligibility pass already applies).
+///
+/// `allowlist == None` (a default install with no policy allowlist) leaves the
+/// picker byte-identical to [`connected_model_rows`]. Pure, so it stays
+/// unit-testable; the caller sources the allowlist + overrides from the
+/// boot-resolved enforcement.
+#[must_use]
+pub fn connected_model_rows_restricted(
+    all: &[ModelRow],
+    availability: &std::collections::BTreeMap<String, bool>,
+    allowlist: Option<&[String]>,
+    overrides: Option<&std::collections::BTreeMap<String, String>>,
+) -> Vec<ModelRow> {
     let current_provider = all
         .iter()
         .find(|m| m.is_current)
@@ -93,6 +114,12 @@ pub fn connected_model_rows(
             eligible
                 && (traits::is_curated_model(profile, &m.request_model)
                     || !traits::provider_has_curated_list(profile))
+                // Managed allowlist gate: a barred model is not selectable.
+                && llm_client::model::allowlist::is_model_allowed(
+                    &m.request_model,
+                    allowlist,
+                    overrides,
+                )
         })
         .cloned()
         .collect();
@@ -235,6 +262,15 @@ pub struct SessionInfo {
     pub memory: Vec<InfoRow>,
     /// `/model` picker rows.
     pub models: Vec<ModelRow>,
+    /// Managed `availableModels` allowlist (parity 2.1.207 H-BIN-08): when an
+    /// enterprise policy tier restricts model selection, the `/model` picker
+    /// filters out barred rows (keeping the current model selectable). `None`
+    /// (the default install) = no restriction — the picker is unfiltered.
+    pub model_allowlist: Option<Vec<String>>,
+    /// Managed `modelOverrides` reverse-map (Anthropic id → provider id) applied
+    /// alongside [`Self::model_allowlist`] so a Bedrock-ARN row still matches an
+    /// allowlisted Anthropic id. Empty (the default) = no reverse-mapping.
+    pub model_overrides: std::collections::BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -395,5 +431,62 @@ mod tests {
             !ids.contains(&"openrouter/auto"),
             "unrelated unconnected provider hidden"
         );
+    }
+
+    // ── H-BIN-08: managed availableModels allowlist filter ──────────────────
+
+    #[test]
+    fn allowlist_filter_drops_barred_rows_but_keeps_current() {
+        use std::collections::BTreeMap;
+        let all = vec![
+            // The current model is Sonnet, which the allowlist does NOT permit —
+            // it must stay selectable regardless (is_current carve-out).
+            row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", true),
+            row("Claude Opus 4.8", "claude-opus-4-8", "anthropic", false),
+            row("Claude Haiku 4.5", "claude-haiku-4-5", "anthropic", false),
+        ];
+        let mut avail = BTreeMap::new();
+        avail.insert("anthropic".to_string(), true);
+        // Managed allowlist permits only the opus family.
+        let allow = vec!["opus".to_string()];
+
+        let shown = connected_model_rows_restricted(&all, &avail, Some(&allow), None);
+        let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
+        // Opus (permitted) + the current Sonnet (carve-out) survive; Haiku is barred.
+        assert!(ids.contains(&"claude-opus-4-8"), "permitted model shown");
+        assert!(ids.contains(&"claude-sonnet-5"), "current kept even though barred");
+        assert!(!ids.contains(&"claude-haiku-4-5"), "barred non-current model dropped");
+    }
+
+    #[test]
+    fn allowlist_none_is_byte_identical_to_unrestricted() {
+        use std::collections::BTreeMap;
+        let all = vec![
+            row("Claude Opus 4.8", "claude-opus-4-8", "anthropic", true),
+            row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", false),
+        ];
+        let mut avail = BTreeMap::new();
+        avail.insert("anthropic".to_string(), true);
+        assert_eq!(
+            connected_model_rows_restricted(&all, &avail, None, None),
+            connected_model_rows(&all, &avail),
+        );
+    }
+
+    #[test]
+    fn allowlist_empty_hides_all_non_current_rows() {
+        use std::collections::BTreeMap;
+        // An empty allowlist permits only the default/current model (binary
+        // `if(n.length===0)return!1`); the current carve-out keeps it selectable.
+        let all = vec![
+            row("Claude Opus 4.8", "claude-opus-4-8", "anthropic", true),
+            row("Claude Sonnet 5", "claude-sonnet-5", "anthropic", false),
+        ];
+        let mut avail = BTreeMap::new();
+        avail.insert("anthropic".to_string(), true);
+        let allow: Vec<String> = Vec::new();
+        let shown = connected_model_rows_restricted(&all, &avail, Some(&allow), None);
+        let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
+        assert_eq!(ids, vec!["claude-opus-4-8"], "only the current model survives");
     }
 }

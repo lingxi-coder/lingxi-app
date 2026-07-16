@@ -122,6 +122,16 @@ pub struct PoolSubagentSpawner {
     /// (the default) the Inherit branch returns the parent model unchanged
     /// (faithful: a non-opusplan setting never triggers the plan-mode swap).
     model_setting: Option<String>,
+    /// Managed `availableModels` restriction threaded into
+    /// [`crate::model_resolution::resolve_agent_model_restricted`] (parity 2.1.207
+    /// H-BIN-08): the resolved policy enforcement + the concrete model catalog the
+    /// "newest permitted of family" plan-mode substitution resolves against. When
+    /// `Some`, a subagent whose EXPLICITLY-requested model is barred inherits the
+    /// parent/runtime model (binary `Qly`) and the plan-mode `opusplan`→Opus /
+    /// `haiku`→Sonnet upgrade is gated (binary `RF`). `None` (the default / tests /
+    /// a default install with no policy allowlist) ⇒ the unrestricted resolution
+    /// (byte-identical legacy). Set at boot via [`Self::with_model_restriction_opt`].
+    model_restriction: Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
     /// LingXi multi-provider half of the 2.1.198 `GAe`/`obm` firstParty gate
     /// (`fr() !== "firstParty"`): `false` when the session's default model
     /// routes to a non-Anthropic provider profile (OpenAI/Gemini/…), which
@@ -236,6 +246,7 @@ impl PoolSubagentSpawner {
             default_model_provider: Arc::new(std::sync::OnceLock::new()),
             permission_mode: PermissionMode::Default,
             model_setting: None,
+            model_restriction: None,
             session_provider_first_party: true,
             hook_executor: Arc::new(std::sync::OnceLock::new()),
             skill_loader: Arc::new(std::sync::OnceLock::new()),
@@ -367,6 +378,53 @@ impl PoolSubagentSpawner {
     pub fn with_model_setting(mut self, setting: impl Into<String>) -> Self {
         self.model_setting = Some(setting.into());
         self
+    }
+
+    /// Builder: attach the managed `availableModels` restriction (parity 2.1.207
+    /// H-BIN-08) — the resolved policy enforcement + the concrete model catalog
+    /// the plan-mode "newest permitted of family" substitution resolves against.
+    /// `None` (the default install with no policy allowlist) leaves subagent /
+    /// plan-mode resolution byte-identical to the unrestricted path. See the
+    /// [`Self::model_restriction`] field doc.
+    #[must_use]
+    pub fn with_model_restriction_opt(
+        mut self,
+        restriction: Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
+    ) -> Self {
+        self.model_restriction = restriction;
+        self
+    }
+
+    /// Resolve a spawn's model preference to a concrete wire id, applying the
+    /// managed `availableModels` restriction when one is wired (subagent
+    /// inherit-on-barred + plan-mode upgrade gating, binary `ble`/`RF`). Without a
+    /// restriction this is exactly [`crate::model_resolution::resolve_agent_model`]
+    /// (byte-identical legacy). Warnings are logged (the binary de-duplicates via a
+    /// process-wide `SN` set; a per-spawn `warn!` is an acceptable non-visible
+    /// divergence for a log line).
+    fn resolve_model_pref(&self, model: &AgentModel, parent_model: &str) -> String {
+        match &self.model_restriction {
+            Some((enforcement, catalog)) => {
+                let restriction = crate::model_resolution::ModelRestriction {
+                    enforcement,
+                    catalog,
+                };
+                crate::model_resolution::resolve_agent_model_restricted(
+                    model,
+                    parent_model,
+                    self.permission_mode,
+                    self.model_setting.as_deref(),
+                    Some(restriction),
+                    &mut |m| tracing::warn!("{m}"),
+                )
+            }
+            None => crate::model_resolution::resolve_agent_model(
+                model,
+                parent_model,
+                self.permission_mode,
+                self.model_setting.as_deref(),
+            ),
+        }
     }
 
     /// Builder: LingXi multi-provider half of the 2.1.198 Explore firstParty
@@ -525,12 +583,8 @@ impl PoolSubagentSpawner {
                 parent_model,
                 self.session_provider_first_party,
             );
-            def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
-                &def.model,
-                parent_model,
-                self.permission_mode,
-                self.model_setting.as_deref(),
-            ));
+            def.model =
+                AgentModel::Explicit(self.resolve_model_pref(&def.model, parent_model));
         }
         def
     }
@@ -882,12 +936,7 @@ impl PoolSubagentSpawner {
                 let requested = AgentModel::Alias(model_pref.to_string());
                 def.model = match parent_model.as_deref() {
                     Some(parent) => {
-                        AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
-                            &requested,
-                            parent,
-                            self.permission_mode,
-                            self.model_setting.as_deref(),
-                        ))
+                        AgentModel::Explicit(self.resolve_model_pref(&requested, parent))
                     }
                     None => requested,
                 };
@@ -1372,12 +1421,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         self.session_provider_first_party,
                     ),
                 };
-                crate::model_resolution::resolve_agent_model(
-                    &pref,
-                    &parent,
-                    self.permission_mode,
-                    self.model_setting.as_deref(),
-                )
+                self.resolve_model_pref(&pref, &parent)
             }
             None => String::new(),
         };

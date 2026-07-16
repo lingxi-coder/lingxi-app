@@ -31,6 +31,12 @@ pub enum ConnectError {
     /// GitHub reported a terminal device-flow error (e.g. `access_denied`).
     #[error("device authorization failed: {0}")]
     DeviceFailed(String),
+    /// A managed login policy (`forceLoginOrgUUID` org pin) rejected the
+    /// completed sign-in (parity 2.1.207 H-BIN-09). Carries the byte-exact
+    /// admin/validation message, surfaced VERBATIM (no wrapper) — unlike a
+    /// network failure, an API key cannot satisfy the org pin either.
+    #[error("{0}")]
+    LoginPolicyDenied(String),
 }
 
 /// Engine seam: prompt for a secret (tui renders a masked input) and persist it

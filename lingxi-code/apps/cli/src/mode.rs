@@ -292,6 +292,9 @@ pub(crate) async fn run_ratatui(
         None => (tui_build.bridge_rx, tui_build.permission_rx),
     };
     let turn_tx = tui_build.turn_tx;
+    // (companyAnnouncements) The merged array, moved out before `tui_build` is
+    // consumed further below; selected + rendered into the startup banner.
+    let company_announcements = tui_build.company_announcements;
     // (/permissions) The gate's live allow-rule bucket + the settings-file
     // roots the interactive editor writes to (same roots the AllowAlways
     // persist uses). Grabbed before `tui_build` is consumed further below.
@@ -494,7 +497,8 @@ pub(crate) async fn run_ratatui(
     // the replayed prior conversation instead (matching the iocraft resume UX,
     // which shows the history with no fresh welcome). Both paths render through
     // the SAME ratatui backend so the composer/footer chrome is identical.
-    let initial = if resumed_messages.is_empty() {
+    let fresh_launch = resumed_messages.is_empty();
+    let mut initial = if fresh_launch {
         vec![tui::RenderedMessage::SystemText {
             body: format!(
                 "✻ Welcome to LingXi Code ({})\n  /help for commands · Esc interrupts a running turn · Esc (idle) or Ctrl-C twice to quit\n  cwd: {}\n  model: {}",
@@ -506,6 +510,17 @@ pub(crate) async fn run_ratatui(
     } else {
         resumed_messages
     };
+    // (companyAnnouncements) CC's `LVs`/`oip()` startup notice: select one of
+    // the configured announcements (memoized on the process `Wxo` cache) and
+    // render it as a dim startup-banner block. Just below the welcome header on
+    // a fresh launch; top-of-feed (before the replayed history) on a resume.
+    if let Some(msg) = build_company_announcement_message(company_announcements.as_deref()) {
+        if fresh_launch {
+            initial.push(msg);
+        } else {
+            initial.insert(0, msg);
+        }
+    }
     // Resume parity: if the cost tracker was seeded from a restored session
     // (`mount_resumed_tui`), surface its accumulated cost in the footer on the
     // very first frame — before any new turn — by emitting an initial
@@ -991,6 +1006,80 @@ pub(crate) async fn run_ratatui(
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
         }
     }
+}
+
+/// (companyAnnouncements) Build the startup-banner announcement block from the
+/// merged `settings.companyAnnouncements`, selecting one (memoized on the
+/// process-global `Wxo` cache) and pairing it with the optional
+/// `Message from <org>:` prefix — CC's `LVs`. `numStartups` and the org name
+/// come from the global config ([`read_startup_config`]). Returns a dim
+/// `SystemText` block, or `None` when there is nothing to show (`oip()` false).
+///
+/// DIVERGENCE (visual-only): CC renders the announcement body in normal color
+/// with only the `Message from …:` prefix dim; lingxi's startup banner is
+/// uniformly dim (`system_text_lines` → `theme.dim`), so the whole block is
+/// rendered dim as a single `SystemText` — the parity-critical selection logic
+/// and the prefix text are faithful.
+fn build_company_announcement_message(
+    announcements: Option<&[String]>,
+) -> Option<tui::RenderedMessage> {
+    let (num_startups, organization_name) = read_startup_config();
+    let sa = engine::settings::company_announcements::startup_announcement(
+        announcements,
+        num_startups,
+        organization_name.as_deref(),
+    )?;
+    Some(announcement_message(sa))
+}
+
+/// Format a selected [`engine::settings::company_announcements::StartupAnnouncement`]
+/// into the dim startup-banner `SystemText` block: the `Message from <org>:`
+/// prefix line (when present) directly above the announcement body — CC's `LVs`
+/// column `[em_, PVs]`.
+fn announcement_message(
+    sa: engine::settings::company_announcements::StartupAnnouncement,
+) -> tui::RenderedMessage {
+    let body = match sa.org_prefix {
+        Some(prefix) => format!("{prefix}\n{}", sa.body),
+        None => sa.body,
+    };
+    tui::RenderedMessage::SystemText {
+        body,
+        timestamp: 0,
+        is_error: false,
+    }
+}
+
+/// Read `(numStartups, oauthAccount.organizationName)` from the global config
+/// (`~/.lingxi.json`) — CC `St().numStartups` + `Nc()?.organizationName`. A
+/// missing HOME, missing file, or broken JSON degrades to `(0, None)` (the
+/// announcement still shows via the random branch; no org prefix).
+fn read_startup_config() -> (u64, Option<String>) {
+    let Some(path) = migrations::global_config::global_config_path() else {
+        return (0, None);
+    };
+    let Ok(map) = migrations::global_config::read_map(&path) else {
+        return (0, None);
+    };
+    read_startup_config_from(&map)
+}
+
+/// Extract `(numStartups, oauthAccount.organizationName)` from an already-read
+/// global-config map (the testable core of [`read_startup_config`]).
+fn read_startup_config_from(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> (u64, Option<String>) {
+    let num_startups = map
+        .get("numStartups")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let organization_name = map
+        .get("oauthAccount")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|o| o.get("organizationName"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    (num_startups, organization_name)
 }
 
 /// (`/plugin`) Merged `enabledPlugins` allowlist across the writable settings
@@ -1730,6 +1819,14 @@ async fn run_connect_action(
                     notice(body, false);
                     connected(provider_id);
                 }
+                // (H-BIN-09) A managed `forceLoginOrgUUID` org pin rejected the
+                // sign-in: surface the admin message VERBATIM. No "network error"
+                // prefix and no API-key fallback hint — a non-OAuth credential
+                // cannot satisfy the org pin either, and the login already rolled
+                // back its persisted token.
+                Err(command_core::ConnectError::LoginPolicyDenied(message)) => {
+                    notice(message, true);
+                }
                 Err(e) => notice(
                     format!("✗ Sign-in failed: {e}. Try connecting with an API key instead."),
                     true,
@@ -1907,6 +2004,11 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
     let skills = skills_rows(&cwd, &crate::run::lingxi_home_dir());
     let memory = dirs::home_dir().map_or_else(Vec::new, |home| memory_rows(&cwd, &home));
 
+    // Managed `availableModels` allowlist for the `/model` picker filter (parity
+    // 2.1.207 H-BIN-08): reads the same policy tier the boot default-model
+    // constraint uses. `None` (default install) leaves the picker unfiltered.
+    let (model_allowlist, model_overrides) = engine_desktop::managed_model_allowlist().await;
+
     SessionInfo {
         doctor: DoctorInfo::capture(mcp_configured, mcp_connected),
         mcp,
@@ -1915,6 +2017,8 @@ async fn build_session_info(orch: &dyn OrchestratorHandle) -> tui::session::Sess
         skills,
         memory,
         models,
+        model_allowlist,
+        model_overrides,
     }
 }
 
@@ -2377,5 +2481,66 @@ mod tests {
             !trust_gate_should_prompt(&cwd, None),
             "no config path must proceed without a dialog (degrade)"
         );
+    }
+
+    // ---- companyAnnouncements startup-banner wiring (CC `LVs`/`oip()`) ----
+
+    /// A configured non-empty array with an org name renders one dim
+    /// `SystemText` block: `Message from <org>:` directly above the body.
+    #[test]
+    fn announcement_message_joins_org_prefix_above_body() {
+        use engine::settings::company_announcements::{
+            startup_announcement_with, AnnouncementMemo,
+        };
+        let memo = AnnouncementMemo::new();
+        let a = vec!["".to_string(), "heads up".to_string()];
+        // num_startups == 1 → deterministic FIRST non-empty entry.
+        let sa = startup_announcement_with(&memo, Some(&a), 1, Some("Acme")).unwrap();
+        match announcement_message(sa) {
+            tui::RenderedMessage::SystemText {
+                body, is_error, ..
+            } => {
+                assert_eq!(body, "Message from Acme:\nheads up");
+                assert!(!is_error, "startup announcement is not an error line");
+            }
+            other => panic!("expected SystemText, got {other:?}"),
+        }
+    }
+
+    /// No org name → the body alone (no `Message from …:` prefix).
+    #[test]
+    fn announcement_message_body_only_without_org() {
+        use engine::settings::company_announcements::{
+            startup_announcement_with, AnnouncementMemo,
+        };
+        let memo = AnnouncementMemo::new();
+        let a = vec!["solo note".to_string()];
+        let sa = startup_announcement_with(&memo, Some(&a), 1, None).unwrap();
+        match announcement_message(sa) {
+            tui::RenderedMessage::SystemText { body, .. } => assert_eq!(body, "solo note"),
+            other => panic!("expected SystemText, got {other:?}"),
+        }
+    }
+
+    /// `read_startup_config_from` extracts `numStartups` +
+    /// `oauthAccount.organizationName`, tolerating absent/typed-wrong keys.
+    #[test]
+    fn read_startup_config_extracts_num_startups_and_org() {
+        let map = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            r#"{"numStartups":7,"oauthAccount":{"organizationName":"Acme","id":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_startup_config_from(&map), (7, Some("Acme".to_string())));
+
+        // Missing numStartups → 0; missing oauthAccount → no org.
+        let empty = serde_json::Map::new();
+        assert_eq!(read_startup_config_from(&empty), (0, None));
+
+        // oauthAccount present but no organizationName → num only, no org.
+        let no_org = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            r#"{"numStartups":3,"oauthAccount":{"id":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_startup_config_from(&no_org), (3, None));
     }
 }

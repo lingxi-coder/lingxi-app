@@ -23,11 +23,14 @@
 //! process-level memo ([`AnnouncementMemo`]) keeps the SAME announcement stable
 //! across re-renders within one process (the `Wxo` cache; the `e` flag on `jxo`).
 //!
-//! NOTE (remainder): the `numStartups` counter and the TUI startup-header render
-//! site are the composition-root/TUI wiring for this feature — this module ports
-//! the selection + gate logic and the memo; the caller supplies `num_startups`
-//! (sourced from the local config state) and renders the returned string as the
-//! dim startup tip (binary `Jf_={tip,color:"dim"}`).
+//! The composition root ([`startup_announcement`]) ties the pieces together the
+//! way CC's `LVs` component does: it selects the announcement (memoized on the
+//! process-global [`PROCESS_MEMO`] = the `Wxo` cache) and pairs it with the
+//! optional `Message from <organizationName>:` prefix (CC's `em_`, from
+//! `Nc()?.organizationName`). The CLI supplies `num_startups` (the global-config
+//! `numStartups` counter) and `organization_name` (the global-config
+//! `oauthAccount.organizationName`) and renders the returned block in the TUI
+//! startup banner.
 
 use std::sync::Mutex;
 
@@ -80,13 +83,17 @@ pub fn select_company_announcement(
 /// across re-renders within one process.
 #[derive(Debug, Default)]
 pub struct AnnouncementMemo {
-    cell: Mutex<Option<Option<String>>>,
+    /// The `Wxo` cache: `None` = not yet memoized (CC `Wxo===null`), `Some(s)` =
+    /// the memoized announcement. Only ever holds a truthy selection — a null
+    /// result is never cached (CC's `if(e)Wxo=r`, where `r` is always a string).
+    cell: Mutex<Option<String>>,
 }
 
 impl AnnouncementMemo {
-    /// Construct an empty memo.
+    /// Construct an empty memo. `const` so the process-global [`PROCESS_MEMO`]
+    /// (the port of the module-level `Wxo` `var`) can be a plain `static`.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             cell: Mutex::new(None),
         }
@@ -106,15 +113,77 @@ impl AnnouncementMemo {
             .cell
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `if(Wxo!==null)return Wxo` — a cached (always truthy) selection wins.
         if let Some(cached) = guard.as_ref() {
-            return cached.clone();
+            return Some(cached.clone());
         }
         let selected = select_company_announcement(announcements, num_startups);
+        // `if(e)Wxo=r` — memoize ONLY a truthy result; a null selection is not
+        // cached, so a later call re-evaluates (CC never stores `null` in `Wxo`).
         if memoize {
-            *guard = Some(selected.clone());
+            if let Some(s) = selected.as_ref() {
+                *guard = Some(s.clone());
+            }
         }
         selected
     }
+}
+
+/// The startup company-announcement block, mirroring CC's `LVs` render (an Ink
+/// column of an optional dim `Message from <org>:` line above the announcement):
+///
+/// ```js
+/// em_ = !IS_DEMO && Nc()?.organizationName && `Message from ${organizationName}:`;  // dim
+/// PVs = jxo(true);                                                                    // announcement
+/// // <column>{em_}{PVs}</column>
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupAnnouncement {
+    /// `Message from <organizationName>:` prefix (CC `em_`) — present only when
+    /// an org name is available; rendered dim above the body. `None` = omit.
+    pub org_prefix: Option<String>,
+    /// The selected announcement text (CC `PVs`).
+    pub body: String,
+}
+
+/// Process-global announcement memo — the port of CC's module-level `Wxo` `var`
+/// (`jxo`/`rm_` operate on it). Keeps the SAME announcement chosen once per
+/// process, stable across any re-render. Production reads it through
+/// [`startup_announcement`]; tests inject a fresh [`AnnouncementMemo`] via
+/// [`startup_announcement_with`] so they never poison this shared cache.
+static PROCESS_MEMO: AnnouncementMemo = AnnouncementMemo::new();
+
+/// Composition-root selection + formatting against an injected memo (testable).
+///
+/// 1:1 with CC's `LVs`: `PVs = jxo(true)` (memoized selection over the merged
+/// `companyAnnouncements`), and `em_ = organizationName && "Message from <org>:"`.
+/// Returns `None` when there is no non-empty announcement to show — the `oip()`
+/// gate false case (`select` yields `None`).
+#[must_use]
+pub fn startup_announcement_with(
+    memo: &AnnouncementMemo,
+    announcements: Option<&[String]>,
+    num_startups: u64,
+    organization_name: Option<&str>,
+) -> Option<StartupAnnouncement> {
+    let body = memo.select(announcements, num_startups, true)?;
+    let org_prefix = organization_name
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .map(|o| format!("Message from {o}:"));
+    Some(StartupAnnouncement { org_prefix, body })
+}
+
+/// Composition-root entry using the process-global [`PROCESS_MEMO`] (the `Wxo`
+/// cache) — the production call the CLI makes once at startup. See
+/// [`startup_announcement_with`] for the selection/formatting contract.
+#[must_use]
+pub fn startup_announcement(
+    announcements: Option<&[String]>,
+    num_startups: u64,
+    organization_name: Option<&str>,
+) -> Option<StartupAnnouncement> {
+    startup_announcement_with(&PROCESS_MEMO, announcements, num_startups, organization_name)
 }
 
 /// Dependency-free entropy for the uniform-random branch. Not cryptographic;
@@ -200,5 +269,107 @@ mod tests {
         // A subsequent memoize=true call then decides the cached value.
         let cached = memo.select(Some(&v(&["b"])), 1, true);
         assert_eq!(cached, Some("b".to_string()));
+    }
+
+    #[test]
+    fn memo_does_not_cache_a_null_result() {
+        // CC `jxo` only caches a truthy string (`if(e)Wxo=r`); a `null` result
+        // is NOT stored in `Wxo`, so a later call with a real announcement
+        // re-evaluates rather than returning a stale `None`.
+        let memo = AnnouncementMemo::new();
+        assert_eq!(memo.select(None, 1, true), None);
+        assert_eq!(memo.select(Some(&v(&["", ""])), 5, true), None);
+        // Now that an announcement exists, selection proceeds (not stuck at None).
+        assert_eq!(
+            memo.select(Some(&v(&["fresh"])), 1, true),
+            Some("fresh".to_string())
+        );
+    }
+
+    // ---- composition root (`LVs`): startup_announcement ----
+
+    #[test]
+    fn startup_first_launch_yields_first_entry_no_org() {
+        // A configured non-empty array on the very first launch renders the
+        // FIRST non-empty entry, with no `Message from …` prefix when there is
+        // no org name (CC `em_` falsy).
+        let memo = AnnouncementMemo::new();
+        let a = v(&["", "hello", "world"]);
+        let got = startup_announcement_with(&memo, Some(&a), 1, None);
+        assert_eq!(
+            got,
+            Some(StartupAnnouncement {
+                org_prefix: None,
+                body: "hello".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn startup_includes_org_prefix_when_org_name_present() {
+        // `em_ = organizationName && "Message from <org>:"` — the dim prefix.
+        let memo = AnnouncementMemo::new();
+        let a = v(&["heads up"]);
+        let got = startup_announcement_with(&memo, Some(&a), 1, Some("Acme")).unwrap();
+        assert_eq!(got.org_prefix.as_deref(), Some("Message from Acme:"));
+        assert_eq!(got.body, "heads up");
+    }
+
+    #[test]
+    fn startup_blank_org_name_omits_prefix() {
+        // A whitespace-only / empty org name is treated as absent (no prefix).
+        let memo = AnnouncementMemo::new();
+        let a = v(&["hi"]);
+        assert_eq!(
+            startup_announcement_with(&memo, Some(&a), 1, Some("   "))
+                .unwrap()
+                .org_prefix,
+            None
+        );
+        let memo2 = AnnouncementMemo::new();
+        assert_eq!(
+            startup_announcement_with(&memo2, Some(&a), 1, Some(""))
+                .unwrap()
+                .org_prefix,
+            None
+        );
+    }
+
+    #[test]
+    fn startup_absent_or_all_empty_renders_nothing() {
+        // `oip()` false → the whole block is omitted (CC `if(!PVs)return null`).
+        assert_eq!(
+            startup_announcement_with(&AnnouncementMemo::new(), None, 1, Some("Acme")),
+            None
+        );
+        assert_eq!(
+            startup_announcement_with(&AnnouncementMemo::new(), Some(&v(&[])), 5, Some("Acme")),
+            None
+        );
+        assert_eq!(
+            startup_announcement_with(
+                &AnnouncementMemo::new(),
+                Some(&v(&["", ""])),
+                5,
+                Some("Acme")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn startup_selection_is_memoized_per_process() {
+        // Once selected+memoized, later calls on the SAME memo return the same
+        // announcement even under different inputs (the `Wxo` cache).
+        let memo = AnnouncementMemo::new();
+        let first = startup_announcement_with(&memo, Some(&v(&["one"])), 3, None);
+        assert_eq!(first.as_ref().map(|s| s.body.as_str()), Some("one"));
+        let second = startup_announcement_with(&memo, Some(&v(&["two"])), 3, Some("Acme"));
+        // Body stays "one" (memoized); the org prefix is recomputed per call.
+        assert_eq!(second.as_ref().map(|s| s.body.as_str()), Some("one"));
+        assert_eq!(
+            second.and_then(|s| s.org_prefix).as_deref(),
+            Some("Message from Acme:")
+        );
     }
 }

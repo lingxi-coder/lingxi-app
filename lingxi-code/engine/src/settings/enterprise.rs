@@ -10,7 +10,7 @@
 //! | `requiredMaximumVersion` | startup exit gate (same fn) | **LIVE** — [`version_gate`] |
 //! | `forceLoginMethod` | pre-select+lock the OAuth login method; non-interactive `gateway` lockout | helpers here; login-flow wiring DORMANT (see below) |
 //! | `forceLoginGatewayUrl` | pre-fill the Cloud gateway URL in the login screen | accessor here; login-flow wiring DORMANT |
-//! | `forceLoginOrgUUID` | pin OAuth login to an org (or list) | [`parse_force_login_org_uuid`] + membership check; login-flow wiring DORMANT |
+//! | `forceLoginOrgUUID` | pin OAuth login to an org (or list) | **LIVE** — [`parse_force_login_org_uuid`] + [`check_org_membership`], enforced in the interactive Anthropic OAuth login (`EngineOAuthConnect`) |
 //! | `parentSettingsBehavior` | whether the SDK `--managed-settings` parent tier merges under the admin tier | [`should_merge_parent_settings`] predicate; the SDK parent tier itself does not exist in lingxi |
 //! | `forceRemoteSettingsRefresh` | block startup until remote managed settings are re-fetched | schema-only; lingxi has no remote-settings fetcher |
 //! | `minimumVersion` | USER setting: auto-updater channel-downgrade guard | schema-only; lingxi has no auto-updater |
@@ -18,10 +18,21 @@
 //! DORMANT surfaces (subsystem genuinely absent in lingxi, faithful CONFIG
 //! surface landed so managed settings carrying these keys are ACCESSIBLE and
 //! MERGED rather than silently dropped):
-//! - the interactive `/login` method-lock + org-pin + gateway-URL pre-fill live
-//!   in the TUI login picker + `llm-client/oauth/anthropic`; the pure helpers
-//!   here (method resolution, pre-select messages, org-pin validation, gateway
-//!   lockout message) are ready to wire when that flow consumes policy.
+//! - `forceLoginOrgUUID` is now LIVE: the interactive Anthropic OAuth login
+//!   (`EngineOAuthConnect::login("anthropic")`) reads the folded pin
+//!   ([`fold_force_login_org_pin`]) and runs [`check_org_membership`] against the
+//!   authenticated account's resolved org, failing + rolling back a forbidden
+//!   login with the byte-exact admin messages. CC's `auth_force_login_org`
+//!   telemetry is NOT emitted: its four reasons (`managed_by_host_under_pin`,
+//!   `unix_socket_{3p,ssh}_under_pin`, `unix_socket_unreadable_policy`) all name
+//!   the SDK-host / unix-socket credential-broker contexts lingxi lacks — CC
+//!   itself emits no such event on the interactive OAuth denial path, so
+//!   emitting one here would fabricate a context.
+//! - the interactive method-lock (`forceLoginMethod` pre-select) + gateway-URL
+//!   pre-fill still live only as the pure helpers here (method resolution,
+//!   pre-select messages, gateway lockout message); wiring them into the TUI
+//!   login picker requires threading resolved policy through the app mount and
+//!   is deferred.
 //! - `minimumVersion`'s sole CC consumer is the auto-updater channel-downgrade
 //!   guard (`Zlo`/`Wn()`); lingxi has no auto-updater, so it is dead-by-missing
 //!   -subsystem — schema + accessor only, do NOT invent an updater.
@@ -414,9 +425,43 @@ pub fn parse_force_login_org_uuid(value: Option<&serde_json::Value>) -> ForceLog
     }
 }
 
+/// The required-organization clause of the interactive-OAuth mismatch message.
+/// A single pinned org reads `organization {uuid}`; multiple read
+/// `one of these organizations: {a, b, …}` (CC join `", "`). Verbatim CC pieces
+/// (`organization `, `one of these organizations: `, `, `). A single-element
+/// `Pinned` (whether the admin wrote a bare string or a one-item array) takes the
+/// singular form, matching CC's `.length === 1` branch on the normalized array.
+#[must_use]
+fn force_login_required_description(permitted: &[String]) -> String {
+    if permitted.len() == 1 {
+        format!("organization {}", permitted[0])
+    } else {
+        format!("one of these organizations: {}", permitted.join(", "))
+    }
+}
+
+/// The byte-exact interactive-OAuth org-mismatch denial (CC `$Xg` assembly):
+/// `Your authentication token belongs to organization {token_org},\nbut this
+/// machine requires {required}.\n\nPlease log in with a permitted organization:
+/// {login_cmd}`. Verbatim CC except the `claude auth login` invocation, which is
+/// rebranded to `lingxi-cli auth login` per repo precedent (the same rebrand the
+/// version gate applies to `claude update`, and `apps/cli/.../auth.rs`'s
+/// not-logged-in line).
+#[must_use]
+fn org_mismatch_message(token_org: &str, permitted: &[String]) -> String {
+    format!(
+        "Your authentication token belongs to organization {token_org},\n\
+but this machine requires {}.\n\n\
+Please log in with a permitted organization: lingxi-cli auth login",
+        force_login_required_description(permitted)
+    )
+}
+
 /// Check an authenticated account's org memberships against the pin, returning
 /// the byte-exact denial message when login is forbidden. `account_org_ids` is
-/// the set of org UUIDs the authenticated account belongs to.
+/// the set of org UUIDs the authenticated account belongs to (lingxi's
+/// first-party OAuth resolves exactly one — the account's `organization.uuid` —
+/// so this is a one-element slice in practice).
 #[must_use]
 pub fn check_org_membership(
     pin: &ForceLoginOrgPin,
@@ -434,17 +479,36 @@ pub fn check_org_membership(
             if account_org_ids.iter().any(|o| permitted.contains(o)) {
                 OrgMembershipCheck::Permitted
             } else {
-                // CC surfaces an org-mismatch message; the exact assembly
-                // ("Required: … / Token organization: …") depends on the live
-                // token-org lookup which is part of the dormant login flow.
-                OrgMembershipCheck::Denied(
-                    "This machine's managed settings require login to a specific organization, \
-                     but the authenticated account does not belong to a permitted organization."
-                        .to_string(),
-                )
+                // CC's interactive-OAuth org-mismatch block: "Your authentication
+                // token belongs to organization {tokenOrg}, but this machine
+                // requires {required}." The displayed token org is the account's
+                // resolved org (the sole element for lingxi's first-party login).
+                let token_org = account_org_ids.first().map(String::as_str).unwrap_or("");
+                OrgMembershipCheck::Denied(org_mismatch_message(token_org, permitted))
             }
         }
     }
+}
+
+/// Fold the raw managed-settings tiers (ASCENDING priority, as returned by
+/// `settings_watch::managed_settings_raw_tiers`) into the effective
+/// `forceLoginOrgUUID` pin. `forceLoginOrgUUID` is a scalar key, so the
+/// highest-priority tier that SETS it wins (later source overrides). A tier that
+/// fails to parse is skipped (fail-OPEN, matching [`managed_version_policy`] and
+/// CC's `try{…}catch` swallow of an unreadable interactive-login policy; the
+/// fail-CLOSED unreadable-policy path is a non-interactive credential-broker
+/// context — `unix_socket_unreadable_policy` — that lingxi does not have).
+#[must_use]
+pub fn fold_force_login_org_pin(raw_tiers: &[String]) -> ForceLoginOrgPin {
+    let mut pin = ForceLoginOrgPin::Unset;
+    for raw in raw_tiers {
+        if let Ok(s) = serde_json::from_str::<SettingsJson>(raw) {
+            if s.force_login_org_uuid.is_some() {
+                pin = s.force_login_org_pin();
+            }
+        }
+    }
+    pin
 }
 
 // ── SettingsJson typed accessors ─────────────────────────────────────────────
@@ -780,14 +844,85 @@ Your organization requires version 2.9.0 or older. Install an approved version u
             ),
             OrgMembershipCheck::Permitted
         );
-        // Pinned + non-member ⇒ denied.
-        assert!(matches!(
-            check_org_membership(
-                &ForceLoginOrgPin::Pinned(vec!["org-a".to_string()]),
-                &["org-x".to_string()]
-            ),
-            OrgMembershipCheck::Denied(_)
-        ));
+    }
+
+    #[test]
+    fn org_mismatch_message_single_pin_byte_exact() {
+        // Single pinned org ⇒ the singular "organization {uuid}" clause; the
+        // displayed token org is the account's resolved org.
+        let denied = check_org_membership(
+            &ForceLoginOrgPin::Pinned(vec!["org-required".to_string()]),
+            &["org-token".to_string()],
+        );
+        assert_eq!(
+            denied,
+            OrgMembershipCheck::Denied(
+                "Your authentication token belongs to organization org-token,\n\
+but this machine requires organization org-required.\n\n\
+Please log in with a permitted organization: lingxi-cli auth login"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn org_mismatch_message_array_pin_byte_exact() {
+        // Multiple pinned orgs ⇒ the plural "one of these organizations: …"
+        // clause, comma-space joined in pin order.
+        let denied = check_org_membership(
+            &ForceLoginOrgPin::Pinned(vec!["org-a".to_string(), "org-b".to_string()]),
+            &["org-token".to_string()],
+        );
+        assert_eq!(
+            denied,
+            OrgMembershipCheck::Denied(
+                "Your authentication token belongs to organization org-token,\n\
+but this machine requires one of these organizations: org-a, org-b.\n\n\
+Please log in with a permitted organization: lingxi-cli auth login"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn fold_force_login_org_pin_last_setting_tier_wins() {
+        // Absent in every tier ⇒ Unset.
+        assert_eq!(
+            fold_force_login_org_pin(&[r#"{}"#.to_string()]),
+            ForceLoginOrgPin::Unset
+        );
+        // Highest-priority tier that SETS the key wins (scalar override).
+        let tiers = vec![
+            r#"{"forceLoginOrgUUID":"org-base"}"#.to_string(),
+            r#"{"forceLoginOrgUUID":["org-x","org-y"]}"#.to_string(),
+        ];
+        assert_eq!(
+            fold_force_login_org_pin(&tiers),
+            ForceLoginOrgPin::Pinned(vec!["org-x".to_string(), "org-y".to_string()])
+        );
+        // A tier absent the key does not clear a lower tier's pin.
+        let tiers2 = vec![
+            r#"{"forceLoginOrgUUID":"org-keep"}"#.to_string(),
+            r#"{"defaultMode":"acceptEdits"}"#.to_string(),
+        ];
+        assert_eq!(
+            fold_force_login_org_pin(&tiers2),
+            ForceLoginOrgPin::Pinned(vec!["org-keep".to_string()])
+        );
+        // An explicit empty array is a distinct (admin-error) state, preserved.
+        assert_eq!(
+            fold_force_login_org_pin(&[r#"{"forceLoginOrgUUID":[]}"#.to_string()]),
+            ForceLoginOrgPin::EmptyArray
+        );
+        // An unparseable tier is skipped (fail-open), lower tier's pin kept.
+        let tiers3 = vec![
+            r#"{"forceLoginOrgUUID":"org-lo"}"#.to_string(),
+            r#"{not json"#.to_string(),
+        ];
+        assert_eq!(
+            fold_force_login_org_pin(&tiers3),
+            ForceLoginOrgPin::Pinned(vec!["org-lo".to_string()])
+        );
     }
 
     #[test]

@@ -1535,8 +1535,15 @@ impl ChatWidget {
     /// An empty result still opens the picker (it renders its own empty
     /// message).
     pub(crate) fn cmd_model(&mut self, _args: &str) -> ChatOutcome {
-        let rows =
-            crate::session::connected_model_rows(&self.session.models, &self.connect_availability);
+        // Filter by the managed `availableModels` allowlist (parity 2.1.207
+        // H-BIN-08) in addition to provider connectivity — a policy-barred model
+        // is not selectable (the current model always stays selectable).
+        let rows = crate::session::connected_model_rows_restricted(
+            &self.session.models,
+            &self.connect_availability,
+            self.session.model_allowlist.as_deref(),
+            Some(&self.session.model_overrides),
+        );
         self.bottom_pane.show_model_picker(rows);
         ChatOutcome::Continue
     }

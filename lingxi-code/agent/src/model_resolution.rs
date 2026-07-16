@@ -49,8 +49,52 @@
 //!   alias logic twice.
 
 use crate::definition::{AgentDefinition, AgentModel, AgentSource};
+use llm_client::model::allowlist::{self, ModelEnforcement};
 use permission::PermissionMode;
 use traits::env::is_env_truthy;
+
+/// Managed model-restriction context threaded into the plan-mode upgrade swap
+/// (binary `RF`) and the subagent model-request gate (binary `ble`/`Qly`). Boot
+/// resolves it once from the managed `availableModels` allowlist and hands it to
+/// the spawner; a default install has no policy allowlist so
+/// [`ModelEnforcement::Inactive`] flows through as a byte-for-byte no-op.
+#[derive(Clone, Copy)]
+pub struct ModelRestriction<'a> {
+    /// Resolved enforcement (managed allowlist + overrides, or Inactive/Refused).
+    pub enforcement: &'a ModelEnforcement,
+    /// The concrete model catalog "newest permitted of family" is resolved
+    /// against (binary `ykr` queries the live registry).
+    pub catalog: &'a [String],
+}
+
+impl<'a> ModelRestriction<'a> {
+    /// `true` when the managed restriction actively BARS `model` (binary
+    /// `!(P4(x)??sl(x))` reduced to the env-free `availableModels` arm). An
+    /// absent restriction, or [`ModelEnforcement::Inactive`], never bars.
+    #[must_use]
+    fn bars(&self, model: &str) -> bool {
+        allowlist::model_allowed_under(self.enforcement, model) == Some(false)
+    }
+
+    /// The allowlist + overrides when enforcement is active (for
+    /// `newest_permitted_in_family`); `None` for Inactive/Refused. The returned
+    /// borrows carry the restriction's `'a` lifetime (they come from the
+    /// `&'a ModelEnforcement`), not the temporary `&self`.
+    fn active(&self) -> Option<(&'a [String], &'a std::collections::BTreeMap<String, String>)> {
+        match self.enforcement {
+            ModelEnforcement::Active {
+                allowlist,
+                overrides,
+            } => Some((allowlist, overrides)),
+            _ => None,
+        }
+    }
+}
+
+/// `true` when a restriction is present AND actively bars `model`.
+fn restriction_bars(restriction: Option<ModelRestriction<'_>>, model: &str) -> bool {
+    restriction.is_some_and(|r| r.bars(model))
+}
 
 /// Canonical concrete id for a bare family alias.
 ///
@@ -169,17 +213,82 @@ fn get_runtime_main_loop_model(
     exceeds_200k_tokens: bool,
     model_setting: Option<&str>,
 ) -> String {
-    // opusplan uses Opus in plan mode without [1m] suffix.
-    if model_setting == Some("opusplan")
-        && permission_mode == PermissionMode::Plan
-        && !exceeds_200k_tokens
-    {
-        return get_default_opus_model();
+    get_runtime_main_loop_model_restricted(
+        permission_mode,
+        main_loop_model,
+        exceeds_200k_tokens,
+        model_setting,
+        None,
+        &mut |_| {},
+    )
+}
+
+/// [`get_runtime_main_loop_model`] with the managed model-restriction gate the
+/// binary `RF` applies to the plan-mode upgrade model. When the `opusplan`→Opus
+/// (or `haiku`→Sonnet) upgrade model is BARRED by the managed allowlist, the
+/// upgrade is replaced by the newest permitted model of that family (binary
+/// `j5`), or — when nothing in the family is permitted — by the resting model
+/// (the setting resolved normally). Each substitution emits its byte-exact
+/// warning through `warn` (the caller de-duplicates, mirroring the binary `SN`
+/// set). With `restriction == None` (or an inactive one) this is byte-identical
+/// to the unrestricted resolution.
+fn get_runtime_main_loop_model_restricted(
+    permission_mode: PermissionMode,
+    main_loop_model: &str,
+    exceeds_200k_tokens: bool,
+    model_setting: Option<&str>,
+    restriction: Option<ModelRestriction<'_>>,
+    warn: &mut dyn FnMut(&str),
+) -> String {
+    let plan = permission_mode == PermissionMode::Plan;
+
+    // opusplan (with or without an explicit [1m] tag) upgrades to Opus in plan
+    // mode unless the context already exceeds 200k tokens.
+    let is_opusplan = model_setting == Some("opusplan") || model_setting == Some("opusplan[1m]");
+    if is_opusplan && plan && !exceeds_200k_tokens {
+        let one_m = model_setting == Some("opusplan[1m]");
+        let upgrade = if one_m {
+            format!("{}[1m]", get_default_opus_model())
+        } else {
+            get_default_opus_model()
+        };
+        if restriction_bars(restriction, &upgrade) {
+            if let Some((allow, ovr, catalog)) =
+                restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+            {
+                if let Some(newest) =
+                    allowlist::newest_permitted_in_family("opus", catalog, Some(allow), Some(ovr))
+                {
+                    warn(allowlist::warnings::PLAN_OPUSPLAN_NEWEST);
+                    return newest;
+                }
+            }
+            warn(allowlist::warnings::PLAN_OPUSPLAN_RESTING);
+            // The resting model = the raw setting resolved normally (opusplan →
+            // Sonnet), preserving the [1m] tag the setting carried.
+            return parse_user_specified_model(model_setting.unwrap_or("opusplan"));
+        }
+        return upgrade;
     }
 
-    // sonnetplan by default
-    if model_setting == Some("haiku") && permission_mode == PermissionMode::Plan {
-        return get_default_sonnet_model();
+    // haiku plan setting upgrades to Sonnet in plan mode.
+    if model_setting == Some("haiku") && plan {
+        let upgrade = get_default_sonnet_model();
+        if restriction_bars(restriction, &upgrade) {
+            if let Some((allow, ovr, catalog)) = restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+            {
+                if let Some(newest) =
+                    allowlist::newest_permitted_in_family("sonnet", catalog, Some(allow), Some(ovr))
+                {
+                    warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
+                    return newest;
+                }
+            }
+            warn(allowlist::warnings::PLAN_HAIKU_RESTING);
+            // Resting model for the `haiku` setting = Haiku.
+            return parse_user_specified_model("haiku");
+        }
+        return upgrade;
     }
 
     main_loop_model.to_string()
@@ -531,6 +640,60 @@ pub fn resolve_agent_model(
     permission_mode: PermissionMode,
     model_setting: Option<&str>,
 ) -> String {
+    resolve_agent_model_restricted(
+        model,
+        parent_model,
+        permission_mode,
+        model_setting,
+        None,
+        &mut |_| {},
+    )
+}
+
+/// [`resolve_agent_model`] with the managed-allowlist subagent gate the binary
+/// `ble`/`Qly` applies. When a subagent's EXPLICITLY-requested (or
+/// `LINGXI_SUBAGENT_MODEL`-env) model resolves to an id BARRED by the managed
+/// allowlist, the request is dropped and the subagent inherits the parent /
+/// runtime main-loop model (itself plan-mode-gated), emitting the byte-exact
+/// `Subagent model "<m>" is not in the availableModels allowlist; inheriting the
+/// parent model instead` warning through `warn` (the caller de-duplicates,
+/// mirroring the binary `SN` set).
+///
+/// An `AgentModel::Inherit` request, or a bare family alias that tier-matches the
+/// parent, is NEVER barred — those already resolve to the parent/runtime model.
+/// With `restriction == None` (or an inactive one) this is byte-identical to the
+/// unrestricted resolution.
+#[must_use]
+pub fn resolve_agent_model_restricted(
+    model: &AgentModel,
+    parent_model: &str,
+    permission_mode: PermissionMode,
+    model_setting: Option<&str>,
+    restriction: Option<ModelRestriction<'_>>,
+    warn: &mut dyn FnMut(&str),
+) -> String {
+    // The inherited / runtime main-loop model an explicitly-requested-but-barred
+    // subagent (and the Inherit branch) falls back to — plan-mode-gated (binary
+    // `i()` = `RF(...)`).
+    let inherit = |warn: &mut dyn FnMut(&str)| {
+        get_runtime_main_loop_model_restricted(
+            permission_mode,
+            parent_model,
+            false,
+            model_setting,
+            restriction,
+            warn,
+        )
+    };
+    // Emit the byte-exact "Subagent model … inheriting the parent model instead"
+    // warning (binary `Qly`), naming the REQUESTED model string.
+    let warn_subagent = |warn: &mut dyn FnMut(&str), requested: &str| {
+        warn(&format!(
+            "Subagent model \"{requested}{}",
+            allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+        ));
+    };
+
     // 1. LINGXI_SUBAGENT_MODEL env override (HIGHEST). The TS guard is falsy
     //    for both unset AND empty-string. This branch bypasses the Bedrock prefix
     //    (the TS early-return precedes applyParentRegionPrefix).
@@ -538,7 +701,12 @@ pub fn resolve_agent_model(
         .ok()
         .filter(|s| !s.is_empty())
     {
-        return parse_user_specified_model(&v);
+        let resolved = parse_user_specified_model(&v);
+        if restriction_bars(restriction, &resolved) {
+            warn_subagent(warn, &v);
+            return inherit(warn);
+        }
+        return resolved;
     }
 
     // Extract Bedrock region prefix from the parent model to inherit for
@@ -568,22 +736,27 @@ pub fn resolve_agent_model(
 
     match model {
         // 3. Inherit → runtime main-loop resolution (opusplan→Opus / haiku→Sonnet
-        //    in plan mode; else the parent model unchanged).
-        AgentModel::Inherit => {
-            get_runtime_main_loop_model(permission_mode, parent_model, false, model_setting)
-        }
+        //    in plan mode; else the parent model unchanged). Never allowlist-gated
+        //    (it already yields the parent/runtime model).
+        AgentModel::Inherit => inherit(warn),
         // 4. Explicit / Alias share the same tail: if the bare family alias
         //    matches the parent's tier, inherit the parent's EXACT id; else
         //    resolve + apply the parent region prefix. Real explicit ids are
         //    full `claude-…` strings, which parse_user_specified_model passes
         //    through unchanged (case preserved, only [1m] normalized), so this is
-        //    byte-identical to the old verbatim passthrough for them.
+        //    byte-identical to the old verbatim passthrough for them. A resolved
+        //    model the managed allowlist BARS falls back to the inherited model.
         AgentModel::Explicit(spec) | AgentModel::Alias(spec) => {
             if alias_matches_parent_tier(spec, parent_model) {
                 return parent_model.to_string();
             }
             let resolved = parse_user_specified_model(spec);
-            apply_parent_region_prefix(&resolved, spec)
+            let resolved = apply_parent_region_prefix(&resolved, spec);
+            if restriction_bars(restriction, &resolved) {
+                warn_subagent(warn, spec);
+                return inherit(warn);
+            }
+            resolved
         }
     }
 }
@@ -1411,5 +1584,276 @@ mod tests {
             resolve_builtin_explore_model(&user_explore, "claude-fable-5", true),
             AgentModel::Alias(ref a) if a == "sonnet"
         ));
+    }
+
+    // ── H-BIN-08: managed availableModels restriction (binary RF / ble/Qly) ──
+    //
+    // These exercise the boot-wired managed-allowlist gate. All pin firstParty
+    // (clear_provider_env) so the provider-aware Opus/Sonnet defaults are
+    // deterministic, and clear LINGXI_SUBAGENT_MODEL so the env branch is inert.
+
+    use std::collections::BTreeMap;
+
+    /// An Active enforcement over `allow` with no overrides.
+    fn active(allow: &[&str]) -> ModelEnforcement {
+        ModelEnforcement::Active {
+            allowlist: allow.iter().map(|s| (*s).to_string()).collect(),
+            overrides: BTreeMap::new(),
+        }
+    }
+
+    fn catalog(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Guard clearing LINGXI_SUBAGENT_MODEL so the env override never shadows the
+    /// restricted-resolution tests (restored on drop).
+    fn clear_subagent_env() -> EnvGuard {
+        let g = EnvGuard {
+            key: "LINGXI_SUBAGENT_MODEL",
+            prev: std::env::var("LINGXI_SUBAGENT_MODEL").ok(),
+        };
+        std::env::remove_var("LINGXI_SUBAGENT_MODEL");
+        g
+    }
+
+    #[test]
+    fn subagent_disallowed_model_inherits_parent_with_exact_warning() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        // Allowlist permits only opus; the request resolves to Sonnet (barred).
+        let enf = active(&["opus"]);
+        let cat = catalog(&["claude-opus-4-8", "claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Alias("sonnet".to_string()),
+            "claude-opus-4-8",
+            DEFAULT,
+            None,
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        // Falls back to the parent (runtime main-loop) model.
+        assert_eq!(out, "claude-opus-4-8");
+        assert_eq!(
+            warns,
+            vec![format!(
+                "Subagent model \"sonnet{}",
+                allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+            )]
+        );
+    }
+
+    #[test]
+    fn subagent_allowed_model_passes_through_no_warning() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        // Sonnet IS allowed → the request resolves normally with no warning.
+        let enf = active(&["opus", "sonnet"]);
+        let cat = catalog(&["claude-opus-4-8", "claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Alias("sonnet".to_string()),
+            "claude-opus-4-8",
+            DEFAULT,
+            None,
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        assert_eq!(out, "claude-sonnet-5");
+        assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn subagent_env_override_disallowed_inherits_with_env_value_in_warning() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = EnvGuard::set("LINGXI_SUBAGENT_MODEL", "sonnet");
+        let enf = active(&["opus"]);
+        let cat = catalog(&["claude-opus-4-8", "claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Inherit,
+            "claude-opus-4-8",
+            DEFAULT,
+            None,
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        assert_eq!(out, "claude-opus-4-8");
+        // The warning names the raw env value.
+        assert_eq!(
+            warns,
+            vec![format!(
+                "Subagent model \"sonnet{}",
+                allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+            )]
+        );
+    }
+
+    #[test]
+    fn inactive_restriction_is_a_no_op() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        let enf = ModelEnforcement::Inactive;
+        let cat = catalog(&["claude-opus-4-8", "claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        // Identical to the unrestricted resolution: Alias("sonnet") → default id.
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Alias("sonnet".to_string()),
+            "claude-opus-4-8",
+            DEFAULT,
+            None,
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        assert_eq!(out, "claude-sonnet-5");
+        assert!(warns.is_empty());
+    }
+
+    #[test]
+    fn plan_opusplan_barred_uses_newest_permitted_opus() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        // The opus upgrade (claude-opus-4-8) is barred; 4-6 is permitted.
+        let enf = active(&["opus-4-6"]);
+        let cat = catalog(&["claude-opus-4-6", "claude-opus-4-8"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Inherit,
+            "claude-sonnet-5",
+            PermissionMode::Plan,
+            Some("opusplan"),
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        assert_eq!(out, "claude-opus-4-6");
+        assert_eq!(warns, vec![allowlist::warnings::PLAN_OPUSPLAN_NEWEST.to_string()]);
+    }
+
+    #[test]
+    fn plan_opusplan_barred_no_permitted_opus_uses_resting_model() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        // No opus is permitted at all → the resting model (opusplan → Sonnet).
+        let enf = active(&["sonnet"]);
+        let cat = catalog(&["claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Inherit,
+            "claude-sonnet-5",
+            PermissionMode::Plan,
+            Some("opusplan"),
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        // Resting model = opusplan resolved normally = the Sonnet default.
+        assert_eq!(out, "claude-sonnet-5");
+        assert_eq!(warns, vec![allowlist::warnings::PLAN_OPUSPLAN_RESTING.to_string()]);
+    }
+
+    #[test]
+    fn plan_haiku_barred_uses_newest_permitted_sonnet() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        // The haiku plan upgrade (Sonnet default claude-sonnet-5) is barred; an
+        // older permitted sonnet exists.
+        let enf = active(&["sonnet-4-5"]);
+        let cat = catalog(&["claude-sonnet-4-5-20250929", "claude-sonnet-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Inherit,
+            "claude-opus-4-8",
+            PermissionMode::Plan,
+            Some("haiku"),
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        assert_eq!(out, "claude-sonnet-4-5-20250929");
+        assert_eq!(warns, vec![allowlist::warnings::PLAN_HAIKU_NEWEST.to_string()]);
+    }
+
+    #[test]
+    fn plan_haiku_barred_no_permitted_sonnet_uses_resting_haiku() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        // No sonnet is permitted → the resting model for `haiku` = Haiku default.
+        let enf = active(&["haiku"]);
+        let cat = catalog(&["claude-haiku-4-5"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Inherit,
+            "claude-opus-4-8",
+            PermissionMode::Plan,
+            Some("haiku"),
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        assert_eq!(out, "claude-haiku-4-5");
+        assert_eq!(warns, vec![allowlist::warnings::PLAN_HAIKU_RESTING.to_string()]);
+    }
+
+    #[test]
+    fn plan_opusplan_permitted_upgrade_uses_opus_no_warning() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = clear_provider_env();
+        let _s = clear_subagent_env();
+        // The opus upgrade IS permitted → no substitution, no warning.
+        let enf = active(&["opus"]);
+        let cat = catalog(&["claude-opus-4-8"]);
+        let restriction = ModelRestriction {
+            enforcement: &enf,
+            catalog: &cat,
+        };
+        let mut warns: Vec<String> = Vec::new();
+        let out = resolve_agent_model_restricted(
+            &AgentModel::Inherit,
+            "claude-sonnet-5",
+            PermissionMode::Plan,
+            Some("opusplan"),
+            Some(restriction),
+            &mut |m| warns.push(m.to_string()),
+        );
+        assert_eq!(out, "claude-opus-4-8");
+        assert!(warns.is_empty());
     }
 }

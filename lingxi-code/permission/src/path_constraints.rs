@@ -438,12 +438,51 @@ fn command_has_network_device_redirect(subs: &[String]) -> bool {
     false
 }
 
-/// Extract the `cd` target from a subcommand if its first word is `cd`. TS `cd`
-/// extractor (`pathValidation.ts:195`): all args join into ONE path; with no
-/// args the target is the home dir (which is always inside no working dir but is
-/// never a constraint violation — see [`check_path_constraints`], where a bare
-/// `cd` is treated as a no-op since home-dir containment is not a write).
-fn extract_cd_target(sub: &str) -> Option<String> {
+/// Outcome of parsing a `cd` subcommand's arguments — mirrors 2.1.211's `cd`
+/// COMMAND_EXTRACTOR (`GQt.cd`, first-positional-only) plus the `gPg.cd`
+/// multi-positional guard (`yPg`).
+enum CdParse {
+    /// The subcommand's first word is not `cd`.
+    NotCd,
+    /// `cd` with ≥2 positional directory arguments — the zsh `cd OLD NEW`
+    /// substitution form, which cannot be statically validated → ask.
+    MultiPositional,
+    /// `cd` with exactly one positional directory target to validate.
+    Target(String),
+    /// Bare `cd` (or flags only) → the home dir. Treated as benign (a `cd` with
+    /// no positional target is not a write and, matching the port's prior
+    /// behavior, is not containment-checked).
+    Bare,
+}
+
+/// Port of 2.1.211's `Bx` positional extractor: collect the positional
+/// (non-flag) args from a command's argv. A `--` terminator turns on
+/// "everything after is positional"; a bare `-` counts as a positional; a
+/// leading `-x` flag (`-` prefix, not exactly `-`) before the first positional
+/// is skipped; once the first positional (or `--`) is seen, every subsequent arg
+/// is positional (including later flags).
+fn cd_positionals(args: &[String]) -> Vec<&String> {
+    let mut out = Vec::new();
+    let mut seen_double_dash = false; // TS `r`
+    let mut seen_positional = false; // TS `n`
+    for a in args {
+        if seen_double_dash || seen_positional {
+            out.push(a);
+        } else if a == "--" {
+            seen_double_dash = true;
+        } else if a == "-" || !a.starts_with('-') {
+            out.push(a);
+            seen_positional = true;
+        }
+        // else: a flag (`-P`, `-L`, …) before the first positional → skipped.
+    }
+    out
+}
+
+/// Parse a subcommand's leading `cd` argv into a [`CdParse`]. Mirrors
+/// 2.1.211's `GQt.cd` (extract only the FIRST positional) gated by `gPg.cd`
+/// (≥2 positionals → the zsh multi-positional ask, `yPg`).
+fn parse_cd(sub: &str) -> CdParse {
     // Reuse the redirect tokenizer's word splitting, but only the leading words
     // up to any redirection/control operator form the `cd` argv.
     let tokens = tokenize_redirects(sub);
@@ -454,23 +493,23 @@ fn extract_cd_target(sub: &str) -> Option<String> {
             Token::Op { .. } => break,
         }
     }
-    let (base, args) = words.split_first()?;
+    let Some((base, args)) = words.split_first() else {
+        return CdParse::NotCd;
+    };
     if base != "cd" {
-        return None;
+        return CdParse::NotCd;
     }
-    // Filter flags (`cd -P`, `cd -L`, `cd -`), then join the rest. A bare `cd`
-    // (no positional args) → None (home dir, treated as benign).
-    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-    if positional.is_empty() {
-        return None;
+    let positional = cd_positionals(args);
+    // `gPg.cd`: n <= 1 positional is OK; ≥2 → the zsh `cd OLD NEW` ask.
+    if positional.len() > 1 {
+        return CdParse::MultiPositional;
     }
-    Some(
-        positional
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    // `GQt.cd`: validate only the FIRST positional (identical to the single
+    // element here); no positional → home dir (benign).
+    match positional.first() {
+        Some(first) => CdParse::Target((*first).clone()),
+        None => CdParse::Bare,
+    }
 }
 
 /// Does any subcommand `cd` somewhere? (TS `compoundCommandHasCd`.) Used to gate
@@ -584,8 +623,18 @@ pub fn check_path_constraints(
 
     // 5/6. `cd` target validation (`validateCommandPaths`, `pathValidation.ts:603`).
     for sub in &subs {
-        let Some(cd_arg) = extract_cd_target(sub) else {
-            continue;
+        let cd_arg = match parse_cd(sub) {
+            CdParse::NotCd | CdParse::Bare => continue,
+            // `gPg.cd` failed (≥2 positional dir args): the zsh `cd OLD NEW`
+            // substitution form can't be statically validated → ask
+            // (byte-exact, no product name; `yPg`, `bashMissKind:cd-multi-positional`).
+            CdParse::MultiPositional => {
+                return Some(PathConstraintAsk {
+                    message: "cd with two or more directory arguments requires manual approval. zsh's \"cd OLD NEW\" form substitutes OLD\u{2192}NEW in $PWD, producing a target path that cannot be statically validated.".to_string(),
+                    reason: "cd with two or more directory arguments".to_string(),
+                });
+            }
+            CdParse::Target(target) => target,
         };
         // 5. Compound `cd` + write — TS asks for ANY write op in a cd-compound
         //    (`pathValidation.ts:645`). `cd` itself is a read op, so this fires
@@ -873,6 +922,51 @@ mod tests {
         // bare `cd` → home dir, treated as benign (no positional target).
         assert!(check("cd").is_none());
         assert!(check("cd -P sub").is_none());
+    }
+
+    // ── cd multi-positional (zsh `cd OLD NEW`) → ask (PERM-PATH-03) ─────────
+
+    #[test]
+    fn cd_multi_positional_asks() {
+        // Two positional dir args = zsh `cd OLD NEW` substitution form → ask,
+        // even when both resolve under cwd (where the join-all port silently
+        // passed).
+        for cmd in ["cd sub other", "cd a b c", "cd ./x ./y", "cd -- a b"] {
+            let a = check(cmd).unwrap_or_else(|| panic!("{cmd} should ask"));
+            assert_eq!(
+                a.message,
+                "cd with two or more directory arguments requires manual approval. \
+                 zsh's \"cd OLD NEW\" form substitutes OLD\u{2192}NEW in $PWD, producing \
+                 a target path that cannot be statically validated.",
+                "cmd={cmd}"
+            );
+            assert_eq!(a.reason, "cd with two or more directory arguments", "cmd={cmd}");
+        }
+    }
+
+    #[test]
+    fn cd_single_positional_with_flags_not_multi() {
+        // Flags before the first positional don't count; a single positional is
+        // validated normally (here inside cwd → no ask).
+        assert!(check("cd -P sub").is_none());
+        assert!(check("cd -L -P ./sub").is_none());
+        // A bare `-` is a single positional (OLDPWD), resolves under cwd lexically.
+        assert!(check("cd -").is_none());
+    }
+
+    #[test]
+    fn cd_multi_positional_flag_after_positional_counts() {
+        // Once the first positional is seen, later flags also count → ≥2 → ask.
+        let a = check("cd sub -P").expect("should ask");
+        assert_eq!(a.reason, "cd with two or more directory arguments");
+    }
+
+    #[test]
+    fn cd_single_positional_first_only_validated() {
+        // Single positional outside cwd still asks via containment (first
+        // positional only, no join artifacts).
+        let a = check("cd /tmp").expect("should ask");
+        assert!(a.message.starts_with("cd in '/tmp' was blocked."));
     }
 
     #[test]

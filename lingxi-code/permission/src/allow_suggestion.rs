@@ -12,32 +12,36 @@
 //! `WebFetch(domain:example.com)`).
 //!
 //! ## What this ports
-//! A faithful STATIC structural narrowing keyed on the tool + its input:
-//! - shell tools (`Bash`/`PowerShell`) → `Bash(<command-root>:*)` where the root
-//!   is the leading run of non-flag tokens of the first sub-command (binary +
-//!   sub-commands + leading positional args, stopping at the first `-flag`),
-//!   unwrapping `sudo`/`env`/leading `VAR=val` assignments first;
+//! The 2.1.211 `KQt` / `$ro` / `MOg` static suggestion algorithm, keyed on the
+//! tool + its input:
+//! - shell tools (`Bash`/`PowerShell`) → a `Bash(<prefix> *)` WILDCARD rule
+//!   (`t9r` appends ` *`, NOT `:*`) where `<prefix>` is EXACTLY TWO tokens
+//!   (`$ro`): leading `NAME=value` env assignments are consumed only when every
+//!   NAME is in the safe `Jqr` set (else fall back to exact), the first non-env
+//!   token must not be an interpreter (`Bro`), and the second token must match
+//!   `/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/`. Heredoc (`MOg`) and multiline
+//!   (first-line) commands take a special-cased prefix. Anything else falls back
+//!   to an EXACT full-command rule (`YYn`, no wildcard) — so `ls` → `Bash(ls)`
+//!   (bare only), `cat /etc/hosts` → `Bash(cat /etc/hosts)`, and
+//!   `SECRET=x cmd` → `Bash(SECRET=x cmd)` (never widened to `cmd *`);
 //! - file-path tools (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Read`/`Glob`)
 //!   → `Edit(<path>)` from `file_path` / `notebook_path` / `path`;
 //! - `WebFetch` → `WebFetch(domain:<host>)` from the `url` host;
-//! - everything else (MCP tools, tools with no narrowable input) → tool-wide,
-//!   exactly as before.
+//! - a shell call with NO command, and every other tool (MCP tools, tools with
+//!   no narrowable input) → tool-wide, exactly as before.
 //!
 //! ## Documented residual
-//! claude-code's Bash prefix is partly MODEL-assisted (`getCommandPrefix` issues
-//! an LLM call to pick the safest prefix and may return the exact command or a
-//! shorter prefix). This static extractor errs toward a NARROWER prefix than the
-//! model would (it keeps leading positional args), so the persisted grant is
-//! never BROADER than claude-code's — only occasionally tighter. The model-driven
-//! refinement is the residual; the structural narrowing (vs. whole-tool) is the
-//! parity fix.
+//! claude-code's `getCommandPrefix` may ALSO issue an LLM call to refine the
+//! prefix; only the byte-faithful STATIC `KQt` path is ported here. Both `:*`
+//! and ` *` are prefix wildcards to the matcher (`shell_rule_matching` strips the
+//! trailing two chars), so the ` *` bytes match `<prefix>`-anchored commands
+//! exactly as `:*` would; the exact-command fallback requires a byte-equal
+//! command.
 
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
-use crate::shell_command::{
-    command_from_input, is_shell_tool, split_command, strip_all_leading_env_vars,
-    strip_safe_wrappers,
-};
+use crate::shell_command::{command_from_input, is_shell_tool};
 use serde_json::Value;
+use std::sync::LazyLock;
 
 /// File-path tools whose `AllowAlways` narrows to the touched path.
 const FILE_PATH_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob"];
@@ -103,9 +107,12 @@ pub fn call_matches_rule(rule: &PermissionRule, tool_name: &str, input: &Value) 
 /// the call tool-wide.
 fn narrowed_content(tool_name: &str, input: &Value) -> Option<String> {
     if is_shell_tool(tool_name) {
+        // 2.1.211 `KQt`: for a shell tool with a command, the suggestion is ALWAYS
+        // a concrete rule (a `<prefix> *` wildcard or an EXACT full command) —
+        // never tool-wide. Only a call with no command at all stays tool-wide.
         return command_from_input(input)
-            .and_then(bash_command_root)
-            .map(|root| format!("{root}:*"));
+            .filter(|c| !c.trim().is_empty())
+            .map(bash_suggestion_content);
     }
     if FILE_PATH_TOOLS.contains(&tool_name) {
         return file_path_content(input);
@@ -116,33 +123,178 @@ fn narrowed_content(tool_name: &str, input: &Value) -> Option<String> {
     None
 }
 
-/// Extract the static command root of the FIRST sub-command: the leading run of
-/// tokens that are not `-flags`, after unwrapping `sudo`/`env`-style wrappers and
-/// stripping leading `VAR=value` assignments. Returns `None` for an empty /
-/// flag-only command (→ tool-wide fallback).
-fn bash_command_root(command: &str) -> Option<String> {
-    // Unwrap safe wrappers (sudo/env/timeout/...), then take the first
-    // sub-command before any `&&`/`|`/`;` operator (quote-aware split).
-    let unwrapped = strip_safe_wrappers(command);
-    let first = split_command(&unwrapped)
-        .into_iter()
-        .next()
-        .unwrap_or(unwrapped);
-    // Drop leading `VAR=val` assignments so `FOO=1 git status` → `git status`.
-    let first = strip_all_leading_env_vars(&first, None);
+/// The 2.1.211 `KQt` interpreter blocklist `Bro`: if the command's first
+/// non-env token is one of these (by basename), no static prefix is derived and
+/// the suggestion falls back to the EXACT full command.
+const INTERPRETER_BLOCKLIST: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "csh", "tcsh", "ksh", "dash", "cmd", "powershell", "pwsh", "env",
+    "xargs", "command", "builtin", "noglob", "nice", "stdbuf", "nohup", "timeout", "time", "watch",
+    "ionice", "chrt", "setsid", "taskset", "strace", "ltrace", "script", "flock", "unshare",
+    "nsenter", "sudo", "doas", "pkexec", "su", "runuser",
+];
 
-    let mut root: Vec<&str> = Vec::new();
-    for tok in first.split_whitespace() {
-        // Stop at the first flag or any stray operator token.
-        if tok.starts_with('-') || matches!(tok, "|" | "&&" | "||" | ";" | ">" | "<" | "&") {
-            break;
-        }
-        root.push(tok);
+/// The 2.1.211 `KQt` safe leading-env-assignment allowlist `Jqr`: a leading
+/// `NAME=value` prefix keeps the command prefix-narrowable only when every NAME
+/// is in this set (else the suggestion falls back to the EXACT full command, so
+/// a `SECRET=… cmd` grant never widens to `cmd *`).
+const SAFE_ENV_ASSIGNMENTS: &[&str] = &[
+    "GOEXPERIMENT",
+    "GOOS",
+    "GOARCH",
+    "CGO_ENABLED",
+    "GO111MODULE",
+    "RUST_BACKTRACE",
+    "RUST_LOG",
+    "NODE_ENV",
+    "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    "PYTEST_DEBUG",
+    "ANTHROPIC_API_KEY",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_TIME",
+    "CHARSET",
+    "TERM",
+    "COLORTERM",
+    "NO_COLOR",
+    "FORCE_COLOR",
+    "TZ",
+    "LS_COLORS",
+    "LSCOLORS",
+    "GREP_COLOR",
+    "GREP_COLORS",
+    "GCC_COLORS",
+    "TIME_STYLE",
+    "BLOCK_SIZE",
+    "BLOCKSIZE",
+    "COLUMNS",
+    "LINES",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "CI",
+    "DEBIAN_FRONTEND",
+    "GIT_TERMINAL_PROMPT",
+];
+
+/// `Fro=/^[A-Za-z_]\w*=/` — a leading `NAME=` env-assignment token.
+fn env_assignment_re() -> &'static regex::Regex {
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^[A-Za-z_]\w*=").unwrap());
+    &RE
+}
+
+/// `/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/` — the shape the SECOND prefix token must
+/// have (a lowercase sub-command like `commit`, `run`, `for-each-ref`).
+fn subcommand_shape_re() -> &'static regex::Regex {
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$").unwrap());
+    &RE
+}
+
+/// The full 2.1.211 `KQt` suggestion-content chain for a shell command. Returns
+/// the rule_content to persist: a `<prefix> *` wildcard (`t9r`) when a static
+/// 2-token prefix can be derived (heredoc `MOg`, multiline first-line, or the
+/// general `$ro` case), else the EXACT full command (`YYn`, no wildcard).
+fn bash_suggestion_content(command: &str) -> String {
+    // Heredoc (`MOg`): a prefix taken from the text BEFORE `<<`.
+    if let Some(prefix) = heredoc_prefix(command) {
+        return format!("{prefix} *");
     }
-    if root.is_empty() {
+    // Multiline (`Nd(e).trim()` = text before the first newline): the whole first
+    // line is the prefix, wildcarded.
+    if command.contains('\n') {
+        let first_line = command.split('\n').next().unwrap_or(command).trim();
+        if !first_line.is_empty() {
+            return format!("{first_line} *");
+        }
+    }
+    // General 2-token prefix (`$ro`).
+    if let Some(prefix) = static_prefix(command) {
+        return format!("{prefix} *");
+    }
+    // Fallback (`YYn`): the exact full command, no wildcard.
+    command.to_string()
+}
+
+/// 2.1.211 `$ro`: derive the static two-token prefix of `command`, or `None` to
+/// fall back to the exact command. Splits on whitespace, consumes leading safe
+/// env assignments (aborting if any NAME is unsafe), requires ≥2 remaining
+/// tokens, rejects an interpreter first token, and requires the second token to
+/// match [`subcommand_shape_re`]. Returns exactly the first two remaining tokens
+/// joined by a space.
+fn static_prefix(command: &str) -> Option<String> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut r = 0;
+    while r < tokens.len() && env_assignment_re().is_match(tokens[r]) {
+        // `ts(tok,"=")` — the NAME before the first `=`.
+        let name = tokens[r].split_once('=').map_or(tokens[r], |(n, _)| n);
+        if !SAFE_ENV_ASSIGNMENTS.contains(&name) {
+            return None; // unsafe leading env → fall back to exact command.
+        }
+        r += 1;
+    }
+    let rest = &tokens[r..];
+    if rest.len() < 2 {
+        return None;
+    }
+    // `n[0].split("/").pop()` — the first token's basename.
+    let base0 = rest[0].rsplit('/').next().unwrap_or(rest[0]);
+    if INTERPRETER_BLOCKLIST.contains(&base0) {
+        return None;
+    }
+    if !subcommand_shape_re().is_match(rest[1]) {
+        return None;
+    }
+    Some(format!("{} {}", rest[0], rest[1]))
+}
+
+/// 2.1.211 `MOg`: derive a two-token prefix from the text BEFORE a `<<` heredoc,
+/// or `None`. Tries [`static_prefix`] first; else consumes leading safe env
+/// assignments and takes up to two of the remaining tokens (WITHOUT the
+/// second-token shape check), rejecting an interpreter first token.
+fn heredoc_prefix(command: &str) -> Option<String> {
+    if !command.contains("<<") {
+        return None;
+    }
+    let idx = command.find("<<")?;
+    if idx == 0 {
+        return None; // `t<=0` — nothing before `<<`.
+    }
+    let before = command[..idx].trim();
+    if before.is_empty() {
+        return None;
+    }
+    if let Some(prefix) = static_prefix(before) {
+        return Some(prefix);
+    }
+    // Manual env-skip + up-to-two-tokens (no shape check).
+    let tokens: Vec<&str> = before.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() && env_assignment_re().is_match(tokens[i]) {
+        let name = tokens[i].split_once('=').map_or(tokens[i], |(n, _)| n);
+        if !SAFE_ENV_ASSIGNMENTS.contains(&name) {
+            return None;
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+    let base = tokens[i].rsplit('/').next().unwrap_or(tokens[i]);
+    if INTERPRETER_BLOCKLIST.contains(&base) {
+        return None;
+    }
+    let joined = tokens[i..(i + 2).min(tokens.len())].join(" ");
+    if joined.is_empty() {
         None
     } else {
-        Some(root.join(" "))
+        Some(joined)
     }
 }
 
@@ -196,48 +348,88 @@ mod tests {
     }
 
     #[test]
-    fn bash_narrows_to_command_root_prefix() {
+    fn bash_narrows_to_two_token_wildcard_prefix() {
+        // `$ro` yields EXACTLY two tokens with the ` *` (space-star) wildcard.
         assert_eq!(
             content("Bash", json!({ "command": "git commit -m \"x\"" })),
-            Some("git commit:*".into())
+            Some("git commit *".into())
         );
+        // Two-token cap: `npm run build` → `npm run *` (NOT `npm run build`).
         assert_eq!(
             content("Bash", json!({ "command": "npm run build" })),
-            Some("npm run build:*".into())
+            Some("npm run *".into())
         );
-        // Leading env assignments are stripped (`sudo` is NOT a safe wrapper in
-        // claude-code, so it is kept verbatim — only timeout/time/nice/stdbuf/
-        // nohup unwrap).
+        // First two whitespace tokens (does NOT stop at the pipe): `cat f`.
+        assert_eq!(
+            content("Bash", json!({ "command": "cat f | grep x" })),
+            Some("cat f *".into())
+        );
+    }
+
+    #[test]
+    fn bash_unsafe_env_prefix_falls_back_to_exact() {
+        // A leading env NAME outside the safe `Jqr` set → EXACT full command,
+        // never widened to `<cmd> *`.
         assert_eq!(
             content(
                 "Bash",
                 json!({ "command": "FOO=1 systemctl restart nginx" })
             ),
-            Some("systemctl restart nginx:*".into())
+            Some("FOO=1 systemctl restart nginx".into())
         );
-        // First sub-command only (before the pipe).
+        // A safe env NAME (`CI`) IS consumed, leaving a two-token prefix.
         assert_eq!(
-            content("Bash", json!({ "command": "cat f | grep x" })),
-            Some("cat f:*".into())
+            content("Bash", json!({ "command": "CI=1 npm test" })),
+            Some("npm test *".into())
         );
     }
 
     #[test]
-    fn mobile_shell_narrows_to_command_root_like_bash() {
-        // The Android mobile `Shell` tool (`tools/shell-mobile` `TOOL_NAME`) must
-        // narrow an AllowAlways to a per-command-root rule, exactly like `Bash` —
-        // NOT a tool-wide `Shell` allow (which would auto-allow every future
-        // shell call after one approval).
+    fn bash_single_token_and_interpreter_and_path_fall_back_to_exact() {
+        // Single token (< 2 non-env tokens) → EXACT bare command (`ls`), NOT `ls *`.
+        assert_eq!(content("Bash", json!({ "command": "ls" })), Some("ls".into()));
+        // Interpreter first token (`Bro`) → exact.
+        assert_eq!(
+            content("Bash", json!({ "command": "bash script.sh" })),
+            Some("bash script.sh".into())
+        );
+        // Second token failing the shape regex (a path) → exact.
+        assert_eq!(
+            content("Bash", json!({ "command": "cat /etc/hosts" })),
+            Some("cat /etc/hosts".into())
+        );
+        // Flag-only command (`-v`) → exact `-v` (still not tool-wide).
+        assert_eq!(content("Bash", json!({ "command": "-v" })), Some("-v".into()));
+    }
+
+    #[test]
+    fn bash_heredoc_and_multiline_prefix() {
+        // Heredoc (`MOg`): prefix from the text before `<<`.
+        assert_eq!(
+            content("Bash", json!({ "command": "cat foo <<EOF\nx\nEOF" })),
+            Some("cat foo *".into())
+        );
+        // Multiline: whole first line + ` *`.
+        assert_eq!(
+            content("Bash", json!({ "command": "git status\nrm -rf /" })),
+            Some("git status *".into())
+        );
+    }
+
+    #[test]
+    fn mobile_shell_narrows_like_bash() {
+        // The Android mobile `Shell` tool narrows an AllowAlways exactly like
+        // `Bash` — never a tool-wide `Shell` allow.
         assert_eq!(
             content("Shell", json!({ "command": "git status" })),
-            Some("git status:*".into())
+            Some("git status *".into())
         );
         assert_eq!(
             content("Shell", json!({ "command": "git commit -m \"x\"" })),
-            Some("git commit:*".into())
+            Some("git commit *".into())
         );
-        // And the persisted narrowed `Shell` rule matches only the covered
-        // command, not an unrelated one.
+        // The persisted ` *` prefix rule matches a covered command, not an
+        // unrelated one.
         let rule = allow_suggestion("Shell", &json!({ "command": "git status" }));
         assert!(call_matches_rule(
             &rule,
@@ -252,10 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn bash_with_no_root_falls_back_tool_wide() {
-        // A flag-only / empty command yields a tool-wide allow.
-        assert_eq!(content("Bash", json!({ "command": "-v" })), None);
+    fn bash_no_command_stays_tool_wide() {
+        // Only a call with NO command (or an all-whitespace command) stays
+        // tool-wide; a flag-only command instead persists exactly (see above).
         assert_eq!(content("Bash", json!({ "command": "" })), None);
+        assert_eq!(content("Bash", json!({ "command": "   " })), None);
         assert_eq!(content("Bash", json!({})), None);
     }
 

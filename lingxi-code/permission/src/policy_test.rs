@@ -777,14 +777,24 @@ mod tests {
     }
 
     #[test]
-    fn cd_outside_cwd_asks_over_allow_rule() {
-        // `cd /tmp && ...` changes directory outside cwd → ask.
+    fn cd_outside_cwd_toolwide_allow_overrides_ask() {
+        // ALLOWOVER-01: `cd /tmp && ...` is a type-`other` path guard ask; a
+        // TOOL-WIDE `Bash` allow overrides it (claude-code `nes`).
         let p = policy_with_roots(
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
             PermissionMode::Default,
         );
         assert!(matches!(
             p.authorize("Bash", &bash("cd /tmp && ls")),
+            PermissionResult::Allow { .. }
+        ));
+        // A CONTENT allow rule is NOT tool-wide → does NOT override; still asks.
+        let p2 = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(cd:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p2.authorize("Bash", &bash("cd /tmp && ls")),
             PermissionResult::Ask {
                 reason: PermissionDecisionReason::Other { .. },
                 ..
@@ -793,14 +803,24 @@ mod tests {
     }
 
     #[test]
-    fn process_substitution_asks_over_allow_rule() {
-        // Process substitution can run arbitrary commands → always ask.
+    fn process_substitution_toolwide_allow_overrides_ask() {
+        // Process substitution is a type-`other` guard ask; a TOOL-WIDE `Bash`
+        // allow overrides it (ALLOWOVER-01 / `nes`).
         let p = policy_with_roots(
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
             PermissionMode::Default,
         );
         assert!(matches!(
             p.authorize("Bash", &bash("echo secret > >(tee /etc/passwd)")),
+            PermissionResult::Allow { .. }
+        ));
+        // A CONTENT allow rule does NOT override → still asks.
+        let p2 = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p2.authorize("Bash", &bash("echo secret > >(tee /etc/passwd)")),
             PermissionResult::Ask {
                 reason: PermissionDecisionReason::Other { .. },
                 ..
@@ -3222,6 +3242,61 @@ mod tests {
             ),
             other => panic!("expected Ask, got {other:?}"),
         }
+    }
+
+    // ---- BYPASS-01: bypassPermissions overrides guard asks (except rm) -----
+
+    /// Under bypassPermissions, a type-`other` path guard ask is overridden to
+    /// allow, but a dangerous-removal SafetyCheck ask still fires; the killswitch
+    /// re-enables the guard.
+    #[test]
+    fn bypass01_suppresses_guard_ask_except_dangerous_rm() {
+        let mut p =
+            policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::BypassPermissions);
+        // `cat /etc/passwd` (outside cwd) is a path-containment ask in normal
+        // modes; bypass allows it (mode reason).
+        match p.authorize("Bash", &bash("cat /etc/passwd")) {
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::BypassPermissions,
+                },
+                ..
+            } => {}
+            other => panic!("bypass must allow the path guard ask, got {other:?}"),
+        }
+        // Dangerous `rm -rf /` STILL asks under bypass (safetyCheck survives).
+        match p.authorize("Bash", &bash("rm -rf /")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            } => {}
+            other => panic!("dangerous rm must still ask under bypass, got {other:?}"),
+        }
+        // Killswitch disables bypass → the path guard fires again.
+        p.bypass_killswitch_active = true;
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat /etc/passwd")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    /// Plan mode with `isBypassPermissionsModeAvailable` behaves like bypass:
+    /// guard asks are suppressed, dangerous rm survives.
+    #[test]
+    fn bypass01_plan_with_bypass_available_suppresses_guard() {
+        let mut p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Plan);
+        p.bypass_permissions_available = true;
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat /etc/passwd")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

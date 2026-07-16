@@ -489,9 +489,16 @@ impl PermissionPolicy {
         //     mirror the too-complex branch: a parseable, resolvable-variable
         //     command (`A=/tmp; rm -rf $A/*`) is NOT force-asked here. Roots-
         //     independent, matching `GIu`'s raw text scan.
+        // BYPASS-01 / ALLOWOVER-01: every guard ASK below is routed through
+        // `resolve_guard_ask`, which (1) lets bypassPermissions suppress a
+        // type-`other` guard ask (returning allow), (2) lets a tool-wide allow
+        // rule override a type-`other` guard ask (`nes`), and (3) preserves the
+        // dangerous-removal SafetyCheck asks against BOTH. Guard DENYs pass
+        // through unchanged.
+        let bypass = self.bypass_active(mode);
         #[cfg(feature = "bash-ast")]
         if let Some(ask) = Self::shell_dangerous_rm_variable_ask(tool_name, input) {
-            return ask;
+            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // 1f. CATASTROPHIC REMOVAL FORCED-ASK. This must run before every
         // allow-like shortcut, including sandbox auto-allow and exact allow:
@@ -510,7 +517,13 @@ impl PermissionPolicy {
                         &roots.cwd,
                         home.as_deref(),
                     ) {
-                        return ask_dangerous_removal(tool_name, danger);
+                        return self.resolve_guard_ask(
+                            ask_dangerous_removal(tool_name, danger),
+                            bypass,
+                            mode,
+                            &sources,
+                            tool_name,
+                        );
                     }
                 }
             }
@@ -544,7 +557,7 @@ impl PermissionPolicy {
             if tool_name == "PowerShell" {
                 if let Some(command) = shell_command::command_from_input(input) {
                     if let Some(result) = self.check_powershell_containment(command, roots) {
-                        return result;
+                        return self.resolve_guard_ask(result, bypass, mode, &sources, tool_name);
                     }
                 }
             } else if shell_command::is_shell_tool(tool_name) {
@@ -575,7 +588,13 @@ impl PermissionPolicy {
                         roots,
                         &self.additional_working_dirs,
                     ) {
-                        return ask_path_constraint(tool_name, ask);
+                        return self.resolve_guard_ask(
+                            ask_path_constraint(tool_name, ask),
+                            bypass,
+                            mode,
+                            &sources,
+                            tool_name,
+                        );
                     }
                     // 2b'. Per-command PATH CONTAINMENT (claude-code
                     //      `validateCommandPaths` + `PATH_EXTRACTORS`, run per
@@ -601,7 +620,13 @@ impl PermissionPolicy {
                             &self.additional_working_dirs,
                         )
                     {
-                        return ask_path_constraint(tool_name, ask);
+                        return self.resolve_guard_ask(
+                            ask_path_constraint(tool_name, ask),
+                            bypass,
+                            mode,
+                            &sources,
+                            tool_name,
+                        );
                     }
                 }
             }
@@ -658,7 +683,7 @@ impl PermissionPolicy {
             }
         }
         if let Some(ask) = Self::shell_bash_safety_ask(tool_name, input) {
-            return ask;
+            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // 3. Allow. Shell tools need compound aggregation (a single allow rule
         //    matching ONE subcommand must not allow a whole compound command),
@@ -694,7 +719,7 @@ impl PermissionPolicy {
         //     containment check; without roots the sed layer is skipped
         //     (consistent with the other shell guards).
         if let Some(ask) = self.shell_sed_constraint_ask(tool_name, input, mode) {
-            return ask;
+            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // 3a. AcceptEdits working-dir auto-allow (claude-code `checkWritePermissionForTool`
         //     step 3, `filesystem.ts:1360-1375`). In `AcceptEdits` mode an EDITOR
@@ -1379,6 +1404,93 @@ impl PermissionPolicy {
                             metadata: PermissionMetadata::default(),
                         });
                     }
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether bypassPermissions is in effect for this call — 1:1 with
+    /// claude-code U1g's `p = d==="bypassPermissions" || (d==="plan" &&
+    /// isBypassPermissionsModeAvailable)`, subject to the killswitch. Threaded
+    /// into the guard block so guard ASKS (except dangerous rm/rmdir) are
+    /// overridden to allow (BYPASS-01).
+    fn bypass_active(&self, mode: PermissionMode) -> bool {
+        if self.bypass_killswitch_active {
+            return false;
+        }
+        mode == PermissionMode::BypassPermissions
+            || (mode == PermissionMode::Plan && self.bypass_permissions_available)
+    }
+
+    /// Resolve a per-tool GUARD ask against the bypass override (BYPASS-01) and
+    /// the tool-wide allow walk (ALLOWOVER-01), 1:1 with the tail of claude-code
+    /// `U1g`:
+    /// ```text
+    /// if(l.behavior==="ask" && (f || !p && (Are(...)||sandboxOverride||qRu))) return l;
+    /// if(p) return {behavior:"allow", decisionReason:{type:"mode",mode:d}};
+    /// let m=nes(...); if(m) return {behavior:"allow", ..., rule:m};
+    /// return l;
+    /// ```
+    /// where `f` = the ask is a safetyCheck whose reason starts with "Dangerous
+    /// rm/rmdir operation". A SafetyCheck ask (our dangerous-removal guards) is
+    /// returned unchanged — it survives BOTH bypass and the tool-wide allow. A
+    /// type-`other` guard ask (path/sed/injection/PowerShell containment) is
+    /// (a) overridden to allow under bypass, else (b) overridden to allow by a
+    /// matching TOOL-WIDE allow rule (`nes`, tool-wide only, no glob), else
+    /// (c) returned as the ask. Non-`Ask` results (guard DENYs) pass through
+    /// unchanged — deny short-circuits before bypass in CC.
+    fn resolve_guard_ask(
+        &self,
+        ask: PermissionResult,
+        bypass: bool,
+        mode: PermissionMode,
+        sources: &[PermissionRuleSource],
+        tool_name: &str,
+    ) -> PermissionResult {
+        let PermissionResult::Ask { reason, .. } = &ask else {
+            return ask;
+        };
+        if let PermissionDecisionReason::SafetyCheck { reason, .. } = reason {
+            let dangerous_rm = reason.starts_with("Dangerous rm operation")
+                || reason.starts_with("Dangerous rmdir operation");
+            // A non-dangerous-rm safetyCheck ask is suppressed under bypass
+            // (matches CC's `f` predicate); dangerous-rm asks always survive.
+            if bypass && !dangerous_rm {
+                return allow_with_mode(mode);
+            }
+            return ask;
+        }
+        // type-`other` guard ask.
+        if bypass {
+            return allow_with_mode(mode);
+        }
+        if let Some(rule) = self.tool_wide_allow_match(sources, tool_name, mode) {
+            return allow_with_rule(rule);
+        }
+        ask
+    }
+
+    /// The TOOL-WIDE allow walk (`nes`): the first ALLOW rule with no content
+    /// (`ruleContent === void 0`) whose tool name matches (exact / MCP
+    /// server-level, NO glob — `nes` uses default opts) and that is available in
+    /// the effective mode ([`Self::rule_is_available_in_mode`], the auto-mode
+    /// dangerous-rule read filter). Consulted by [`Self::resolve_guard_ask`] so
+    /// a blanket allow overrides a type-`other` guard ask.
+    fn tool_wide_allow_match(
+        &self,
+        sources: &[PermissionRuleSource],
+        tool_name: &str,
+        mode: PermissionMode,
+    ) -> Option<&PermissionRule> {
+        for src in sources {
+            if let Some(rules) = self.allow_rules.get(src) {
+                if let Some(rule) = rules.iter().find(|r| {
+                    r.value.rule_content.is_none()
+                        && self.rule_is_available_in_mode(r, mode)
+                        && tool_wide_name_matches(&r.value.tool_name, tool_name)
+                }) {
+                    return Some(rule);
                 }
             }
         }

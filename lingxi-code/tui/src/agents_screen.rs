@@ -155,6 +155,28 @@ pub enum AgentsOutcome {
     Attach(String),
     /// Close the view (`q` / `Esc` / `Ctrl-C`).
     Exit,
+    /// Delete the session (kill its live worker, then remove its job state) —
+    /// the second press of the two-press Ctrl-X confirm. Carries the armed
+    /// row's session id.
+    Delete(String),
+    /// Stop every running agent + background job at once — the `Ctrl+X Ctrl+K`
+    /// chord.
+    StopAll,
+}
+
+/// The footer hint for the stop-all chord (binary `NZo`/FleetView, byte-exact).
+pub const STOP_ALL_HINT: &str =
+    "Ctrl+X Ctrl+K stops all running agents and background work at once.";
+
+/// A delete-confirm armed by the first Ctrl-X, awaiting either the second
+/// Ctrl-X (confirm delete) or the `Ctrl+X Ctrl+K` chord (stop all).
+#[derive(Debug, Clone)]
+struct PendingDelete {
+    /// The session id the confirm is armed on (the selection at arm time).
+    session_id: String,
+    /// Whether the armed row is already stopped (terminal `Completed` band) —
+    /// selects the confirm hint text.
+    stopped: bool,
 }
 
 /// The agents-view state machine: rows grouped by band, one selection cursor
@@ -165,6 +187,9 @@ pub struct AgentsScreenState {
     rows: Vec<AgentRow>,
     /// Selected index into `rows` (`None` when empty).
     selected: Option<usize>,
+    /// A two-press Ctrl-X delete armed on a row (also the `Ctrl+X` prefix of
+    /// the `Ctrl+X Ctrl+K` stop-all chord).
+    pending: Option<PendingDelete>,
 }
 
 impl AgentsScreenState {
@@ -174,7 +199,11 @@ impl AgentsScreenState {
     pub fn new(mut rows: Vec<AgentRow>) -> Self {
         rows.sort_by_key(AgentRow::band);
         let selected = if rows.is_empty() { None } else { Some(0) };
-        Self { rows, selected }
+        Self {
+            rows,
+            selected,
+            pending: None,
+        }
     }
 
     /// Replace the rows (registry refresh after an attach returns), keeping
@@ -204,11 +233,60 @@ impl AgentsScreenState {
         self.selected
     }
 
+    /// The delete-confirm hint shown while a Ctrl-X is armed (binary strings,
+    /// byte-exact): a running row → `ctrl+x again to delete`; an already-stopped
+    /// row → `stopped · ctrl+x again to delete`. `None` when not armed.
+    #[must_use]
+    pub fn pending_hint(&self) -> Option<&'static str> {
+        self.pending.as_ref().map(|p| {
+            if p.stopped {
+                "stopped \u{b7} ctrl+x again to delete"
+            } else {
+                "ctrl+x again to delete"
+            }
+        })
+    }
+
+    /// First Ctrl-X arms a delete-confirm on the selected row; a second Ctrl-X
+    /// (while armed) confirms and returns [`AgentsOutcome::Delete`].
+    fn on_ctrl_x(&mut self) -> AgentsOutcome {
+        if let Some(pending) = self.pending.take() {
+            return AgentsOutcome::Delete(pending.session_id);
+        }
+        if let Some(row) = self.selected.and_then(|i| self.rows.get(i)) {
+            if !row.session_id.is_empty() {
+                self.pending = Some(PendingDelete {
+                    session_id: row.session_id.clone(),
+                    stopped: row.band() == Band::Done,
+                });
+            }
+        }
+        AgentsOutcome::Stay
+    }
+
     /// Route one key.
     pub fn on_key(&mut self, key: KeyEvent) -> AgentsOutcome {
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.code == KeyCode::Char('c') && ctrl {
             return AgentsOutcome::Exit;
         }
+        // Two-press Ctrl-X delete + the `Ctrl+X Ctrl+K` stop-all chord. These
+        // are handled BEFORE the plain-key arms so a Ctrl-modified `x`/`k`
+        // never falls through to the `k` navigation binding.
+        if ctrl && matches!(key.code, KeyCode::Char('x') | KeyCode::Char('X')) {
+            return self.on_ctrl_x();
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')) {
+            // Ctrl-K only fires the stop-all chord when Ctrl-X armed it first;
+            // otherwise it is inert (never a plain-`k` navigation).
+            if self.pending.take().is_some() {
+                return AgentsOutcome::StopAll;
+            }
+            return AgentsOutcome::Stay;
+        }
+        // Any other key cancels a pending delete-confirm, then is processed
+        // normally (so navigation still moves the cursor).
+        self.pending = None;
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => AgentsOutcome::Exit,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -306,6 +384,13 @@ impl AgentsScreenState {
     pub fn render(&self, frame: &mut ratatui::Frame) {
         let area = frame.area();
         frame.render_widget(Clear, area);
+        // Footer: while a Ctrl-X delete is armed, show the byte-exact confirm
+        // hint; otherwise the base key legend (incl. the delete + stop-all
+        // chords).
+        let footer = self.pending_hint().map_or_else(
+            || "enter attach · ↑/↓ select · ctrl+x delete · q quit".to_string(),
+            std::string::ToString::to_string,
+        );
         let block = Block::new()
             .borders(Borders::ALL)
             .title(Span::styled(
@@ -313,7 +398,11 @@ impl AgentsScreenState {
                 Style::default().add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Line::from(Span::styled(
-                "enter attach · ↑/↓ select · q quit",
+                footer,
+                Style::default().add_modifier(Modifier::DIM),
+            )))
+            .title_bottom(Line::from(Span::styled(
+                STOP_ALL_HINT,
                 Style::default().add_modifier(Modifier::DIM),
             )));
         let inner = block.inner(area);
@@ -520,5 +609,88 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_x_two_press_arms_then_confirms_delete() {
+        let mut s = AgentsScreenState::new(vec![row("sid-a", "runs", "working")]);
+        // First Ctrl-X arms the confirm on the selected running row.
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('x'))), AgentsOutcome::Stay);
+        assert_eq!(s.pending_hint(), Some("ctrl+x again to delete"));
+        // Second Ctrl-X confirms the delete of the armed session.
+        assert_eq!(
+            s.on_key(ctrl(KeyCode::Char('x'))),
+            AgentsOutcome::Delete("sid-a".to_string())
+        );
+        // Disarmed after confirm.
+        assert_eq!(s.pending_hint(), None);
+    }
+
+    #[test]
+    fn ctrl_x_on_stopped_row_shows_stopped_hint() {
+        // A terminal (Completed band) row arms with the `stopped · …` hint.
+        let mut s = AgentsScreenState::new(vec![row("sid-done", "finished", "done")]);
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('x'))), AgentsOutcome::Stay);
+        assert_eq!(
+            s.pending_hint(),
+            Some("stopped \u{b7} ctrl+x again to delete")
+        );
+    }
+
+    #[test]
+    fn ctrl_x_then_ctrl_k_stops_all() {
+        // The `Ctrl+X Ctrl+K` chord: Ctrl-X arms, Ctrl-K fires stop-all.
+        let mut s = AgentsScreenState::new(vec![row("sid-a", "runs", "working")]);
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('x'))), AgentsOutcome::Stay);
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('k'))), AgentsOutcome::StopAll);
+        assert_eq!(s.pending_hint(), None);
+    }
+
+    #[test]
+    fn ctrl_k_alone_is_inert_not_navigation() {
+        // Ctrl-K without a preceding Ctrl-X is a no-op — and must NOT move the
+        // cursor like a plain `k`.
+        let mut s =
+            AgentsScreenState::new(vec![row("a", "one", "working"), row("b", "two", "working")]);
+        let _ = s.on_key(key(KeyCode::Down));
+        assert_eq!(s.selected(), Some(1));
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('k'))), AgentsOutcome::Stay);
+        assert_eq!(s.selected(), Some(1), "Ctrl-K did not navigate");
+        assert_eq!(s.pending_hint(), None);
+    }
+
+    #[test]
+    fn navigation_cancels_pending_delete_confirm() {
+        let mut s =
+            AgentsScreenState::new(vec![row("a", "one", "working"), row("b", "two", "working")]);
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('x'))), AgentsOutcome::Stay);
+        assert!(s.pending_hint().is_some());
+        // Moving the selection disarms; the move still happens.
+        assert_eq!(s.on_key(key(KeyCode::Down)), AgentsOutcome::Stay);
+        assert_eq!(s.pending_hint(), None);
+        assert_eq!(s.selected(), Some(1));
+        // A single Ctrl-X now only RE-ARMS (does not immediately delete).
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('x'))), AgentsOutcome::Stay);
+        assert_eq!(s.pending_hint(), Some("ctrl+x again to delete"));
+    }
+
+    #[test]
+    fn ctrl_x_on_empty_view_is_inert() {
+        let mut s = AgentsScreenState::new(vec![]);
+        assert_eq!(s.on_key(ctrl(KeyCode::Char('x'))), AgentsOutcome::Stay);
+        assert_eq!(s.pending_hint(), None);
+    }
+
+    #[test]
+    fn stop_all_hint_is_byte_exact() {
+        // Binary FleetView footer (@195140238), byte-exact.
+        assert_eq!(
+            STOP_ALL_HINT,
+            "Ctrl+X Ctrl+K stops all running agents and background work at once."
+        );
     }
 }

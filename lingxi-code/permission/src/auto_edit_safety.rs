@@ -251,8 +251,9 @@ pub fn is_dangerous_file_path_to_auto_edit(path: &Path, raw: &str) -> bool {
 ///    module-header WSL divergence.
 /// 2. 8.3 short names — `~` followed by a digit (`/~\d/`). Platform-independent.
 /// 3. Long-path prefixes — `\\?\`, `\\.\`, `//?/`, `//./`. Platform-independent.
-/// 4. Trailing dots/spaces Windows strips during resolution (`/[.\s]+$/`).
-///    Platform-independent.
+/// 4. Trailing dots/spaces Windows strips during resolution (`/[.\s]+$/`),
+///    tested PER PATH SEGMENT (2.1.211 `eat` splits on `/[/\\]/`, skips
+///    ""/"."/".." segments, tests each). Platform-independent.
 /// 5. DOS device names — `.(CON|PRN|AUX|NUL|COM1-9|LPT1-9)` at end,
 ///    case-insensitive. Platform-independent.
 /// 6. Three-or-more consecutive dots used as a path component
@@ -287,10 +288,20 @@ pub fn has_suspicious_windows_path_pattern(raw: &str) -> bool {
         return true;
     }
 
-    // 4. Trailing dots/spaces Windows strips during path resolution. Examples:
-    //    `.git.`, `.claude `, `.bashrc...`, `settings.json.`.
-    if trailing_dot_space_re().is_match(raw) {
-        return true;
+    // 4. Trailing dots/spaces Windows strips during path resolution, tested PER
+    //    PATH SEGMENT. 2.1.211 `eat` splits the path on /[/\\]/, skips the
+    //    ""/"."/".." segments, and tests aMi=/[.\s]+$/ against EACH remaining
+    //    segment — so a mid-path trailing-dot/space segment (`/proj/dir./file`,
+    //    `.claude /x`) is suspicious, not only a trailing dot/space at the very
+    //    end of the whole path. Examples: `.git.`, `.claude /x`, `dir./file`,
+    //    `.bashrc...`, `settings.json.`.
+    for segment in raw.split(['/', '\\']) {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            continue;
+        }
+        if trailing_dot_space_re().is_match(segment) {
+            return true;
+        }
     }
 
     // 5. DOS device names Windows treats as special devices. Examples:
@@ -765,6 +776,22 @@ mod tests {
         assert!(has_suspicious_windows_path_pattern(".claude "));
         // multiple trailing dots.
         assert!(has_suspicious_windows_path_pattern(".bashrc..."));
+    }
+
+    #[test]
+    fn trailing_dot_or_space_is_checked_per_segment() {
+        // PERM-AUTO-05: 2.1.211 `eat` tests aMi=/[.\s]+$/ PER path segment, not
+        // just the whole string. A mid-path segment with a trailing dot/space
+        // (which the whole-string check missed) must be flagged suspicious.
+        assert!(has_suspicious_windows_path_pattern("/proj/dir./file"));
+        assert!(has_suspicious_windows_path_pattern("/proj/.claude /x"));
+        assert!(has_suspicious_windows_path_pattern("dir. /file.txt"));
+        // Backslash separators split the same way.
+        assert!(has_suspicious_windows_path_pattern("proj\\dir.\\file"));
+        // `""`, `.`, `..` segments are skipped, so a plain relative path with a
+        // leading `./` or a `..` component is not falsely flagged by this check.
+        assert!(!has_suspicious_windows_path_pattern("./proj/src/main.rs"));
+        assert!(!has_suspicious_windows_path_pattern("a/../b/main.rs"));
     }
 
     #[test]

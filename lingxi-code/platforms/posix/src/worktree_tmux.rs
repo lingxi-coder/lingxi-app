@@ -71,6 +71,46 @@ pub async fn create_worktree_tmux_session(
     Ok(())
 }
 
+/// Audit reason for the `tmux -V` install probe.
+const WORKTREE_TMUX_PROBE_AUDIT_REASON: &str = "worktree_tmux_probe";
+
+/// Probe whether `tmux` is installed by running `tmux -V` and checking for a
+/// zero exit — byte-faithful to 206's `i4i()` install check (`{code} =
+/// Ur("tmux", ["-V"]); return code === 0`, binary @216346996). A runner-level
+/// error (spawn failure, tmux not on PATH) counts as "not installed"
+/// (`false`), matching the JS `code === 0` semantics where a failed spawn is
+/// non-zero.
+pub async fn tmux_is_installed(runner: &dyn ProcessRunner, sandbox: &dyn Sandbox) -> bool {
+    let pcmd = ProcessCommand {
+        command: "tmux".to_string(),
+        args: vec!["-V".to_string()],
+        cwd: None,
+        env: HashMap::new(),
+        timeout: None,
+        stdin: None,
+    };
+    let sandboxed = sandbox.bypass_with_audit(pcmd, WORKTREE_TMUX_PROBE_AUDIT_REASON);
+    matches!(runner.run(&sandboxed).await, Ok(out) if out.exit_code == 0)
+}
+
+/// Platform-specific "how to install tmux" hint — byte-faithful to 206's
+/// `s4i()` (binary @216347060). 206 switches on its `Ut()` platform enum
+/// (`macos` / `linux` / `wsl` / `windows` / default); this maps
+/// [`std::env::consts::OS`] to the same strings, folding `wsl` into the
+/// `linux` arm (they share the identical message in 206) since Rust's `OS`
+/// const reports WSL as `"linux"`.
+#[must_use]
+pub fn tmux_install_hint() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "Install tmux with: brew install tmux",
+        "linux" => {
+            "Install tmux with: sudo apt install tmux (Debian/Ubuntu) or sudo dnf install tmux (Fedora/RHEL)"
+        }
+        "windows" => "tmux is not natively available on Windows. Consider using WSL or Cygwin.",
+        _ => "Install tmux using your system package manager.",
+    }
+}
+
 /// Derives the tmux `-s` session name for a worktree, given the git repo
 /// root and the worktree's name (e.g. a branch-derived slug like
 /// `"feature/x"` or `"pr-123"`).
@@ -221,6 +261,43 @@ mod tests {
         let path = PathBuf::from("/tmp/wt-y");
         let result = create_worktree_tmux_session(&runner, &sandbox, "wt-y", &path).await;
         assert_eq!(result, Err("boom".to_string()));
+    }
+
+    #[tokio::test]
+    async fn tmux_is_installed_true_on_zero_exit_and_probes_dash_v() {
+        let runner = MockRunner::new(0, "");
+        let sandbox = PosixSandbox::new();
+        assert!(tmux_is_installed(&runner, &sandbox).await);
+        // 206's `i4i()` runs exactly `tmux -V`.
+        assert_eq!(
+            *runner.recorded_command.lock().unwrap(),
+            Some("tmux".to_string())
+        );
+        assert_eq!(
+            *runner.recorded_args.lock().unwrap(),
+            Some(vec!["-V".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn tmux_is_installed_false_on_nonzero_exit() {
+        let runner = MockRunner::new(127, "tmux: command not found");
+        let sandbox = PosixSandbox::new();
+        assert!(!tmux_is_installed(&runner, &sandbox).await);
+    }
+
+    #[test]
+    fn tmux_install_hint_matches_206_for_this_platform() {
+        // Byte-lock the hint for whichever platform the test runs on against
+        // 206's `s4i()`.
+        let expected = match std::env::consts::OS {
+            "macos" => "Install tmux with: brew install tmux",
+            "linux" => "Install tmux with: sudo apt install tmux (Debian/Ubuntu) or sudo dnf install tmux (Fedora/RHEL)",
+            "windows" => "tmux is not natively available on Windows. Consider using WSL or Cygwin.",
+            _ => "Install tmux using your system package manager.",
+        };
+        assert_eq!(tmux_install_hint(), expected);
+        assert!(!tmux_install_hint().is_empty());
     }
 
     #[test]

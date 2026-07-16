@@ -2351,6 +2351,20 @@ pub enum BuildError {
     /// flag — worktree-tmux-launch plan Task 4.
     #[error("--tmux requires --worktree")]
     TmuxRequiresWorktree,
+    /// Bare `--tmux` (the "native" mode, `tmux_launch == Some("")`) was passed
+    /// on Windows. 206's native pre-flight rejects it (`Ut()==="windows" →
+    /// "--tmux is not supported on Windows"`, binary @230041975). `--tmux=classic`
+    /// skips this native pre-check.
+    #[error("--tmux is not supported on Windows")]
+    TmuxNotSupportedOnWindows,
+    /// Bare `--tmux` (native mode) was passed but `tmux` is not installed
+    /// (`tmux -V` non-zero). 206's native pre-flight rejects it (`!await i4i()
+    /// → "tmux is not installed.\n" + s4i()`, binary @230041975). The payload is
+    /// the platform-specific install hint (`s4i()`). `--tmux=classic` skips this
+    /// native pre-check (a missing tmux then degrades to the non-fatal
+    /// create-session warning).
+    #[error("tmux is not installed.\n{0}")]
+    TmuxNotInstalled(String),
 }
 
 /// Build a fully-wired desktop [`DesktopRuntime`] from a deterministic
@@ -3233,6 +3247,31 @@ async fn apply_worktree_launch(
     } else {
         name_or_empty.clone()
     };
+
+    // Native-mode (`--tmux` with NO explicit value → `Some("")`) pre-flight,
+    // byte-faithful to 206's `re = Dor() && a.tmux===!0` branch (@230041975):
+    // bare `--tmux` hard-checks not-Windows + tmux-installed BEFORE creating
+    // the worktree. `--tmux=classic` (any explicit value) is NOT native and
+    // skips these — a missing tmux then degrades to the non-fatal
+    // create-session warning below. (`--tmux requires --worktree` is enforced
+    // for BOTH modes by the `worktree_launch == None` guard above; that is a
+    // deliberate, safe superset of 206, which only checks it for native.)
+    if tmux_launch.as_deref() == Some("") {
+        if cfg!(windows) {
+            return Err(BuildError::TmuxNotSupportedOnWindows);
+        }
+        if !platform_posix::worktree_tmux::tmux_is_installed(
+            ctx.process.as_ref(),
+            ctx.sandbox.as_ref(),
+        )
+        .await
+        {
+            return Err(BuildError::TmuxNotInstalled(
+                platform_posix::worktree_tmux::tmux_install_hint().to_string(),
+            ));
+        }
+    }
+
     // Captured BEFORE the swap below — the pre-launch boot cwd, which
     // `ExitWorktree` later restores (same contract as
     // `EnterWorktreeTool::record_worktree_session`), and (Task 4) the repo
@@ -7493,25 +7532,63 @@ mod tests {
     // ── worktree-tmux-launch plan Task 4: `--tmux` boot tmux session ────────
 
     /// In-test `ProcessRunner` that records every command it's handed and
-    /// returns a canned exit code — lets Task 4's tests assert BOTH the
-    /// resulting `tmux_session_name` and whether a tmux call happened at all
-    /// (the without-`--tmux` case must issue none). Mirrors the `MockRunner`
-    /// pattern in `platform_posix::worktree_tmux`'s own tests.
+    /// returns a per-command canned exit code — lets these tests assert BOTH
+    /// the resulting `tmux_session_name` and whether a given tmux call happened
+    /// at all. Dispatches on the argv: `tmux -V` (the native-mode install
+    /// probe, `i4i()`) gets [`Self::probe_exit`]; every other invocation
+    /// (`tmux new-session ...`, the create) gets [`Self::create_exit`]. Mirrors
+    /// the `MockRunner` pattern in `platform_posix::worktree_tmux`'s own tests.
     struct RecordingProcessRunner {
-        exit_code: i32,
+        probe_exit: i32,
+        create_exit: i32,
         calls: std::sync::Mutex<Vec<(String, Vec<String>)>>,
     }
 
     impl RecordingProcessRunner {
-        fn new(exit_code: i32) -> Self {
+        /// `tmux -V` probe SUCCEEDS (tmux installed); the `new-session` create
+        /// returns `create_exit`. This is the common case: existing callers
+        /// `new(0)` (create ok) / `new(1)` (create fails non-fatally) keep
+        /// their meaning now that a native-mode probe precedes the create.
+        fn new(create_exit: i32) -> Self {
             Self {
-                exit_code,
+                probe_exit: 0,
+                create_exit,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The `tmux -V` probe returns `probe_exit` (non-zero ⇒ "not
+        /// installed"); the create returns `create_exit`.
+        fn with_exits(probe_exit: i32, create_exit: i32) -> Self {
+            Self {
+                probe_exit,
+                create_exit,
                 calls: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn call_count(&self) -> usize {
             self.calls.lock().unwrap().len()
+        }
+
+        /// Count of `tmux -V` install-probe calls issued.
+        fn probe_calls(&self) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, args)| args == &vec!["-V".to_string()])
+                .count()
+        }
+
+        /// Count of `tmux new-session ...` create calls issued.
+        fn create_calls(&self) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, args)| args.first().map(String::as_str) == Some("new-session"))
+                .count()
         }
     }
 
@@ -7522,18 +7599,23 @@ mod tests {
             cmd: &traits::SandboxedCommand,
         ) -> Result<traits::ProcessOutput, traits::ProcessError> {
             let inner = cmd.inner();
+            let exit_code = if inner.args == vec!["-V".to_string()] {
+                self.probe_exit
+            } else {
+                self.create_exit
+            };
             self.calls
                 .lock()
                 .unwrap()
                 .push((inner.command.clone(), inner.args.clone()));
             Ok(traits::ProcessOutput {
                 stdout: String::new(),
-                stderr: if self.exit_code == 0 {
+                stderr: if exit_code == 0 {
                     String::new()
                 } else {
                     "boom".to_string()
                 },
-                exit_code: self.exit_code,
+                exit_code,
                 timed_out: false,
             })
         }
@@ -7578,7 +7660,12 @@ mod tests {
             .await
             .expect("worktree + tmux launch must succeed");
 
-        assert_eq!(runner.call_count(), 1, "exactly one tmux invocation");
+        assert_eq!(
+            runner.probe_calls(),
+            1,
+            "native (bare --tmux) must run the `tmux -V` install pre-flight"
+        );
+        assert_eq!(runner.create_calls(), 1, "exactly one tmux new-session");
 
         let expected_name =
             platform_posix::worktree_tmux::worktree_tmux_session_name(&boot_cwd, "feat");
@@ -7612,7 +7699,7 @@ mod tests {
             .await
             .expect("a tmux failure must not fail boot");
 
-        assert_eq!(runner.call_count(), 1, "tmux was attempted exactly once");
+        assert_eq!(runner.create_calls(), 1, "tmux new-session was attempted once");
         let session = ctx
             .worktree_session
             .lock()
@@ -7683,6 +7770,91 @@ mod tests {
             .expect_err("--tmux without --worktree must be a hard boot failure");
         assert!(matches!(err, super::BuildError::TmuxRequiresWorktree));
         assert!(ctx.worktree_session.lock().unwrap().is_none());
+    }
+
+    /// Native-mode (`--worktree feat --tmux`, bare) with tmux NOT installed:
+    /// the `tmux -V` pre-flight fails, so boot HARD-fails with
+    /// `BuildError::TmuxNotInstalled` (payload = the platform install hint) —
+    /// BEFORE any worktree is created. 206 `re` branch: `!await i4i() → "tmux
+    /// is not installed.\n"+s4i()`.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn apply_worktree_launch_native_tmux_not_installed_is_hard_error() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/tmux-missing");
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+        let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        // `tmux -V` probe returns non-zero ⇒ "not installed"; create exit is
+        // irrelevant (never reached).
+        let runner = Arc::new(RecordingProcessRunner::with_exits(127, 0));
+        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+
+        let err = super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
+            .await
+            .expect_err("native --tmux with tmux absent must hard-fail boot");
+        assert!(
+            matches!(err, super::BuildError::TmuxNotInstalled(ref hint)
+                if hint == platform_posix::worktree_tmux::tmux_install_hint()),
+            "expected TmuxNotInstalled with the platform hint, got {err:?}"
+        );
+        // Pre-flight fired and short-circuited: probe ran, NO create, NO worktree.
+        assert_eq!(runner.probe_calls(), 1, "the `tmux -V` probe ran");
+        assert_eq!(runner.create_calls(), 0, "no new-session after a failed probe");
+        assert_eq!(mock.created().len(), 0, "no worktree created on pre-flight failure");
+        assert!(
+            ctx.worktree_session.lock().unwrap().is_none(),
+            "no session recorded"
+        );
+        assert_eq!(ctx.session_cwd.cwd(), boot_cwd, "cwd unchanged");
+    }
+
+    /// Classic-mode (`--tmux=classic`) with tmux NOT installed: the native
+    /// pre-flight is SKIPPED (206 gates it on `a.tmux===true`, i.e. bare only),
+    /// so boot proceeds — the worktree IS created and the `tmux new-session`
+    /// create is attempted, failing NON-fatally (session name stays `None`).
+    /// Crucially, NO `tmux -V` probe is issued.
+    #[tokio::test]
+    async fn apply_worktree_launch_classic_tmux_skips_install_preflight() {
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let boot_cwd = std::path::PathBuf::from("/tmp/lingxi-worktree-launch-test/tmux-classic");
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![boot_cwd.clone()],
+        );
+        let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
+        ctx.worktree = mock.clone() as Arc<dyn traits::worktree::WorktreeManager>;
+        // Probe would report "not installed" IF it ran; create fails. Classic
+        // must not run the probe, and the create failure must be non-fatal.
+        let runner = Arc::new(RecordingProcessRunner::with_exits(127, 1));
+        ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
+
+        super::apply_worktree_launch(&Some("feat".to_string()), &Some("classic".to_string()), &ctx)
+            .await
+            .expect("classic --tmux skips the install pre-flight and does not hard-fail");
+
+        assert_eq!(
+            runner.probe_calls(),
+            0,
+            "classic mode must NOT run the native `tmux -V` pre-flight"
+        );
+        assert_eq!(runner.create_calls(), 1, "classic still attempts the create");
+        assert_eq!(mock.created().len(), 1, "the worktree was still created");
+        let session = ctx
+            .worktree_session
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("worktree_session populated");
+        assert_eq!(
+            session.tmux_session_name, None,
+            "the failed create leaves tmux_session_name None (non-fatal)"
+        );
     }
 
     /// worktree-tmux-launch plan Task 3, boot-level integration test: driving

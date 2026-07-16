@@ -220,6 +220,13 @@ pub enum InitError {
     /// --worktree").
     #[error("--tmux requires --worktree")]
     TmuxRequiresWorktree,
+    /// (worktree-tmux mode pre-flight) bare `--tmux` (native) on Windows.
+    #[error("--tmux is not supported on Windows")]
+    TmuxNotSupportedOnWindows,
+    /// (worktree-tmux mode pre-flight) bare `--tmux` (native) but tmux is not
+    /// installed; payload is the platform-specific install hint.
+    #[error("tmux is not installed.\n{0}")]
+    TmuxNotInstalled(String),
 }
 
 impl From<engine_desktop::BuildError> for InitError {
@@ -231,6 +238,10 @@ impl From<engine_desktop::BuildError> for InitError {
             engine_desktop::BuildError::SandboxUnavailable(m) => Self::SandboxUnavailable(m),
             engine_desktop::BuildError::WorktreeLaunch(m) => Self::WorktreeLaunch(m),
             engine_desktop::BuildError::TmuxRequiresWorktree => Self::TmuxRequiresWorktree,
+            engine_desktop::BuildError::TmuxNotSupportedOnWindows => {
+                Self::TmuxNotSupportedOnWindows
+            }
+            engine_desktop::BuildError::TmuxNotInstalled(m) => Self::TmuxNotInstalled(m),
         }
     }
 }

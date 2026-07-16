@@ -293,6 +293,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         worktree_launch: None,
         // The Electron bridge has no `--tmux` flag; inert (no tmux session).
         tmux_launch: None,
+        // The Electron bridge has no `--dangerously-skip-permissions` flag.
+        allow_dangerously_skip_permissions: false,
     }
 }
 
@@ -636,6 +638,7 @@ mod tests {
             // Deterministic test: empty memory, never the real FS.
             memory_provider: None,
             permission_mode: permission::PermissionMode::Default,
+            allow_dangerously_skip_permissions: false,
             connect_prompt: None,
             max_turns: None,
             plan_mode_instructions: None,

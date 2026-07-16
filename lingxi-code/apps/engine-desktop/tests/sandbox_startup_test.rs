@@ -93,6 +93,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         session_started_as_coordinator: false,
         memory_provider: None,
         permission_mode: permission::PermissionMode::Default,
+        allow_dangerously_skip_permissions: false,
         connect_prompt: None,
         max_turns: None,
         plan_mode_instructions: None,

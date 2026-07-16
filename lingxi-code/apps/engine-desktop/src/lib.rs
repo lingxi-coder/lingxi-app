@@ -340,8 +340,13 @@ fn sandbox_auto_allow_from_settings_tiers(
 /// sandbox-auto-allow). Pure so it is unit-testable; see the call site in
 /// [`build`] for the full rationale.
 ///
-/// - `BypassPermissions` mode (`--dangerously-skip-permissions`) ⇒ never enforce
-///   (allow-all), matching claude-code's bypass.
+/// - `BypassPermissions` mode (`--dangerously-skip-permissions`) STILL enforces:
+///   claude-code never drops the permission layer — `checkPermissions` runs the
+///   deny/ask rule walks first and bypass short-circuits to allow AFTER them
+///   (`permissions.ts` step order: 1a deny … 2a bypass). The wrap is what
+///   provides that auto-allow; without it the BASE gate decides every call, and
+///   an interactive base (`TuiPermissionGate`) prompts on every tool use —
+///   the exact opposite of bypass.
 /// - An explicit `LINGXI_ENFORCE_PERMISSIONS` value wins: falsey
 ///   (`""|0|off|false|no`) ⇒ off, anything else ⇒ on.
 /// - Unset ⇒ default-on ONLY for the CLI/desktop `NoOpPermissionGate` inner
@@ -352,9 +357,7 @@ fn should_enforce_permissions(
     use_noop_inner: bool,
     mode: permission::PermissionMode,
 ) -> bool {
-    if mode == permission::PermissionMode::BypassPermissions {
-        return false;
-    }
+    let _ = mode;
     // `use_noop_inner` no longer gates the default: claude-code enforces ONE core
     // policy on every host, so transport hosts (the bridge-server's
     // AdapterPermissionGate) ALSO wrap with the local PolicyPermissionGate by
@@ -1434,6 +1437,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     // `Some(orchestrator::prompt::real_provider())` to load real LINGXI.md.
 ///     memory_provider: None,
 ///     permission_mode: permission::PermissionMode::Default,
+///     allow_dangerously_skip_permissions: false,
 ///     connect_prompt: None,
 ///     system_prompt_override: None,
 ///     append_system_prompt: None,
@@ -1587,10 +1591,12 @@ pub struct DesktopConfig {
     /// settings `defaultMode` as the highest-priority source; `BypassPermissions`
     /// makes the policy allow-all (unless the bypass killswitch is set).
     ///
-    /// EXECUTION-SEMANTICS NOTE: with the default `NoOpPermissionGate`
-    /// (enforcement OFF) this field is execution-neutral — tools already
-    /// all-allow — but it still drives `BuiltinToolContext.permission_mode`
-    /// state. The CLI flag deliberately does NOT switch enforcement on.
+    /// EXECUTION-SEMANTICS NOTE: enforcement is default-ON for every mode
+    /// (including `BypassPermissions` — the `PolicyPermissionGate` wrap is what
+    /// PROVIDES the bypass auto-allow; see `should_enforce_permissions`). Only
+    /// the `LINGXI_ENFORCE_PERMISSIONS=0` escape hatch disables it, in which
+    /// case this field is execution-neutral but still drives
+    /// `BuiltinToolContext.permission_mode` state.
     pub permission_mode: permission::PermissionMode,
     /// Make `BypassPermissions` mode available in the session permission
     /// mode cycle (claude-code `--allow-dangerously-skip-permissions`).
@@ -4632,6 +4638,18 @@ pub async fn build(
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
             .with_sandbox_runtime(sandbox_auto_allow)
+            // TS `isBypassPermissionsModeAvailable` (2.1.211 permissionSetup):
+            // `S = (n === "bypassPermissions" || o) && !g && !_` — available when
+            // the session RESOLVED to bypass mode OR the explicit
+            // `--allow-dangerously-skip-permissions` flag was passed, unless the
+            // settings killswitch (`disableBypassPermissionsMode: "disable"`)
+            // vetoes it. (`g`, the Statsig remote killswitch, is a documented
+            // omission here like the other remote gates.)
+            .with_bypass_available(
+                (mode == permission::PermissionMode::BypassPermissions
+                    || cfg.allow_dangerously_skip_permissions)
+                    && !bypass_disabled,
+            )
             // Enable PowerShell path-containment via a real `pwsh` parse
             // (claude-code `validatePowerShellCommandPaths`). Inert on hosts
             // without PowerShell — `SystemPwshParser` returns passthrough when
@@ -5598,7 +5616,12 @@ pub async fn build(
         permission_policy: boot_permission_policy.clone().unwrap_or_else(|| {
             Arc::new(
                 permission::PermissionPolicy::new(cfg.permission_mode)
-                .with_bypass_available(cfg.allow_dangerously_skip_permissions)
+                    // Same TS formula as the enforced boot policy above; no
+                    // settings were read on this path, so no killswitch term.
+                    .with_bypass_available(
+                        cfg.permission_mode == permission::PermissionMode::BypassPermissions
+                            || cfg.allow_dangerously_skip_permissions,
+                    )
                     .with_roots(permission::FsRoots {
                         cwd: cwd.clone(),
                         home: dirs::home_dir(),
@@ -9344,14 +9367,24 @@ mod tests {
             );
         }
 
-        // BypassPermissions (--dangerously-skip-permissions) ⇒ never enforce.
-        assert!(!should_enforce_permissions(
+        // BypassPermissions (--dangerously-skip-permissions) STILL enforces:
+        // claude-code never removes the permission layer — bypass short-circuits
+        // INSIDE checkPermissions (after deny rules), so the PolicyPermissionGate
+        // must wrap the inner gate to provide that auto-allow. Un-wrapped, an
+        // interactive inner (TuiPermissionGate) would prompt on EVERY call.
+        assert!(should_enforce_permissions(
             None,
             true,
             PermissionMode::BypassPermissions
         ));
-        assert!(!should_enforce_permissions(
+        assert!(should_enforce_permissions(
             Some("1"),
+            true,
+            PermissionMode::BypassPermissions
+        ));
+        // The env escape hatch still opts out, bypass mode or not.
+        assert!(!should_enforce_permissions(
+            Some("0"),
             true,
             PermissionMode::BypassPermissions
         ));

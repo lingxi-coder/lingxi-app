@@ -15,6 +15,7 @@
 //! cancels a turn or exits the process by itself.
 
 pub mod ask_user_question_view;
+pub mod cd_confirm_view;
 pub mod completion_view;
 pub mod connect_key_view;
 pub mod connect_method_view;
@@ -141,6 +142,13 @@ pub enum BottomPaneOutcome {
         /// Which parts to restore.
         scope: crate::bottom_pane::view::RewindScope,
     },
+    /// The `/cd` confirm view was accepted: the owner must move the session's
+    /// working directory to this (absolute, validated) path off-loop — surfaced
+    /// up through `ChatOutcome::PermissionAction(PermissionAction::ChangeDirectory)`
+    /// so it reuses the existing permission-effect channel (no new app
+    /// callback). The confirm view has already been popped by
+    /// [`ViewStack::apply`]'s accepting catch-all.
+    ChangeDirectory(std::path::PathBuf),
     /// The `/resume` picker resolved to this session uuid: the owner must
     /// UNWIND its loop and re-mount that session in-process (writer retargeted)
     /// — surfaced up through `ChatOutcome::SwitchSession` → `AppExit`. The
@@ -494,6 +502,17 @@ impl BottomPane {
     pub fn show_permission(&mut self, exchange: PermissionExchange) {
         self.view_stack
             .push(Box::new(PermissionView::new(exchange)));
+    }
+
+    /// Open the `/cd` confirm dialog for the (already-resolved, absolute)
+    /// `target` directory: it owns the keyboard until the user accepts (→
+    /// [`ViewOutcome::ChangeDirectory`]) or cancels. `display` is the path
+    /// string shown to the user (normally == `target`'s lossy string).
+    pub fn show_cd_confirm(&mut self, target: std::path::PathBuf, display: String) {
+        self.view_stack
+            .push(Box::new(cd_confirm_view::CdConfirmView::new(
+                target, display,
+            )));
     }
 
     /// Open the `AskUserQuestion` selection widget for `exchange`: it owns the
@@ -855,6 +874,7 @@ impl BottomPane {
             ViewOutcome::RunTaskAction(action) => BottomPaneOutcome::RunTaskAction(action),
             ViewOutcome::RunPluginAction(action) => BottomPaneOutcome::RunPluginAction(action),
             ViewOutcome::Rewind { message, scope } => BottomPaneOutcome::Rewind { message, scope },
+            ViewOutcome::ChangeDirectory(path) => BottomPaneOutcome::ChangeDirectory(path),
             ViewOutcome::SwitchSession(uuid) => BottomPaneOutcome::SwitchSession(uuid),
         }
     }
@@ -2662,8 +2682,11 @@ mod tests {
             "first item highlighted: {}",
             buffer_row(&buf, 4)
         );
+        // Sixth item: `/cd` (parity 2.1.207 added it to the advertised set; it
+        // sorts /add-dir, /agents, /autocompact, /branch, /btw, /cd — pushing
+        // /clear to the 7th, off-window, slot).
         assert!(
-            buffer_row(&buf, 9).contains("/clear"),
+            buffer_row(&buf, 9).contains("/cd"),
             "sixth item visible: {}",
             buffer_row(&buf, 9)
         );

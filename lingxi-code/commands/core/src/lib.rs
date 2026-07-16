@@ -13,6 +13,7 @@
 pub mod agents;
 pub mod autocompact;
 pub mod bundled;
+pub mod cd;
 pub mod clear;
 pub mod commit;
 pub mod commit_push_pr;

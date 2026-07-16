@@ -1573,6 +1573,28 @@ async fn run_permission_action(
                 }
             }
         }
+        // `/cd <path>`: move the session's working directory (parity 2.1.207
+        // `local-jsx` `name:"cd"`). Reuses this off-loop effect channel (like
+        // `AddDirectory`) rather than a dedicated app callback. The confirm
+        // already happened in the TUI (`cd_confirm_view`); `path` is absolute +
+        // validated (`add_dir::resolve_and_validate`). Swap the SAME shared
+        // `SessionCwd` cell `EnterWorktree`/`ExitWorktree` swap — so every
+        // FS/Bash tool + the memory hierarchy observe the new cwd, and the
+        // swap's registered on-swap callback clears the cwd-keyed
+        // conditional-rules cache (the `<env>`/gitStatus sections recompute each
+        // turn: this IS the "loads project configuration from that location"
+        // reload) — then emit `tengu_cd_command` and print the byte-exact result
+        // message. `swap` publishes `(path, [path])`, matching the reference's
+        // "moves the working directory AND write access there".
+        PermissionAction::ChangeDirectory { path } => {
+            let target = std::path::PathBuf::from(&path);
+            session_cwd.swap(target.clone(), vec![target]);
+            command_core::cd::emit_command();
+            let _ = turn_tx.send(TurnEvent::SystemNotice {
+                body: command_core::cd::result_message(&path),
+                is_error: false,
+            });
+        }
     }
 }
 

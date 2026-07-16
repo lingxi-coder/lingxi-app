@@ -163,6 +163,22 @@ pub const BUILTIN: &[SlashCommand] = &[
         run: ChatWidget::cmd_add_dir,
     },
     SlashCommand {
+        // parity 2.1.207 `local-jsx` `name:"cd"`: move this session to a new
+        // working directory (confirm dialog → shared `SessionCwd` swap). The
+        // description matches `command_api::builtin_support::core_description("cd")`.
+        name: "/cd",
+        aliases: &[],
+        description: "Move this session to a new working directory",
+        dynamic_description: None,
+        hint: "<path>",
+        // Optional (NOT Required): a bare `/cd` reaches the handler so it renders
+        // its own "Usage: /cd <path>" line rather than falling through as an LLM
+        // prompt (same rationale as `/add-dir`).
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_cd,
+    },
+    SlashCommand {
         name: "/rewind",
         aliases: &["/checkpoint", "/undo"],
         description: "Restore the code and/or conversation to a previous point",

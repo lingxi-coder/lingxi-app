@@ -2066,6 +2066,33 @@ impl ChatWidget {
         }
     }
 
+    /// `/cd <path>`: move this session to a new working directory (parity
+    /// 2.1.207 `local-jsx` `name:"cd"`). The path is `~`-expanded, resolved
+    /// against the cwd, normalized, and validated (must exist + be a directory,
+    /// reusing [`crate::add_dir::resolve_and_validate`]); on success a confirm
+    /// dialog opens over the byte-exact [`command_api::cd::CONFIRM_PROMPT`], and
+    /// on accept the shared-`SessionCwd` swap + `tengu_cd_command` telemetry +
+    /// the byte-exact result message all run OFF-LOOP through the permission
+    /// effect channel ([`ChatOutcome::PermissionAction`] →
+    /// `PermissionAction::ChangeDirectory` → `run_permission_action`) — the
+    /// widget carries no live `SessionCwd`/telemetry handle itself. Validation
+    /// errors and a bare-invocation usage line render synchronously as system
+    /// text (the same `resolve_and_validate` messages `/add-dir` renders).
+    pub(crate) fn cmd_cd(&mut self, args: &str) -> ChatOutcome {
+        let input = args.trim();
+        if input.is_empty() {
+            return self.show_system_text("Usage: /cd <path>", false);
+        }
+        match crate::add_dir::resolve_and_validate(input) {
+            crate::add_dir::AddDirValidation::Success { absolute } => {
+                self.bottom_pane
+                    .show_cd_confirm(std::path::PathBuf::from(&absolute), absolute);
+                ChatOutcome::Continue
+            }
+            other => self.show_system_text(&crate::add_dir::help_message(&other), true),
+        }
+    }
+
     /// `/resume [term]` (alias `/continue`): open the interactive session
     /// picker, seeded from the rows preloaded at startup ([`Self::set_resume_rows`]).
     /// With a `term` argument the picker opens pre-filtered by title. On `Enter`
@@ -3075,6 +3102,14 @@ impl ChatWidget {
             BottomPaneOutcome::RunTaskAction(action) => ChatOutcome::TaskAction(action),
             BottomPaneOutcome::RunPluginAction(action) => ChatOutcome::PluginAction(action),
             BottomPaneOutcome::Rewind { message, scope } => ChatOutcome::Rewind { message, scope },
+            // `/cd` confirm accepted: reuse the permission-effect channel (no
+            // dedicated app callback) so the CLI swaps the shared `SessionCwd`
+            // cell + emits `tengu_cd_command` + prints the result off-loop.
+            BottomPaneOutcome::ChangeDirectory(path) => {
+                ChatOutcome::PermissionAction(PermissionAction::ChangeDirectory {
+                    path: path.to_string_lossy().into_owned(),
+                })
+            }
             BottomPaneOutcome::SwitchSession(uuid) => ChatOutcome::SwitchSession(uuid),
         }
     }
@@ -3811,6 +3846,55 @@ mod tests {
             "workflowSizeGuideline takes one of: unrestricted, small, medium, large"
         );
         assert!(sys.is_error());
+    }
+
+    /// `/cd` (parity 2.1.207 `local-jsx` `name:"cd"`): bare `/cd` shows the
+    /// usage line; a missing path renders the byte-exact validation error
+    /// (shared with `/add-dir`); a valid directory opens the confirm dialog,
+    /// and confirming (Enter on the default "Yes") yields the off-loop
+    /// `PermissionAction::ChangeDirectory` effect carrying the resolved absolute
+    /// path — the CLI then swaps the shared `SessionCwd` there.
+    #[test]
+    fn cmd_cd_usage_error_and_confirm_flow() {
+        use crate::bottom_pane::cd_confirm_view::CdConfirmView;
+        use crate::bottom_pane::PermissionAction;
+
+        // Bare `/cd` → usage line (not an error, not a prompt fall-through).
+        let mut w = widget();
+        assert!(matches!(w.cmd_cd(""), ChatOutcome::Continue));
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert_eq!(sys.body(), "Usage: /cd <path>");
+        assert!(!sys.is_error());
+
+        // A missing path → the byte-exact "not found" error.
+        let mut w = widget();
+        let missing =
+            std::env::temp_dir().join(format!("lingxi-cd-missing-{}", std::process::id()));
+        w.cmd_cd(&missing.to_string_lossy());
+        let sys = cell::<crate::history_cell::system::SystemTextCell>(&w, 0);
+        assert!(sys.body().starts_with("Path "), "{}", sys.body());
+        assert!(sys.body().ends_with(" was not found."), "{}", sys.body());
+        assert!(sys.is_error());
+
+        // A valid directory → the confirm dialog opens (no transcript row yet).
+        let mut w = widget();
+        let dir = std::env::temp_dir();
+        assert!(matches!(
+            w.cmd_cd(&dir.to_string_lossy()),
+            ChatOutcome::Continue
+        ));
+        assert!(w.bottom_pane().view_stack().contains::<CdConfirmView>());
+
+        // Confirming (Enter on the default "Yes") routes the swap off-loop
+        // through the permission-effect channel, carrying the resolved absolute
+        // path; the confirm view is dismissed.
+        match w.handle_key(press(KeyCode::Enter)) {
+            ChatOutcome::PermissionAction(PermissionAction::ChangeDirectory { path }) => {
+                assert!(std::path::Path::new(&path).is_dir(), "{path}");
+            }
+            _ => panic!("expected ChatOutcome::PermissionAction(ChangeDirectory)"),
+        }
+        assert!(!w.bottom_pane().view_stack().contains::<CdConfirmView>());
     }
 
     /// `/mcp` arg routing (2.1.206 `lJy`): bare `/mcp` and the `mke` menu

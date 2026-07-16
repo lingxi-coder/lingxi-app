@@ -19,6 +19,7 @@
 
 pub mod argument_substitution;
 pub mod builtin_support;
+pub mod cd;
 pub mod describe;
 pub mod dispatcher;
 pub mod expand;

@@ -135,6 +135,13 @@ pub const VERSION_COMPLETED: &str = "tengu_command_version_completed";
 /// Emitted when `/version` fails (currently unreachable, reserved for future).
 pub const VERSION_FAILED: &str = "tengu_command_version_failed";
 
+/// The flat `tengu_cd_command` event claude-code 2.1.207 emits after a `/cd`
+/// working-directory move (`N("tengu_cd_command", { source })`). Deliberately
+/// NOT one of the `tengu_command_<name>_<phase>` names in [`NAMES`] (the `/cd`
+/// interactive local-jsx command does not use the started/completed/failed
+/// lifecycle triple) — so it is excluded from that locked array.
+pub const CD_COMMAND: &str = "tengu_cd_command";
+
 /// All 54 command-event names (sorted ASCII-ascending: by command-name then phase).
 ///
 /// Locked at length **54** for M5-11 ([`super::ALL_EVENT_NAMES`] formula must

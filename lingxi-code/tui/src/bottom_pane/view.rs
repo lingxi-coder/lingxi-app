@@ -69,6 +69,14 @@ pub enum ViewOutcome {
     /// `/permissions` editor); the async settings write is reported back
     /// through `TurnEvent::SystemNotice` and reflected on the next open.
     RunPluginAction(PluginAction),
+    /// The `/cd` confirm view was accepted: move the session's working
+    /// directory to this (already-resolved, absolute) path. Unlike
+    /// [`Self::RunPermissionAction`] (which keeps the editor open), this
+    /// completes the confirm view — it hits `ViewStack::apply`'s accepting
+    /// catch-all and pops. The owner performs the actual `SessionCwd` swap +
+    /// `tengu_cd_command` + result notice off-loop (it carries no live
+    /// `SessionCwd`/telemetry handle itself).
+    ChangeDirectory(std::path::PathBuf),
     /// The `/resume` picker resolved to this session uuid. Unlike the off-loop
     /// effect variants above, this UNWINDS the app loop: the owner
     /// (`RataApp::run` → `run_app`) returns an `AppExit::SwitchSession(uuid)` so
@@ -140,6 +148,18 @@ pub enum PermissionAction {
         path: String,
         /// Which settings file to persist to.
         dest: PermissionUpdateDestination,
+    },
+    /// Move the session's working directory to `path` (the `/cd` command,
+    /// parity 2.1.207). Reuses the `/permissions` off-loop effect channel (like
+    /// [`Self::AddDirectory`]) rather than growing a dedicated app callback: the
+    /// owner swaps the shared `tool_api::SessionCwd` cell to `(path, [path])` —
+    /// the same cell `EnterWorktree`/`ExitWorktree` swap — emits
+    /// `tengu_cd_command`, and prints the byte-exact `command_api::cd`
+    /// result message via `TurnEvent::SystemNotice`.
+    ChangeDirectory {
+        /// Absolute, normalized target directory (validated to exist + be a
+        /// directory by `crate::add_dir::resolve_and_validate` before confirm).
+        path: String,
     },
 }
 

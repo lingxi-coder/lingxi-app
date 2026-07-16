@@ -87,6 +87,16 @@ pub fn emit_command_failed(event: &'static str, error: &str) {
     tracing::error!(event = event, error = %error);
 }
 
+/// Emit the `tengu_cd_command` event (claude-code 2.1.207's `/cd` move:
+/// `N("tengu_cd_command", { source: xe(t) })`). `source` is the pre-hash
+/// trigger label (`"cd_command"` for the `/cd` slash path); the sink applies
+/// any PII hashing on the wire, matching the reference's `xe(t)` = hash-strip.
+/// The event name is intentionally the flat `tengu_cd_command` (NOT part of the
+/// `tengu_command_<name>_<phase>` family in [`crate::tengu::command`]).
+pub fn emit_cd_command(source: &str) {
+    tracing::info!(event = crate::tengu::command::CD_COMMAND, source = %source);
+}
+
 // -- EXPERIMENTAL_SKILL_SEARCH skill-discovery emit helper -------------------
 
 /// Emit the skill-discovery-collected event with the `hidden_by_main_turn` field

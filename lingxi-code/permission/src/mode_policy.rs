@@ -27,11 +27,13 @@
 
 /// External read-only / planning-safe allowlist (the `Plan`-mode pass set).
 ///
-/// Mirrors `SAFE_YOLO_ALLOWLISTED_TOOLS` (`classifierDecision.ts:56-94`),
-/// external subset. A tool on this list never trips the Plan-mode mutation
-/// backstop; everything else does. Read-only file/search operations, MCP
-/// resource reads, task/todo metadata, plan-mode UI tools, the team mailbox
-/// tools, and `Sleep` are all safe.
+/// Mirrors `SAFE_YOLO_ALLOWLISTED_TOOLS` / 2.1.211 `FLg`
+/// (`classifierDecision.ts:56-94`), external subset. A tool on this list never
+/// trips the Plan-mode mutation backstop; everything else does. Read-only
+/// file/search operations, MCP resource reads, task/todo metadata, plan-mode
+/// UI tools, and the `SendMessage` mailbox tool are all safe. `TeamCreate`/
+/// `TeamDelete`/`Sleep` were REMOVED in 2.1.211 (MODE-SAFE-LIST-06) and are no
+/// longer plan-safe.
 const PLAN_SAFE_TOOLS: &[&str] = &[
     // Read-only file operations.
     "Read",
@@ -54,14 +56,14 @@ const PLAN_SAFE_TOOLS: &[&str] = &[
     "AskUserQuestion",
     "EnterPlanMode",
     "ExitPlanMode",
-    // Swarm coordination (internal mailbox / team state only — teammates run
-    // their own permission checks, so no actual security bypass).
-    "TeamCreate",
-    // Agent cleanup.
-    "TeamDelete",
+    // Swarm coordination (internal mailbox only — teammates run their own
+    // permission checks, so no actual security bypass). MODE-SAFE-LIST-06:
+    // 2.1.211's isAutoModeAllowlistedTool set (FLg) keeps `SendMessage` (uf)
+    // but NO LONGER lists `TeamCreate`/`TeamDelete` (those now appear only in
+    // the legacy-names set JUr, not the plan-safe allowlist) and has no `Sleep`
+    // tool-name string at all — so all three are removed here and now trip the
+    // Plan-mode mutation backstop like any other unlisted tool.
     "SendMessage",
-    // Misc safe.
-    "Sleep",
 ];
 
 /// Is `tool_name` on the read-only / planning-safe allowlist?
@@ -116,15 +118,20 @@ mod tests {
     }
 
     #[test]
-    fn team_and_send_message_tools_are_plan_safe() {
-        assert!(is_plan_safe_tool("TeamCreate"));
-        assert!(is_plan_safe_tool("TeamDelete"));
+    fn send_message_is_plan_safe() {
+        // 2.1.211 FLg still lists `SendMessage` (uf).
         assert!(is_plan_safe_tool("SendMessage"));
     }
 
     #[test]
-    fn sleep_is_plan_safe() {
-        assert!(is_plan_safe_tool("Sleep"));
+    fn team_and_sleep_tools_are_not_plan_safe() {
+        // MODE-SAFE-LIST-06: 2.1.211 dropped `TeamCreate`/`TeamDelete` from the
+        // plan-safe allowlist (they now live only in the legacy-names set JUr)
+        // and removed the `Sleep` tool-name entirely. They must now trip the
+        // Plan-mode mutation backstop.
+        assert!(!is_plan_safe_tool("TeamCreate"));
+        assert!(!is_plan_safe_tool("TeamDelete"));
+        assert!(!is_plan_safe_tool("Sleep"));
     }
 
     #[test]

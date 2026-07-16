@@ -1155,22 +1155,27 @@ mod tests {
             ),
             _ => panic!("expected Ask"),
         }
-        // Mode ask ⇒ mode branch (permissions.ts:200) with the Plan Mode title.
+        // Mode ask ⇒ mode branch (permissions.ts:200) with the Plan title.
+        // MODE-TITLE-BYTES-05: 2.1.211 getModeConfig gives plan.title="Plan"
+        // (not "Plan Mode"), interpolated into the ask message.
         match ask_with_mode(PermissionMode::Plan, "Edit") {
             PermissionResult::Ask { prompt, .. } => assert_eq!(
                 prompt.message,
-                "Current permission mode (Plan Mode) requires approval for this Edit command"
+                "Current permission mode (Plan) requires approval for this Edit command"
             ),
             _ => panic!("expected Ask"),
         }
-        // Mode titles byte-locked to getModeConfig (PermissionMode.ts:46-74).
+        // Mode titles byte-locked to getModeConfig (PermissionMode.ts:46-74,
+        // 2.1.211 tyl map). plan.title="Plan", auto.title="Auto".
         assert_eq!(PermissionMode::Default.title(), "Manual");
+        assert_eq!(PermissionMode::Plan.title(), "Plan");
         assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
         assert_eq!(
             PermissionMode::BypassPermissions.title(),
             "Bypass Permissions"
         );
         assert_eq!(PermissionMode::DontAsk.title(), "Don't Ask");
+        assert_eq!(PermissionMode::Auto.title(), "Auto");
     }
 
     #[test]

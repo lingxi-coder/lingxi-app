@@ -3543,6 +3543,64 @@ mod tests {
         assert!(!ps_element_is_cd_like("cddir")); // not a cd form
     }
 
+    // ---- PATH-01: command-path target vs Read/Edit deny rule --------------
+
+    /// `cat secret.env` INSIDE cwd is DENIED by a `Read(secret.env)` content deny
+    /// rule (the deny-rule walk runs before containment; containment alone would
+    /// allow an in-cwd read).
+    #[test]
+    fn path01_read_command_path_denied_by_read_deny_rule() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(secret.env)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("cat secret.env")) {
+            PermissionResult::Deny { reason, explanation, .. } => {
+                assert!(matches!(reason, PermissionDecisionReason::MatchedRule { .. }));
+                assert!(
+                    explanation
+                        .as_deref()
+                        .is_some_and(|e| e.contains("was blocked")),
+                    "explanation: {explanation:?}"
+                );
+            }
+            other => panic!("expected Read-deny command-path deny, got {other:?}"),
+        }
+        // A non-denied read is not denied by the rule.
+        assert!(!matches!(
+            p.authorize("Bash", &bash("cat other.txt")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// A write-op command path (`cp x denied.txt`) is denied by an
+    /// `Edit(denied.txt)` deny rule.
+    #[test]
+    fn path01_write_command_path_denied_by_edit_deny_rule() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(denied.txt)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("cp src.txt denied.txt")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// The command-path deny is bypass-immune (a deny short-circuits before the
+    /// mode layer).
+    #[test]
+    fn path01_read_deny_survives_bypass() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(secret.env)"] } }"#,
+            PermissionMode::BypassPermissions,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat secret.env")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
     #[test]
     fn stringify_primitive_semantics() {
         assert_eq!(

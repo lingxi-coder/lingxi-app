@@ -1144,6 +1144,93 @@ pub fn check_command_path_containment(
     None
 }
 
+/// PATH-01: a resolved command-path target for the policy's deny-rule walk.
+pub struct CommandPathTarget {
+    /// The resolved absolute path (as a string) to match against deny rules.
+    pub resolved: String,
+    /// `true` for write/create-op commands (checked against Edit-deny rules);
+    /// `false` for read-op commands (checked against Read-deny rules).
+    pub is_write: bool,
+    /// The byte-exact message CC surfaces for a rule-typed command-path deny
+    /// (`yPg`'s `S`, the containment template reused when `decisionReason.type
+    /// === "rule"`).
+    pub blocked_message: String,
+}
+
+/// PATH-01: extract every RESOLVED command-path target (in- OR out-of-cwd) for
+/// the policy's Read/Edit deny-rule walk — the companion to
+/// [`check_command_path_containment`] (which containment-ASKS). Mirrors the same
+/// per-subcommand extraction, but records every path that reaches
+/// [`PathGuard::Check`] (a resolved absolute path) rather than only out-of-cwd
+/// ones, because a deny rule matches an in-cwd path too (`cat secret.env`).
+/// Subcommands that would themselves ASK (mv/cp with flags, compound-cd-write,
+/// or a pre-guard ask like `..`-traversal / shell-expansion) contribute no deny
+/// targets — matching CC, where those asks preempt the `EUr`→`Ptt` deny walk.
+#[must_use]
+pub fn command_path_deny_targets(
+    command: &str,
+    roots: &FsRoots,
+    additional: &[PathBuf],
+) -> Vec<CommandPathTarget> {
+    let subs = crate::shell_command::split_command(command);
+    let compound_has_cd = compound_has_cd(&subs);
+    let home = roots
+        .home
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let mut targets = Vec::new();
+    for sub in &subs {
+        let stripped = crate::shell_command::strip_safe_wrappers(sub);
+        let tokens = split_argv(&stripped);
+        let Some((base, args)) = tokens.split_first() else {
+            continue;
+        };
+        let Some((mut operation_type, action_verb)) = command_spec(base) else {
+            continue;
+        };
+        if base == "sed"
+            && matches!(
+                crate::sed_validation::sed_constraint_verdict(&stripped, false, roots, additional),
+                crate::sed_validation::SedVerdict::Safe
+            )
+        {
+            operation_type = OperationType::Read;
+        }
+        // mv/cp with flags and compound-cd-write are ASK cases → no deny target.
+        if matches!(base.as_str(), "mv" | "cp") && args.iter().any(|a| a.starts_with('-')) {
+            continue;
+        }
+        if compound_has_cd && operation_type != OperationType::Read {
+            continue;
+        }
+        if base == "cd" {
+            continue;
+        }
+        let paths = extract_paths(base, args, home.as_deref());
+        for path in &paths {
+            // Only paths that clear every pre-guard (resolved) are deny-checked;
+            // a pre-guard Ask preempts the deny walk in CC.
+            if let PathGuard::Check(resolved) = validate_path(path, operation_type, roots) {
+                let dirs = all_working_directories(roots, additional);
+                let dir_list = format_directory_list(&dirs);
+                let resolved_str = resolved.to_string_lossy().into_owned();
+                let blocked_message = format!(
+                    "{base} in '{resolved_str}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
+                );
+                targets.push(CommandPathTarget {
+                    resolved: resolved_str,
+                    is_write: matches!(
+                        operation_type,
+                        OperationType::Write | OperationType::Create
+                    ),
+                    blocked_message,
+                });
+            }
+        }
+    }
+    targets
+}
+
 /// Does any subcommand start with `cd`? (TS `compoundCommandHasCd`.) Gates the
 /// compound-`cd`-with-write ask. A leading-word `cd` in ANY subcommand counts.
 fn compound_has_cd(subs: &[String]) -> bool {

@@ -646,6 +646,17 @@ impl PermissionPolicy {
                     if let Some(deny) = self.output_redirect_deny(&sources, command, roots) {
                         return deny;
                     }
+                    // 2b-deny(read/cmd). PATH-01: a COMMAND-PATH target matching a
+                    //     Read-deny (read op) / Edit-deny (write/create op) CONTENT
+                    //     rule is DENIED (claude-code `EUr`→`Ptt` returns a
+                    //     rule-typed deny that `yPg` surfaces as `behavior:"deny"`)
+                    //     — e.g. `cat secret.env` under `deny:["Read(secret.env)"]`
+                    //     even inside cwd. Runs before the containment ask (deny
+                    //     beats ask) and is bypass-immune (a deny short-circuits
+                    //     before the mode layer in CC).
+                    if let Some(deny) = self.command_path_deny(&sources, command, roots) {
+                        return deny;
+                    }
                     if let Some(ask) = crate::path_constraints::check_path_constraints(
                         command,
                         roots,
@@ -1448,6 +1459,49 @@ impl PermissionPolicy {
     /// tool-wide `Edit` deny, and the read-op command-path deny walk, are
     /// documented follow-ups). Roots are supplied by the caller (guard is
     /// roots-gated like the sibling path guards).
+    /// PATH-01: deny a bash command whose extracted command-path target matches
+    /// a Read-deny (read op) / Edit-deny (write/create op) CONTENT rule
+    /// (claude-code `EUr`→`Ptt`, the `Ww(...,"deny")` walk that runs before
+    /// containment). Mirrors [`Self::output_redirect_deny`] but over the
+    /// positional command paths, using the byte-exact containment-template
+    /// message CC reuses for a rule-typed deny. Returns the FIRST match, or
+    /// `None`.
+    fn command_path_deny(
+        &self,
+        sources: &[PermissionRuleSource],
+        command: &str,
+        roots: &FsRoots,
+    ) -> Option<PermissionResult> {
+        for target in crate::command_path_containment::command_path_deny_targets(
+            command,
+            roots,
+            &self.additional_working_dirs,
+        ) {
+            let rule_tool = if target.is_write { "Edit" } else { "Read" };
+            for src in sources {
+                let Some(rules) = self.deny_rules.get(src) else {
+                    continue;
+                };
+                for rule in rules {
+                    if rule.value.tool_name != rule_tool {
+                        continue;
+                    }
+                    let Some(pattern) = rule.value.rule_content.as_deref() else {
+                        continue;
+                    };
+                    if path_matches_rule_pattern(&target.resolved, pattern, rule.source, roots) {
+                        return Some(PermissionResult::Deny {
+                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                            explanation: Some(target.blocked_message.clone()),
+                            metadata: PermissionMetadata::default(),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn output_redirect_deny(
         &self,
         sources: &[PermissionRuleSource],

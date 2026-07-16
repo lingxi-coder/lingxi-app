@@ -61,23 +61,51 @@ pub fn permission_mode_from_cli_string(s: &str) -> PermissionMode {
     }
 }
 
+/// `MODE-ENV-SCRUB-03`: byte-exact `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`
+/// force-to-default notice, with the accepted `LINGXI_` env-name divergence
+/// (the subprocess-env scrub is `LINGXI_SUBPROCESS_ENV_SCRUB` in this port,
+/// `platforms/posix/src/process/runner.rs`). Em-dash is U+2014.
+pub(crate) const ENV_SCRUB_FORCED_TO_DEFAULT_MSG: &str = "Permission mode forced to default \u{2014} LINGXI_SUBPROCESS_ENV_SCRUB is set (allowed_non_write_users hardening). Declare allowedTools explicitly, or set LINGXI_SUBPROCESS_ENV_SCRUB=0 to opt out.";
+
 /// `initialPermissionModeFromCLI` (`permissionSetup.ts:689-812`): resolve the
 /// session permission mode from CLI flags + settings, returning the mode plus
 /// an optional user-facing notice (set when the bypass killswitch suppresses a
-/// requested bypass).
+/// requested bypass, or a hardening/downgrade path forces the mode).
+///
+/// `env_scrub_active` is `isEnvTruthy(LINGXI_SUBPROCESS_ENV_SCRUB)` — the
+/// `allowed_non_write_users` subprocess-env-scrub hardening flag. When set, the
+/// resolver short-circuits to [`PermissionMode::Default`] BEFORE any other
+/// input (`MODE-ENV-SCRUB-03` / claude-code `klc`'s leading
+/// `if(ut(r.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB))` guard), emitting the notice iff
+/// a non-default mode was actually requested (skip flag or a CLI mode other
+/// than default).
 #[must_use]
 pub fn initial_permission_mode_from_cli(
     permission_mode_cli: Option<&str>,
     dangerously_skip: bool,
+    env_scrub_active: bool,
     settings: &CliModeSettings,
 ) -> (PermissionMode, Option<String>) {
+    let cli_mode = permission_mode_cli.map(permission_mode_from_cli_string);
+
+    // MODE-ENV-SCRUB-03: env-scrub hardening forces mode to default before any
+    // other input is consulted. The notice fires only when a non-default mode
+    // was requested (skip flag, or a CLI mode that isn't `default`), matching
+    // klc's `y=s||i&&i!=="default"||a&&a!=="default"`.
+    if env_scrub_active {
+        let requested_non_default =
+            dangerously_skip || cli_mode.is_some_and(|m| m != PermissionMode::Default);
+        let notice = requested_non_default.then(|| ENV_SCRUB_FORCED_TO_DEFAULT_MSG.to_string());
+        return (PermissionMode::Default, notice);
+    }
+
     // Modes in order of priority (TS `orderedModes`).
     let mut ordered: Vec<PermissionMode> = Vec::new();
     if dangerously_skip {
         ordered.push(PermissionMode::BypassPermissions);
     }
-    if let Some(cli) = permission_mode_cli {
-        ordered.push(permission_mode_from_cli_string(cli));
+    if let Some(cli) = cli_mode {
+        ordered.push(cli);
     }
     if let Some(default_mode) = settings.default_mode {
         ordered.push(default_mode);
@@ -163,21 +191,21 @@ mod tests {
 
     #[test]
     fn dangerously_skip_wins_and_yields_bypass() {
-        let (mode, notice) = initial_permission_mode_from_cli(None, true, &no_settings());
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, false, &no_settings());
         assert_eq!(mode, PermissionMode::BypassPermissions);
         assert!(notice.is_none());
     }
 
     #[test]
     fn cli_flag_used_when_no_skip() {
-        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, &no_settings());
+        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, false, &no_settings());
         assert_eq!(mode, PermissionMode::Plan);
     }
 
     #[test]
     fn skip_outranks_cli_flag() {
         // ordered_modes pushes bypass first, then the cli mode; first valid wins.
-        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), true, &no_settings());
+        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), true, false, &no_settings());
         assert_eq!(mode, PermissionMode::BypassPermissions);
     }
 
@@ -188,7 +216,7 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
         };
-        let (mode, _) = initial_permission_mode_from_cli(None, false, &s);
+        let (mode, _) = initial_permission_mode_from_cli(None, false, false, &s);
         assert_eq!(mode, PermissionMode::AcceptEdits);
     }
 
@@ -199,7 +227,7 @@ mod tests {
             bypass_disabled: true,
             auto_mode_disabled: false,
         };
-        let (mode, notice) = initial_permission_mode_from_cli(None, true, &s);
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, false, &s);
         assert_eq!(mode, PermissionMode::Default);
         assert_eq!(
             notice.as_deref(),
@@ -216,7 +244,7 @@ mod tests {
             bypass_disabled: true,
             auto_mode_disabled: false,
         };
-        let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, &s);
+        let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, false, &s);
         assert_eq!(mode, PermissionMode::Plan);
         assert_eq!(
             notice.as_deref(),
@@ -226,8 +254,62 @@ mod tests {
 
     #[test]
     fn no_inputs_is_default_no_notice() {
-        let (mode, notice) = initial_permission_mode_from_cli(None, false, &no_settings());
+        let (mode, notice) = initial_permission_mode_from_cli(None, false, false, &no_settings());
         assert_eq!(mode, PermissionMode::Default);
         assert!(notice.is_none());
+    }
+
+    // ---- MODE-ENV-SCRUB-03 ----
+
+    #[test]
+    fn env_scrub_forces_default_and_suppresses_requested_bypass() {
+        // A hardened/scrubbed subprocess must NOT inherit --dangerously-skip
+        // bypass. Even with the bypass killswitch OFF, env-scrub wins.
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, true, &no_settings());
+        assert_eq!(mode, PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some(ENV_SCRUB_FORCED_TO_DEFAULT_MSG));
+    }
+
+    #[test]
+    fn env_scrub_forces_default_over_settings_and_cli_plan() {
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::BypassPermissions),
+            bypass_disabled: false,
+            auto_mode_disabled: false,
+        };
+        let (mode, notice) =
+            initial_permission_mode_from_cli(Some("plan"), false, true, &s);
+        assert_eq!(mode, PermissionMode::Default);
+        // CLI mode `plan` is non-default → notice fires.
+        assert_eq!(notice.as_deref(), Some(ENV_SCRUB_FORCED_TO_DEFAULT_MSG));
+    }
+
+    #[test]
+    fn env_scrub_no_notice_when_no_non_default_requested() {
+        // Nothing non-default requested (no skip, no CLI mode) → silent force.
+        let (mode, notice) = initial_permission_mode_from_cli(None, false, true, &no_settings());
+        assert_eq!(mode, PermissionMode::Default);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn env_scrub_no_notice_when_cli_mode_is_default_or_manual() {
+        // `default`/`manual` both normalize to Default → not a non-default
+        // request → no notice (klc `i&&i!=="default"`).
+        for m in ["default", "manual"] {
+            let (mode, notice) =
+                initial_permission_mode_from_cli(Some(m), false, true, &no_settings());
+            assert_eq!(mode, PermissionMode::Default);
+            assert!(notice.is_none(), "cli mode {m} should not emit a notice");
+        }
+    }
+
+    #[test]
+    fn env_scrub_message_is_byte_exact_with_lingxi_env_name() {
+        // Lock the LINGXI_ env-name divergence + U+2014 em-dash.
+        assert_eq!(
+            ENV_SCRUB_FORCED_TO_DEFAULT_MSG,
+            "Permission mode forced to default \u{2014} LINGXI_SUBPROCESS_ENV_SCRUB is set (allowed_non_write_users hardening). Declare allowedTools explicitly, or set LINGXI_SUBPROCESS_ENV_SCRUB=0 to opt out."
+        );
     }
 }

@@ -840,9 +840,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 /// gate is deferred — see [`permission::auto_gate`]).
 pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMode, Option<String>) {
     let settings = read_cli_mode_settings(argv);
+    // MODE-ENV-SCRUB-03: `LINGXI_SUBPROCESS_ENV_SCRUB` (the port's spelling of
+    // `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, `platforms/posix` runner) forces the
+    // permission mode to `default` — a hardened / scrubbed subprocess must not
+    // inherit a requested bypass/plan/etc.
+    let env_scrub_active =
+        traits::env::is_env_truthy(std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref());
     let (mode, notice) = permission::initial_permission_mode_from_cli(
         argv.permission_mode.as_deref(),
         argv.dangerously_skip_permissions,
+        env_scrub_active,
         &settings,
     );
     if mode != permission::PermissionMode::Auto {

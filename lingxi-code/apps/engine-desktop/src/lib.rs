@@ -3311,6 +3311,15 @@ async fn apply_worktree_launch(
         .await
         {
             Ok(()) => {
+                // 206's CLI worktree-launch prints the session name + attach
+                // hint on success (@225872424, `console.log("Created tmux
+                // session: {S}\nTo attach: tmux attach -t {S}")`) so the user
+                // can find it — without this the derived name is invisible.
+                // Emitted on STDERR (not 206's stdout) so it never pollutes
+                // `--print`/stream-json stdout; this follows the port's boot-
+                // notice precedent (the settings-warning `eprintln!` in
+                // `build`). Colorization (206 `ht.green`) is dropped.
+                eprintln!("Created tmux session: {session_name}\nTo attach: tmux attach -t {session_name}");
                 if let Some(session) = ctx.worktree_session.lock().unwrap().as_mut() {
                     session.tmux_session_name = Some(session_name);
                 }
@@ -3318,7 +3327,12 @@ async fn apply_worktree_launch(
             Err(e) => {
                 // Non-fatal: the worktree itself was already created+entered
                 // above, so a tmux hiccup must not fail boot — it only means
-                // `WorktreeSession.tmux_session_name` stays `None`.
+                // `WorktreeSession.tmux_session_name` stays `None`. 206 also
+                // surfaces this to the user (@225872... `console.error("Warning:
+                // Failed to create tmux session: {error}")`), so print it (on
+                // stderr, matching 206's `console.error`) in addition to the
+                // structured `tracing::warn!`.
+                eprintln!("Warning: Failed to create tmux session: {e}");
                 tracing::warn!(
                     error = %e,
                     session_name = %session_name,

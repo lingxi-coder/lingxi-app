@@ -608,6 +608,14 @@ lazy_re!(xeg_pushd_n_re, r"^-[a-zA-Z]*n[a-zA-Z]*$");
 // popd stack-index operands that do NOT change PWD: `/^\+0*[1-9]/` and `/^-0+$/`.
 lazy_re!(xeg_popd_plus_re, r"^\+0*[1-9]");
 lazy_re!(xeg_popd_minus_re, r"^-0+$");
+
+// ── pUr/HVc (body-write invalidation pre-scan) regexes ──
+// HVc `word` flag that is safe to skip: `/^-[fvn]+$/`.
+lazy_re!(hvc_fvn_flag_re, r"^-[fvn]+$");
+// HVc backslash-escaped bare NAME operand: `/^\\?[A-Za-z_][A-Za-z0-9_]*$/`.
+lazy_re!(hvc_bslash_name_re, r"^\\?[A-Za-z_][A-Za-z0-9_]*$");
+// pUr declaration-command `NAME+?=` prefix: `/^([A-Za-z_][A-Za-z0-9_]*)\+?=/`.
+lazy_re!(pur_decl_assign_re, r"^([A-Za-z_][A-Za-z0-9_]*)\+?=");
 // PROC_ENVIRON_RE (ast.ts:2197): `.*` (procfs resolves `..`), NOT `[^/]*`.
 lazy_re!(proc_environ_re, r"/proc/.*/environ");
 // NEWLINE_HASH_RE (ast.ts:2204): newline, then 0+ space/tab, then `#`.
@@ -952,6 +960,324 @@ fn children(node: Node<'_>) -> Vec<Node<'_>> {
     node.children(&mut cursor).collect()
 }
 
+/// TS `P3i` (ast.ts): best-effort STATIC text of an argument node. `None` = the
+/// node is not statically representable (used only by the [`pur`] pre-scan).
+fn p3i(node: Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "word" | "number" => Some(unescape_word(node_text(node, src))),
+        "raw_string" => Some(strip_raw_string(node_text(node, src))),
+        "string" => {
+            let inner: Vec<Node> = children(node)
+                .into_iter()
+                .filter(|c| c.kind() != "\"")
+                .collect();
+            if inner.is_empty() {
+                return Some(String::new());
+            }
+            if inner.len() == 1 && inner[0].kind() == "string_content" {
+                return Some(node_text(inner[0], src).to_string());
+            }
+            None
+        }
+        "concatenation" => {
+            let mut t = String::new();
+            for c in children(node) {
+                t.push_str(&p3i(c, src)?);
+            }
+            Some(t)
+        }
+        _ => None,
+    }
+}
+
+/// TS `HVc` (ast.ts): mark every variable an `unset` (given its operand nodes)
+/// may remove as unknown ([`VAR_PLACEHOLDER`]) in `scope`. A non-identifier /
+/// pattern operand invalidates the WHOLE scope (fail-safe over-invalidation).
+fn hvc(operands: &[Node], src: &[u8], scope: &mut HashMap<String, String>) {
+    let invalidate_all = |scope: &mut HashMap<String, String>| {
+        let keys: Vec<String> = scope.keys().cloned().collect();
+        for k in keys {
+            scope.insert(k, VAR_PLACEHOLDER.to_string());
+        }
+    };
+    for n in operands {
+        match n.kind() {
+            "unset" | "file_redirect" | "heredoc_redirect" | "herestring_redirect" => continue,
+            "variable_name" => {
+                let name = node_text(*n, src).replace('\\', "");
+                scope.insert(name, VAR_PLACEHOLDER.to_string());
+                continue;
+            }
+            "word" => {
+                let text = node_text(*n, src);
+                if text.starts_with('-') {
+                    if text == "--" || hvc_fvn_flag_re().is_match(text) {
+                        continue;
+                    }
+                    invalidate_all(scope);
+                    continue;
+                }
+                if hvc_bslash_name_re().is_match(text) {
+                    let name = text.strip_prefix('\\').unwrap_or(text).to_string();
+                    scope.insert(name, VAR_PLACEHOLDER.to_string());
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        invalidate_all(scope);
+    }
+}
+
+/// TS `pUr` (ast.ts): recursively pre-scan `node`, marking every variable its
+/// body MAY write (assignments, loop vars, `read`/`mapfile`/`unset`,
+/// `cd`→PWD/OLDPWD, `pushd`/`popd`→DIRSTACK) as unknown in `scope`. Isolated
+/// scopes (`function_definition`/`subshell`/`command_substitution`/
+/// `process_substitution`) do NOT leak writes and are skipped.
+fn pur(node: Node, src: &[u8], scope: &mut HashMap<String, String>) {
+    let kind = node.kind();
+    if matches!(
+        kind,
+        "function_definition" | "subshell" | "command_substitution" | "process_substitution"
+    ) {
+        return;
+    }
+    if kind == "pipeline" {
+        // Only the LAST non-separator stage runs in the current shell.
+        let mut last: Option<Node> = None;
+        for c in children(node) {
+            if !SEPARATOR_TYPES.contains(&c.kind()) {
+                last = Some(c);
+            }
+        }
+        if let Some(l) = last {
+            pur(l, src, scope);
+        }
+        return;
+    }
+    if kind == "list" || kind == "program" {
+        let kids = children(node);
+        for (n, o) in kids.iter().enumerate() {
+            if SEPARATOR_TYPES.contains(&o.kind()) {
+                continue;
+            }
+            // Skip a background job (`cmd &`) — it runs in a subshell.
+            if kids.get(n + 1).map(|x| x.kind()) == Some("&") {
+                continue;
+            }
+            pur(*o, src, scope);
+        }
+        return;
+    }
+    if kind == "variable_assignment" {
+        for r in children(node) {
+            if r.kind() == "variable_name" {
+                scope.insert(node_text(r, src).to_string(), VAR_PLACEHOLDER.to_string());
+                break;
+            }
+        }
+    }
+    if kind == "for_statement" {
+        for r in children(node) {
+            if r.kind() == "variable_name" {
+                scope.insert(node_text(r, src).to_string(), VAR_PLACEHOLDER.to_string());
+                break;
+            }
+        }
+    }
+    if kind == "unset_command" {
+        hvc(&children(node), src, scope);
+    }
+    if kind == "command" {
+        let mut name_node: Option<Node> = None;
+        let mut cmd: Option<String> = None;
+        let mut o: Vec<String> = Vec::new();
+        let mut arg_nodes: Vec<Node> = Vec::new();
+        let mut saw_name = false;
+        for p in children(node) {
+            if p.kind() == "command_name" {
+                name_node = Some(p);
+                let first = children(p).into_iter().next().unwrap_or(p);
+                cmd = p3i(first, src);
+                saw_name = true;
+            } else if !saw_name
+                || matches!(
+                    p.kind(),
+                    "file_redirect" | "herestring_redirect" | "heredoc_redirect"
+                )
+            {
+                // leading assignments / redirects — not positional args
+            } else {
+                o.push(p3i(p, src).unwrap_or_default());
+                arg_nodes.push(p);
+            }
+        }
+        // Strip command-prefix wrappers (env-style assignments write vars).
+        let mut idx = 0usize;
+        while cmd
+            .as_deref()
+            .is_some_and(|c| XEG_WRAPPERS.contains(&c) || c == "!")
+        {
+            while idx < o.len() {
+                let p = &o[idx];
+                if xeg_wrapper_flag_re().is_match(p) {
+                    idx += 1;
+                } else if xeg_assign_word_re().is_match(p) {
+                    if let Some(id) = leading_ident(p) {
+                        scope.insert(id.to_string(), VAR_PLACEHOLDER.to_string());
+                    }
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+            cmd = o.get(idx).cloned();
+            idx += 1;
+        }
+        let args: &[String] = o.get(idx..).unwrap_or(&[]);
+        let unwrapped_arg_nodes: &[Node] = arg_nodes.get(idx..).unwrap_or(&[]);
+        let mark = |scope: &mut HashMap<String, String>, p: &str| {
+            if valid_var_name_re().is_match(p) {
+                scope.insert(p.to_string(), VAR_PLACEHOLDER.to_string());
+            }
+        };
+        match cmd.as_deref() {
+            Some("read") => {
+                scope.insert("REPLY".to_string(), VAR_PLACEHOLDER.to_string());
+                let mut p = 0;
+                let mut dd = false;
+                while p < args.len() {
+                    let m = &args[p];
+                    if !dd && m == "--" {
+                        dd = true;
+                        p += 1;
+                        continue;
+                    }
+                    if !dd && m.starts_with('-') {
+                        if READ_DATA_FLAGS.contains(&m.as_str()) {
+                            p += 2;
+                            continue;
+                        }
+                        let mb = m.as_bytes();
+                        let mut g = 1;
+                        let mut consumed = false;
+                        while g < m.len() {
+                            let y = mb[g];
+                            if y == b'a' || y == b'A' {
+                                let val = if g < m.len() - 1 {
+                                    m[g + 1..].to_string()
+                                } else {
+                                    args.get(p + 1).cloned().unwrap_or_default()
+                                };
+                                mark(scope, &val);
+                                consumed = g == m.len() - 1;
+                                break;
+                            }
+                            let flag = format!("-{}", y as char);
+                            if READ_DATA_FLAGS.contains(&flag.as_str()) {
+                                consumed = g == m.len() - 1;
+                                break;
+                            }
+                            g += 1;
+                        }
+                        p += if consumed { 2 } else { 1 };
+                        continue;
+                    }
+                    mark(scope, m);
+                    p += 1;
+                }
+            }
+            Some(c) if c == "mapfile" || c == "readarray" => {
+                scope.insert("MAPFILE".to_string(), VAR_PLACEHOLDER.to_string());
+                let mut p = 0;
+                while p < args.len() {
+                    let f = &args[p];
+                    if f.starts_with('-') {
+                        if xeg_mapfile_flag_re().is_match(f) {
+                            p += 1;
+                        }
+                        p += 1;
+                        continue;
+                    }
+                    mark(scope, f);
+                    p += 1;
+                }
+            }
+            Some("unset") => hvc(unwrapped_arg_nodes, src, scope),
+            _ => {}
+        }
+        // Recurse into children, but skip env-prefix `variable_assignment`s when
+        // the command is an ordinary external command (those writes are local).
+        let cname = name_node
+            .and_then(|n| children(n).into_iter().next())
+            .filter(|c| c.kind() == "word")
+            .map(|c| unescape_word(node_text(c, src)));
+        let skip_env_assigns = cname
+            .as_deref()
+            .is_some_and(|u| {
+                !XEG_SPECIAL_BUILTINS.contains(&u)
+                    && !XEG_WRAPPERS.contains(&u)
+                    && !XEG_ASSIGN_BUILTINS.contains(&u)
+            });
+        for p in children(node) {
+            if p.kind() == "variable_assignment" && skip_env_assigns {
+                continue;
+            }
+            pur(p, src, scope);
+        }
+        return;
+    }
+    if kind == "declaration_command" {
+        for r in children(node) {
+            if matches!(
+                r.kind(),
+                "string" | "raw_string" | "word" | "number" | "concatenation" | "variable_name"
+            ) {
+                let text = node_text(r, src);
+                let cleaned: String = text.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
+                if let Some(caps) = pur_decl_assign_re().captures(&cleaned) {
+                    scope.insert(caps[1].to_string(), VAR_PLACEHOLDER.to_string());
+                } else if let Some(eq) = cleaned.find('=') {
+                    // `x=$…` with a `$` before the `=` → invalidate the whole scope.
+                    if eq > 0 && cleaned[..eq].contains('$') {
+                        let keys: Vec<String> = scope.keys().cloned().collect();
+                        for k in keys {
+                            scope.insert(k, VAR_PLACEHOLDER.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for r in children(node) {
+        pur(r, src, scope);
+    }
+}
+
+/// TS `E3i(scope, node)` = `pUr(node, scope)` (argument swap only).
+fn e3i(scope: &mut HashMap<String, String>, node: Node, src: &[u8]) {
+    pur(node, src, scope);
+}
+
+/// TS `dUr` (ast.ts): merge a walked body scope back into `outer`. Any variable
+/// the body changed becomes unknown; any outer variable the body did not carry
+/// forward becomes unknown (it may have been unset inside the body).
+fn dur(outer: &mut HashMap<String, String>, body: &HashMap<String, String>) {
+    for (k, v) in body {
+        if let Some(o) = outer.get(k) {
+            if o != v {
+                outer.insert(k.clone(), VAR_PLACEHOLDER.to_string());
+            }
+        }
+    }
+    let keys: Vec<String> = outer.keys().cloned().collect();
+    for k in keys {
+        if !body.contains_key(&k) {
+            outer.insert(k, VAR_PLACEHOLDER.to_string());
+        }
+    }
+}
+
 /// A leading `name=value` / `name+=value` assignment (TS
 /// `{name,value,isAppend}`, ast.ts:1781 return shape).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1149,13 +1475,23 @@ pub(crate) fn collect_commands(
     }
 
     if kind == "for_statement" {
+        // NOTE: the TS `mP()` env-scrub gate (reject for/while outright when
+        // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set) is a runtime feature flag; the
+        // port runs the flag-OFF default (full static analysis).
         let mut loop_var: Option<String> = None;
         let mut do_group: Option<Node> = None;
         for child in children(node) {
             match child.kind() {
                 "variable_name" => loop_var = Some(node_text(child, src).to_string()),
                 "do_group" => do_group = Some(child),
-                "for" | "in" | "select" | ";" => {}
+                // SECURITY: `select` reads stdin into $REPLY — cannot model.
+                "select" => {
+                    return Some(ParseForSecurityResult::TooComplex {
+                        reason: "select statement reads stdin into $REPLY; cannot statically model"
+                            .to_string(),
+                    })
+                }
+                "for" | "in" | ";" => {}
                 "command_substitution" => {
                     if let Some(err) = collect_command_substitution(child, commands, var_scope, src)
                     {
@@ -1175,16 +1511,38 @@ pub(crate) fn collect_commands(
             (Some(v), Some(g)) => (v, g),
             _ => return Some(too_complex(node)),
         };
-        // SECURITY: PS4/IFS as loop var bypasses assignment validation.
-        if loop_var == "PS4" || loop_var == "IFS" {
+        // SECURITY: a loop var that aliases an exec-influencing / integer-attr /
+        // safe-env / volatile name bypasses assignment validation.
+        if loop_var == "PS4"
+            || loop_var == "IFS"
+            || o3i(&loop_var)
+            || DANGEROUS_VAR_Y3I.contains(&loop_var.as_str())
+            || SAFE_ENV_VARS.contains(&loop_var.as_str())
+            || VOLATILE_VARS_GVC.contains(&loop_var.as_str())
+        {
             return Some(ParseForSecurityResult::TooComplex {
                 reason: format!("{loop_var} as loop variable bypasses assignment validation"),
             });
         }
-        // Loop var is ALWAYS unknown-value (VAR_PLACEHOLDER) in the REAL scope;
-        // body uses a COPY so body assignments don't leak past `done`.
-        var_scope.insert(loop_var, VAR_PLACEHOLDER.to_string());
+        // SECURITY: refuse to clobber a tracked literal with the loop var — the
+        // post-loop value cannot be statically determined.
+        if let Some(existing) = var_scope.get(&loop_var) {
+            if !contains_any_placeholder(existing) {
+                let truncated: String = existing.chars().take(40).collect();
+                let quoted = serde_json::to_string(&truncated).unwrap_or_else(|_| "\"\"".to_string());
+                return Some(ParseForSecurityResult::TooComplex {
+                    reason: format!(
+                        "for-loop variable '{loop_var}' would overwrite tracked literal {quoted}; post-loop value cannot be statically determined"
+                    ),
+                });
+            }
+        }
+        // Delete the loop var (its post-loop value is unknown), then walk the body
+        // on a COPY seeded by the body-write pre-scan; merge writes back after.
+        var_scope.remove(&loop_var);
         let mut body_scope = var_scope.clone();
+        e3i(&mut body_scope, do_group, src);
+        body_scope.remove(&loop_var);
         for c in children(do_group) {
             if matches!(c.kind(), "do" | "done" | ";") {
                 continue;
@@ -1193,10 +1551,28 @@ pub(crate) fn collect_commands(
                 return Some(err);
             }
         }
+        dur(var_scope, &body_scope);
         return None;
     }
 
     if kind == "if_statement" || kind == "while_statement" {
+        // (`mP()` env-scrub gate omitted — flag-OFF default = analyze.)
+        let is_while = kind == "while_statement";
+        // For a `while`, snapshot the pre-loop key set + values, then pre-scan the
+        // WHOLE loop into the REAL scope (every var the body may write is unknown
+        // before the condition runs — the loop may iterate ≥1 times).
+        let orig_keys: Option<std::collections::HashSet<String>> = if is_while {
+            Some(var_scope.keys().cloned().collect())
+        } else {
+            None
+        };
+        let snapshot: Option<HashMap<String, String>> = if is_while {
+            let snap = var_scope.clone();
+            e3i(var_scope, node, src);
+            Some(snap)
+        } else {
+            None
+        };
         let mut seen_then = false;
         for child in children(node) {
             match child.kind() {
@@ -1206,71 +1582,122 @@ pub(crate) fn collect_commands(
                     continue;
                 }
                 "do_group" => {
-                    // while body: scope COPY (body assignments don't leak past
-                    // done); inherits any `read VAR` tracking already in the real
-                    // scope from the condition.
-                    let mut body_scope = var_scope.clone();
+                    let mut d = var_scope.clone();
+                    e3i(&mut d, child, src);
                     for c in children(child) {
                         if matches!(c.kind(), "do" | "done" | ";") {
                             continue;
                         }
-                        if let Some(err) = collect_commands(c, commands, &mut body_scope, src) {
+                        if let Some(err) = collect_commands(c, commands, &mut d, src) {
                             return Some(err);
                         }
                     }
+                    dur(var_scope, &d);
                     continue;
                 }
                 "elif_clause" | "else_clause" => {
-                    let mut branch_scope = var_scope.clone();
+                    let mut d = var_scope.clone();
                     for c in children(child) {
                         if matches!(c.kind(), "elif" | "else" | "then" | ";") {
                             continue;
                         }
-                        if let Some(err) = collect_commands(c, commands, &mut branch_scope, src) {
+                        if let Some(err) = collect_commands(c, commands, &mut d, src) {
                             return Some(err);
                         }
                     }
+                    dur(var_scope, &d);
                     continue;
                 }
                 _ => {}
             }
-            // Condition (seen_then=false) uses REAL varScope; then-body uses a COPY.
-            let before = commands.len();
-            if seen_then {
-                let mut copy = var_scope.clone();
-                if let Some(err) = collect_commands(child, commands, &mut copy, src) {
-                    return Some(err);
+            // A condition (seen_then=false) or then-body child. Walk on a COPY.
+            let mut l = var_scope.clone();
+            let c_start = commands.len();
+            if let Some(err) = collect_commands(child, commands, &mut l, src) {
+                return Some(err);
+            }
+            if !seen_then {
+                // Condition: reconcile the copy `l` back into the REAL scope, but
+                // FAIL CLOSED whenever a tracked literal may have changed or been
+                // unset (the condition may short-circuit / pipeline / subshell).
+                // `ref_map` holds the ORIGINAL literals (while: pre-scan snapshot;
+                // if: the scope as it stood before this child).
+                let ref_map: HashMap<String, String> =
+                    snapshot.clone().unwrap_or_else(|| var_scope.clone());
+                for (d, p) in &l {
+                    if let Some(f) = ref_map.get(d) {
+                        if !contains_any_placeholder(f) && p != f {
+                            return Some(ParseForSecurityResult::TooComplex {
+                                reason: format!(
+                                    "'{d}' was tracked as literal '{f}' but condition may modify it (||/pipeline/unset/&&-short-circuit) — cannot prove downstream value"
+                                ),
+                            });
+                        }
+                    }
+                    var_scope.insert(d.clone(), p.clone());
                 }
-            } else {
-                if let Some(err) = collect_commands(child, commands, var_scope, src) {
-                    return Some(err);
-                }
-                // `while read VAR`: track condition `read VAR` names in REAL scope
-                // (value UNKNOWN → VAR_PLACEHOLDER) so the body COPY inherits them.
-                for i in before..commands.len() {
-                    let c = &commands[i];
-                    if c.argv.first().map(String::as_str) != Some("read") {
+                let cur_keys: Vec<String> = var_scope.keys().cloned().collect();
+                for d in cur_keys {
+                    if l.contains_key(&d) {
                         continue;
                     }
-                    let names: Vec<String> = c.argv[1..]
+                    if let Some(p) = ref_map.get(&d) {
+                        if !contains_any_placeholder(p) {
+                            return Some(ParseForSecurityResult::TooComplex {
+                                reason: format!(
+                                    "'{d}' was tracked as literal '{p}' but condition may unset it (&&-short-circuit) — cannot prove downstream value"
+                                ),
+                            });
+                        }
+                    }
+                    var_scope.insert(d, VAR_PLACEHOLDER.to_string());
+                }
+                // `read` in the condition writes its operands (and REPLY) with a
+                // runtime value; deny if it would clobber a tracked literal.
+                for i in c_start..commands.len() {
+                    if commands[i].argv.first().map(String::as_str) != Some("read") {
+                        continue;
+                    }
+                    let names: Vec<String> = commands[i].argv[1..]
                         .iter()
-                        .filter(|a| !a.starts_with('-') && valid_var_name_re().is_match(a))
+                        .filter(|m| !m.starts_with('-') && valid_var_name_re().is_match(m))
                         .cloned()
                         .collect();
-                    for a in names {
-                        // SECURITY: fail closed when a tracked literal would be
-                        // overwritten by a `read` that may not execute.
-                        if let Some(existing) = var_scope.get(&a) {
-                            if !contains_any_placeholder(existing) {
+                    for m in names {
+                        if let Some(g) = var_scope.get(&m) {
+                            if !contains_any_placeholder(g) {
                                 return Some(ParseForSecurityResult::TooComplex {
                                     reason: format!(
-                                        "'read {a}' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal '{existing}'"
+                                        "'read {m}' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal '{g}'"
                                     ),
                                 });
                             }
                         }
-                        var_scope.insert(a, VAR_PLACEHOLDER.to_string());
+                        var_scope.insert(m, VAR_PLACEHOLDER.to_string());
                     }
+                    if let Some(f) = var_scope.get("REPLY") {
+                        if !contains_any_placeholder(f) {
+                            let f = f.clone();
+                            return Some(ParseForSecurityResult::TooComplex {
+                                reason: format!(
+                                    "'read' in condition may write stdin to REPLY; cannot prove it overwrites tracked literal '{f}'"
+                                ),
+                            });
+                        }
+                    }
+                    var_scope.insert("REPLY".to_string(), VAR_PLACEHOLDER.to_string());
+                }
+            } else {
+                dur(var_scope, &l);
+            }
+        }
+        // A `while` loop may run ZERO times: any var introduced solely inside it
+        // is not guaranteed to exist afterward — drop keys not present pre-loop.
+        if let Some(o) = orig_keys {
+            let cur: Vec<String> = var_scope.keys().cloned().collect();
+            for k in cur {
+                if !o.contains(&k) {
+                    var_scope.remove(&k);
                 }
             }
         }
@@ -1540,7 +1967,7 @@ fn xeg(
     env_vars: &[(String, String)],
     var_scope: &mut HashMap<String, String>,
 ) -> Option<ParseForSecurityResult> {
-    /// Names this command writes (checked against [`itt`] at the end).
+    // Names this command writes (checked against `itt` at the end).
     let mut written: Vec<String> = Vec::new();
     macro_rules! push_name {
         ($u:expr) => {
@@ -5095,5 +5522,67 @@ EOF
         );
         // Non-identifier wrapped-unset operand.
         assert!(pfs("command unset 'a b'").is_err());
+    }
+
+    // ── PERM-AST-VARSCOPE-01: loop/branch scope machinery ──
+
+    #[test]
+    fn select_statement_rejected() {
+        assert_eq!(
+            pfs("select x in a b; do echo $x; done"),
+            Err("select statement reads stdin into $REPLY; cannot statically model".to_string())
+        );
+    }
+
+    #[test]
+    fn loop_var_guard_widened() {
+        // O3i / Y3i / SAFE_ENV / GVc loop vars bypass assignment validation.
+        for name in ["PATH", "RANDOM", "HOME", "REPLY", "IFS", "PS4"] {
+            let cmd = format!("for {name} in a b; do echo hi; done");
+            assert_eq!(
+                pfs(&cmd),
+                Err(format!("{name} as loop variable bypasses assignment validation")),
+                "loop var {name} must be rejected"
+            );
+        }
+        // An ordinary loop var is fine.
+        assert!(pfs("for i in a b; do echo hi; done").is_ok());
+    }
+
+    #[test]
+    fn for_loop_overwrites_tracked_literal_denied() {
+        // `X=status` is a tracked literal; using X as the loop var clobbers it and
+        // the post-loop value is unknowable → deny (JSON.stringify-quoted).
+        assert_eq!(
+            pfs("X=status; for X in a b; do echo hi; done"),
+            Err("for-loop variable 'X' would overwrite tracked literal \"status\"; post-loop value cannot be statically determined".to_string())
+        );
+    }
+
+    #[test]
+    fn for_body_write_invalidates_outer_literal() {
+        // Outer literal Y=safe; the loop body reassigns Y from an unknown source.
+        // After the loop Y must be treated as unknown (placeholder), so a bare $Y
+        // rejects rather than resolving to the stale "safe" literal (under-ask).
+        assert!(
+            pfs("Y=safe; for i in a b; do Y=$RANDOM; done; git $Y").is_err(),
+            "post-loop $Y must not resolve to the stale pre-loop literal"
+        );
+    }
+
+    #[test]
+    fn while_read_overwrites_tracked_literal_denied() {
+        // `V=lit` then a plain `while read V` — the pre-scan marks V unknown and
+        // the condition-modify reconciliation fires FIRST (byte-faithful to CC).
+        assert_eq!(
+            pfs("V=lit; while read V; do echo hi; done"),
+            Err("'V' was tracked as literal 'lit' but condition may modify it (||/pipeline/unset/&&-short-circuit) — cannot prove downstream value".to_string())
+        );
+        // A PIPELINED read isolates the var-write from the condition copy, so the
+        // dedicated read-clobbers-literal reason is what surfaces.
+        assert_eq!(
+            pfs("V=lit; if echo x | read V; then echo hi; fi"),
+            Err("'read V' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal 'lit'".to_string())
+        );
     }
 }

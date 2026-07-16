@@ -217,9 +217,14 @@ pub fn is_dangerous_task_permission(tool_name: &str, _rule_content: &Option<Stri
 }
 
 /// Checks if a permission rule is dangerous for auto mode (the OR of the three
-/// shell/agent predicates). 1:1 with `isDangerousClassifierPermission`
+/// shell/agent predicates). 1:1 with `tjr`/`isDangerousClassifierPermission`
 /// (`permissionSetup.ts:272-285`), MINUS the `USER_TYPE === 'ant'` `Tmux` case
 /// (see module doc).
+///
+/// This is the base (no-`classifyAllShell`) predicate. For the 2.1.211 auto-mode
+/// escalation, callers that know the resolved `autoMode.classifyAllShell` setting
+/// should use [`is_dangerous_classifier_permission_with_flag`] instead — this
+/// wrapper is equivalent to passing `classify_all_shell = false`.
 #[must_use]
 pub fn is_dangerous_classifier_permission(tool_name: &str, rule_content: &Option<String>) -> bool {
     // The ant-only `Tmux` special-case (`permissionSetup.ts:276-279`) is omitted
@@ -227,6 +232,45 @@ pub fn is_dangerous_classifier_permission(tool_name: &str, rule_content: &Option
     is_dangerous_bash_permission(tool_name, rule_content)
         || is_dangerous_powershell_permission(tool_name, rule_content)
         || is_dangerous_task_permission(tool_name, rule_content)
+}
+
+/// 2.1.211 `uxt` classifier-permission predicate WITH the `autoMode.classifyAllShell`
+/// escalation. 1:1 with:
+///
+/// ```js
+/// function uxt(e,t){if((e===$o||e===Si)&&ejr())return!0;return tjr(e,t)}
+/// // $o = Bash tool, Si = PowerShell tool, ejr() = Jpi() = any settings source
+/// //   has autoMode.classifyAllShell === true
+/// ```
+///
+/// When `classify_all_shell` is set (the caller resolved
+/// `autoMode.classifyAllShell === true` from any settings source via `Jpi`),
+/// EVERY Bash/PowerShell allow rule is treated as dangerous so it is suspended
+/// during auto mode and all shell commands route through the classifier — per
+/// the settings schema: *"When true, every Bash/PowerShell allow rule is
+/// suspended while auto mode is active so all shell commands are routed through
+/// the classifier"*. Otherwise this is exactly the base
+/// [`is_dangerous_classifier_permission`].
+///
+/// The Android mobile `Shell` tool (this port's Bash equivalent) is included in
+/// the shell escalation, consistent with how [`is_dangerous_bash_permission`]
+/// already treats it; this is an over-ask relative to the two upstream tool
+/// names and is safe (a suspended allow rule only means the command is
+/// re-evaluated by the classifier).
+#[must_use]
+pub fn is_dangerous_classifier_permission_with_flag(
+    tool_name: &str,
+    rule_content: &Option<String>,
+    classify_all_shell: bool,
+) -> bool {
+    if classify_all_shell
+        && (tool_name == BASH_TOOL_NAME
+            || tool_name == POWERSHELL_TOOL_NAME
+            || tool_name == SHELL_TOOL_NAME)
+    {
+        return true;
+    }
+    is_dangerous_classifier_permission(tool_name, rule_content)
 }
 
 /// Structured info about a dangerous permission found in the loaded rules.
@@ -605,6 +649,70 @@ mod tests {
         assert!(!is_dangerous_classifier_permission(
             "Bash",
             &content("ls:*")
+        ));
+    }
+
+    // ── uxt: autoMode.classifyAllShell escalation ──
+
+    #[test]
+    fn classify_all_shell_flag_suspends_every_shell_allow() {
+        // With classify_all_shell set, an otherwise-SAFE Bash/PowerShell allow
+        // rule (e.g. `Bash(ls:*)`) becomes dangerous so it is suspended in auto
+        // mode and the command routes through the classifier.
+        assert!(is_dangerous_classifier_permission_with_flag(
+            "Bash",
+            &content("ls:*"),
+            true
+        ));
+        assert!(is_dangerous_classifier_permission_with_flag(
+            "PowerShell",
+            &content("get-childitem:*"),
+            true
+        ));
+        // The mobile `Shell` (Bash equivalent) is included in the escalation.
+        assert!(is_dangerous_classifier_permission_with_flag(
+            SHELL_TOOL_NAME,
+            &content("ls:*"),
+            true
+        ));
+    }
+
+    #[test]
+    fn classify_all_shell_flag_does_not_touch_non_shell_tools() {
+        // The escalation only covers shell tools; a safe Read/Edit rule stays
+        // non-dangerous even with the flag set (falls through to the base OR).
+        assert!(!is_dangerous_classifier_permission_with_flag(
+            "Read",
+            &content("*"),
+            true
+        ));
+        // An Agent rule is dangerous via the base predicate regardless of flag.
+        assert!(is_dangerous_classifier_permission_with_flag(
+            "Agent",
+            &content("x"),
+            true
+        ));
+    }
+
+    #[test]
+    fn classify_all_shell_flag_false_is_base_predicate() {
+        // flag = false → exactly the base classifier: safe shell allow rules are
+        // NOT dangerous.
+        assert!(!is_dangerous_classifier_permission_with_flag(
+            "Bash",
+            &content("ls:*"),
+            false
+        ));
+        assert!(!is_dangerous_classifier_permission_with_flag(
+            "PowerShell",
+            &content("get-childitem:*"),
+            false
+        ));
+        // …but an inherently dangerous shell allow rule still is.
+        assert!(is_dangerous_classifier_permission_with_flag(
+            "Bash",
+            &content("python:*"),
+            false
         ));
     }
 

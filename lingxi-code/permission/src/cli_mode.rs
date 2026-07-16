@@ -72,17 +72,24 @@ pub(crate) const ENV_SCRUB_FORCED_TO_DEFAULT_MSG: &str = "Permission mode forced
 /// an optional user-facing notice (set when the bypass killswitch suppresses a
 /// requested bypass, or a hardening/downgrade path forces the mode).
 ///
+/// `agent_frontmatter_mode` is the `--agent`-resolved agent definition's
+/// `permissionMode` (`MODE-FRONTMATTER-04` / klc's `a=o?.permissionMode`). It is
+/// pushed into `orderedModes` AFTER the `--permission-mode` flag and BEFORE the
+/// settings `defaultMode`, and it participates in the env-scrub non-default
+/// request test (klc `a&&a!=="default"`).
+///
 /// `env_scrub_active` is `isEnvTruthy(LINGXI_SUBPROCESS_ENV_SCRUB)` — the
 /// `allowed_non_write_users` subprocess-env-scrub hardening flag. When set, the
 /// resolver short-circuits to [`PermissionMode::Default`] BEFORE any other
 /// input (`MODE-ENV-SCRUB-03` / claude-code `klc`'s leading
 /// `if(ut(r.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB))` guard), emitting the notice iff
-/// a non-default mode was actually requested (skip flag or a CLI mode other
-/// than default).
+/// a non-default mode was actually requested (skip flag, a CLI mode other than
+/// default, or an agent frontmatter mode other than default).
 #[must_use]
 pub fn initial_permission_mode_from_cli(
     permission_mode_cli: Option<&str>,
     dangerously_skip: bool,
+    agent_frontmatter_mode: Option<PermissionMode>,
     env_scrub_active: bool,
     settings: &CliModeSettings,
 ) -> (PermissionMode, Option<String>) {
@@ -90,11 +97,13 @@ pub fn initial_permission_mode_from_cli(
 
     // MODE-ENV-SCRUB-03: env-scrub hardening forces mode to default before any
     // other input is consulted. The notice fires only when a non-default mode
-    // was requested (skip flag, or a CLI mode that isn't `default`), matching
-    // klc's `y=s||i&&i!=="default"||a&&a!=="default"`.
+    // was requested (skip flag, a CLI mode that isn't `default`, or an agent
+    // frontmatter mode that isn't `default`), matching klc's
+    // `y=s||i&&i!=="default"||a&&a!=="default"`.
     if env_scrub_active {
-        let requested_non_default =
-            dangerously_skip || cli_mode.is_some_and(|m| m != PermissionMode::Default);
+        let requested_non_default = dangerously_skip
+            || cli_mode.is_some_and(|m| m != PermissionMode::Default)
+            || agent_frontmatter_mode.is_some_and(|m| m != PermissionMode::Default);
         let notice = requested_non_default.then(|| ENV_SCRUB_FORCED_TO_DEFAULT_MSG.to_string());
         return (PermissionMode::Default, notice);
     }
@@ -106,6 +115,11 @@ pub fn initial_permission_mode_from_cli(
     }
     if let Some(cli) = cli_mode {
         ordered.push(cli);
+    }
+    // MODE-FRONTMATTER-04: agent frontmatter permissionMode sits between the
+    // CLI flag and the settings defaultMode.
+    if let Some(frontmatter) = agent_frontmatter_mode {
+        ordered.push(frontmatter);
     }
     if let Some(default_mode) = settings.default_mode {
         ordered.push(default_mode);
@@ -191,21 +205,21 @@ mod tests {
 
     #[test]
     fn dangerously_skip_wins_and_yields_bypass() {
-        let (mode, notice) = initial_permission_mode_from_cli(None, true, false, &no_settings());
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::BypassPermissions);
         assert!(notice.is_none());
     }
 
     #[test]
     fn cli_flag_used_when_no_skip() {
-        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, false, &no_settings());
+        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::Plan);
     }
 
     #[test]
     fn skip_outranks_cli_flag() {
         // ordered_modes pushes bypass first, then the cli mode; first valid wins.
-        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), true, false, &no_settings());
+        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), true, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::BypassPermissions);
     }
 
@@ -216,7 +230,7 @@ mod tests {
             bypass_disabled: false,
             auto_mode_disabled: false,
         };
-        let (mode, _) = initial_permission_mode_from_cli(None, false, false, &s);
+        let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::AcceptEdits);
     }
 
@@ -227,7 +241,7 @@ mod tests {
             bypass_disabled: true,
             auto_mode_disabled: false,
         };
-        let (mode, notice) = initial_permission_mode_from_cli(None, true, false, &s);
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &s);
         assert_eq!(mode, PermissionMode::Default);
         assert_eq!(
             notice.as_deref(),
@@ -244,7 +258,7 @@ mod tests {
             bypass_disabled: true,
             auto_mode_disabled: false,
         };
-        let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, false, &s);
+        let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, None, false, &s);
         assert_eq!(mode, PermissionMode::Plan);
         assert_eq!(
             notice.as_deref(),
@@ -254,7 +268,7 @@ mod tests {
 
     #[test]
     fn no_inputs_is_default_no_notice() {
-        let (mode, notice) = initial_permission_mode_from_cli(None, false, false, &no_settings());
+        let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::Default);
         assert!(notice.is_none());
     }
@@ -265,7 +279,7 @@ mod tests {
     fn env_scrub_forces_default_and_suppresses_requested_bypass() {
         // A hardened/scrubbed subprocess must NOT inherit --dangerously-skip
         // bypass. Even with the bypass killswitch OFF, env-scrub wins.
-        let (mode, notice) = initial_permission_mode_from_cli(None, true, true, &no_settings());
+        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, true, &no_settings());
         assert_eq!(mode, PermissionMode::Default);
         assert_eq!(notice.as_deref(), Some(ENV_SCRUB_FORCED_TO_DEFAULT_MSG));
     }
@@ -278,7 +292,7 @@ mod tests {
             auto_mode_disabled: false,
         };
         let (mode, notice) =
-            initial_permission_mode_from_cli(Some("plan"), false, true, &s);
+            initial_permission_mode_from_cli(Some("plan"), false, None, true, &s);
         assert_eq!(mode, PermissionMode::Default);
         // CLI mode `plan` is non-default → notice fires.
         assert_eq!(notice.as_deref(), Some(ENV_SCRUB_FORCED_TO_DEFAULT_MSG));
@@ -287,7 +301,7 @@ mod tests {
     #[test]
     fn env_scrub_no_notice_when_no_non_default_requested() {
         // Nothing non-default requested (no skip, no CLI mode) → silent force.
-        let (mode, notice) = initial_permission_mode_from_cli(None, false, true, &no_settings());
+        let (mode, notice) = initial_permission_mode_from_cli(None, false, None, true, &no_settings());
         assert_eq!(mode, PermissionMode::Default);
         assert!(notice.is_none());
     }
@@ -298,10 +312,94 @@ mod tests {
         // request → no notice (klc `i&&i!=="default"`).
         for m in ["default", "manual"] {
             let (mode, notice) =
-                initial_permission_mode_from_cli(Some(m), false, true, &no_settings());
+                initial_permission_mode_from_cli(Some(m), false, None, true, &no_settings());
             assert_eq!(mode, PermissionMode::Default);
             assert!(notice.is_none(), "cli mode {m} should not emit a notice");
         }
+    }
+
+    // ---- MODE-FRONTMATTER-04 ----
+
+    #[test]
+    fn agent_frontmatter_mode_used_when_no_cli_flag() {
+        let (mode, _) = initial_permission_mode_from_cli(
+            None,
+            false,
+            Some(PermissionMode::AcceptEdits),
+            false,
+            &no_settings(),
+        );
+        assert_eq!(mode, PermissionMode::AcceptEdits);
+    }
+
+    #[test]
+    fn cli_flag_outranks_agent_frontmatter_mode() {
+        // orderedModes: CLI flag pushed before frontmatter → CLI wins.
+        let (mode, _) = initial_permission_mode_from_cli(
+            Some("plan"),
+            false,
+            Some(PermissionMode::AcceptEdits),
+            false,
+            &no_settings(),
+        );
+        assert_eq!(mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn agent_frontmatter_mode_outranks_settings_default_mode() {
+        // orderedModes: frontmatter pushed before settings defaultMode.
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::Plan),
+            bypass_disabled: false,
+            auto_mode_disabled: false,
+        };
+        let (mode, _) = initial_permission_mode_from_cli(
+            None,
+            false,
+            Some(PermissionMode::AcceptEdits),
+            false,
+            &s,
+        );
+        assert_eq!(mode, PermissionMode::AcceptEdits);
+    }
+
+    #[test]
+    fn skip_outranks_agent_frontmatter_mode() {
+        let (mode, _) = initial_permission_mode_from_cli(
+            None,
+            true,
+            Some(PermissionMode::Plan),
+            false,
+            &no_settings(),
+        );
+        assert_eq!(mode, PermissionMode::BypassPermissions);
+    }
+
+    #[test]
+    fn agent_frontmatter_non_default_triggers_env_scrub_notice() {
+        // env-scrub `y` includes `a&&a!=="default"`.
+        let (mode, notice) = initial_permission_mode_from_cli(
+            None,
+            false,
+            Some(PermissionMode::Plan),
+            true,
+            &no_settings(),
+        );
+        assert_eq!(mode, PermissionMode::Default);
+        assert_eq!(notice.as_deref(), Some(ENV_SCRUB_FORCED_TO_DEFAULT_MSG));
+    }
+
+    #[test]
+    fn agent_frontmatter_default_does_not_trigger_env_scrub_notice() {
+        let (mode, notice) = initial_permission_mode_from_cli(
+            None,
+            false,
+            Some(PermissionMode::Default),
+            true,
+            &no_settings(),
+        );
+        assert_eq!(mode, PermissionMode::Default);
+        assert!(notice.is_none());
     }
 
     #[test]

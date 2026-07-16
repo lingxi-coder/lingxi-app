@@ -41,11 +41,20 @@ fn env_truthy(v: Option<String>) -> bool {
 /// environment is unsafe — the caller prints it to stderr and exits 1 (TS
 /// `console.error` + `process.exit(1)`).
 ///
+/// 2.1.211 (`setup.ts`, `refuseBypassUnderRoot`/`IXl`) enforces ONLY the
+/// root/sudo refusal. The old ant-gated "can only be used in Docker/sandbox
+/// containers with no internet access but got Docker: …" refusal was removed
+/// upstream (0 hits for `but got Docker` / `can only be used in Docker` across
+/// the 2.1.211 corpus). It is therefore no longer ported — its presence was
+/// anti-parity dead weight that fired (with a 1s internet probe) whenever
+/// `USER_TYPE=ant`, which 2.1.211 no longer does. The `is_docker` /
+/// `has_internet` trait probes are retained for the injected-env contract but
+/// are now unused by the guard.
+///
 /// # Errors
-/// Returns the byte-exact TS refusal message for a root/sudo session or, in an
-/// ant build, a non-sandboxed-or-internet-connected session.
+/// Returns the byte-exact 2.1.211 refusal message for a root/sudo session.
 pub async fn enforce_bypass_safety(env: &dyn BypassEnv) -> Result<(), String> {
-    // Check 1 — root/sudo refusal (all builds; setup.ts:402-414).
+    // Root/sudo refusal (all builds; 2.1.211 `refuseBypassUnderRoot`/`IXl`).
     if !env.is_windows()
         && env.effective_uid() == 0
         && env.env("IS_SANDBOX").as_deref() != Some("1")
@@ -57,24 +66,6 @@ pub async fn enforce_bypass_safety(env: &dyn BypassEnv) -> Result<(), String> {
         );
     }
 
-    // Check 2 — ant-only Docker/no-internet (setup.ts:416-442). The USER_TYPE
-    // gate keeps it dead in external builds; ported faithfully per the spec.
-    let entrypoint = env.env("CLAUDE_CODE_ENTRYPOINT");
-    if env.env("USER_TYPE").as_deref() == Some("ant")
-        && entrypoint.as_deref() != Some("local-agent")
-        && entrypoint.as_deref() != Some("claude-desktop")
-    {
-        let is_docker = env.is_docker();
-        let is_bubblewrap = env_truthy(env.env("LINGXI_BUBBLEWRAP"));
-        let is_sandbox = env.env("IS_SANDBOX").as_deref() == Some("1");
-        let sandboxed = is_docker || is_bubblewrap || is_sandbox;
-        let has_internet = env.has_internet().await;
-        if !sandboxed || has_internet {
-            return Err(format!(
-                "--dangerously-skip-permissions can only be used in Docker/sandbox containers with no internet access but got Docker: {is_docker}, Bubblewrap: {is_bubblewrap}, IS_SANDBOX: {is_sandbox}, hasInternet: {has_internet}"
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -156,48 +147,45 @@ mod tests {
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 
-    #[tokio::test]
-    async fn ant_not_sandboxed_is_refused() {
-        let mut e = FakeEnv::default();
-        e.vars.insert("USER_TYPE".into(), "ant".into());
-        let err = enforce_bypass_safety(&e).await.unwrap_err();
-        assert_eq!(err, "--dangerously-skip-permissions can only be used in Docker/sandbox containers with no internet access but got Docker: false, Bubblewrap: false, IS_SANDBOX: false, hasInternet: false");
-    }
+    // BYPASS-ANT-DOCKER-07: 2.1.211 removed the ant-gated Docker/no-internet
+    // refusal. `USER_TYPE=ant` on an un-sandboxed, internet-connected host must
+    // now PASS the guard (only the root/sudo refusal survives), and the old
+    // "can only be used in Docker/sandbox" message must never be emitted.
 
     #[tokio::test]
-    async fn ant_sandboxed_no_internet_passes() {
-        let mut e = FakeEnv {
-            docker: true,
-            ..FakeEnv::default()
-        };
+    async fn ant_not_sandboxed_passes_after_docker_refusal_removed() {
+        let mut e = FakeEnv::default();
         e.vars.insert("USER_TYPE".into(), "ant".into());
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 
     #[tokio::test]
-    async fn ant_sandboxed_with_internet_is_refused() {
+    async fn ant_sandboxed_with_internet_passes_after_docker_refusal_removed() {
         let mut e = FakeEnv {
             docker: true,
             internet: true,
             ..FakeEnv::default()
         };
         e.vars.insert("USER_TYPE".into(), "ant".into());
-        let err = enforce_bypass_safety(&e).await.unwrap_err();
-        assert!(err.contains("Docker: true") && err.contains("hasInternet: true"));
-    }
-
-    #[tokio::test]
-    async fn ant_local_agent_entrypoint_skips_check_two() {
-        let mut e = FakeEnv::default(); // not sandboxed, no internet
-        e.vars.insert("USER_TYPE".into(), "ant".into());
-        e.vars
-            .insert("CLAUDE_CODE_ENTRYPOINT".into(), "local-agent".into());
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 
     #[tokio::test]
-    async fn non_ant_skips_check_two() {
-        let e = FakeEnv::default(); // not sandboxed; non-ant → check 2 skipped
+    async fn ant_root_still_refused_by_root_check() {
+        // The surviving root/sudo refusal still fires for an ant root session.
+        let mut e = FakeEnv {
+            euid: 0,
+            ..FakeEnv::default()
+        };
+        e.vars.insert("USER_TYPE".into(), "ant".into());
+        let err = enforce_bypass_safety(&e).await.unwrap_err();
+        assert_eq!(err, "--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons");
+        assert!(!err.contains("Docker"));
+    }
+
+    #[tokio::test]
+    async fn non_ant_unsandboxed_passes() {
+        let e = FakeEnv::default(); // not sandboxed, non-ant → passes
         assert!(enforce_bypass_safety(&e).await.is_ok());
     }
 }

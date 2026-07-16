@@ -908,15 +908,31 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     let mut default_mode = None;
     let mut bypass_disabled = false;
     let mut auto_mode_disabled = false;
-    let home = incl_user.then(|| crate::run::lingxi_home_dir().join("settings.json"));
-    let proj = incl_project.then(|| project_dir.join(branding::DOT_DIR).join("settings.json"));
+    // MODE-SETTINGS-AUTO-TRUST-01: track whether a TRUSTED tier declared
+    // `defaultMode: auto`. At this CLI surface only the user (`~/.lingxi`) tier
+    // is trusted; the project (`.lingxi`) tier is repo-controllable. When the
+    // merged `default_mode` ends up `auto` but no trusted tier granted it, the
+    // resolver drops it (a committed project settings file cannot enable
+    // classifier-driven auto-accept mode).
+    let mut auto_default_from_trusted = false;
+    let home = incl_user
+        .then(|| crate::run::lingxi_home_dir().join("settings.json"))
+        .map(|p| (p, permission::PermissionRuleSource::UserSettings));
+    let proj = incl_project
+        .then(|| project_dir.join(branding::DOT_DIR).join("settings.json"))
+        .map(|p| (p, permission::PermissionRuleSource::ProjectSettings));
     // User first, then project (ascending priority): project read last wins on
     // `defaultMode`; `bypass_disabled` / `auto_mode_disabled` are sticky across
     // tiers (any tier disabling wins — `Bpa()`).
-    for path in [home, proj].into_iter().flatten() {
+    for (path, source) in [home, proj].into_iter().flatten() {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Some(m) = permission::default_mode_from_settings_json(&raw) {
                 default_mode = Some(m);
+                if m == permission::PermissionMode::Auto
+                    && permission::loader::auto_mode_grantable_by_source(source)
+                {
+                    auto_default_from_trusted = true;
+                }
             }
             if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                 bypass_disabled = true;
@@ -930,6 +946,7 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         default_mode,
         bypass_disabled,
         auto_mode_disabled,
+        auto_default_from_trusted,
     }
 }
 

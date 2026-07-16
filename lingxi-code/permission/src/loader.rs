@@ -140,6 +140,35 @@ pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
     }
 }
 
+/// `MODE-SETTINGS-AUTO-TRUST-01`: may a settings tier of this `source` GRANT
+/// `defaultMode: "auto"`?
+///
+/// claude-code 2.1.211's `initialPermissionModeFromCLI` only honors a settings
+/// `defaultMode` of `"auto"` when it was declared by a TRUSTED tier —
+/// `policySettings`, `userSettings`, or `flagSettings`
+/// (`!["policySettings","userSettings","flagSettings"].some(t =>
+/// getSettings(t)?.permissions?.defaultMode==="auto")` → ignore). A
+/// `defaultMode: "auto"` coming from `projectSettings` or `localSettings` is
+/// IGNORED (warn + `tengu_settings_auto_mode_untrusted_source_ignored`) because
+/// those files are repo-controllable: a committed `.lingxi/settings.json` in an
+/// untrusted repo must NOT be able to put the session into classifier-driven
+/// auto-accept mode.
+///
+/// Returns `true` for the trusted tiers (User/Policy/Flag) and `false` for the
+/// repo-controllable ones (Project/Local) and the runtime tiers
+/// (CliArg/Command/Session), which never carry a settings `defaultMode`. This is
+/// citation-neutral: the five external modes may still be set from ANY tier;
+/// only `auto` is trust-gated.
+#[must_use]
+pub fn auto_mode_grantable_by_source(source: PermissionRuleSource) -> bool {
+    matches!(
+        source,
+        PermissionRuleSource::UserSettings
+            | PermissionRuleSource::PolicySettings
+            | PermissionRuleSource::FlagSettings
+    )
+}
+
 /// Does this settings file DISABLE `bypassPermissions` mode? True iff
 /// `permissions.disableBypassPermissionsMode == "disable"` (claude-code's
 /// bypass-permissions killswitch). When any tier disables it, the constructed
@@ -226,6 +255,25 @@ pub fn allow_managed_permission_rules_only_from_settings_json(raw: &str) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_mode_grantable_only_from_trusted_tiers() {
+        // MODE-SETTINGS-AUTO-TRUST-01: policy/user/flag may grant auto.
+        assert!(auto_mode_grantable_by_source(PermissionRuleSource::UserSettings));
+        assert!(auto_mode_grantable_by_source(PermissionRuleSource::PolicySettings));
+        assert!(auto_mode_grantable_by_source(PermissionRuleSource::FlagSettings));
+        // Repo-controllable tiers may NOT.
+        assert!(!auto_mode_grantable_by_source(
+            PermissionRuleSource::ProjectSettings
+        ));
+        assert!(!auto_mode_grantable_by_source(
+            PermissionRuleSource::LocalSettings
+        ));
+        // Runtime tiers never carry a settings defaultMode.
+        assert!(!auto_mode_grantable_by_source(PermissionRuleSource::CliArg));
+        assert!(!auto_mode_grantable_by_source(PermissionRuleSource::Command));
+        assert!(!auto_mode_grantable_by_source(PermissionRuleSource::Session));
+    }
 
     #[test]
     fn no_permissions_block_is_empty() {

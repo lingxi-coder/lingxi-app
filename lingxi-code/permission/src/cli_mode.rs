@@ -35,6 +35,18 @@ pub struct CliModeSettings {
     /// (CLI flag or settings `defaultMode: auto`) is downgraded to `default`
     /// when set.
     pub auto_mode_disabled: bool,
+    /// `MODE-SETTINGS-AUTO-TRUST-01`: was a settings `defaultMode: "auto"`
+    /// granted by a TRUSTED tier (`policySettings`/`userSettings`/`flagSettings`)?
+    ///
+    /// Only consulted when [`Self::default_mode`] is [`PermissionMode::Auto`].
+    /// The caller computes it by checking whether any trusted tier declared
+    /// `defaultMode: "auto"` (see
+    /// [`crate::loader::auto_mode_grantable_by_source`]). When `default_mode` is
+    /// `Auto` but this is `false`, the auto request is IGNORED (the repo-
+    /// controllable `projectSettings`/`localSettings` may not enable classifier-
+    /// driven auto-accept). Irrelevant for the five external modes, which may be
+    /// set from any tier.
+    pub auto_default_from_trusted: bool,
 }
 
 /// `permissionModeFromString` (`PermissionMode.ts:117-121`): the valid set is
@@ -122,7 +134,17 @@ pub fn initial_permission_mode_from_cli(
         ordered.push(frontmatter);
     }
     if let Some(default_mode) = settings.default_mode {
-        ordered.push(default_mode);
+        // MODE-SETTINGS-AUTO-TRUST-01: a settings `defaultMode: "auto"` is only
+        // honored when a trusted tier (policy/user/flag) granted it. From the
+        // repo-controllable projectSettings/localSettings tiers it is IGNORED
+        // (klc warns + emits `tengu_settings_auto_mode_untrusted_source_ignored`;
+        // the warn/telemetry are omitted at this pure layer). The five external
+        // modes are unaffected — they may be set from any tier.
+        let untrusted_auto =
+            default_mode == PermissionMode::Auto && !settings.auto_default_from_trusted;
+        if !untrusted_auto {
+            ordered.push(default_mode);
+        }
     }
 
     let mut notification: Option<String> = None;
@@ -147,6 +169,7 @@ mod tests {
             default_mode: None,
             bypass_disabled: false,
             auto_mode_disabled: false,
+            auto_default_from_trusted: false,
         }
     }
 
@@ -229,6 +252,7 @@ mod tests {
             default_mode: Some(PermissionMode::AcceptEdits),
             bypass_disabled: false,
             auto_mode_disabled: false,
+            auto_default_from_trusted: false,
         };
         let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
         assert_eq!(mode, PermissionMode::AcceptEdits);
@@ -240,6 +264,7 @@ mod tests {
             default_mode: None,
             bypass_disabled: true,
             auto_mode_disabled: false,
+            auto_default_from_trusted: false,
         };
         let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &s);
         assert_eq!(mode, PermissionMode::Default);
@@ -257,6 +282,7 @@ mod tests {
             default_mode: None,
             bypass_disabled: true,
             auto_mode_disabled: false,
+            auto_default_from_trusted: false,
         };
         let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), true, None, false, &s);
         assert_eq!(mode, PermissionMode::Plan);
@@ -290,6 +316,7 @@ mod tests {
             default_mode: Some(PermissionMode::BypassPermissions),
             bypass_disabled: false,
             auto_mode_disabled: false,
+            auto_default_from_trusted: false,
         };
         let (mode, notice) =
             initial_permission_mode_from_cli(Some("plan"), false, None, true, &s);
@@ -352,6 +379,7 @@ mod tests {
             default_mode: Some(PermissionMode::Plan),
             bypass_disabled: false,
             auto_mode_disabled: false,
+            auto_default_from_trusted: false,
         };
         let (mode, _) = initial_permission_mode_from_cli(
             None,
@@ -409,5 +437,69 @@ mod tests {
             ENV_SCRUB_FORCED_TO_DEFAULT_MSG,
             "Permission mode forced to default \u{2014} LINGXI_SUBPROCESS_ENV_SCRUB is set (allowed_non_write_users hardening). Declare allowedTools explicitly, or set LINGXI_SUBPROCESS_ENV_SCRUB=0 to opt out."
         );
+    }
+
+    // ---- MODE-SETTINGS-AUTO-TRUST-01 ----
+
+    #[test]
+    fn settings_auto_from_untrusted_tier_is_ignored() {
+        // A repo-controllable projectSettings/localSettings `defaultMode: auto`
+        // must NOT enter auto mode — it is dropped, leaving Default.
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::Auto),
+            bypass_disabled: false,
+            auto_mode_disabled: false,
+            auto_default_from_trusted: false,
+        };
+        let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &s);
+        assert_eq!(mode, PermissionMode::Default);
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn settings_auto_from_trusted_tier_is_honored() {
+        // policy/user/flag tiers may grant auto.
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::Auto),
+            bypass_disabled: false,
+            auto_mode_disabled: false,
+            auto_default_from_trusted: true,
+        };
+        let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
+        assert_eq!(mode, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn settings_external_modes_honored_from_untrusted_tier() {
+        // The trust gate applies ONLY to auto; the five external modes may be
+        // set from any tier even when auto_default_from_trusted is false.
+        for m in [
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::DontAsk,
+        ] {
+            let s = CliModeSettings {
+                default_mode: Some(m),
+                bypass_disabled: false,
+                auto_mode_disabled: false,
+                auto_default_from_trusted: false,
+            };
+            let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
+            assert_eq!(mode, m);
+        }
+    }
+
+    #[test]
+    fn untrusted_auto_does_not_shadow_a_cli_flag() {
+        // Even if untrusted settings auto is present, a CLI mode still wins and
+        // the untrusted auto is simply dropped (never reached).
+        let s = CliModeSettings {
+            default_mode: Some(PermissionMode::Auto),
+            bypass_disabled: false,
+            auto_mode_disabled: false,
+            auto_default_from_trusted: false,
+        };
+        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, None, false, &s);
+        assert_eq!(mode, PermissionMode::Plan);
     }
 }

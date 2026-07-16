@@ -470,7 +470,23 @@ async fn load_boot_permission_tiers(
                 ),
             }
             if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-                mode = m; // later tiers read last → their defaultMode wins
+                // MODE-SETTINGS-AUTO-TRUST-01: a `defaultMode: "auto"` is only
+                // honored from a TRUSTED tier (policy/user/flag). The
+                // repo-controllable `projectSettings`/`localSettings` tiers may
+                // set the five external modes but NOT auto — a committed
+                // `.lingxi/settings.json` must not put the session into
+                // classifier-driven auto-accept mode. (Non-auto modes fold as
+                // before, last-tier-wins.)
+                if m != permission::PermissionMode::Auto
+                    || permission::loader::auto_mode_grantable_by_source(source)
+                {
+                    mode = m; // later tiers read last → their defaultMode wins
+                } else {
+                    tracing::warn!(
+                        source = ?source,
+                        "settings defaultMode \"auto\" ignored — only policy/user/flag settings may grant auto mode (projectSettings and localSettings are repo-controllable)"
+                    );
+                }
             }
             if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                 bypass_disabled = true; // sticky: any tier disabling wins

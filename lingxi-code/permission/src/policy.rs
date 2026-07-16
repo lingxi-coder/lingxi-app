@@ -512,6 +512,18 @@ impl PermissionPolicy {
         //     mirror the too-complex branch: a parseable, resolvable-variable
         //     command (`A=/tmp; rm -rf $A/*`) is NOT force-asked here. Roots-
         //     independent, matching `GIu`'s raw text scan.
+        // EDIT-READDENY-02: an Edit-family (Editor-kind) call whose target is
+        //     covered by a Read deny rule (`CZn`) ASKS with the byte-locked
+        //     errorCode-13 message. Runs after the deny/ask rule walks (an
+        //     explicit Edit deny already returned) and is bypass-immune (CC's
+        //     `validateInput` runs regardless of permission mode) — this
+        //     protects a read-denied file from being edited, so it must not be
+        //     overridable by an allow rule / bypass. Roots-gated.
+        if file_tool_kind(tool_name) == FileToolKind::Editor
+            && self.edit_covered_by_read_deny(tool_name, input)
+        {
+            return ask_edit_read_deny_covered(tool_name);
+        }
         // BYPASS-01 / ALLOWOVER-01: every guard ASK below is routed through
         // `resolve_guard_ask`, which (1) lets bypassPermissions suppress a
         // type-`other` guard ask (returning allow), (2) lets a tool-wide allow
@@ -1441,6 +1453,63 @@ impl PermissionPolicy {
         None
     }
 
+    /// EDIT-READDENY-02: `CZn(path, ctx)` — is the Edit target covered by a
+    /// Read deny rule? 1:1 with claude-code 2.1.211:
+    /// ```text
+    /// function CZn(e,t){
+    ///   if(h8(t,Est,U2(t).filter((n)=>!$$y.has(n.source)))!==null)return!0;
+    ///   if(rws(t,"read","deny").size===0)return!1;
+    ///   return Yy(e).some((n)=>Ww(n,t,"read","deny")!==null)}
+    /// ```
+    /// (1) a TOOL-WIDE Read deny rule from a source NOT in
+    /// `$$y = {toolsNarrowing, cliArg, command}` (`toolsNarrowing` is unported),
+    /// OR (2) a read/deny CONTENT rule covering the resolved path
+    /// ([`path_matches_rule_pattern`] handles the raw+resolved `Yy` variants).
+    /// Roots-gated (returns `false` without roots).
+    fn edit_covered_by_read_deny(&self, tool_name: &str, input: &serde_json::Value) -> bool {
+        let Some(roots) = self.roots.as_ref() else {
+            return false;
+        };
+        // (1) tool-wide Read deny rule (excluding cliArg / command sources).
+        for src in SOURCES_BY_PRIORITY {
+            if matches!(
+                src,
+                PermissionRuleSource::CliArg | PermissionRuleSource::Command
+            ) {
+                continue;
+            }
+            if let Some(rules) = self.deny_rules.get(&src) {
+                if rules
+                    .iter()
+                    .any(|r| r.value.rule_content.is_none() && r.value.tool_name == "Read")
+                {
+                    return true;
+                }
+            }
+        }
+        // (2) read/deny CONTENT rule covering the path.
+        let Some(path) = input_path_for_tool(tool_name, input, roots) else {
+            return false;
+        };
+        for src in SOURCES_BY_PRIORITY {
+            let Some(rules) = self.deny_rules.get(&src) else {
+                continue;
+            };
+            for rule in rules {
+                if rule.value.tool_name != "Read" {
+                    continue;
+                }
+                let Some(pattern) = rule.value.rule_content.as_deref() else {
+                    continue;
+                };
+                if path_matches_rule_pattern(&path, pattern, rule.source, roots) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// BGOP-01: the `&` background-operator allow→ask downgrade — 1:1 with
     /// claude-code `Yqr`. Given the FINAL permission result, returns
     /// `Some(background_ask)` when the result is an ALLOW for a shell command
@@ -2345,6 +2414,27 @@ fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// EDIT-READDENY-02 ask: the Edit target is covered by a Read deny rule
+/// (claude-code `CZn` → validateInput `{result:!1,behavior:"ask",message:eLi,
+/// errorCode:13}`). Tagged [`PermissionDecisionReason::Other`] carrying the
+/// byte-locked `eLi` message.
+fn ask_edit_read_deny_covered(tool_name: &str) -> PermissionResult {
+    let message =
+        "File is covered by a Read deny rule in your permission settings and cannot be edited.";
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::Other {
+            reason: message.to_string(),
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: message.to_string(),
             options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,

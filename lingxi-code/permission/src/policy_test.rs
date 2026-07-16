@@ -3472,6 +3472,53 @@ mod tests {
         ));
     }
 
+    // ---- EDIT-READDENY-02: Read-deny covers an Edit target (CZn, code 13) --
+
+    /// A file covered by a Read CONTENT deny rule cannot be edited — Edit asks
+    /// with the byte-locked message.
+    #[test]
+    fn editreaddeny02_content_read_deny_blocks_edit() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Edit", &edit("/proj/secrets/keys.txt")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert_eq!(
+                    prompt.message,
+                    "File is covered by a Read deny rule in your permission settings and cannot be edited."
+                );
+                assert!(matches!(reason, PermissionDecisionReason::Other { .. }));
+            }
+            other => panic!("expected read-deny-covers ask, got {other:?}"),
+        }
+        // A file NOT covered by the Read deny is editable (falls to normal flow).
+        assert!(!matches!(
+            p.authorize("Edit", &edit("/proj/src/main.rs")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { ref reason },
+                ..
+            } if reason.contains("covered by a Read deny rule")
+        ));
+    }
+
+    /// A TOOL-WIDE Read deny rule blocks editing any file (from a qualifying
+    /// source), and the gate is bypass-immune.
+    #[test]
+    fn editreaddeny02_toolwide_read_deny_blocks_edit_even_under_bypass() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read"] } }"#,
+            PermissionMode::BypassPermissions,
+        );
+        match p.authorize("Edit", &edit("/proj/any.rs")) {
+            PermissionResult::Ask { prompt, .. } => assert_eq!(
+                prompt.message,
+                "File is covered by a Read deny rule in your permission settings and cannot be edited."
+            ),
+            other => panic!("read-deny-covers must fire even under bypass, got {other:?}"),
+        }
+    }
+
     #[test]
     fn stringify_primitive_semantics() {
         assert_eq!(

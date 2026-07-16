@@ -1630,7 +1630,21 @@ pub fn check_ps_path(
         .as_deref()
         .map(|p| p.to_string_lossy().into_owned());
     match classify_ps_path(raw, op, is_windows, home.as_deref()) {
-        PsPathClass::Blocked { resolved, reason } => PsPathOutcome::AskReason { resolved, reason },
+        PsPathClass::Blocked { resolved, reason } => {
+            // PERM-PS-RM-05: claude-code `yeo`'s traversal branch reports
+            // `resolvedPath: c8.resolve(cwd, i)` (all other guards report the raw
+            // normalized path). The resolved path feeds the `Remove-Item` d7t
+            // protected check, so a relative `../..` that resolves into a protected
+            // root hard-denies rather than degrading to the traversal ask.
+            let resolved = if reason == ps_path_reasons::TRAVERSAL {
+                crate::filesystem::expand_path(&resolved, roots)
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                resolved
+            };
+            PsPathOutcome::AskReason { resolved, reason }
+        }
         PsPathClass::Proceed { normalized } => {
             let resolved = crate::filesystem::expand_path(&normalized, roots);
             let mut work_dirs = Vec::with_capacity(1 + additional.len());
@@ -1745,15 +1759,50 @@ fn is_drive_child(i: &str) -> bool {
         && !i[3..].contains('/')
 }
 
-/// The raw-path protected check (claude-code `ZBr`): strip quotes, drop a `::`
-/// prefix, expand `~`, normalize backslashes, then [`is_protected_removal_resolved`].
+/// The raw-path protected check (claude-code `O5r`): strip quotes, drop a `::`
+/// prefix, expand `~`, normalize backslashes, lexically normalize an ABSOLUTE
+/// path (collapsing `.`/`..`, matching Node `path.normalize`), then
+/// [`is_protected_removal_resolved`].
 fn is_protected_removal_raw(path: &str, home: Option<&str>, is_macos: bool) -> bool {
     let mut t = strip_surrounding_quotes(path).to_string();
     if let Some(idx) = t.find("::") {
         t = t[idx + 2..].to_string();
     }
-    let t = expand_tilde(&t, home).replace('\\', "/");
+    let mut t = expand_tilde(&t, home).replace('\\', "/");
+    // PERM-PS-RM-05: `if(c8.isAbsolute(t))t=c8.normalize(t)` — collapse `..`/`.`
+    // for an absolute path so `Remove-Item /a/b/../..` (→ `/a`) is seen as its
+    // protected root. Relative paths are left untouched (Node `normalize` keeps a
+    // leading `..`), matching the oracle.
+    if std::path::Path::new(&t).is_absolute() {
+        t = node_normalize_absolute(&t);
+    }
     is_protected_removal_resolved(&t, home, is_macos)
+}
+
+/// Node `path.normalize` for an absolute POSIX path (claude-code `c8.normalize`):
+/// collapse `.` and `..` segments (a `..` above the root is dropped) and duplicate
+/// separators, keeping the leading `/`. Only called on an absolute path.
+fn node_normalize_absolute(t: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let mut out = PathBuf::new();
+    for comp in Path::new(t).components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
+                // At (or above) root Node drops the `..` entirely.
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    let s = out.to_string_lossy().into_owned();
+    if s.is_empty() {
+        "/".to_string()
+    } else {
+        s
+    }
 }
 
 /// Whether an argument is a `-Recurse` parameter (claude-code's inline test in
@@ -1887,14 +1936,24 @@ pub fn validate_ps_statement(
         if !RGG.contains(normalize_cmdlet(&l.name).as_str()) {
             non_readonly_seen = true;
         }
-        if let Some(deny) = run_ps_command(l, ctx, &dirs, pipeline_source, prev, &mut ask) {
+        if let Some(deny) = run_ps_command(l, ctx, &dirs, pipeline_source, prev, false, false, &mut ask)
+        {
             return deny;
         }
     }
+    // Whether the main pipeline contained a non-CommandAst expression element
+    // (claude-code `i`) — used only by the nested-command loop below.
+    let stmt_has_expression = pipeline_source;
 
-    // Nested commands (script blocks / control flow).
+    // Nested commands (script blocks / control flow). claude-code's nested-command
+    // loop (`RRg`) differs from the main loop: it does NOT run the pipeline-source
+    // ask, the upstream-pipeline ask, or the `Remove-Item -Recurse` cwd check, and
+    // it ends each command with the control-flow ask when the main pipeline held an
+    // expression source (`stmt_has_expression`).
     for l in &stmt.nested_commands {
-        if let Some(deny) = run_ps_command(l, ctx, &dirs, false, false, &mut ask) {
+        if let Some(deny) =
+            run_ps_command(l, ctx, &dirs, false, false, true, stmt_has_expression, &mut ask)
+        {
             return deny;
         }
     }
@@ -1915,12 +1974,20 @@ pub fn validate_ps_statement(
 /// Run one command's path checks (claude-code `xgg`'s per-command body). Returns
 /// `Some(deny)` on a `Remove-Item` protected-path hit; otherwise updates the
 /// first-ask accumulator.
+///
+/// `nested` selects claude-code's nested-command loop shape: it suppresses the
+/// `Remove-Item -Recurse` working-directory check (which claude-code runs only in
+/// the main pipeline loop) and, when `stmt_has_expression` is set, appends the
+/// control-flow/chain ask after the path loop.
+#[allow(clippy::too_many_arguments)]
 fn run_ps_command(
     l: &PsCommand,
     ctx: &PsCtx,
     dirs: &[String],
     pipeline_source: bool,
     prev_non_readonly: bool,
+    nested: bool,
+    stmt_has_expression: bool,
     ask: &mut Option<PsContainmentResult>,
 ) -> Option<PsContainmentResult> {
     let roots = ctx.roots;
@@ -1959,7 +2026,10 @@ fn run_ps_command(
     }
 
     let is_remove = f == "remove-item";
-    if is_remove && l.args.iter().any(|a| is_recurse_flag(a)) {
+    // claude-code runs the `-Recurse` cwd guard ONLY in the main pipeline loop —
+    // the nested-command loop omits it. Gating on `!nested` removes the port's
+    // anti-parity extra ask for nested `Remove-Item -Recurse`.
+    if !nested && is_remove && l.args.iter().any(|a| is_recurse_flag(a)) {
         let cwd_fold = casefold_path(&roots.cwd.to_string_lossy());
         for b in &extraction.paths {
             let v = expand_tilde(&short_name_expand(b, ctx.is_windows), home.as_deref())
@@ -2004,6 +2074,15 @@ fn run_ps_command(
                 set_first_ask(ask, cmdlet_containment_message(&f, &resolved, dirs));
             }
         }
+    }
+
+    // claude-code nested-command loop tail (`if(i)o??=…`): when the statement's
+    // main pipeline contained a non-CommandAst expression source, each nested
+    // command ends with the control-flow/chain ask.
+    if nested && stmt_has_expression {
+        set_first_ask(ask, format!(
+            "{f} appears inside a control-flow or chain statement where piped expression sources cannot be statically validated and requires manual approval"
+        ));
     }
     None
 }

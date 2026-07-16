@@ -632,6 +632,60 @@ fn xgg_remove_item_protected_path_denies() {
     ));
 }
 
+// ── PERM-PS-RM-05: normalize/resolve `..` before the protected-path check ──
+
+#[test]
+fn xgg_remove_absolute_traversal_into_protected_root_denies() {
+    // `Remove-Item /Users/x/proj/../..` → O5r normalizes the absolute path to
+    // `/Users` (a protected top-level dir) → hard deny, not the traversal ask.
+    let roots = ps_roots();
+    match validate_ps_statement(
+        &one_cmd_stmt(cmd("Remove-Item", &["/Users/x/proj/../.."])),
+        &ctx_of(&roots, &[]),
+        false,
+    ) {
+        PsContainmentResult::Deny { message, .. } => {
+            assert!(message.contains("is blocked"), "{message}");
+        }
+        other => panic!("expected Deny, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_remove_relative_traversal_into_protected_root_denies() {
+    // `Remove-Item proj/../../..` from cwd `/proj/work` resolves to `/` — yeo's
+    // traversal branch reports the cwd-resolved path so the resolved d7t check
+    // hard-denies rather than degrading to the traversal ask.
+    let roots = ps_roots();
+    match validate_ps_statement(
+        &one_cmd_stmt(cmd("Remove-Item", &["proj/../../.."])),
+        &ctx_of(&roots, &[]),
+        false,
+    ) {
+        PsContainmentResult::Deny { message, .. } => {
+            assert!(message.contains("is blocked"), "{message}");
+        }
+        other => panic!("expected Deny, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_remove_relative_traversal_inside_cwd_asks_not_denies() {
+    // A traversal that resolves back inside cwd is NOT protected → the traversal
+    // ask fires (no over-deny).
+    let roots = ps_roots();
+    match validate_ps_statement(
+        &one_cmd_stmt(cmd("Remove-Item", &["sub/../notes.txt"])),
+        &ctx_of(&roots, &[]),
+        false,
+    ) {
+        PsContainmentResult::Ask { message, .. } => {
+            assert_eq!(message, ps_path_reasons::TRAVERSAL);
+        }
+        other => panic!("expected traversal Ask, got {other:?}"),
+    }
+}
+
 #[test]
 fn xgg_remove_recurse_targeting_cwd_asks() {
     // Remove-Item -Recurse of the working directory (or an ancestor) → ask.
@@ -693,6 +747,93 @@ fn xgg_pipeline_source_before_cmdlet_asks() {
         }
         other => panic!("expected Ask, got {other:?}"),
     }
+}
+
+// ── PERM-PS-NEST-04: nested-command control-flow ask + no recurse-cwd check ──
+
+#[test]
+fn xgg_nested_control_flow_source_asks() {
+    // Main pipeline is a bare expression source (sets claude-code's `i`), and the
+    // control-flow body is a nested command. Each nested command that does not
+    // otherwise ask ends with the "appears inside a control-flow …" ask.
+    let roots = ps_roots();
+    let stmt = PsStatement {
+        commands: vec![PsElement::Expression {
+            text: "$cond".to_string(),
+        }],
+        nested_commands: vec![cmd("Get-Content", &["notes.txt"])],
+        redirections: Vec::new(),
+    };
+    match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
+        PsContainmentResult::Ask { message, reason } => {
+            assert_eq!(
+                message,
+                "get-content appears inside a control-flow or chain statement where piped expression sources cannot be statically validated and requires manual approval"
+            );
+            assert_eq!(reason, message);
+        }
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_nested_without_pipeline_expression_no_control_flow_ask() {
+    // No main-pipeline expression → `i` is false → nested commands do NOT get the
+    // control-flow ask; an in-cwd read passes through.
+    let roots = ps_roots();
+    let stmt = PsStatement {
+        commands: vec![PsElement::Command(cmd("Write-Output", &["hi"]))],
+        nested_commands: vec![cmd("Get-Content", &["notes.txt"])],
+        redirections: Vec::new(),
+    };
+    assert_eq!(
+        validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
+        PsContainmentResult::Passthrough
+    );
+}
+
+#[test]
+fn xgg_nested_remove_recurse_cwd_no_extra_ask() {
+    // The `Remove-Item -Recurse` working-directory guard is main-pipeline-only in
+    // claude-code. A nested `Remove-Item -Recurse` targeting cwd must NOT ask (the
+    // port's former anti-parity extra ask is removed). With no pipeline expression,
+    // the statement passes through.
+    let roots = ps_roots();
+    let stmt = PsStatement {
+        commands: vec![PsElement::Command(cmd("Write-Output", &["run"]))],
+        nested_commands: vec![cmd("Remove-Item", &["-Recurse", "/proj/work"])],
+        redirections: Vec::new(),
+    };
+    assert_eq!(
+        validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
+        PsContainmentResult::Passthrough
+    );
+    // Contrast: the SAME command in the main pipeline still asks (guard intact).
+    match validate_ps_statement(
+        &one_cmd_stmt(cmd("Remove-Item", &["-Recurse", "/proj/work"])),
+        &ctx_of(&roots, &[]),
+        false,
+    ) {
+        PsContainmentResult::Ask { message, .. } => {
+            assert!(message.contains("would delete the working directory"), "{message}");
+        }
+        other => panic!("expected main-pipeline recurse ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn xgg_nested_remove_protected_still_denies() {
+    // The protected-path hard deny still fires from the nested-command loop.
+    let roots = ps_roots();
+    let stmt = PsStatement {
+        commands: vec![PsElement::Command(cmd("Write-Output", &["run"]))],
+        nested_commands: vec![cmd("Remove-Item", &["/etc"])],
+        redirections: Vec::new(),
+    };
+    assert!(matches!(
+        validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
+        PsContainmentResult::Deny { .. }
+    ));
 }
 
 #[test]

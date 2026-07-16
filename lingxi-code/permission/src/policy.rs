@@ -460,9 +460,22 @@ impl PermissionPolicy {
         if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, true) {
             return deny_with_rule_content(rule, tool_name, input);
         }
-        // 1c. Tool-wide ask (`EIo`).
+        // 1c. Tool-wide ask (`EIo`). SBXASK-01 / SBX-ASKWIDE-03: the matched
+        //     TOOL-WIDE ask rule is EXEMPTED for Bash when the sandbox auto-allow
+        //     would apply — claude-code `Qot`/`U1g`:
+        //       `y = e.name===$o && isSandboxingEnabled() &&
+        //            isAutoAllowBashIfSandboxedEnabled() && C6(t);
+        //        if(!y) return {behavior:"ask", ...}`.
+        //     When exempt, the ask is skipped and control falls through so the
+        //     1d sandbox auto-allow layer can decide. Content ask rules (1d) keep
+        //     asking (matches `zOg`, whose internal re-check still asks on a
+        //     matching ask rule). [`Self::shell_sandbox_auto_allows`] is the C6
+        //     analogue (shell-tool + sandbox enabled + auto-allow + would-sandbox)
+        //     and is inert (`false`) when no sandbox runtime is wired.
         if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, false) {
-            return ask_with_rule(rule, tool_name);
+            if !self.shell_sandbox_auto_allows(tool_name, input) {
+                return ask_with_rule(rule, tool_name);
+            }
         }
         // 1d. Content ask (`K5t(...,"ask")`, mSm step 5) — a matching content ask
         //     rule prompts. Placed AFTER the deny phase but BEFORE the per-tool

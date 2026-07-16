@@ -2437,6 +2437,69 @@ mod tests {
         }
     }
 
+    /// SBXASK-01 / SBX-ASKWIDE-03: a TOOL-WIDE `ask:["Bash"]` rule is EXEMPTED
+    /// when the sandbox auto-allow would apply — the sandboxable command is
+    /// auto-allowed instead of prompting.
+    #[test]
+    fn sbxask01_toolwide_ask_exempted_when_sandbox_auto_allows() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        match p.authorize("Bash", &bash("npm install")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matched_other(&reason, "Auto-allowed with sandbox"),
+                "sandbox auto-allow must win over the tool-wide ask, got {reason:?}"
+            ),
+            other => panic!("expected sandbox Allow over tool-wide ask, got {other:?}"),
+        }
+    }
+
+    /// Without a sandbox runtime the same tool-wide ask rule fires (the exemption
+    /// is inert when no sandbox is wired).
+    #[test]
+    fn sbxask01_toolwide_ask_still_asks_without_sandbox() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    /// A command excluded from the sandbox is NOT auto-allowed, so the tool-wide
+    /// ask still fires.
+    #[test]
+    fn sbxask01_excluded_command_still_asks_under_sandbox() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&["npm:*"]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    /// A CONTENT ask rule keeps asking under sandbox — only the TOOL-WIDE ask is
+    /// exempted (matches `zOg`).
+    #[test]
+    fn sbxask01_content_ask_rule_still_asks_under_sandbox() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(npm:*)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
     #[test]
     fn output_redirect_matching_edit_deny_rule_is_denied() {
         // 2.1.211 EUr→Ptt: a redirect whose resolved target matches an

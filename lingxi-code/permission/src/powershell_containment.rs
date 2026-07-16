@@ -2016,6 +2016,13 @@ fn deny_removal(path: &str) -> PsContainmentResult {
     }
 }
 
+/// `$null` / `${null}` redirection-target test — 2.1.211 `xXt`. Case-insensitive
+/// after trimming; these targets discard output and never touch the filesystem.
+fn is_null_redirect(target: &str) -> bool {
+    let t = target.trim().to_lowercase();
+    t == "$null" || t == "${null}"
+}
+
 /// Validate a command's/statement's output redirections against the working dirs
 /// (claude-code: each `create`-op redirection target → the "Output redirection
 /// to '…' … write to files in …" message). Returns `Some(deny)` on a rule/deny,
@@ -2028,6 +2035,13 @@ fn check_redirections(
 ) -> Option<PsContainmentResult> {
     for r in redirs {
         if r.is_merging || r.target.is_empty() {
+            continue;
+        }
+        // `> $null` / `> ${null}` is the standard PowerShell discard idiom —
+        // 2.1.211 `xXt` skips any redirection whose target trims/lowercases to
+        // `$null`/`${null}` before path validation (else the `$` guard in
+        // classify_ps_path would falsely ask on it).
+        if is_null_redirect(&r.target) {
             continue;
         }
         match check_ps_path(

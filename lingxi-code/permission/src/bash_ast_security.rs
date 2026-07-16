@@ -506,6 +506,26 @@ lazy_re!(
 );
 // jq `system(` detector inside extractSafeCatHeredoc (ast.ts:1773): `/\bsystem\s*\(/`.
 lazy_re!(jq_system_re, r"\bsystem\s*\(");
+// awk program battery (TS `YVc`, permissionSetup.ts). The regex-crate has no
+// lookbehind, so `(?<![A-Za-z_])` is emulated with `(?:^|[^A-Za-z_])` — we only
+// test `is_match`, so consuming the guard char is harmless.
+lazy_re!(awk_system_re, r"(?:^|[^A-Za-z_])system[\s\\]*\(");
+lazy_re!(awk_pipe_cmd_re, r##"(?:^|[^|])\|&?[^/|%";#{}]*""##);
+lazy_re!(awk_pipe_getline_re, r"(?:^|[^|])\|&?[\s\\]*getline\b");
+lazy_re!(
+    awk_include_re,
+    r"@[\s\\]*(?:load|include)\b|@[\s\\]*\w+(?:::\w+)?(?:\[[^\]]*\])*[\s\\]*\("
+);
+lazy_re!(awk_extension_re, r"(?:^|[^A-Za-z_])extension[\s\\]*\(");
+lazy_re!(awk_inet_re, r#""/inet[46]?/"#);
+// awk program-supplying flags (read program from file / load extensions /
+// supply program fragments): `/^-[bcCghIkMnNOPrsStV]*[fEileDW]/` and
+// `/^--(?:fil|e|i|lo|s|de)/`.
+lazy_re!(awk_program_flag_short_re, r"^-[bcCghIkMnNOPrsStV]*[fEileDW]");
+lazy_re!(awk_program_flag_long_re, r"^--(?:fil|e|i|lo|s|de)");
+// xargs-awk value-consuming flags (TS `rtg`): `-F`/`-v`/`-W <value>` and
+// `--fie`/`--a`/`--as` skip their following value when scanning for a program.
+lazy_re!(awk_xargs_value_flag_re, r"^(?:-[FvW]$|--(?:fie|a$|as))");
 // Valid bash variable name (ast.ts:1835): `[A-Za-z_][A-Za-z0-9_]*`, anchored.
 lazy_re!(valid_var_name_re, r"^[A-Za-z_][A-Za-z0-9_]*$");
 // PS4 `${IDENT}` reference, stripped before the charset check (ast.ts:1896).
@@ -531,6 +551,39 @@ lazy_re!(shell_escape_re, "[\"'\\\\ \t\n$`;|&<>(){}*?\\[\\]~#]");
 #[must_use]
 pub(crate) fn contains_any_placeholder(value: &str) -> bool {
     value.contains(CMDSUB_PLACEHOLDER) || value.contains(VAR_PLACEHOLDER)
+}
+
+/// TS `tzn`: the awk family whose programs `check_semantics` scans for
+/// code-execution / socket constructs.
+const AWK_COMMANDS: &[&str] = &["awk", "gawk", "mawk", "nawk"];
+
+/// TS `YVc` (permissionSetup.ts): scan a single awk program/argument for
+/// constructs that execute commands or open sockets. Returns the byte-exact deny
+/// reason, or `None` when clean. Also reused over `$(cat <<'EOF' … )` heredoc
+/// bodies by [`extract_safe_cat_heredoc`].
+fn yvc_awk_program(e: &str) -> Option<&'static str> {
+    if awk_system_re().is_match(e) {
+        return Some("awk program contains system() which executes arbitrary commands");
+    }
+    if awk_pipe_cmd_re().is_match(e) || awk_pipe_getline_re().is_match(e) {
+        return Some(
+            "awk program contains a command pipe (| \"cmd\" or | getline) which executes arbitrary commands",
+        );
+    }
+    if awk_include_re().is_match(e) {
+        return Some(
+            "awk program contains @load/@include or an @indirect call which can execute arbitrary code",
+        );
+    }
+    if awk_extension_re().is_match(e) {
+        return Some(
+            "awk program contains extension() which loads arbitrary native code (legacy gawk)",
+        );
+    }
+    if awk_inet_re().is_match(e) {
+        return Some("awk program opens a gawk /inet/ network socket which can exfiltrate data");
+    }
+    None
 }
 
 /// TS `nodeTypeId` (ast.ts:213). Analytics-only (no security effect). `None` →
@@ -572,7 +625,7 @@ pub(crate) fn too_complex(node: Node) -> ParseForSecurityResult {
     } else if DANGEROUS_TYPES.contains(&t) {
         format!("Contains {t}")
     } else {
-        format!("Unhandled node type: {t}")
+        format!("Contains shell syntax ({t}) that cannot be statically analyzed")
     };
     ParseForSecurityResult::TooComplex { reason }
 }
@@ -1626,6 +1679,11 @@ pub(crate) fn extract_safe_cat_heredoc(sub_node: Node, src: &[u8]) -> CatHeredoc
     if jq_system_re().is_match(&body) {
         return CatHeredoc::Dangerous;
     }
+    // 2.1.211: the awk program battery also runs over the heredoc body, so a
+    // `$(cat <<'EOF' … system("rm -rf /") … EOF)` fed to awk is caught.
+    if yvc_awk_program(&body).is_some() {
+        return CatHeredoc::Dangerous;
+    }
     CatHeredoc::Body(body)
 }
 
@@ -1690,7 +1748,10 @@ pub(crate) fn walk_variable_assignment(
         });
     }
     // SECURITY: PS4 is expanded at trace time after `set -x` — allowlist only.
-    if name == "PS4" {
+    // 2.1.211 applies the same battery to PROMPT4 (the zsh alias for PS4, so
+    // `PROMPT4='$(cmd)'` + xtrace executes). Reason strings keep the "PS4"
+    // wording even for PROMPT4, matching CC.
+    if name == "PS4" || name == "PROMPT4" {
         if is_append {
             return Err(ParseForSecurityResult::TooComplex {
                 reason:
@@ -2103,8 +2164,12 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
     for cmd in commands {
         // Working argv (`r`), narrowed as safe command-prefix wrappers are stripped.
         let mut a: &[String] = &cmd.argv;
+        // TS `o`: set once an `xargs <cmd>` wrapper is stripped — the wrapped
+        // command receives stdin-appended arguments that cannot be statically
+        // analyzed, so find/jq/awk reached this way are denied below.
+        let mut through_xargs = false;
         // ── Strip command-prefix wrappers (path-aware): time/nohup/timeout/nice/
-        // stdbuf/env/command (matched on the basename) + builtin/noglob (raw). ──
+        // stdbuf/env/command/xargs (matched on the basename) + builtin/noglob (raw). ──
         loop {
             let raw0 = match a.first() {
                 Some(s) => s.as_str(),
@@ -2113,7 +2178,7 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
             let base = raw0.rsplit(['/', '\\']).next().unwrap_or(raw0);
             let l = if matches!(
                 base,
-                "time" | "nohup" | "timeout" | "nice" | "stdbuf" | "env" | "command"
+                "time" | "nohup" | "timeout" | "nice" | "stdbuf" | "env" | "command" | "xargs"
             ) {
                 base
             } else {
@@ -2274,6 +2339,17 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                         break;
                     }
                     a = &a[c..];
+                }
+                "xargs" => {
+                    // TS: strip `xargs` only when argv[1] exists and is not a
+                    // flag (a bare `xargs -0`/`xargs` supplies no static command);
+                    // set the through-xargs flag for the find/jq/awk denials.
+                    if a.len() >= 2 && !a[1].starts_with('-') {
+                        a = &a[1..];
+                        through_xargs = true;
+                    } else {
+                        break;
+                    }
                 }
                 _ => {
                     if raw0 == "builtin" || raw0 == "noglob" {
@@ -2675,6 +2751,76 @@ pub(crate) fn check_semantics(commands: &[SimpleCommand]) -> SemanticCheckResult
                     "Shell keyword '{o}' as command name \u{2014} tree-sitter mis-parse"
                 ),
             };
+        }
+
+        // ── through-xargs: stdin-appended arguments defeat static analysis. ──
+        if through_xargs {
+            if o == "find" || o == "jq" {
+                return SemanticCheckResult::Deny {
+                    reason: format!(
+                        "{o} through xargs \u{2014} stdin-appended arguments cannot be statically analyzed"
+                    ),
+                };
+            }
+            if AWK_COMMANDS.contains(&o) {
+                // Does the awk invocation carry a STATIC program (a non-flag arg,
+                // a bare `-`, or a value after `--`)? If not, xargs may supply the
+                // program text itself.
+                let mut has_static_program = false;
+                let mut c = 1usize;
+                while c < a.len() {
+                    let u = a[c].as_str();
+                    if u == "--" {
+                        has_static_program = c + 1 < a.len();
+                        break;
+                    }
+                    if u == "-" || !u.starts_with('-') {
+                        has_static_program = true;
+                        break;
+                    }
+                    // A value-consuming flag skips its following value.
+                    if !u.contains('=') && awk_xargs_value_flag_re().is_match(u) {
+                        c += 1;
+                    }
+                    c += 1;
+                }
+                if !has_static_program {
+                    return SemanticCheckResult::Deny {
+                        reason: format!(
+                            "{o} through xargs with no static program \u{2014} stdin-supplied program text cannot be statically analyzed"
+                        ),
+                    };
+                }
+            }
+        }
+
+        // ── awk/gawk/mawk/nawk: system(), pipes, @load/@include, extensions,
+        //    /inet sockets, runtime-determined args, program-supplying flags. ──
+        if AWK_COMMANDS.contains(&o) {
+            if find_unquoted_glob(&cmd.text) {
+                return SemanticCheckResult::Deny {
+                    reason: "awk command contains unquoted glob characters \u{2014} could glob-expand to a planted program or flag before awk runs".to_string(),
+                };
+            }
+            for l in a {
+                if let Some(reason) = yvc_awk_program(l) {
+                    return SemanticCheckResult::Deny {
+                        reason: reason.to_string(),
+                    };
+                }
+                if contains_any_placeholder(l) {
+                    return SemanticCheckResult::Deny {
+                        reason: "awk argument is runtime-determined \u{2014} substituted text becomes awk code and cannot be statically analyzed".to_string(),
+                    };
+                }
+            }
+            if a.iter().any(|l| {
+                awk_program_flag_short_re().is_match(l) || awk_program_flag_long_re().is_match(l)
+            }) {
+                return SemanticCheckResult::Deny {
+                    reason: "awk command uses flags that read the program from a file, load extensions, or supply program fragments \u{2014} cannot be statically analyzed".to_string(),
+                };
+            }
         }
 
         // ── jq: system(), include/import, and code/file-reading flags. ──
@@ -3147,7 +3293,7 @@ mod tests {
         // too-complex on the outer string.
         assert_eq!(
             cmd_argvs(r#"cd "$(echo /etc)""#),
-            Err("Unhandled node type: string".to_string())
+            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
         );
     }
 
@@ -3180,7 +3326,7 @@ mod tests {
         // no content children. Guard B (text len > 2) → reject.
         assert_eq!(
             cmd_argvs(r#"echo " ""#),
-            Err("Unhandled node type: string".to_string())
+            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
         );
         // Genuine empty `""` (len == 2) is fine → argv element "".
         let argvs = cmd_argvs(r#"echo """#).expect("simple");
@@ -3577,6 +3723,20 @@ EOF
         }
     }
 
+    #[test]
+    fn prompt4_assignment_guarded_like_ps4() {
+        // 2.1.211: the PS4 battery also applies to PROMPT4 (zsh alias for PS4).
+        // A cmdsub-derived value must be TooComplex, not Simple.
+        for cmd in ["PS4='$(id)' set -x", "PROMPT4='$(id)' set -x"] {
+            match parse_for_security(cmd) {
+                ParseForSecurityResult::Simple { .. } => {
+                    panic!("cmdsub-derived trace-prompt var wrongly Simple: {cmd:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
     // ── L4: check_semantics ──
 
     /// Build a [`SimpleCommand`] from a bare argv (no env/redirects).
@@ -3947,6 +4107,75 @@ EOF
             &["/bin/timeout", "5", "eval", "x"],
             "'eval' evaluates arguments as shell code",
         );
+    }
+
+    #[test]
+    fn awk_program_battery_denied() {
+        // YVc constructs that execute code / open sockets.
+        assert_deny(
+            &["awk", "BEGIN{system(\"rm -rf /\")}"],
+            "awk program contains system() which executes arbitrary commands",
+        );
+        assert_deny(
+            &["gawk", "{print | \"sh\"}"],
+            "awk program contains a command pipe (| \"cmd\" or | getline) which executes arbitrary commands",
+        );
+        assert_deny(
+            &["awk", "@load \"filefuncs\""],
+            "awk program contains @load/@include or an @indirect call which can execute arbitrary code",
+        );
+        assert_deny(
+            &["gawk", "BEGIN{extension(\"x\")}"],
+            "awk program contains extension() which loads arbitrary native code (legacy gawk)",
+        );
+        assert_deny(
+            &["gawk", "BEGIN{print > \"/inet/tcp/0/host/80\"}"],
+            "awk program opens a gawk /inet/ network socket which can exfiltrate data",
+        );
+        // Program-supplying flags (read program from file / fragments).
+        assert_deny(
+            &["awk", "-f", "prog.awk", "data"],
+            "awk command uses flags that read the program from a file, load extensions, or supply program fragments — cannot be statically analyzed",
+        );
+        // Unquoted glob before awk runs (hasUnquotedGlob reads cmd.text, so this
+        // case needs an explicit text like the find glob test).
+        let glob_cmd = SimpleCommand {
+            argv: vec!["awk".into(), "*".into()],
+            text: "awk *".into(),
+            ..Default::default()
+        };
+        match check_semantics(&[glob_cmd]) {
+            SemanticCheckResult::Deny { reason } => assert_eq!(
+                reason,
+                "awk command contains unquoted glob characters — could glob-expand to a planted program or flag before awk runs"
+            ),
+            SemanticCheckResult::Ok => panic!("unquoted glob before awk not denied"),
+        }
+        // A benign field-print awk program is fine.
+        assert_ok(&["awk", "{print $1}", "file.txt"]);
+    }
+
+    #[test]
+    fn through_xargs_denials() {
+        // find/jq reached through xargs cannot be statically analyzed.
+        assert_deny(
+            &["xargs", "find", ".", "-name", "x"],
+            "find through xargs — stdin-appended arguments cannot be statically analyzed",
+        );
+        assert_deny(
+            &["xargs", "jq", "."],
+            "jq through xargs — stdin-appended arguments cannot be statically analyzed",
+        );
+        // awk through xargs with no static program (only flags) is denied.
+        assert_deny(
+            &["xargs", "awk", "-F", ","],
+            "awk through xargs with no static program — stdin-supplied program text cannot be statically analyzed",
+        );
+        // awk through xargs WITH a static program falls through to the awk
+        // battery (a benign program is OK).
+        assert_ok(&["xargs", "awk", "{print $1}"]);
+        // `xargs -0 …` (flag first) is NOT stripped → no through-xargs verdict.
+        assert_ok(&["xargs", "-0", "grep", "x"]);
     }
 
     #[test]

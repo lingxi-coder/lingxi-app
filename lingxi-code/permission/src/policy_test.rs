@@ -2412,6 +2412,46 @@ mod tests {
     }
 
     #[test]
+    fn output_redirect_matching_edit_deny_rule_is_denied() {
+        // 2.1.211 EUr→Ptt: a redirect whose resolved target matches an
+        // Edit(<path>) deny rule is DENIED (not asked), with the byte-exact
+        // message — even for a target inside cwd (containment alone would allow).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(secrets/**)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("echo x > secrets/keys.txt")) {
+            PermissionResult::Deny { explanation, reason, .. } => {
+                assert_eq!(
+                    explanation.as_deref(),
+                    Some("Output redirection to '/proj/secrets/keys.txt' was blocked by a deny rule.")
+                );
+                assert!(
+                    matches!(reason, PermissionDecisionReason::MatchedRule { .. }),
+                    "deny must be rule-typed, got {reason:?}"
+                );
+            }
+            other => panic!("expected redirect deny, got {other:?}"),
+        }
+        // A redirect to a NON-denied path inside cwd is allowed (no deny, no ask).
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > out/log.txt")),
+            PermissionResult::Allow { .. } | PermissionResult::Ask { .. }
+        ));
+        // The deny only applies to write redirects, not a plain read of the path.
+        // `cat secrets/keys.txt` (a READ) is out of this slice's scope (Read-deny
+        // command-path walk is a follow-up) — it must NOT be denied by this guard.
+        match p.authorize("Bash", &bash("cat secrets/keys.txt")) {
+            PermissionResult::Deny { explanation: Some(e), .. }
+                if e.contains("blocked by a deny rule") =>
+            {
+                panic!("read path must not hit the output-redirect deny guard")
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
     fn sandbox_auto_allow_does_not_bypass_dangerous_rm_in_substitution() {
         let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
             .with_sandbox_runtime(sandbox_cfg(&[]));

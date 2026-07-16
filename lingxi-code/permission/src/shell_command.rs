@@ -422,10 +422,42 @@ fn rule_matches_candidate(rule: &ShellRule, candidate: &str, guard_compound: boo
     }
 }
 
+/// Collapse runs of spaces/tabs to a single space — 2.1.211 `replace(/[ \t]+/g," ")`.
+/// Applied to both the rule prefix and the candidate before prefix matching so a
+/// deny/allow prefix rule authored with single spaces still matches a candidate
+/// with doubled internal whitespace (`Bash(rm -rf:*)` vs `rm  -rf /`). NOT applied
+/// to exact-rule comparisons (CC keeps `f.command === m` byte-exact).
+fn collapse_ws(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.as_bytes().windows(2).any(|w| {
+        matches!(w[0], b' ' | b'\t') && matches!(w[1], b' ' | b'\t')
+    }) && !s.contains('\t')
+    {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut prev_ws = false;
+    for c in s.chars() {
+        if c == ' ' || c == '\t' {
+            if !prev_ws {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            out.push(c);
+            prev_ws = false;
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// `prefix:*` word-boundary match: the candidate equals the prefix, starts with
 /// `prefix ` (space boundary, so `ls:*` does NOT match `lsof`), or is the same
 /// under a bare `xargs ` invocation (`Bash(grep:*)` matches `xargs grep p`).
+/// Both sides are whitespace-collapsed first (2.1.211 `cxt`'s prefix arm).
 fn prefix_matches(prefix: &str, candidate: &str) -> bool {
+    let prefix = collapse_ws(prefix);
+    let candidate = collapse_ws(candidate);
+    let (prefix, candidate) = (prefix.as_ref(), candidate.as_ref());
     if candidate == prefix || candidate.starts_with(&format!("{prefix} ")) {
         return true;
     }
@@ -528,9 +560,9 @@ pub fn command_exact_allowed(allow_contents: &[&str], command: &str) -> bool {
         cands.iter().any(|cand| match &rule {
             // Exact rule: full-string equality (TS `bashRule.command === cmdToMatch`).
             ShellRule::Exact(s) => cand == s,
-            // Prefix rule in exact mode: only the bare prefix with no args
-            // (TS `bashRule.prefix === cmdToMatch`).
-            ShellRule::Prefix(prefix) => cand == prefix,
+            // Prefix rule in exact mode: only the bare prefix with no args, both
+            // sides whitespace-collapsed (2.1.211 `cxt` exact arm `g === y`).
+            ShellRule::Prefix(prefix) => collapse_ws(cand) == collapse_ws(prefix),
             // Wildcard never matches in exact mode (TS returns false).
             ShellRule::Wildcard(_) => false,
         })
@@ -602,6 +634,18 @@ mod tests {
             "rm:*",
             "# comment\nrm -rf /tmp/x"
         ));
+    }
+
+    #[test]
+    fn prefix_rule_collapses_internal_whitespace() {
+        // 2.1.211 `cxt`'s prefix arm collapses `[ \t]+` on both sides, so a
+        // single-space deny prefix rule still catches a doubled-space candidate
+        // (under-deny fix). Direct helper + through the subcommand walk.
+        assert!(prefix_matches("rm -rf", "rm  -rf /tmp/x"));
+        assert!(prefix_matches("git push", "git\tpush origin"));
+        assert!(rule_matches_any_subcommand("rm -rf:*", "rm   -rf /tmp/x"));
+        // A genuinely different command still does not match.
+        assert!(!prefix_matches("rm -rf", "rmdir /tmp/x"));
     }
 
     #[test]

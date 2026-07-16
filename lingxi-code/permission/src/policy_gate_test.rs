@@ -1022,6 +1022,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_permission_mode_manual_aliases_to_default() {
+        // 2.1.211 `LE`/PERMISSION_MODE_MANUAL_ALIAS: "manual" → default. Boot in
+        // bypassPermissions (Write allows), switch to "manual" → the mode really
+        // CHANGES to default (Write now asks → delegates to Deny), distinguishing
+        // it from the unknown-string no-op (which would keep bypass → Allow).
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::BypassPermissions,
+            Vec::new(),
+        ));
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompt-denied".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+        gate.set_permission_mode("manual").await.unwrap();
+        assert!(matches!(
+            gate.check("Write", &serde_json::json!({})).await,
+            PermissionDecision::Deny { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn set_permission_mode_rejects_bypass_when_killswitch_active() {
         let mut policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
         policy.bypass_killswitch_active = true;

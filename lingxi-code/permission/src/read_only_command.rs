@@ -77,10 +77,12 @@ const READONLY_BASE_COMMANDS: &[&str] = &[
     // `test`/`getconf`; the port previously over-allowed those two read-only.)
     "sleep", "which", "type", "expr", "seq", "tsort", "pr",
     // Hand-written read-only regex commands whose simple forms reduce to a
-    // base-word + metachar-free-args shape (`pwd`, `whoami`, `ls`, `find`,
-    // `cd`, `arch`, `alias`). `echo`/`grep`/`rg`/`jq`/`uniq`/`history` are
-    // handled with their TS-specific guards in `is_read_only_subcommand`.
-    "pwd", "whoami", "ls", "find", "cd", "arch", "alias",
+    // base-word + metachar-free-args shape (`ls`, `find`, `cd`).
+    // `pwd`/`whoami`/`alias`/`arch` are NOT base words — 2.1.211 keeps them in
+    // the exact-match set `OPg` / the `arch` regex (bare / `-h` / `--help` only),
+    // gated in `is_read_only_subcommand`. `echo`/`grep`/`rg`/`jq`/`uniq`/
+    // `history` are handled with their TS-specific guards there too.
+    "ls", "find", "cd",
 ];
 
 /// `find` primary actions that WRITE / execute / side-effect — binary `vDp`
@@ -289,6 +291,19 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     if base == "find" {
         return !words.any(|w| FIND_DANGEROUS_ACTIONS.contains(&w));
     }
+    // `pwd`/`whoami`/`alias` — 2.1.211 exact-match-only set `OPg`: read-only
+    // ONLY as a single bare token (`pwd -L`, `alias k=v` ask).
+    if matches!(base, "pwd" | "whoami" | "alias") {
+        return words.next().is_none();
+    }
+    // `arch` — 2.1.211 `/^arch(?:\s+(?:--help|-h))?\s*$/`: bare, or a lone
+    // `-h`/`--help`.
+    if base == "arch" {
+        return match words.next() {
+            None => true,
+            Some(a) => words.next().is_none() && matches!(a, "-h" | "--help"),
+        };
+    }
     READONLY_BASE_COMMANDS.contains(&base)
 }
 
@@ -383,20 +398,43 @@ fn git_subcommand_is_read_only(rest: &[&str]) -> bool {
     }
 }
 
-/// `git remote show` positional-write guard — port of the TS callback
-/// (`readOnlyCommandValidation.ts:478-487`). `args` are the tokens after
-/// `git remote show`. Allows an optional `-n`, then exactly ONE remote name
-/// matching `/^[a-zA-Z0-9_-]+$/`; anything else is dangerous.
+/// `git remote show` positional-write guard — port of the 2.1.211 TS callback.
+/// `args` are the tokens after `git remote show`. 2.1.211 REQUIRES the `-n`
+/// (no-network) flag so only the offline form is auto-allowed: it splits args
+/// on `--`, drops `-n` from the pre-`--` segment, then requires exactly ONE
+/// remaining token that (a) came with `-n` present and (b) matches
+/// `/^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/` (first char NOT `-`). Without `-n`,
+/// `git remote show origin` contacts the network and is dangerous.
 fn git_remote_show_is_dangerous(args: &[&str]) -> bool {
-    let positional: Vec<&str> = args.iter().copied().filter(|a| *a != "-n").collect();
+    // Split on the `--` end-of-options marker (TS `t.indexOf("--")`).
+    let (pre, post): (&[&str], Vec<&str>) = match args.iter().position(|a| *a == "--") {
+        Some(i) => (&args[..i], args[i + 1..].to_vec()),
+        None => (args, Vec::new()),
+    };
+    let has_no_network = pre.contains(&"-n");
+    let positional: Vec<&str> = pre
+        .iter()
+        .copied()
+        .filter(|a| *a != "-n")
+        .chain(post.into_iter())
+        .collect();
     if positional.len() != 1 {
         return true;
     }
+    // The offline `-n` flag is mandatory (2.1.211 `if(!n.includes("-n"))return!0`).
+    if !has_no_network {
+        return true;
+    }
     let name = positional[0];
-    name.is_empty()
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    // `/^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/`: non-empty, first byte alphanumeric/`_`.
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        None => true,
+        Some(first) => {
+            !(first.is_ascii_alphanumeric() || first == b'_')
+                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }
+    }
 }
 
 /// `git remote` positional-write guard — port of the TS callback
@@ -407,23 +445,22 @@ fn git_remote_is_dangerous(args: &[&str]) -> bool {
     args.iter().any(|a| *a != "-v" && *a != "--verbose")
 }
 
-/// `git reflog` write-subcommand guard — port of the TS callback
-/// (`readOnlyCommandValidation.ts:283-303`). `args` are the tokens after
-/// `git reflog`. The FIRST non-flag positional is the subcommand: `expire` /
-/// `delete` / `exists` write to `.git/logs/**` and are dangerous; `show` or a
-/// ref name is safe.
+/// `git reflog` write-subcommand guard — port of the 2.1.211 TS callback.
+/// `args` are the tokens after `git reflog`. 2.1.211 uses an ALLOWLIST gate on
+/// the first token (must be a flag, or exactly `show`/`list`; anything else —
+/// incl. a bare ref name — is dangerous), PLUS a denylist of write subcommands
+/// (`expire`/`delete`/`exists`/`drop`/`write`) matched anywhere in the args.
 fn git_reflog_is_dangerous(args: &[&str]) -> bool {
-    const DANGEROUS_SUBCOMMANDS: &[&str] = &["expire", "delete", "exists"];
-    for token in args {
-        if token.is_empty() || token.starts_with('-') {
-            continue;
+    const SAFE_SUBCOMMANDS: &[&str] = &["show", "list"];
+    const DANGEROUS_SUBCOMMANDS: &[&str] = &["expire", "delete", "exists", "drop", "write"];
+    // First-token allowlist (TS `if(o&&!o.startsWith("-")&&!r.has(o))return!0`).
+    if let Some(first) = args.first() {
+        if !first.is_empty() && !first.starts_with('-') && !SAFE_SUBCOMMANDS.contains(first) {
+            return true;
         }
-        // First non-flag positional decides: dangerous subcommand, or a safe
-        // `show`/ref (after which further positionals are ref args → safe).
-        return DANGEROUS_SUBCOMMANDS.contains(token);
     }
-    // No positional = bare `git reflog` = safe (shows the reflog).
-    false
+    // Denylist anywhere in the args (TS `for(i of t)if(n.has(i))return!0`).
+    args.iter().any(|a| DANGEROUS_SUBCOMMANDS.contains(a))
 }
 
 /// Does `token` (a `-…` flag) contain a short-flag `l`, marking a list request?
@@ -584,6 +621,37 @@ mod tests {
         assert!(command_is_read_only("rg needle"));
         assert!(command_is_read_only("echo hello world"));
         assert!(command_is_read_only("find . -name '*.rs'"));
+    }
+
+    #[test]
+    fn exact_match_base_commands_reject_args() {
+        // 2.1.211 `OPg`: pwd/whoami/alias are read-only ONLY as a bare token.
+        assert!(command_is_read_only("pwd"));
+        assert!(command_is_read_only("whoami"));
+        assert!(command_is_read_only("alias"));
+        assert!(!command_is_read_only("pwd -L"));
+        assert!(!command_is_read_only("whoami --foo"));
+        assert!(!command_is_read_only("alias k=v"));
+        // 2.1.211 `arch` regex: bare, or a lone `-h`/`--help`.
+        assert!(command_is_read_only("arch"));
+        assert!(command_is_read_only("arch -h"));
+        assert!(command_is_read_only("arch --help"));
+        assert!(!command_is_read_only("arch -x"));
+        assert!(!command_is_read_only("arch x86_64 uname"));
+    }
+
+    #[test]
+    fn git_reflog_allowlist_gate() {
+        // 2.1.211: first token must be a flag or exactly show/list; the
+        // {expire,delete,exists,drop,write} denylist matches anywhere.
+        assert!(command_is_read_only("git reflog"));
+        assert!(command_is_read_only("git reflog show"));
+        assert!(command_is_read_only("git reflog list"));
+        assert!(!command_is_read_only("git reflog drop"));
+        assert!(!command_is_read_only("git reflog write"));
+        assert!(!command_is_read_only("git reflog expire --all"));
+        // A bare ref name is no longer auto-allowed (allowlist gate).
+        assert!(!command_is_read_only("git reflog main"));
     }
 
     #[test]
@@ -753,7 +821,10 @@ mod test_git_read_only {
         assert!(command_is_read_only("git reflog show"));
         assert!(command_is_read_only("git remote"));
         assert!(command_is_read_only("git remote -v"));
-        assert!(command_is_read_only("git remote show origin"));
+        // 2.1.211: `git remote show` is read-only ONLY with the `-n` (offline)
+        // flag; the network-contacting form asks.
+        assert!(command_is_read_only("git remote show -n origin"));
+        assert!(!command_is_read_only("git remote show origin"));
         assert!(command_is_read_only("git stash list"));
         assert!(command_is_read_only("git stash show"));
         assert!(command_is_read_only("git config --get user.name"));
@@ -811,9 +882,12 @@ mod test_git_read_only {
         assert!(!command_is_read_only("git reflog delete HEAD@{0}"));
         assert!(!command_is_read_only("git remote add origin url"));
         assert!(!command_is_read_only("git remote remove origin"));
-        // `git remote show` requires exactly one alphanumeric name.
+        // `git remote show` requires `-n` + exactly one name whose first char
+        // is alphanumeric/underscore (not `-`).
         assert!(!command_is_read_only("git remote show"));
-        assert!(!command_is_read_only("git remote show a b"));
+        assert!(!command_is_read_only("git remote show -n a b"));
+        assert!(!command_is_read_only("git remote show -n -origin"));
+        assert!(command_is_read_only("git remote show -n -- origin"));
     }
 
     #[test]

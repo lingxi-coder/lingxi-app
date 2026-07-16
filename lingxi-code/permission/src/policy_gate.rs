@@ -671,12 +671,14 @@ impl PermissionGate for PolicyPermissionGate {
 ///
 /// Accepts the five external modes plus the internal `auto` (the binary's
 /// settable set is `default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`/
-/// `auto`). Returns `None` for an unrecognized mode — the binary accepts any
-/// string and no-ops an unknown one (it does NOT error), so the caller acks
-/// without mutating rather than returning an error frame.
+/// `auto`), with the 2.1.211 `manual` alias (`LE`/`PERMISSION_MODE_MANUAL_ALIAS`)
+/// normalized to `default` — applied in both the wire schema `preprocess` and the
+/// `-p` engine handler. Returns `None` for an unrecognized mode — the binary
+/// accepts any string and no-ops an unknown one (it does NOT error), so the
+/// caller acks without mutating rather than returning an error frame.
 fn parse_settable_mode(s: &str) -> Option<PermissionMode> {
     match s {
-        "default" => Some(PermissionMode::Default),
+        "default" | "manual" => Some(PermissionMode::Default),
         "plan" => Some(PermissionMode::Plan),
         "acceptEdits" => Some(PermissionMode::AcceptEdits),
         "bypassPermissions" => Some(PermissionMode::BypassPermissions),

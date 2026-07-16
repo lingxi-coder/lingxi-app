@@ -154,15 +154,18 @@ pub struct McpRegistry {
     /// static headers; static-token servers are unaffected either way. Wired
     /// via [`Self::with_oauth`].
     oauth: Option<OAuthDeps>,
-    /// Additional working directories (settings `additionalDirectories` union
-    /// CLI `--add-dir`) advertised alongside cwd on each server's `roots/list`.
+    /// LIVE additional working directories (settings `additionalDirectories`
+    /// union CLI `--add-dir`, plus any runtime `/add-dir`) advertised alongside
+    /// cwd on each server's `roots/list`.
     ///
-    /// Forwarded into every [`McpClient`] built by [`Self::connect`] (via
-    /// [`McpClient::with_roots`]) so a connected server sees the FULL working-dir
-    /// set, matching claude-code 2.1.207 `r1d()` (`[cwd, ...additionalWorkingDirectories]`).
-    /// Empty by default (cwd-only roots, unchanged). Set via
-    /// [`Self::with_additional_roots`].
-    additional_roots: Vec<std::path::PathBuf>,
+    /// A SHARED [`crate::SharedRoots`] cell — the SAME `Arc` is forwarded into
+    /// every [`McpClient`] built by [`Self::connect`] (via
+    /// [`McpClient::with_roots`]), so a directory pushed via [`Self::add_root`]
+    /// at runtime is seen by ALL connected servers' `roots/list` handlers
+    /// without a reconnect, matching claude-code 2.1.207 `r1d()`
+    /// (`[cwd, ...additionalWorkingDirectories]`). Empty by default (cwd-only
+    /// roots, unchanged). Set via [`Self::with_additional_roots`].
+    additional_roots: crate::SharedRoots,
     /// Interval used by the background health-check task.
     #[allow(dead_code)] // consumed by the health-check loop in Plan 13
     pub health_check_interval: Duration,
@@ -188,7 +191,7 @@ impl McpRegistry {
             raw_conn: None,
             hook_dispatcher: None,
             oauth: None,
-            additional_roots: Vec::new(),
+            additional_roots: crate::new_shared_roots(Vec::new()),
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
         }
@@ -247,22 +250,71 @@ impl McpRegistry {
         self
     }
 
-    /// Inject the session's additional working directories (settings
+    /// Inject the session's LIVE additional working directories (settings
     /// `additionalDirectories` union CLI `--add-dir`) advertised alongside cwd
     /// on each connected server's `roots/list`. Builder-style so it composes
     /// with [`Self::new`] / [`Self::with_raw_conn`]:
     ///
     /// ```ignore
+    /// let roots = mcp::new_shared_roots(vec![PathBuf::from("/tmp/extra")]);
     /// let reg = McpRegistry::with_raw_conn(transport, raw_conn)
-    ///     .with_additional_roots(vec![PathBuf::from("/tmp/extra")]);
+    ///     .with_additional_roots(roots);
     /// ```
     ///
-    /// Empty (the default) leaves `roots/list` cwd-only (unchanged). Matches
-    /// claude-code 2.1.207 `r1d()` = `[cwd, ...additionalWorkingDirectories]`.
+    /// Takes the SHARED [`crate::SharedRoots`] cell (not a snapshot) so the
+    /// composition root can retain the SAME `Arc` and later push into it via
+    /// [`Self::add_root`] to drive a runtime `/add-dir`. An empty cell (the
+    /// default) leaves `roots/list` cwd-only (unchanged). Matches claude-code
+    /// 2.1.207 `r1d()` = `[cwd, ...additionalWorkingDirectories]`.
     #[must_use]
-    pub fn with_additional_roots(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
-        self.additional_roots = dirs;
+    pub fn with_additional_roots(mut self, roots: crate::SharedRoots) -> Self {
+        self.additional_roots = roots;
         self
+    }
+
+    /// Push `dir` into the LIVE additional-roots set (the shared `roots/list`
+    /// source) with a jzn-style change-compare: returns `true` when the dir was
+    /// newly added, `false` when it was already present (a strict no-op). The
+    /// caller only fires [`Self::notify_roots_list_changed_all`] on a `true`
+    /// result — matching claude-code, which recomputes the sorted additional-dir
+    /// list (`jzn`) and notifies MCP roots ONLY on a real change. Parity 2.1.207
+    /// P1-08 runtime `/add-dir`.
+    pub fn add_root(&self, dir: std::path::PathBuf) -> bool {
+        let mut guard = self
+            .additional_roots
+            .write()
+            .expect("additional_roots lock poisoned");
+        if guard.iter().any(|d| d == &dir) {
+            return false;
+        }
+        guard.push(dir);
+        true
+    }
+
+    /// Snapshot of the LIVE additional-roots set (test / observability).
+    #[must_use]
+    pub fn additional_roots_snapshot(&self) -> Vec<std::path::PathBuf> {
+        self.additional_roots
+            .read()
+            .expect("additional_roots lock poisoned")
+            .clone()
+    }
+
+    /// Send `notifications/roots/list_changed` to EVERY connected MCP client,
+    /// telling each server the client's working-dir set changed so it should
+    /// re-query `roots/list`. A 1:1 port of claude-code's
+    /// `notifyMcpRootsListChanged` → `UMy()` fan-out, which calls
+    /// `sendRootsListChanged()` on every connected client. Best-effort per
+    /// client (a per-client send failure is logged + swallowed inside
+    /// [`McpClient::send_roots_list_changed`]). Returns the number of clients
+    /// notified. Parity 2.1.207 P1-08.
+    pub async fn notify_roots_list_changed_all(&self) -> usize {
+        let clients: Vec<Arc<McpClient>> =
+            self.clients.read().await.values().cloned().collect();
+        for client in &clients {
+            client.send_roots_list_changed();
+        }
+        clients.len()
     }
 
     /// Whether the OAuth seam ([`OAuthDeps`]) has been injected via
@@ -497,6 +549,9 @@ impl McpRegistry {
         // down (parity 2.1.207 P2-01).
         let config_timeout_ms = config.timeout_ms;
         let config_always_load = config.always_load;
+        // Transport kind feeds the `GLd` idle-timeout default (stdio 30 min /
+        // remote 5 min / in-process none) on the built `McpClient`.
+        let config_transport_kind = config.spec.transport_kind();
         self.connections.write().await.insert(
             server_name.clone(),
             McpConnectionState::Connected {
@@ -543,7 +598,10 @@ impl McpRegistry {
                     // with `request_timeout_ms`) into the BHs per-call resolver,
                     // and the server-level `alwaysLoad` flag into each listed
                     // tool's `always_load` bit (parity 2.1.207 P2-01).
-                    .with_config_options(config_timeout_ms, config_always_load),
+                    .with_config_options(config_timeout_ms, config_always_load)
+                    // Transport kind → `GLd` idle-timeout default (parity 2.1.207
+                    // P2-01 remainder).
+                    .with_transport_kind(config_transport_kind),
                 );
                 self.register_client(&server_name, client).await;
             }
@@ -1953,6 +2011,85 @@ mod tests {
         assert_eq!(tools[0].full_name, "mcp__claude_ai_Linear__search");
         drop(conns);
         assert!(registry.get_client("claude_ai_Linear").await.is_some());
+    }
+
+    // ---- P1-08: runtime `/add-dir` live roots + notification fan-out -------
+
+    /// Build a paired `Connection` whose PEER ends stay observable (unlike the
+    /// module `paired_connection`, which drops them), so a test can read the
+    /// frames the client emits.
+    fn observable_connection() -> (Arc<Connection>, mpsc::Receiver<Bytes>) {
+        let (_peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        let conn = Arc::new(Connection::new_streams(
+            peer_to_us_rx,
+            us_to_peer_tx,
+            Mode::Lines,
+        ));
+        (conn, us_to_peer_rx)
+    }
+
+    #[test]
+    fn add_root_reports_change_only_on_a_real_add() {
+        // jzn-style change-compare: a NEW dir returns true and lands in the
+        // shared set; re-adding it returns false (a no-op, so the caller sends
+        // NO roots/list_changed notification).
+        let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[])));
+        assert!(
+            registry.add_root(std::path::PathBuf::from("/extra")),
+            "first add of a dir must report a change"
+        );
+        assert!(
+            !registry.add_root(std::path::PathBuf::from("/extra")),
+            "re-adding an already-present dir must report NO change"
+        );
+        assert_eq!(
+            registry.additional_roots_snapshot(),
+            vec![std::path::PathBuf::from("/extra")],
+            "the dir is stored exactly once",
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_roots_list_changed_all_fans_out_one_per_client() {
+        // The fan-out sends exactly one `notifications/roots/list_changed` to
+        // EVERY connected client (claude-code notifyMcpRootsListChanged → per-
+        // client sendRootsListChanged).
+        let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[])));
+
+        let (conn_a, mut peer_a) = observable_connection();
+        let (conn_b, mut peer_b) = observable_connection();
+        let client_a = Arc::new(McpClient::new("a", std::path::PathBuf::from("/a"), conn_a).await);
+        let client_b = Arc::new(McpClient::new("b", std::path::PathBuf::from("/b"), conn_b).await);
+        registry.register_test_client("a", cfg("a"), client_a).await;
+        registry.register_test_client("b", cfg("b"), client_b).await;
+
+        let notified = registry.notify_roots_list_changed_all().await;
+        assert_eq!(notified, 2, "both connected clients must be notified");
+
+        for peer in [&mut peer_a, &mut peer_b] {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer.recv())
+                .await
+                .expect("notification within timeout")
+                .expect("a frame was emitted");
+            let text = std::str::from_utf8(&frame).expect("utf-8 frame");
+            assert!(
+                text.contains(r#""method":"notifications/roots/list_changed""#),
+                "each client must receive the roots/list_changed notification: {text}",
+            );
+            assert!(!text.contains(r#""id""#), "a notification carries no id: {text}");
+            // Exactly ONE frame per client — no second notification queued.
+            assert!(
+                peer.try_recv().is_err(),
+                "a client must receive exactly one notification",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn notify_roots_list_changed_all_on_empty_registry_notifies_none() {
+        let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[])));
+        assert_eq!(registry.notify_roots_list_changed_all().await, 0);
     }
 }
 

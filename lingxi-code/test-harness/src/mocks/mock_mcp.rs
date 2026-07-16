@@ -55,6 +55,11 @@ pub struct MockMcpTransport {
     /// all-servers `ListMcpResources` test can give each server its own
     /// resources (or an error). Only used with `respond_to_calls`.
     resources: Mutex<HashMap<String, ResourceBehavior>>,
+    /// Records the `method` of every id-less inbound notification frame the
+    /// client emits (e.g. `notifications/roots/list_changed`), so a test can
+    /// assert the roots-changed fan-out reached the server. Only populated when
+    /// `respond_to_calls` is set (the responder task reads the client's stream).
+    observed_notifications: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for MockMcpTransport {
@@ -74,6 +79,7 @@ impl MockMcpTransport {
             respond_to_calls: false,
             called_tools: Arc::new(Mutex::new(Vec::new())),
             resources: Mutex::new(HashMap::new()),
+            observed_notifications: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -94,6 +100,14 @@ impl MockMcpTransport {
     #[must_use]
     pub fn called_tools(&self) -> Vec<String> {
         self.called_tools.lock().unwrap().clone()
+    }
+
+    /// The `method`s of every inbound notification the client emitted (in
+    /// order), e.g. `notifications/roots/list_changed` from the roots-changed
+    /// fan-out. Empty unless built via [`MockMcpTransport::with_call_responder`].
+    #[must_use]
+    pub fn observed_notifications(&self) -> Vec<String> {
+        self.observed_notifications.lock().unwrap().clone()
     }
 
     /// Make the server identified by `registry_key` answer `resources/list`
@@ -162,6 +176,7 @@ fn paired_connection() -> Arc<Connection> {
 fn responding_connection(
     called_tools: Arc<Mutex<Vec<String>>>,
     resources: Option<ResourceBehavior>,
+    observed_notifications: Arc<Mutex<Vec<String>>>,
 ) -> Arc<Connection> {
     // `peer_to_us`: peer (responder) → client (responses).
     // `us_to_peer`: client → peer (the outbound requests we answer).
@@ -177,9 +192,14 @@ fn responding_connection(
             let Ok(req) = serde_json::from_slice::<Value>(&frame) else {
                 continue;
             };
-            // Notifications (e.g. `notifications/initialized`) carry no `id` —
-            // ignore them; only id-bearing requests get a response.
+            // Notifications (e.g. `notifications/initialized`,
+            // `notifications/roots/list_changed`) carry no `id`. Record the
+            // method so a test can assert the roots-changed fan-out arrived,
+            // then ignore them — only id-bearing requests get a response.
             let Some(id) = req.get("id").cloned() else {
+                if let Some(method) = req.get("method").and_then(Value::as_str) {
+                    observed_notifications.lock().unwrap().push(method.to_string());
+                }
                 continue;
             };
             let method = req.get("method").and_then(Value::as_str);
@@ -251,7 +271,11 @@ impl McpTransport for MockMcpTransport {
                 }
                 _ => None,
             };
-            responding_connection(self.called_tools.clone(), resources)
+            responding_connection(
+                self.called_tools.clone(),
+                resources,
+                self.observed_notifications.clone(),
+            )
         } else {
             paired_connection()
         };

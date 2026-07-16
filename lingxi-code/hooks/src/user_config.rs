@@ -2,9 +2,13 @@
 //!
 //! A plugin's resolved `userConfig` values (non-sensitive from
 //! `pluginConfigs[plugin].options`, sensitive from secure storage — see
-//! [`crate::loader::resolve_user_config`]) are substituted into the plugin's
+//! `plugin::loader::resolve_user_config`) are substituted into the plugin's
 //! MCP / LSP server config, hook commands, and (non-sensitive) skill/agent
 //! content via `${user_config.KEY}` references.
+//!
+//! This module lives in the `hooks` crate (below `plugin` in the dependency
+//! graph) so the plugin-hook executor can reuse the same substitution + gate
+//! logic at spawn time; `plugin` re-exports it as `plugin::user_config`.
 //!
 //! Byte-faithful port of claude-code 2.1.207's two substitution forms:
 //! * **whole-string, type-preserving** — a string that IS exactly
@@ -213,6 +217,57 @@ pub fn monitor_reference_rejection(name: &str) -> String {
     )
 }
 
+/// Build the rejection message for a **shell-form** plugin hook command (a bare
+/// command string with no discrete exec-form `args`) that references
+/// `${user_config.*}`: the substituted value would be re-parsed by the shell, so
+/// the hook fails rather than running with an injection hazard.
+///
+/// Byte-faithful port of claude-code 2.1.207's hook advisory (`GSo` /
+/// `throw new Bn(…)`), reassembled from its template quasis:
+/// `` `Hook from ${c?`plugin ${c}`:"a plugin"} references ${user_config.*} in a
+/// shell-form command. The substituted value would be re-parsed by the shell.
+/// Use exec `+'form instead — {"command": "<executable>", "args": '+'["${user_config.KEY}",
+/// ...]} — or read '+`$CLAUDE_PLUGIN_OPTION_<KEY> from the hook's environment.
+/// Command: ${Vve(e)}` ``. The em-dashes (`—`, U+2014) and the exact wording are
+/// preserved; the ONLY branding change is the env-var name
+/// `CLAUDE_PLUGIN_OPTION_<KEY>` → `LINGXI_PLUGIN_OPTION_<KEY>` (cf.
+/// [`option_env_var`]). `plugin_display` is the owning plugin's name (CC's `c`);
+/// `command` is the offending command string (CC's `Vve(e)`, the hook display
+/// text — for a shell-form hook that is the bare command).
+#[must_use]
+pub fn shell_form_reference_rejection(plugin_display: &str, command: &str) -> String {
+    format!(
+        "Hook from plugin {plugin_display} references ${{user_config.*}} in a \
+         shell-form command. The substituted value would be re-parsed by the \
+         shell. Use exec form instead \u{2014} {{\"command\": \"<executable>\", \
+         \"args\": [\"${{user_config.KEY}}\", ...]}} \u{2014} or read \
+         $LINGXI_PLUGIN_OPTION_<KEY> from the hook's environment. Command: \
+         {command}"
+    )
+}
+
+/// Build the byte-faithful rejection message for a plugin **MCP stdio** server
+/// whose `command` (the shell-executed field) references `${user_config.*}`. The
+/// substituted value would be passed to a shell, so the server is rejected and
+/// the operator is told to read the value inside the helper script (e.g. from an
+/// env var set in the server's `"env"` block — which IS a safe substitution
+/// surface). `name` is the scoped server name (CC's `${…}` server key).
+///
+/// Byte-faithful port of claude-code 2.1.207's advisory, quoted verbatim from
+/// the binary (`'` + `${name}` + `'` +
+/// `` ` references ${user_config.*}. The substituted value would be passed to a
+/// shell; read the value inside the helper script instead (e.g. from an env var
+/// set in the server's "env" block).` ``). No branding change — this message
+/// names no env var.
+#[must_use]
+pub fn mcp_stdio_reference_rejection(name: &str) -> String {
+    format!(
+        "'{name}' references ${{user_config.*}}. The substituted value would be \
+         passed to a shell; read the value inside the helper script instead \
+         (e.g. from an env var set in the server's \"env\" block)."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +401,33 @@ mod tests {
              substituted value would be passed to a shell. Monitor commands \
              cannot safely reference ${user_config.*}; have the monitor script \
              read the value from a config file or prompt instead."
+        );
+    }
+
+    #[test]
+    fn shell_form_rejection_is_byte_faithful() {
+        // Branding-adjusted env var only (CLAUDE_PLUGIN_OPTION → LINGXI_PLUGIN_OPTION);
+        // the rest mirrors the binary's advisory quasis, em-dashes (U+2014) and
+        // all: `Hook from plugin <name> …Use exec form instead — {…} — or read …`.
+        assert_eq!(
+            shell_form_reference_rejection("weather", "./run.sh ${user_config.KEY}"),
+            "Hook from plugin weather references ${user_config.*} in a \
+             shell-form command. The substituted value would be re-parsed by \
+             the shell. Use exec form instead \u{2014} {\"command\": \
+             \"<executable>\", \"args\": [\"${user_config.KEY}\", ...]} \u{2014} \
+             or read $LINGXI_PLUGIN_OPTION_<KEY> from the hook's environment. \
+             Command: ./run.sh ${user_config.KEY}"
+        );
+    }
+
+    #[test]
+    fn mcp_stdio_rejection_is_byte_faithful() {
+        assert_eq!(
+            mcp_stdio_reference_rejection("plugin:weather:api"),
+            "'plugin:weather:api' references ${user_config.*}. The substituted \
+             value would be passed to a shell; read the value inside the helper \
+             script instead (e.g. from an env var set in the server's \"env\" \
+             block)."
         );
     }
 }

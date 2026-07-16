@@ -17,9 +17,18 @@
 //! (note: NOT set to `false` — that is what `disable` does), and ORPHANS the
 //! cache (writes a `.orphaned_at` marker rather than deleting immediately).
 //!
-//! Residuals (follow-ups): non-directory marketplace sources (git/github/url),
-//! `--config` userConfig storage/validation, and `--prune` dependency GC (the
-//! orphan marker is written; the deferred sweep that deletes it is not ported).
+//! `--config key=value` persists NON-SENSITIVE userConfig values (validated
+//! against the plugin's manifest schema, byte-faithful errors) to settings
+//! `pluginConfigs[<name>].options` at the chosen scope — the map the
+//! composition-root loader reads back; uninstall clears that entry
+//! (`deletePluginOptions` settings half).
+//!
+//! Residuals (follow-ups): non-directory marketplace sources (git/github/url);
+//! `--config` SENSITIVE values → secure storage `pluginSecrets` (needs an async
+//! CredentialManager threaded into this sync CLI) + `number`/`boolean` type
+//! coercion; the matching `deletePluginOptions` keychain half; and `--prune`
+//! dependency GC (the orphan marker is written; the deferred sweep that deletes
+//! it is not ported).
 
 use std::path::{Path, PathBuf};
 
@@ -196,6 +205,157 @@ fn fail(verb: &str, arg: &str, reason: &str) -> String {
     format!("✘ Failed to {verb} plugin \"{arg}\": {reason}")
 }
 
+/// Read a plugin's declared `userConfig` schema (`field → {sensitive, required,
+/// …}`) from its `<root>/.lingxi-plugin/plugin.json`. Missing / malformed ⇒ an
+/// empty map (⇒ any `--config` key is "not declared").
+fn read_user_config_schema(plugin_root: &Path) -> Map<String, Value> {
+    std::fs::read_to_string(
+        plugin_root
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .and_then(|v| v.get("userConfig").and_then(Value::as_object).cloned())
+    .unwrap_or_default()
+}
+
+/// Is a declared userConfig field sensitive (routed to secure storage)?
+fn field_is_sensitive(schema: &Map<String, Value>, key: &str) -> bool {
+    schema
+        .get(key)
+        .and_then(|f| f.get("sensitive"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Parse + validate the repeatable `--config key=value` flags against a plugin's
+/// `userConfig` `schema`, byte-faithful with claude-code 2.1.207's parser: each
+/// arg must contain `=` at a non-zero index (`indexOf("=") > 0`), the key must be
+/// declared, and the value (the first line after `=`, trimmed) must be non-empty.
+/// Returns the accepted `(key, value)` pairs (both sensitive + non-sensitive; the
+/// caller routes them). Type coercion (`number`/`boolean`) is a follow-up — values
+/// are carried as strings, which the `${user_config.*}` substitution accepts.
+fn parse_config_pairs(
+    config: &[String],
+    schema: &Map<String, Value>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::with_capacity(config.len());
+    for raw in config {
+        // `indexOf("=")` with the `s <= 0` guard: no `=`, or `=` at index 0.
+        let Some(eq) = raw.find('=').filter(|&i| i > 0) else {
+            return Err(format!(
+                "--config expects KEY=VALUE, got \"{raw}\". Use --config key=value (repeatable)."
+            ));
+        };
+        let key = &raw[..eq];
+        // Value = first line after `=`, trimmed (CC `slice(s+1).split(/\r\n|\r|\n/,1)[0].trim()`).
+        let value = raw[eq + 1..]
+            .split(['\r', '\n'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !schema.contains_key(key) {
+            let known: Vec<&str> = schema.keys().map(String::as_str).collect();
+            let suffix = if known.is_empty() {
+                String::new()
+            } else {
+                format!(" Known keys: {}.", known.join(", "))
+            };
+            return Err(format!(
+                "--config key \"{key}\" isn't declared in this plugin's userConfig.{suffix}"
+            ));
+        }
+        if value.is_empty() {
+            return Err(format!(
+                "--config {key}: value is empty. Omit the flag to leave \"{key}\" unset."
+            ));
+        }
+        out.push((key.to_string(), value));
+    }
+    Ok(out)
+}
+
+/// Persist the non-sensitive `--config` values to settings
+/// `pluginConfigs[<plugin_key>].options` at `scope` — the exact map the
+/// composition-root loader reads back (`PluginManager::load_plugin` looks it up
+/// by the plugin's bare `manifest.name`, so `plugin_key` is that bare name).
+/// Existing `options` / `mcpServers` are preserved; a value now declared
+/// SENSITIVE is scrubbed from plaintext `options` (claude-code's `{...n, ...u}`
+/// stale-key scrub) and instead routed to secure storage — the keychain write is
+/// a documented follow-up, so a sensitive `--config` value is validated here but
+/// not persisted to plaintext settings.
+fn persist_plugin_options(
+    scope: Scope,
+    home: &Path,
+    cwd: &Path,
+    plugin_key: &str,
+    schema: &Map<String, Value>,
+    pairs: &[(String, String)],
+) -> Result<(), String> {
+    let path = scope.path(home, cwd);
+    let settings = read_settings_map(&path).unwrap_or_default();
+    let mut plugin_configs = settings
+        .get("pluginConfigs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut entry = plugin_configs
+        .get(plugin_key)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut options = entry
+        .get("options")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (k, v) in pairs {
+        if field_is_sensitive(schema, k) {
+            // Never write a secret to plaintext settings; drop any stale copy.
+            options.remove(k);
+        } else {
+            options.insert(k.clone(), Value::String(v.clone()));
+        }
+    }
+    entry.insert("options".to_string(), Value::Object(options));
+    plugin_configs.insert(plugin_key.to_string(), Value::Object(entry));
+    update_settings(
+        &path,
+        vec![("pluginConfigs".to_string(), Some(Value::Object(plugin_configs)))],
+    )
+}
+
+/// `deletePluginOptions` parity (settings half): clear a plugin's non-sensitive
+/// userConfig (`settings.pluginConfigs[<plugin_key>]`) at `scope` on uninstall.
+/// Keyed by the bare plugin name (matching the install-time write + loader
+/// lookup). A missing key is a no-op; a write failure logs claude-code's
+/// byte-faithful warn. Clearing the plugin's secure-storage `pluginSecrets` is a
+/// documented follow-up (the sync CLI writes no secrets, so none linger).
+fn clear_plugin_config(scope: Scope, home: &Path, cwd: &Path, plugin_key: &str) {
+    let path = scope.path(home, cwd);
+    let Ok(settings) = read_settings_map(&path) else {
+        return;
+    };
+    let Some(mut plugin_configs) = settings
+        .get("pluginConfigs")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return;
+    };
+    if plugin_configs.remove(plugin_key).is_none() {
+        return;
+    }
+    if let Err(e) = update_settings(
+        &path,
+        vec![("pluginConfigs".to_string(), Some(Value::Object(plugin_configs)))],
+    ) {
+        tracing::warn!("deletePluginOptions: failed to clear settings.pluginConfigs[{plugin_key}]: {e}");
+    }
+}
+
 /// The `projectPath` an install record carries at this scope: the realpath of
 /// `cwd` for `project`/`local`, `None` for `user` (which is cwd-independent).
 /// Records are keyed per (scope, projectPath), so this identifies the slot.
@@ -228,7 +388,7 @@ fn record_matches(rec: &Value, scope: Scope, proj: &Option<String>) -> bool {
 pub fn run_install(
     arg: &str,
     scope: Option<&str>,
-    _config: &[String],
+    config: &[String],
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -282,6 +442,19 @@ pub fn run_install(
     };
 
     let full_id = format!("{name}@{market_name}");
+
+    // `--config key=value` userConfig persistence. Parse + validate against the
+    // plugin's declared schema (byte-faithful errors, no "Installing…" prefix —
+    // like the scope error), then persist the NON-SENSITIVE values to settings
+    // `pluginConfigs[<name>].options` at the chosen scope. That is the exact map
+    // the composition-root loader reads back (keyed by the plugin's bare name).
+    // Done BEFORE materialisation so a bad `--config` aborts without a half
+    // install; a no-op when no `--config` was passed (byte-identical to before).
+    let schema = read_user_config_schema(&plugin_src);
+    let config_pairs = parse_config_pairs(config, &schema)?;
+    if !config_pairs.is_empty() {
+        persist_plugin_options(scope, home, cwd, name, &schema, &config_pairs)?;
+    }
 
     // Version from the plugin's own manifest.
     let version = std::fs::read_to_string(
@@ -453,6 +626,12 @@ pub fn run_uninstall(
     // DELETE the enabledPlugins key at THIS scope only (uninstall removes the
     // entry entirely, unlike `disable` which sets it to false).
     let _ = edit_enabled(scope, home, cwd, &full_id, None);
+
+    // deletePluginOptions parity: clear the plugin's persisted non-sensitive
+    // userConfig (`settings.pluginConfigs[<name>]`) at this scope so stale
+    // options don't linger for a later re-install. Keyed by the bare plugin name
+    // (matching the install-time write + loader lookup).
+    clear_plugin_config(scope, home, cwd, name_of(&full_id));
 
     Ok(format!(
         "✔ Successfully uninstalled plugin: {} (scope: {})",
@@ -800,6 +979,155 @@ mod tests {
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
         );
+    }
+
+    /// Overwrite the marketplace `hello` plugin's manifest to declare the given
+    /// `userConfig` object (JSON), so `--config` has a schema to validate against.
+    fn set_user_config(e: &Env, user_config_json: &str) {
+        let p = e
+            .market
+            .join("plugins")
+            .join("hello")
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
+        std::fs::write(
+            &p,
+            format!(r#"{{"name":"hello","version":"1.2.3","userConfig":{user_config_json}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn install_config_persists_nonsensitive_options() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"description":"","sensitive":false}}"#);
+        run_install(
+            "hello@mymkt",
+            None,
+            &["REGION=us-east".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        // Persisted to pluginConfigs[<bare name>].options — the map the loader reads.
+        assert_eq!(
+            user_settings(&e)["pluginConfigs"]["hello"]["options"]["REGION"],
+            Value::String("us-east".into())
+        );
+        // The install itself still succeeded (enabledPlugins set too).
+        assert_eq!(
+            user_settings(&e)["enabledPlugins"]["hello@mymkt"],
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn install_config_sensitive_not_written_to_plaintext() {
+        let e = env();
+        set_user_config(
+            &e,
+            r#"{"API_KEY":{"description":"","sensitive":true},"REGION":{"sensitive":false}}"#,
+        );
+        run_install(
+            "hello@mymkt",
+            None,
+            &["API_KEY=sk-live".to_string(), "REGION=eu".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let opts = &user_settings(&e)["pluginConfigs"]["hello"]["options"];
+        // Non-sensitive persisted; the secret is NOT in plaintext settings.
+        assert_eq!(opts["REGION"], Value::String("eu".into()));
+        assert!(opts.get("API_KEY").is_none());
+    }
+
+    #[test]
+    fn install_config_malformed_errors() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        let err = run_install(
+            "hello@mymkt",
+            None,
+            &["NOEQ".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "--config expects KEY=VALUE, got \"NOEQ\". Use --config key=value (repeatable)."
+        );
+    }
+
+    #[test]
+    fn install_config_undeclared_key_errors() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        let err = run_install(
+            "hello@mymkt",
+            None,
+            &["NOPE=1".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "--config key \"NOPE\" isn't declared in this plugin's userConfig. Known keys: REGION."
+        );
+    }
+
+    #[test]
+    fn install_config_empty_value_errors() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        let err = run_install(
+            "hello@mymkt",
+            None,
+            &["REGION=".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "--config REGION: value is empty. Omit the flag to leave \"REGION\" unset."
+        );
+    }
+
+    #[test]
+    fn uninstall_clears_plugin_config() {
+        let e = env();
+        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        run_install(
+            "hello@mymkt",
+            None,
+            &["REGION=us-east".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert!(user_settings(&e)["pluginConfigs"].get("hello").is_some());
+        run_uninstall(
+            "hello@mymkt",
+            None,
+            false,
+            false,
+            false,
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        // deletePluginOptions parity: the pluginConfigs entry is gone.
+        assert!(user_settings(&e)["pluginConfigs"].get("hello").is_none());
     }
 
     #[test]

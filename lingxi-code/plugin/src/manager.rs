@@ -22,7 +22,7 @@ use crate::user_config;
 use serde_json::{Map, Value};
 
 use command_api::CommandRegistry;
-use hooks::HookRegistry;
+use hooks::{HookDefinition, HookExecutor, HookRegistry};
 use lsp::LspRegistry;
 use mcp::{McpRegistry, McpServerConfig};
 use outputstyles::{OutputStyle, OutputStyleFrontmatter, OutputStyleRegistry, OutputStyleSource};
@@ -700,14 +700,30 @@ impl PluginManager {
                 .components
                 .mcp_servers
                 .values()
-                .map(|cfg| {
+                .filter_map(|cfg| {
+                    let scoped_name = format!("plugin:{plugin_name}:{}", cfg.name);
+                    // Deferred-substitution-site gate (claude `mcp-config-invalid`):
+                    // a stdio `command` (the shell-executed field) referencing
+                    // `${user_config.*}` would pass the substituted value to a
+                    // shell — reject the server (byte-faithful msg). `args` / `env`
+                    // ARE safe to substitute (discrete argv / env block), so only
+                    // the `command` field is gated.
+                    if let traits::McpTransportSpec::Stdio { command, .. } = &cfg.spec {
+                        if user_config::references_user_config(command) {
+                            tracing::warn!(
+                                "{}",
+                                user_config::mcp_stdio_reference_rejection(&scoped_name)
+                            );
+                            return None;
+                        }
+                    }
                     let mut scoped = cfg.clone();
-                    scoped.name = format!("plugin:{plugin_name}:{}", cfg.name);
+                    scoped.name = scoped_name;
                     // Substitute `${user_config.KEY}` references (command / args
                     // / env, and remote url / headers) with the resolved values
                     // — the primary consumption path for a plugin's userConfig.
                     substitute_mcp_config(&mut scoped, &subst_ctx);
-                    scoped
+                    Some(scoped)
                 })
                 .collect()
         };
@@ -730,11 +746,19 @@ impl PluginManager {
                 .register_plugin_skills(manifest.id, skills);
         }
 
-        // 4. Hooks.
+        // 4. Hooks — apply the resolved userConfig to each Command hook before
+        //    registering: inject `LINGXI_PLUGIN_OPTION_<KEY>` into the child env
+        //    (claude `CLAUDE_PLUGIN_OPTION_${ye}`), substitute `${user_config.*}`
+        //    into exec-form command/args, and REJECT (skip) a shell-form command
+        //    that references `${user_config.*}` (the shell would re-parse the
+        //    substituted value — an injection hazard). A no-op when the plugin
+        //    has no userConfig (`subst_ctx` empty), leaving hooks byte-unchanged.
+        let plugin_hooks =
+            apply_user_config_to_hooks(plugin_name, &manifest.components.hooks, &subst_ctx);
         self.hook_registry
             .write()
             .await
-            .register_plugin_hooks(manifest.id, manifest.components.hooks.clone());
+            .register_plugin_hooks(manifest.id, plugin_hooks);
 
         // 5. OutputStyles.
         if !styles.is_empty() {
@@ -845,6 +869,75 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
     }
 }
 
+/// Apply a plugin's resolved `userConfig` (`ctx`, keyed by bare field name) to
+/// its hook definitions before registration, mirroring claude-code 2.1.207:
+///
+/// * every **Command** hook's child env gains a `LINGXI_PLUGIN_OPTION_<KEY>`
+///   entry per userConfig field (claude `CLAUDE_PLUGIN_OPTION_${ye}=String(me)`,
+///   with the established `LINGXI_` prefix — cf. `LINGXI_PLUGIN_ROOT`), so a hook
+///   script can read a value (including a sensitive one) from its environment
+///   without it ever touching a command line;
+/// * an **exec-form** Command hook (with discrete `args`) has `${user_config.*}`
+///   substituted into its `command` + `args` (each arg a discrete argv element —
+///   no shell re-parse);
+/// * a **shell-form** Command hook (a bare `command`, no `args`) that references
+///   `${user_config.*}` is REJECTED (skipped) — the substituted value would be
+///   re-parsed by the shell (`user_config::shell_form_reference_rejection`).
+///
+/// Non-Command hooks (Http / Agent / Prompt / Builtin) carry no subprocess env
+/// and are passed through unchanged. A no-op (verbatim clone) when `ctx` is empty
+/// — the common no-userConfig case stays byte-identical.
+fn apply_user_config_to_hooks(
+    plugin_name: &str,
+    hooks: &[HookDefinition],
+    ctx: &Map<String, Value>,
+) -> Vec<HookDefinition> {
+    if ctx.is_empty() {
+        return hooks.to_vec();
+    }
+    let mut out = Vec::with_capacity(hooks.len());
+    for hook in hooks {
+        let HookExecutor::Command {
+            command,
+            args,
+            env,
+            cwd,
+        } = &hook.executor
+        else {
+            out.push(hook.clone());
+            continue;
+        };
+        // Shell-form = a bare command with no discrete exec-form args. Rejecting
+        // it (skip) is the safety gate: a substituted secret would hit the shell.
+        // The rejection names the OWNING PLUGIN (claude `Hook from plugin ${c}`),
+        // not the hook.
+        if args.is_empty() && user_config::references_user_config(command) {
+            tracing::warn!(
+                "{}",
+                user_config::shell_form_reference_rejection(plugin_name, command)
+            );
+            continue;
+        }
+        // Exec-form (and no-ref shell-form, a no-op): substitute the discrete
+        // command + args, then inject the plugin-option env vars.
+        let new_command = user_config::substitute_string_field(command, ctx);
+        let new_args = user_config::substitute_args(args, ctx);
+        let mut new_env = env.clone();
+        for (key, value) in ctx {
+            new_env.insert(user_config::option_env_var(key), user_config::value_to_env_string(value));
+        }
+        let mut hook = hook.clone();
+        hook.executor = HookExecutor::Command {
+            command: new_command,
+            args: new_args,
+            env: new_env,
+            cwd: cwd.clone(),
+        };
+        out.push(hook);
+    }
+    out
+}
+
 /// Extract the YAML frontmatter block (between leading `---` fences) of a
 /// markdown agent file, if present. Returns `None` when the file has no
 /// frontmatter. Mirrors the `---\n…\n---` convention claude-code's agent
@@ -936,4 +1029,120 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod user_config_tests {
+    use super::*;
+    use hooks::events::HookEventType;
+    use hooks::{HookDefinition, HookExecutor, HookSource};
+    use protocol::HookId;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn command_hook(name: &str, command: &str, args: &[&str]) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: name.to_string(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: HookExecutor::Command {
+                command: command.to_string(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+                env: HashMap::new(),
+                cwd: None,
+            },
+            source: HookSource::Plugin,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    fn ctx() -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert("API_KEY".into(), json!("sk-live"));
+        m.insert("PORT".into(), json!(8080));
+        m
+    }
+
+    /// An exec-form Command hook (with discrete args) has `${user_config.*}`
+    /// substituted into command + args, and gains a `LINGXI_PLUGIN_OPTION_<KEY>`
+    /// env entry per userConfig field.
+    #[test]
+    fn exec_form_hook_substitutes_args_and_injects_env() {
+        let hooks = vec![command_hook(
+            "check",
+            "./verify.sh",
+            &["--key", "${user_config.API_KEY}"],
+        )];
+        let out = apply_user_config_to_hooks("weather", &hooks, &ctx());
+        assert_eq!(out.len(), 1);
+        let HookExecutor::Command { args, env, .. } = &out[0].executor else {
+            panic!("expected Command executor");
+        };
+        assert_eq!(args, &["--key".to_string(), "sk-live".to_string()]);
+        // Both userConfig fields exposed as LINGXI_PLUGIN_OPTION_<KEY> (uppercased,
+        // sanitized) with String(value) semantics.
+        assert_eq!(env.get("LINGXI_PLUGIN_OPTION_API_KEY").map(String::as_str), Some("sk-live"));
+        assert_eq!(env.get("LINGXI_PLUGIN_OPTION_PORT").map(String::as_str), Some("8080"));
+    }
+
+    /// A shell-form Command hook (bare command, no args) that references
+    /// `${user_config.*}` is REJECTED (skipped) — the substituted value would be
+    /// re-parsed by the shell.
+    #[test]
+    fn shell_form_hook_referencing_user_config_is_skipped() {
+        let hooks = vec![
+            command_hook("safe", "./ok.sh", &["--port", "${user_config.PORT}"]),
+            command_hook("danger", "./run.sh ${user_config.API_KEY}", &[]),
+        ];
+        let out = apply_user_config_to_hooks("weather", &hooks, &ctx());
+        // Only the exec-form hook survives; the shell-form one is dropped.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "safe");
+    }
+
+    /// A shell-form Command hook with NO userConfig reference is left intact
+    /// (env still gains the option vars), so unrelated bare-command hooks keep
+    /// working.
+    #[test]
+    fn shell_form_hook_without_reference_survives() {
+        let hooks = vec![command_hook("plain", "./noop.sh", &[])];
+        let out = apply_user_config_to_hooks("weather", &hooks, &ctx());
+        assert_eq!(out.len(), 1);
+        let HookExecutor::Command { command, env, .. } = &out[0].executor else {
+            panic!("expected Command executor");
+        };
+        assert_eq!(command, "./noop.sh");
+        assert!(env.contains_key("LINGXI_PLUGIN_OPTION_API_KEY"));
+    }
+
+    /// Empty substitution context ⇒ hooks pass through byte-unchanged (the common
+    /// no-userConfig case): no env injection, no substitution, no rejection.
+    #[test]
+    fn empty_ctx_is_noop() {
+        let hooks = vec![command_hook("danger", "./run.sh ${user_config.API_KEY}", &[])];
+        let out = apply_user_config_to_hooks("weather", &hooks, &Map::new());
+        assert_eq!(out.len(), 1);
+        let HookExecutor::Command { command, env, .. } = &out[0].executor else {
+            panic!("expected Command executor");
+        };
+        // Not rejected, not substituted, no injected env.
+        assert_eq!(command, "./run.sh ${user_config.API_KEY}");
+        assert!(env.is_empty());
+    }
+
+    /// The MCP stdio `command` gate: a scoped stdio server whose `command`
+    /// references `${user_config.*}` is rejected by the substitution site (the
+    /// value would hit a shell); `args` / `env` remain safe substitution
+    /// surfaces (covered by the `enable_substitutes_user_config_*` integration
+    /// test).
+    #[test]
+    fn mcp_stdio_command_reference_is_detected() {
+        assert!(user_config::references_user_config("mysrv ${user_config.API_KEY}"));
+        assert!(!user_config::references_user_config("mysrv --flag"));
+    }
 }

@@ -50,3 +50,64 @@ async fn connect_registers_live_client_via_raw_conn() {
         "a working McpClient must be registered after connect"
     );
 }
+
+/// P1-08 runtime `/add-dir`: after a connected server exists, adding a new
+/// working directory to the LIVE roots source fans out exactly ONE
+/// `notifications/roots/list_changed` to the server, the shared roots cell now
+/// includes the new dir, and re-adding an already-present dir (jzn compare)
+/// sends NO further notification.
+#[tokio::test]
+async fn add_dir_fans_out_one_roots_list_changed_and_is_idempotent() {
+    use std::path::PathBuf;
+
+    // A responder-backed mock so the client's outbound notification frames are
+    // observable, plus a shared roots cell the registry + client both hold.
+    let mock = Arc::new(MockMcpTransport::with_call_responder());
+    let roots = mcp::new_shared_roots(Vec::new());
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    )
+    .with_additional_roots(roots);
+
+    registry.connect(mock_config()).await.unwrap();
+    assert!(registry.get_client("mock").await.is_some());
+
+    // Runtime add of a NEW dir → jzn reports a change → fan out one notification.
+    assert!(
+        registry.add_root(PathBuf::from("/extra")),
+        "adding a new dir must report a change"
+    );
+    let notified = registry.notify_roots_list_changed_all().await;
+    assert_eq!(notified, 1, "the one connected client must be notified");
+
+    // The live roots source now includes the runtime-added dir (a re-issued
+    // roots/list would advertise it — asserted at the handler level in the mcp
+    // crate unit tests).
+    assert_eq!(
+        registry.additional_roots_snapshot(),
+        vec![PathBuf::from("/extra")],
+    );
+
+    // Let the async responder task drain the emitted notification frame.
+    for _ in 0..50 {
+        if !mock.observed_notifications().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        mock.observed_notifications(),
+        vec!["notifications/roots/list_changed".to_string()],
+        "the server must receive exactly one roots/list_changed",
+    );
+
+    // Re-adding the SAME dir is a no-op (jzn): the caller sends no notification.
+    assert!(
+        !registry.add_root(PathBuf::from("/extra")),
+        "re-adding an already-present dir must report NO change"
+    );
+    // (The effect never calls notify on a false change; assert the observed
+    // count stayed at exactly one.)
+    assert_eq!(mock.observed_notifications().len(), 1);
+}

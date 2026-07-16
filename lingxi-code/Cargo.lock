@@ -837,6 +837,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tool-api",
  "tool-web",
  "tracing",
  "tracing-subscriber",

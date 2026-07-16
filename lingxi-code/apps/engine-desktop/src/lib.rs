@@ -2309,6 +2309,15 @@ pub struct DesktopRuntime {
     /// the browser flow for the first-party OAuth providers (Anthropic Pro/Max,
     /// OpenAI ChatGPT) — replacing the honest-but-inert `Unavailable` screen.
     pub oauth_connect_driver: Arc<dyn command_core::OAuthConnectDriver>,
+    /// (P1-08 runtime `/add-dir`) The SAME `Arc<SessionCwd>` the file tools gate
+    /// on. The CLI `/add-dir` effect calls `add_trusted_dir(...)` on it so a
+    /// directory added mid-session is immediately accessible to
+    /// Read/Edit/Write/Glob/Grep/NotebookEdit without a reboot.
+    pub session_cwd: Arc<SessionCwd>,
+    /// (P1-08 runtime `/add-dir`) The live MCP registry. The CLI `/add-dir`
+    /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
+    /// every connected server's `roots/list` reflects the new working directory.
+    pub mcp_registry: Arc<mcp::McpRegistry>,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -2812,6 +2821,44 @@ async fn load_enabled_plugins(
                     merged.insert(k.clone(), b);
                 }
             }
+        }
+    }
+    merged
+}
+
+/// Read the merged `settings.pluginConfigs` scope (`plugin → {options,
+/// mcpServers}`) from the user then project `settings.json`, project last so it
+/// wins on conflict — the persisted, non-sensitive half of a plugin's
+/// `userConfig`. This is the composition-root READ that seeds
+/// [`plugin::PluginManager::with_plugin_configs`]; without it the manager's
+/// `plugin_configs` is always empty and non-sensitive options from settings.json
+/// never reach `resolve_user_config`. Mirrors `load_enabled_plugins`'s
+/// user-then-project merge (`pluginLoader.ts` reads settings the same way).
+/// Malformed files / a missing key degrade to an empty map (no persisted
+/// config), matching the resilient read-only boot.
+///
+/// Keyed by the `pluginConfigs` object key today (the manager looks it up by
+/// `manifest.name`); the installed `name@marketplace` id is a documented
+/// follow-up (see `manager.rs` `load_plugin`).
+async fn load_plugin_configs(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> std::collections::HashMap<String, plugin::PluginUserConfig> {
+    let mut merged: std::collections::HashMap<String, plugin::PluginUserConfig> =
+        std::collections::HashMap::new();
+    let user = lingxi_home.join("settings.json");
+    let project = cwd.join(branding::DOT_DIR).join("settings.json");
+    // User first, project second → project overrides on identical plugin keys.
+    for path in [user, project] {
+        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+        else {
+            continue;
+        };
+        for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
+            merged.insert(plugin, cfg);
         }
     }
     merged
@@ -4928,6 +4975,11 @@ pub async fn build(
         on_authorization_url: mcp_on_auth_url,
         xaa_config,
     };
+    // LIVE additional-roots cell shared between the MCP registry (seeds every
+    // server's `roots/list`) and the runtime `/add-dir` effect: pushing into it
+    // via `mcp_registry.add_root(...)` is seen by every connected server on its
+    // next `roots/list` without a reconnect (parity 2.1.207 P1-08).
+    let mcp_additional_roots = mcp::new_shared_roots(boot_additional_working_dirs.clone());
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
             posix.clone() as Arc<dyn McpTransport>,
@@ -4938,10 +4990,13 @@ pub async fn build(
         // Advertise the session's additional working dirs (settings
         // `additionalDirectories` + `--add-dir`) on every server's `roots/list`,
         // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].
-        .with_additional_roots(boot_additional_working_dirs.clone()),
+        .with_additional_roots(mcp_additional_roots),
     );
     mcp_registry.connect_all(mcp_configs).await;
     tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
+    // Clone handles the runtime `/add-dir` live effect needs (the same registry
+    // Arc is moved into the orchestrator builder below via `with_mcp_registry`).
+    let runtime_mcp_registry = mcp_registry.clone();
 
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
     //       collision (passed SECOND; later paths win). The user agents dir is
@@ -5605,6 +5660,10 @@ pub async fn build(
     // `trusted_dirs` set (cwd + `--add-dir`/`additionalDirectories`) so the
     // file tools' `ctx.trusted_dirs()` gate keeps allowing the additional dirs.
     let session_cwd = SessionCwd::new(cwd.clone(), trusted_dirs);
+    // Handle the runtime `/add-dir` live effect needs to widen the file-tool
+    // trusted set (the same `Arc<SessionCwd>` is moved into the orchestrator
+    // builder below via `with_session_cwd`). P1-08.
+    let runtime_session_cwd = session_cwd.clone();
     // P1-06: ONE per-session read-file-state registry (claude-code's single
     // `readFileState` map on the `ToolUseContext`). Created here, cloned into
     // every file tool's `BuiltinToolContext` below, and the SAME `Arc` handed to
@@ -6491,22 +6550,31 @@ pub async fn build(
         // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
         // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer yet,
         // so they are local instances here (residual, as at startup).
-        let pm = Arc::new(plugin::PluginManager::new(
-            plugins_dir.clone(),
-            Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
-            http.clone(),
-            Arc::new(PosixRuntime::new()),
-            credentials.clone(),
-            Arc::new(plugin::PluginBlocklist::new(String::new())),
-            Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
-            shared_command_registry.clone(),
-            Arc::new(RwLock::new(SkillRegistry::new())),
-            plugin_hook_registry.clone(),
-            Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
-            plugin_mcp_registry.clone(),
-            plugin_lsp_registry.clone(),
-            Arc::new(RwLock::new(ToolRegistry::new())),
-        ));
+        // Seed the persisted non-sensitive `userConfig` (settings `pluginConfigs`
+        // scope) so the loader resolves `${user_config.*}` options from disk (not
+        // just field defaults) and injects `LINGXI_PLUGIN_OPTION_*` into plugin
+        // hooks. Sensitive values are NOT here — they resolve live from
+        // `CredentialManager`.
+        let plugin_configs = load_plugin_configs(&cfg.lingxi_home, &cwd_for_plugins).await;
+        let pm = Arc::new(
+            plugin::PluginManager::new(
+                plugins_dir.clone(),
+                Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
+                http.clone(),
+                Arc::new(PosixRuntime::new()),
+                credentials.clone(),
+                Arc::new(plugin::PluginBlocklist::new(String::new())),
+                Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+                shared_command_registry.clone(),
+                Arc::new(RwLock::new(SkillRegistry::new())),
+                plugin_hook_registry.clone(),
+                Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+                plugin_mcp_registry.clone(),
+                plugin_lsp_registry.clone(),
+                Arc::new(RwLock::new(ToolRegistry::new())),
+            )
+            .with_plugin_configs(plugin_configs),
+        );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
             // Materialise COMMANDS + HOOKS + MCP + LSP (the privilege gate runs
@@ -6830,6 +6898,10 @@ pub async fn build(
         shell_expansion: shell_expansion_provider,
         connect_copilot,
         oauth_connect_driver,
+        // P1-08 runtime `/add-dir` live-effect handles (captured before the
+        // orchestrator builder consumed the originals).
+        session_cwd: runtime_session_cwd,
+        mcp_registry: runtime_mcp_registry,
     })
 }
 
@@ -8004,6 +8076,49 @@ mod tests {
             rt.orchestrator.has_compaction(),
             "no CompactionOrchestrator"
         );
+    }
+
+    /// P1-08: a `--add-dir` directory must land in BOTH the file-tool trusted
+    /// set (`session_cwd.trusted_dirs`) AND the live MCP roots source
+    /// (`mcp_registry.additional_roots_snapshot`) at boot, and the two
+    /// runtime handles the CLI `/add-dir` effect uses must be exposed on the
+    /// `DesktopRuntime`. This pins the composition-root wiring the runtime add
+    /// builds on.
+    #[tokio::test]
+    async fn build_threads_add_dir_into_trusted_dirs_and_mcp_roots() {
+        let (tmp, mut cfg) = test_config(true);
+        // A real existing directory under the tempdir (must be absolute so
+        // `expand_trusted_dir` takes it verbatim, matching the value the TUI's
+        // `resolve_and_validate` produces).
+        let extra = tmp.path().join("extra");
+        std::fs::create_dir_all(&extra).expect("mkdir extra");
+        cfg.add_dir = vec![extra.clone()];
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        assert!(
+            rt.session_cwd.trusted_dirs().contains(&extra),
+            "--add-dir must widen the file-tool trusted set: {:?}",
+            rt.session_cwd.trusted_dirs(),
+        );
+        assert!(
+            rt.mcp_registry.additional_roots_snapshot().contains(&extra),
+            "--add-dir must seed the live MCP roots source: {:?}",
+            rt.mcp_registry.additional_roots_snapshot(),
+        );
+
+        // The runtime add itself: a NEW dir takes live effect + reports change;
+        // re-adding it is a no-op (jzn), and it lands in both surfaces.
+        let extra2 = tmp.path().join("extra2");
+        assert!(rt.session_cwd.add_trusted_dir(extra2.clone()));
+        assert!(rt.mcp_registry.add_root(extra2.clone()));
+        assert!(!rt.mcp_registry.add_root(extra2.clone()), "jzn dedupe");
+        assert!(rt.session_cwd.trusted_dirs().contains(&extra2));
+        assert!(rt.mcp_registry.additional_roots_snapshot().contains(&extra2));
     }
 
     /// The production-built `McpRegistry` must carry the OAuth seam

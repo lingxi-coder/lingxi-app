@@ -44,10 +44,56 @@ async fn spawn_mock() -> (String, MockState) {
     (format!("http://{addr}/mcp"), state)
 }
 
+/// Handler that stalls before responding, so a short fetch timeout aborts the
+/// POST before any response headers arrive.
+async fn slow_handler(Json(body): Json<Value>) -> Json<Value> {
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let id = body.get("id").cloned().unwrap_or(json!(0));
+    Json(json!({ "jsonrpc": "2.0", "id": id, "result": {"echo": "ok"} }))
+}
+
+async fn spawn_slow_mock() -> String {
+    let app = Router::new().route("/mcp", post(slow_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}/mcp")
+}
+
+/// `jHs`/`YJr`: a POST whose response-headers do not arrive within the fetch
+/// timeout is aborted and dropped, so no inbound frame is ever routed back and
+/// the awaiting JSON-RPC call never resolves. A generous outer bound (well above
+/// the 300ms handler delay) confirms the call was dropped, not merely slow.
+#[tokio::test]
+async fn connect_http_fetch_timeout_drops_slow_post() {
+    let url = spawn_slow_mock().await;
+    let conn = platform_common::connect_http(
+        &url,
+        None,
+        &HashMap::new(),
+        Some(std::time::Duration::from_millis(50)),
+    )
+    .await
+    .expect("connect_http should succeed");
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        conn.call::<_, Value>("ping", json!({"a": 1})),
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "the slow POST must be dropped by the 50ms fetch timeout — the call must \
+never resolve (got {outcome:?})"
+    );
+}
+
 #[tokio::test]
 async fn connect_http_sends_accept_and_content_type() {
     let (url, state) = spawn_mock().await;
-    let conn = platform_common::connect_http(&url, None, &HashMap::new())
+    let conn = platform_common::connect_http(&url, None, &HashMap::new(), None)
         .await
         .expect("connect_http should succeed");
 
@@ -87,6 +133,7 @@ async fn connect_http_includes_ide_auth_header_when_provided() {
         &url,
         Some("deadbeefdeadbeefdeadbeefdeadbeef"),
         &HashMap::new(),
+        None,
     )
     .await
     .expect("connect_http should succeed");

@@ -40,7 +40,7 @@ pub use identity::{
     ClientInfo, CLIENT_DESCRIPTION, CLIENT_INFO, CLIENT_NAME, CLIENT_TITLE, CLIENT_VERSION,
     MCP_WEBSITE_URL,
 };
-pub use inbound::{ElicitationCreateHandler, RootsListHandler};
+pub use inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
 pub use initialize_params::{ClientCapabilities, InitializeParams};
 pub use json_config::{
     load_mcp_json_with_precedence, load_mcp_servers, parse_global_config_mcp_servers,

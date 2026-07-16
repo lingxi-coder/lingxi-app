@@ -29,7 +29,7 @@ url = "2"
 regex = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "io-util", "net"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "io-util", "net", "test-util"] }
 serde_json.workspace = true
 bytes = { workspace = true }
 tempfile = "3"

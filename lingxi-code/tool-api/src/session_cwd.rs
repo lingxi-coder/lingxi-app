@@ -123,6 +123,34 @@ impl SessionCwd {
         }
     }
 
+    /// Add `dir` to the current trusted-directory set — keeping the cwd and
+    /// every existing trusted dir — and publish the widened pair via the same
+    /// atomic `ArcSwap` store as [`Self::swap`]. Returns `true` when the set
+    /// actually changed (the dir was not already trusted), `false` when it was
+    /// already present (a strict no-op: nothing is published).
+    ///
+    /// Backs the runtime `/add-dir` live effect (parity 2.1.207 P1-08): a
+    /// directory added mid-session becomes immediately accessible to the file
+    /// tools (`Read`/`Edit`/`Write`/`Glob`/`Grep`/`NotebookEdit`), which gate
+    /// on the allowed set read off [`Self::trusted_dirs`], WITHOUT a reboot —
+    /// matching claude-code's live `toolPermissionContext.additionalWorkingDirectories`
+    /// update. Unlike [`Self::swap`] this leaves the cwd untouched, so it does
+    /// NOT fire the on-swap callback or mirror the live-cwd cells (both key off
+    /// a cwd change, and none happened here).
+    pub fn add_trusted_dir(&self, dir: PathBuf) -> bool {
+        let cur = self.state.load();
+        if cur.trusted_dirs.iter().any(|d| d == &dir) {
+            return false;
+        }
+        let mut trusted = cur.trusted_dirs.clone();
+        trusted.push(dir);
+        self.state.store(Arc::new(CwdState {
+            cwd: cur.cwd.clone(),
+            trusted_dirs: trusted,
+        }));
+        true
+    }
+
     /// Register a callback invoked (with the new cwd) at the end of every
     /// [`SessionCwd::swap`]. No-op until called; replaces any prior callback.
     pub fn set_on_swap(&self, cb: Box<dyn Fn(&Path) + Send + Sync>) {
@@ -240,6 +268,76 @@ mod tests {
         let sc = SessionCwd::new(boot(), vec![boot()]);
         assert_eq!(sc.cwd(), boot());
         assert_eq!(sc.trusted_dirs(), vec![boot()]);
+    }
+
+    #[test]
+    fn add_trusted_dir_publishes_live_and_returns_true() {
+        // A runtime `/add-dir` add widens the trusted set immediately and
+        // reports the change, keeping the cwd + existing dirs.
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let extra = PathBuf::from("/extra");
+        assert!(
+            sc.add_trusted_dir(extra.clone()),
+            "adding a NEW dir must report a change"
+        );
+        assert_eq!(
+            sc.trusted_dirs(),
+            vec![boot(), extra],
+            "the new dir is appended after cwd/existing dirs"
+        );
+        assert_eq!(sc.cwd(), boot(), "cwd is untouched by add_trusted_dir");
+    }
+
+    #[test]
+    fn add_trusted_dir_dedupes_and_returns_false() {
+        // Re-adding a dir already in the set (including the cwd itself) is a
+        // strict no-op — nothing is published and no change is reported (the
+        // jzn-style change-compare the runtime effect keys the MCP
+        // roots/list_changed notification off).
+        let extra = PathBuf::from("/extra");
+        let sc = SessionCwd::new(boot(), vec![boot(), extra.clone()]);
+        assert!(
+            !sc.add_trusted_dir(extra.clone()),
+            "an already-trusted dir must report NO change"
+        );
+        assert!(
+            !sc.add_trusted_dir(boot()),
+            "the cwd is already trusted — re-adding it must report NO change"
+        );
+        assert_eq!(sc.trusted_dirs(), vec![boot(), extra]);
+    }
+
+    #[test]
+    fn add_trusted_dir_does_not_fire_on_swap_callback() {
+        // The cwd never changes on an add, so cwd-keyed cache invalidation
+        // (the on-swap callback) must NOT fire.
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        sc.set_on_swap(Box::new(move |_p: &Path| {
+            f.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(sc.add_trusted_dir(PathBuf::from("/extra")));
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "add_trusted_dir must not fire the cwd on-swap callback"
+        );
+    }
+
+    #[test]
+    fn add_trusted_dir_does_not_mirror_into_live_cell() {
+        // The live-cwd mirror cells track the cwd; an add leaves the cwd alone
+        // so a linked cell must be untouched.
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let cell: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(boot()));
+        sc.link_live_cwd(cell.clone());
+        assert!(sc.add_trusted_dir(PathBuf::from("/extra")));
+        assert_eq!(
+            *cell.lock().unwrap(),
+            boot(),
+            "add_trusted_dir must not perturb the linked live-cwd cell"
+        );
     }
 
     #[test]

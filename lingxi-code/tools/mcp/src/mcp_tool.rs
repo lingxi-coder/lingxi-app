@@ -805,7 +805,9 @@ impl Tool for MCPTool {
             }
             Err(e) => {
                 let kind = match &e {
-                    McpClientError::Timeout { .. } => "timeout",
+                    // Both the overall (`BHs`) and idle (`GLd`) timeouts are
+                    // timeout-family aborts (parity 2.1.207 P2-01 remainder).
+                    McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => "timeout",
                     _ => "rpc",
                 };
                 emit(
@@ -822,7 +824,9 @@ impl Tool for MCPTool {
                 // (M2-02b lock); propagate verbatim. For other errors, wrap
                 // with a clear MCPTool prefix.
                 Err(match &e {
-                    McpClientError::Timeout { .. } => ToolError::Io(e.to_string()),
+                    McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => {
+                        ToolError::Io(e.to_string())
+                    }
                     _ => ToolError::Io(format!("MCPTool: server {server:?} rpc error: {e}")),
                 })
             }

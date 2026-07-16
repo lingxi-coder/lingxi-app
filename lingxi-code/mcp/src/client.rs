@@ -14,11 +14,11 @@ use tokio::sync::RwLock;
 use serde::Deserialize;
 use traits::{
     McpPromptDto, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    ServerCapabilitiesDto,
+    McpTransportKind, ServerCapabilitiesDto,
 };
 
 use crate::hook_dispatch::HookDispatcher;
-use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
+use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
 use crate::initialize_params::InitializeParams;
 
 /// Maximum character length for free-form text fields sourced from MCP
@@ -243,6 +243,12 @@ pub struct McpClient {
     /// `true`, every tool this client lists is marked `always_load` so it is
     /// never deferred behind tool search.
     config_always_load: bool,
+    /// Transport kind of the underlying connection, feeding the `GLd` idle-timeout
+    /// resolver ([`mcp_tool_idle_timeout_for`]): stdio → 30 min default, remote →
+    /// 5 min, in-process (IDE/SDK) → no idle timeout. Defaults to
+    /// [`McpTransportKind::Stdio`] (claude-code's `e?.type ?? "stdio"`) until the
+    /// registry sets the real kind via [`Self::with_transport_kind`].
+    transport_kind: McpTransportKind,
 }
 
 impl McpClient {
@@ -287,20 +293,33 @@ impl McpClient {
         connection: Arc<jsonrpc::Connection>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
-        Self::with_roots(server_name, cwd, Vec::new(), connection, dispatcher).await
+        Self::with_roots(
+            server_name,
+            cwd,
+            new_shared_roots(Vec::new()),
+            connection,
+            dispatcher,
+        )
+        .await
     }
 
-    /// Like [`Self::with_hook_dispatcher`], but also advertises `additional_roots`
-    /// alongside `cwd` on `roots/list` (the session's additional working
-    /// directories — settings `additionalDirectories` union CLI `--add-dir`).
+    /// Like [`Self::with_hook_dispatcher`], but also advertises the session's
+    /// LIVE additional working directories alongside `cwd` on `roots/list`
+    /// (settings `additionalDirectories` union CLI `--add-dir`, plus any
+    /// runtime `/add-dir`).
+    ///
+    /// `additional_roots` is a shared [`SharedRoots`] cell, NOT a snapshot: the
+    /// registered [`RootsListHandler`] reads it fresh on every `roots/list`, so
+    /// a directory pushed into the cell at runtime (paired with
+    /// [`Self::send_roots_list_changed`]) is reflected without a reconnect.
     ///
     /// Matches claude-code 2.1.207 `r1d()`, which returns `roots/list` as
     /// `[cwd, ...additionalWorkingDirectories]` deduped by file URL. Passing an
-    /// empty `additional_roots` is byte-identical to [`Self::with_hook_dispatcher`].
+    /// empty cell is byte-identical to [`Self::with_hook_dispatcher`].
     pub async fn with_roots(
         server_name: impl Into<String>,
         cwd: PathBuf,
-        additional_roots: Vec<PathBuf>,
+        additional_roots: SharedRoots,
         connection: Arc<jsonrpc::Connection>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
@@ -332,6 +351,7 @@ impl McpClient {
             server_instructions: RwLock::new(None),
             config_timeout_ms: None,
             config_always_load: false,
+            transport_kind: McpTransportKind::Stdio,
         }
     }
 
@@ -346,6 +366,18 @@ impl McpClient {
     pub fn with_config_options(mut self, timeout_ms: Option<u64>, always_load: bool) -> Self {
         self.config_timeout_ms = timeout_ms;
         self.config_always_load = always_load;
+        self
+    }
+
+    /// Builder that records the connection's transport kind so the `GLd`
+    /// idle-timeout resolver ([`mcp_tool_idle_timeout_for`]) picks the right
+    /// silence-window default (stdio 30 min / remote 5 min / in-process none) and
+    /// caps it by the per-call [`mcp_tool_timeout_for`] ceiling. Defaults to
+    /// [`McpTransportKind::Stdio`] when not called (byte-identical to claude-code's
+    /// `e?.type ?? "stdio"`).
+    #[must_use]
+    pub fn with_transport_kind(mut self, kind: McpTransportKind) -> Self {
+        self.transport_kind = kind;
         self
     }
 
@@ -621,10 +653,28 @@ impl McpClient {
             );
         }
 
+        // P2-01 (`GLd`): the per-call idle/silence timeout. A stdio server may
+        // stay silent (no response, no progress) for at most 30 min, a remote one
+        // 5 min, before the watchdog aborts — capped by the overall `BHs` ceiling
+        // and disabled (`ZERO`) for the in-process transports. The idle window is
+        // reset by inbound `notifications/progress` (claude-code onprogress:
+        // `v = Date.now()`).
+        let idle_timeout = mcp_tool_idle_timeout_for(self.config_timeout_ms, self.transport_kind);
+        let watchdog_active = !idle_timeout.is_zero();
+        // Last-activity instant shared with the progress listener; the watchdog
+        // measures silence against it. Seeded at "now" (the call is about to fly).
+        // On the tokio clock so `sleep`-driven watchdog checks and `elapsed`
+        // measurements agree (and paused-time tests are deterministic).
+        let last_activity = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+
         // MCP.4: subscribe to inbound notifications BEFORE the request is sent
         // (so no early `notifications/progress` is missed) and spawn a forwarder
-        // matching by the minted `progressToken`. Only wired when both a
-        // callback and a toolUseId exist (the `onProgress && toolUseId` gate).
+        // matching by the minted `progressToken`. The `progressToken` is minted
+        // (and stamped into `_meta`, altering the outgoing request body) ONLY when
+        // both a callback and a toolUseId exist (the `onProgress && toolUseId`
+        // gate — outgoing request-body parity is locked to that surface). When a
+        // token IS stamped, the listener also resets the idle watchdog on every
+        // matching progress note.
         let progress_active = on_progress.is_some() && tool_use_id.is_some();
         let forwarder = if progress_active {
             // The MCP SDK uses the outgoing request id as the progressToken; the
@@ -637,6 +687,7 @@ impl McpClient {
             meta.insert("progressToken".to_string(), token.clone());
             let callback = on_progress.expect("progress_active implies Some(callback)");
             let mut notifications = self.connection.notifications();
+            let activity = last_activity.clone();
             Some(tokio::spawn(async move {
                 loop {
                     match notifications.recv().await {
@@ -649,6 +700,11 @@ impl McpClient {
                             };
                             if p.get("progressToken") != Some(&token) {
                                 continue;
+                            }
+                            // Reset the idle watchdog: a matching progress note is
+                            // liveness (claude-code onprogress: `v = Date.now()`).
+                            if let Ok(mut a) = activity.lock() {
+                                *a = tokio::time::Instant::now();
                             }
                             // SDK `onprogress` payload: `{progress, total?, message?}`
                             // (`client.ts:3109-3111`).
@@ -697,19 +753,45 @@ impl McpClient {
             .connection
             .call::<_, ToolCallResponse>("tools/call", params);
 
-        let outcome = match tokio::time::timeout(timeout, fut).await {
-            Err(_elapsed) => Err(McpClientError::Timeout {
-                server: self.server_name.clone(),
-                tool: tool_name,
-                secs,
-            }),
-            Ok(Err(e)) => Err(McpClientError::Rpc(e.to_string())),
-            Ok(Ok(resp)) => Ok(McpToolResultDto {
-                content: resp.content,
-                is_error: resp.is_error,
-                meta: resp.meta,
-                structured_content: resp.structured_content,
-            }),
+        // Race the call against the overall `BHs` timeout and — when enabled —
+        // the `GLd` idle watchdog. When the idle watchdog is disabled (`ZERO`)
+        // the single-timeout path is byte-identical to before.
+        let outcome = if watchdog_active {
+            let server = self.server_name.clone();
+            let idle_tool = tool_name.clone();
+            tokio::select! {
+                biased;
+                r = tokio::time::timeout(timeout, fut) => match r {
+                    Err(_elapsed) => Err(McpClientError::Timeout {
+                        server: self.server_name.clone(),
+                        tool: tool_name,
+                        secs,
+                    }),
+                    Ok(Err(e)) => Err(McpClientError::Rpc(e.to_string())),
+                    Ok(Ok(resp)) => Ok(McpToolResultDto {
+                        content: resp.content,
+                        is_error: resp.is_error,
+                        meta: resp.meta,
+                        structured_content: resp.structured_content,
+                    }),
+                },
+                idle = idle_watchdog(idle_timeout, last_activity.clone(), server, idle_tool) => idle,
+            }
+        } else {
+            match tokio::time::timeout(timeout, fut).await {
+                Err(_elapsed) => Err(McpClientError::Timeout {
+                    server: self.server_name.clone(),
+                    tool: tool_name,
+                    secs,
+                }),
+                Ok(Err(e)) => Err(McpClientError::Rpc(e.to_string())),
+                Ok(Ok(resp)) => Ok(McpToolResultDto {
+                    content: resp.content,
+                    is_error: resp.is_error,
+                    meta: resp.meta,
+                    structured_content: resp.structured_content,
+                }),
+            }
         };
 
         // The call settled — stop forwarding progress for this request.
@@ -1057,6 +1139,202 @@ fn resolve_tool_timeout(env_value: Option<&str>) -> std::time::Duration {
     resolve_tool_timeout_bhs(None, env_value)
 }
 
+/// Default `tools/call` **idle** timeout for a stdio server — claude-code
+/// `RMy = 1_800_000` (30 min). The idle timeout aborts a call after this many
+/// ms of *silence* (no response and no `notifications/progress`), independent of
+/// the overall [`mcp_tool_timeout_for`] ceiling.
+const MCP_TOOL_IDLE_TIMEOUT_STDIO_MS: u64 = 1_800_000;
+/// Default `tools/call` idle timeout for a *remote* (sse/http/ws) server —
+/// claude-code `AMy = 300_000` (5 min).
+const MCP_TOOL_IDLE_TIMEOUT_REMOTE_MS: u64 = 300_000;
+
+/// Cadence at which the idle watchdog samples the silence deadline — claude-code
+/// arms its silence check on a `setInterval(..., 30000)`, so the *effective*
+/// idle-abort granularity is 30s (the first sample can only fire one interval
+/// in). Mirrored here as the watchdog's poll interval.
+const MCP_TOOL_IDLE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Idle/silence watchdog for a single `tools/call`. Samples `last_activity`
+/// every [`MCP_TOOL_IDLE_CHECK_INTERVAL`]; once the silence since the last
+/// inbound `notifications/progress` (or the call start) exceeds `idle_timeout`,
+/// resolves to [`McpClientError::IdleTimeout`]. Only ever resolves to `Err`
+/// (never `Ok`) — it is one arm of the `tools/call` race in
+/// [`McpClient::call_tool_with_meta`]; when the call responds first this future
+/// is dropped. Mirrors claude-code's silence check inside the 30s watchdog
+/// `setInterval` (abort with the `"MCP tool idle timeout"` `Bn`).
+async fn idle_watchdog(
+    idle_timeout: std::time::Duration,
+    last_activity: Arc<std::sync::Mutex<tokio::time::Instant>>,
+    server: String,
+    tool: String,
+) -> Result<McpToolResultDto, McpClientError> {
+    loop {
+        tokio::time::sleep(MCP_TOOL_IDLE_CHECK_INTERVAL).await;
+        let elapsed = last_activity
+            .lock()
+            .map(|a| a.elapsed())
+            .unwrap_or_default();
+        // `Date.now() - v > b` — strictly greater, matching the `GLd` watchdog.
+        if elapsed > idle_timeout {
+            return Err(McpClientError::IdleTimeout {
+                server,
+                tool,
+                // `B = Math.floor((Date.now() - v) / 1000)`.
+                secs: elapsed.as_secs(),
+            });
+        }
+    }
+}
+
+/// Resolve the per-call **idle** timeout — a 1:1 port of claude-code `GLd`
+/// (`services/mcp/client.ts`):
+///
+/// ```js
+/// function GLd(e){
+///   let t=e?.type??"stdio";
+///   if(xMy.has(t))return 0;                       // xMy = {"sse-ide","ws-ide","sdk"}
+///   let r=be.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT ?? (t==="stdio"?RMy:AMy);
+///   if(r<=0)return 0;                             // env 0 (or negative) disables
+///   let n=e?.timeout!==void 0 && e.timeout>=1000 ? e.timeout : 0;
+///   return Math.min(Math.max(r,n,1000), BHs(e))   // capped by the per-call ceiling
+/// }
+/// ```
+///
+/// Returns `0` when the idle timeout is disabled: for the in-process transports
+/// (`SseIde`/`SdkControl`/`InProcess`, mirroring `xMy`), or when
+/// `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` parses to `<= 0`. Otherwise the resolved
+/// idle window is `max(env-or-default, config.timeout, 1000)` clamped **down** to
+/// the [`mcp_tool_timeout_for`] (`BHs`) ceiling, so it never exceeds the hard
+/// call timeout.
+#[must_use]
+pub fn mcp_tool_idle_timeout_for(
+    config_timeout_ms: Option<u64>,
+    transport_kind: McpTransportKind,
+) -> std::time::Duration {
+    resolve_idle_timeout_gld(
+        config_timeout_ms,
+        transport_kind,
+        std::env::var("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT").ok().as_deref(),
+        std::env::var("MCP_TOOL_TIMEOUT").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`mcp_tool_idle_timeout_for`] (config + env injected for
+/// testability); see that function for the `GLd` reference.
+fn resolve_idle_timeout_gld(
+    config_timeout_ms: Option<u64>,
+    transport_kind: McpTransportKind,
+    idle_env: Option<&str>,
+    tool_timeout_env: Option<&str>,
+) -> std::time::Duration {
+    // `xMy.has(type)` — the in-process transports carry no idle timeout.
+    if transport_kind_is_in_process(transport_kind) {
+        return std::time::Duration::ZERO;
+    }
+    // `be.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT ?? (stdio ? RMy : AMy)`. The env
+    // accessor parses a base-10 integer; a missing / non-numeric value falls to
+    // the transport default. A value that parses `<= 0` disables the idle timeout.
+    let r = match idle_env.and_then(parse_int_signed_base10_prefix) {
+        Some(v) => v,
+        None => i128::from(if matches!(transport_kind, McpTransportKind::Stdio) {
+            MCP_TOOL_IDLE_TIMEOUT_STDIO_MS
+        } else {
+            MCP_TOOL_IDLE_TIMEOUT_REMOTE_MS
+        }),
+    };
+    if r <= 0 {
+        return std::time::Duration::ZERO;
+    }
+    // `r > 0` here, so narrowing to the ms domain is lossless (an absurdly large
+    // env value saturates at the BHs ceiling anyway).
+    let r = u64::try_from(r).unwrap_or(MCP_TOOL_TIMEOUT_MAX_MS);
+    // `n = config.timeout>=1000 ? config.timeout : 0`.
+    let n = config_timeout_ms
+        .filter(|&ms| ms >= MCP_TOOL_TIMEOUT_MIN_MS)
+        .unwrap_or(0);
+    // `Math.min(Math.max(r, n, 1000), BHs(e))`. The BHs ceiling is always
+    // `<= WLd` (i32::MAX ms), so the `u128 -> u64` narrowing never truncates.
+    let ceiling = u64::try_from(
+        resolve_tool_timeout_bhs(config_timeout_ms, tool_timeout_env).as_millis(),
+    )
+    .unwrap_or(MCP_TOOL_TIMEOUT_MAX_MS);
+    let floor = r.max(n).max(MCP_TOOL_TIMEOUT_MIN_MS);
+    std::time::Duration::from_millis(floor.min(ceiling))
+}
+
+/// The in-process MCP transports that carry no idle timeout — mirrors
+/// claude-code's `xMy = new Set(["sse-ide","ws-ide","sdk"])` (`GLd`). These are
+/// same-process bridges (IDE / SDK control), for which a silence watchdog is
+/// meaningless.
+fn transport_kind_is_in_process(kind: McpTransportKind) -> bool {
+    matches!(
+        kind,
+        McpTransportKind::SseIde | McpTransportKind::SdkControl | McpTransportKind::InProcess
+    )
+}
+
+/// Lower clamp / default for the HTTP non-GET **fetch** timeout — claude-code
+/// `FLd = 60_000` (`jHs`). When no config `timeout` and no `MCP_TOOL_TIMEOUT`
+/// env override resolve, the fetch timeout is exactly this floor.
+const MCP_HTTP_FETCH_TIMEOUT_FLOOR_MS: u64 = 60_000;
+
+/// Resolve the Streamable-HTTP **non-GET fetch** timeout — a 1:1 port of
+/// claude-code `jHs` (`services/mcp/client.ts`):
+///
+/// ```js
+/// function jHs(e){
+///   let t=parseInt(process.env.MCP_TOOL_TIMEOUT||"",10),
+///       n=(e?.timeout!==void 0 && e.timeout>=1000 ? e.timeout : void 0) ?? (t>0 ? t : void 0);
+///   return n!==void 0 ? Math.min(Math.max(n,FLd),WLd) : FLd   // FLd=60000, WLd=2147483647
+/// }
+/// ```
+///
+/// This bounds the time-to-response-*headers* of an HTTP POST (the `fetch`
+/// resolves once headers arrive; a streaming SSE body is read afterwards without
+/// this bound — claude-code clears the timer in the `finally` of `await
+/// fetch(...)`). Precedence: config `timeout` (`>= 1000ms`) → `MCP_TOOL_TIMEOUT`
+/// env (`> 0`) → `60_000`. When either resolves, the value is clamped to
+/// `[60_000, 2_147_483_647]`; otherwise it is exactly `60_000`.
+#[must_use]
+pub fn mcp_http_fetch_timeout_for(config_timeout_ms: Option<u64>) -> std::time::Duration {
+    resolve_http_fetch_timeout_jhs(
+        config_timeout_ms,
+        std::env::var("MCP_TOOL_TIMEOUT").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`mcp_http_fetch_timeout_for`] (config + env injected for
+/// testability); see that function for the `jHs` reference.
+fn resolve_http_fetch_timeout_jhs(
+    config_timeout_ms: Option<u64>,
+    env_value: Option<&str>,
+) -> std::time::Duration {
+    let n = config_timeout_ms
+        .filter(|&ms| ms >= MCP_TOOL_TIMEOUT_MIN_MS)
+        .or_else(|| env_value.and_then(parse_int_base10_prefix).filter(|&ms| ms > 0));
+    let ms = match n {
+        Some(v) => v.clamp(MCP_HTTP_FETCH_TIMEOUT_FLOOR_MS, MCP_TOOL_TIMEOUT_MAX_MS),
+        None => MCP_HTTP_FETCH_TIMEOUT_FLOOR_MS,
+    };
+    std::time::Duration::from_millis(ms)
+}
+
+/// JS `parseInt(s, 10)` allowing a leading `-` (the idle-timeout env may be set
+/// to a negative or `0` value to *disable* the watchdog, which
+/// [`resolve_idle_timeout_gld`] treats via its `r <= 0` guard). Returns `None`
+/// when no digits lead (JS `NaN` → the `??` default). Widened to `i128` so a
+/// negative parses distinctly from absent.
+fn parse_int_signed_base10_prefix(s: &str) -> Option<i128> {
+    let t = s.trim_start();
+    let (neg, t) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
+    let v = digits.parse::<i128>().ok()?;
+    Some(if neg { -v } else { v })
+}
+
 /// JS `parseInt(s, 10)` for the non-negative case: skip leading ASCII
 /// whitespace, accept an optional `+`, consume leading base-10 digits, and
 /// ignore any trailing characters (`"100abc"` → `100`). Returns `None` when no
@@ -1140,6 +1418,24 @@ pub enum McpClientError {
         /// Tool name from the failing `tools/call` invocation.
         tool: String,
         /// Configured timeout (seconds).
+        secs: u64,
+    },
+    /// Tool call produced no response and no `notifications/progress` for the
+    /// resolved idle window ([`mcp_tool_idle_timeout_for`], `GLd`), so the
+    /// silence watchdog aborted it. Message format is wire-locked to
+    /// claude-code's idle-timeout `Bn(...)` string ("MCP tool idle timeout").
+    #[error(
+        "MCP server \"{server}\" tool \"{tool}\" sent no response or progress for {secs}s; \
+aborting. If this server is configured in your MCP settings, set a per-server \"timeout\" \
+(ms) to allow longer silent runs for just this server; otherwise set \
+CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
+    )]
+    IdleTimeout {
+        /// Logical MCP server name from [`McpClient::new`].
+        server: String,
+        /// Tool name from the stalled `tools/call` invocation.
+        tool: String,
+        /// Elapsed idle seconds at abort (`floor(idle_ms / 1000)`).
         secs: u64,
     },
     /// Underlying JSON-RPC transport returned an error response or framing
@@ -1254,7 +1550,7 @@ mod constructor_tests {
         let _client = McpClient::with_roots(
             "filesystem",
             std::path::PathBuf::from("/proj"),
-            vec![std::path::PathBuf::from("/tmp/extra")],
+            crate::new_shared_roots(vec![std::path::PathBuf::from("/tmp/extra")]),
             conn,
             None,
         )
@@ -1273,6 +1569,62 @@ mod constructor_tests {
         assert!(
             text.contains(r#""roots":[{"uri":"file:///proj"},{"uri":"file:///tmp/extra"}]"#),
             "roots/list must advertise cwd + additional dir: {text}",
+        );
+    }
+
+    #[tokio::test]
+    async fn roots_list_reflects_a_runtime_add_without_reconnect() {
+        // Parity 2.1.207 P1-08: a directory pushed into the SHARED roots cell
+        // AFTER the client is built (a runtime `/add-dir`) shows up on the very
+        // next `roots/list` the server issues — the handler reads the cell live,
+        // so no reconnect / rebuild is needed.
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let roots = crate::new_shared_roots(Vec::new());
+        let _client = McpClient::with_roots(
+            "filesystem",
+            std::path::PathBuf::from("/proj"),
+            roots.clone(),
+            conn,
+            None,
+        )
+        .await;
+
+        let issue = |peer_tx: tokio::sync::mpsc::Sender<Bytes>| async move {
+            let req = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"roots/list\"}\n";
+            peer_tx
+                .send(Bytes::from_static(req))
+                .await
+                .expect("send into broker");
+        };
+
+        // First roots/list: cwd-only.
+        issue(peer_tx.clone()).await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("response within timeout")
+            .expect("frame was sent");
+        let text = std::str::from_utf8(&frame).expect("utf-8 frame");
+        assert!(
+            text.contains(r#""roots":[{"uri":"file:///proj"}]"#),
+            "initial roots/list is cwd-only: {text}",
+        );
+
+        // Runtime add.
+        roots
+            .write()
+            .unwrap()
+            .push(std::path::PathBuf::from("/extra"));
+
+        // Second roots/list now includes the live-added dir.
+        issue(peer_tx.clone()).await;
+        let frame2 = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("response within timeout")
+            .expect("frame was sent");
+        let text2 = std::str::from_utf8(&frame2).expect("utf-8 frame");
+        assert!(
+            text2.contains(r#""roots":[{"uri":"file:///proj"},{"uri":"file:///extra"}]"#),
+            "roots/list must reflect the runtime add without reconnect: {text2}",
         );
     }
 
@@ -1688,10 +2040,12 @@ mod constructor_tests {
 #[cfg(test)]
 mod timeout_tests {
     use super::{
-        parse_int_base10_prefix, resolve_tool_timeout, resolve_tool_timeout_bhs,
+        parse_int_base10_prefix, parse_int_signed_base10_prefix, resolve_http_fetch_timeout_jhs,
+        resolve_idle_timeout_gld, resolve_tool_timeout, resolve_tool_timeout_bhs,
         DEFAULT_CALL_TOOL_TIMEOUT,
     };
     use std::time::Duration;
+    use traits::McpTransportKind;
 
     #[test]
     fn default_value_is_byte_locked_to_claude_code() {
@@ -1780,6 +2134,192 @@ mod timeout_tests {
             resolve_tool_timeout_bhs(None, None),
             Duration::from_millis(100_000_000)
         );
+    }
+
+    // ── GLd idle-timeout resolver (parity 2.1.207 P2-01 remainder) ──────────
+
+    #[test]
+    fn idle_default_is_30min_for_stdio_5min_for_remote() {
+        // No env, no config timeout → the transport default (RMy / AMy), which is
+        // below the 1e8 BHs ceiling so it passes through.
+        assert_eq!(
+            resolve_idle_timeout_gld(None, McpTransportKind::Stdio, None, None),
+            Duration::from_millis(1_800_000)
+        );
+        for kind in [
+            McpTransportKind::Sse,
+            McpTransportKind::Http,
+            McpTransportKind::WebSocket,
+        ] {
+            assert_eq!(
+                resolve_idle_timeout_gld(None, kind, None, None),
+                Duration::from_millis(300_000),
+                "remote transport {kind:?} idle default must be 5 min",
+            );
+        }
+    }
+
+    #[test]
+    fn idle_is_zero_for_in_process_transports() {
+        // xMy = {"sse-ide","ws-ide","sdk"} → no idle timeout. lingxi's in-process
+        // kinds (SseIde / SdkControl / InProcess) mirror that set.
+        for kind in [
+            McpTransportKind::SseIde,
+            McpTransportKind::SdkControl,
+            McpTransportKind::InProcess,
+        ] {
+            assert_eq!(
+                resolve_idle_timeout_gld(Some(600_000), kind, Some("120000"), None),
+                Duration::ZERO,
+                "in-process transport {kind:?} must have NO idle timeout",
+            );
+        }
+    }
+
+    #[test]
+    fn idle_env_overrides_default_and_zero_disables() {
+        // Env `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` beats the transport default.
+        assert_eq!(
+            resolve_idle_timeout_gld(None, McpTransportKind::Stdio, Some("120000"), None),
+            Duration::from_millis(120_000)
+        );
+        // Env <= 0 disables the watchdog entirely (`if(r<=0)return 0`).
+        assert_eq!(
+            resolve_idle_timeout_gld(None, McpTransportKind::Stdio, Some("0"), None),
+            Duration::ZERO
+        );
+        assert_eq!(
+            resolve_idle_timeout_gld(None, McpTransportKind::Http, Some("-1"), None),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn idle_floor_is_max_of_env_config_and_1000_capped_by_bhs() {
+        // `Math.min(Math.max(r, n, 1000), BHs(e))`. config.timeout raises the
+        // floor when it exceeds the env/default (n = config when >= 1000).
+        // Remote default r=300_000, config=600_000 → floor 600_000 (< 1e8 ceiling).
+        assert_eq!(
+            resolve_idle_timeout_gld(Some(600_000), McpTransportKind::Http, None, None),
+            Duration::from_millis(600_000)
+        );
+        // The idle window is capped DOWN by the BHs ceiling. With config.timeout
+        // = 5000, BHs = 5000, and the stdio default r = 1_800_000, so the idle
+        // window collapses to the 5000ms ceiling.
+        assert_eq!(
+            resolve_idle_timeout_gld(Some(5_000), McpTransportKind::Stdio, None, None),
+            Duration::from_millis(5_000)
+        );
+    }
+
+    #[test]
+    fn idle_signed_parse_distinguishes_absent_from_nonpositive() {
+        assert_eq!(parse_int_signed_base10_prefix(""), None); // absent → default applies
+        assert_eq!(parse_int_signed_base10_prefix("abc"), None);
+        assert_eq!(parse_int_signed_base10_prefix("0"), Some(0));
+        assert_eq!(parse_int_signed_base10_prefix("-1"), Some(-1));
+        assert_eq!(parse_int_signed_base10_prefix("  90000x"), Some(90_000));
+        assert_eq!(parse_int_signed_base10_prefix("+42"), Some(42));
+    }
+
+    // ── jHs HTTP non-GET fetch timeout (parity 2.1.207 P2-01 remainder) ─────
+
+    #[test]
+    fn fetch_timeout_defaults_to_60s_floor() {
+        // No config, no env → exactly FLd = 60_000 (NOT the 1e8 BHs default).
+        assert_eq!(
+            resolve_http_fetch_timeout_jhs(None, None),
+            Duration::from_millis(60_000)
+        );
+        // Sub-floor config/env is clamped UP to 60_000.
+        assert_eq!(
+            resolve_http_fetch_timeout_jhs(Some(5_000), None),
+            Duration::from_millis(60_000)
+        );
+        assert_eq!(
+            resolve_http_fetch_timeout_jhs(None, Some("30000")),
+            Duration::from_millis(60_000)
+        );
+    }
+
+    #[test]
+    fn fetch_timeout_config_wins_over_env_and_clamps_to_i32_max() {
+        // config.timeout (>= 1000) beats env, above the 60s floor → verbatim.
+        assert_eq!(
+            resolve_http_fetch_timeout_jhs(Some(90_000), Some("120000")),
+            Duration::from_millis(90_000)
+        );
+        // config < 1000 is ignored → env consulted (env 120000 → 120000).
+        assert_eq!(
+            resolve_http_fetch_timeout_jhs(Some(500), Some("120000")),
+            Duration::from_millis(120_000)
+        );
+        // Upper clamp WLd = 2_147_483_647.
+        assert_eq!(
+            resolve_http_fetch_timeout_jhs(Some(9_999_999_999), None),
+            Duration::from_millis(2_147_483_647)
+        );
+    }
+
+    // ── idle watchdog behavior (parity 2.1.207 P2-01 remainder) ─────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watchdog_aborts_after_silence_window() {
+        use super::{idle_watchdog, McpClientError};
+        use std::sync::{Arc, Mutex};
+
+        let last = Arc::new(Mutex::new(tokio::time::Instant::now()));
+        let wd = tokio::spawn(idle_watchdog(
+            Duration::from_millis(1_000),
+            last.clone(),
+            "srv".to_string(),
+            "read".to_string(),
+        ));
+        // Let the watchdog reach its first 30s sample, then advance one interval:
+        // elapsed (~31s) exceeds the 1s idle window → abort.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+
+        let err = wd.await.expect("watchdog join").expect_err("must abort");
+        match err {
+            McpClientError::IdleTimeout { server, tool, secs } => {
+                assert_eq!(server, "srv");
+                assert_eq!(tool, "read");
+                assert!(secs >= 30, "elapsed idle secs floor was {secs}");
+            }
+            other => panic!("expected IdleTimeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watchdog_holds_while_activity_is_fresh() {
+        use super::idle_watchdog;
+        use std::sync::{Arc, Mutex};
+
+        // A 90s idle window (three 30s ticks). One tick of silence (31s) is well
+        // under the window, so the watchdog must NOT have fired yet.
+        let last = Arc::new(Mutex::new(tokio::time::Instant::now()));
+        let wd = tokio::spawn(idle_watchdog(
+            Duration::from_secs(90),
+            last.clone(),
+            "srv".to_string(),
+            "read".to_string(),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert!(!wd.is_finished(), "watchdog must not abort inside its window");
+
+        // Liveness (a progress note) resets the timer; another sub-window tick
+        // still must not fire.
+        *last.lock().unwrap() = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !wd.is_finished(),
+            "a reset within the window must keep the call alive"
+        );
+        wd.abort();
     }
 }
 

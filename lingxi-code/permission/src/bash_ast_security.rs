@@ -196,6 +196,188 @@ pub(crate) const SAFE_ENV_VARS: &[&str] = &[
 /// BashTool shell; a placeholder would lie).
 pub(crate) const SPECIAL_VAR_NAMES: &[&str] = &["?", "$", "!", "#", "0", "-"];
 
+// ── Dangerous variable-name battery (TS `ntg`/`Y3i`/`GVc`, `O3i`/`Itt`) ──
+
+/// TS `ntg`: lowercase exec-influencing / shell-behavior var names, matched
+/// case-INSENSITIVELY by [`o3i`]. Membership via lowercased `.contains`.
+pub(crate) const DANGEROUS_VAR_NTG: &[&str] = &[
+    "path",
+    "home",
+    "tmpprefix",
+    "bash_env",
+    "env",
+    "cdpath",
+    "globignore",
+    "shell",
+    "fpath",
+    "bash_loadables_path",
+    "module_path",
+    "manpath",
+    "mailpath",
+    "readnullcmd",
+    "nullcmd",
+    "histfile",
+    "zdotdir",
+    "functions",
+    "commands",
+    "aliases",
+    "galiases",
+    "saliases",
+    "lang",
+    "language",
+    "lc_all",
+    "lc_ctype",
+    "lc_collate",
+    "lc_messages",
+    "lc_numeric",
+    "lc_time",
+    "histchars",
+    "textdomain",
+    "textdomaindir",
+];
+
+/// TS `Y3i`: integer-attribute / volatile shell vars matched by EXACT case
+/// (part of the [`itt`] battery).
+pub(crate) const DANGEROUS_VAR_Y3I: &[&str] = &[
+    "RANDOM",
+    "SECONDS",
+    "LINENO",
+    "OPTIND",
+    "MAILCHECK",
+    "HISTCMD",
+    "SRANDOM",
+    "EPOCHSECONDS",
+    "EPOCHREALTIME",
+    "COLUMNS",
+    "LINES",
+    "SHLVL",
+    "ERRNO",
+    "TMOUT",
+    "HISTSIZE",
+    "SAVEHIST",
+    "TRY_BLOCK_ERROR",
+    "TRY_BLOCK_INTERRUPT",
+    "KEYTIMEOUT",
+    "LISTMAX",
+    "LOGCHECK",
+    "PERIOD",
+    "FUNCNEST",
+    "UID",
+    "EUID",
+    "GID",
+    "EGID",
+    "ZLE_RPROMPT_INDENT",
+    "MBEGIN",
+    "MEND",
+    "PPID",
+    "ARGC",
+    "ZSH_SUBSHELL",
+    "TTYIDLE",
+    "status",
+];
+
+/// TS `GVc`: generally-volatile shell vars whose runtime value cannot be a
+/// tracked literal (gated FIRST in [`resolve_simple_expansion`] and used to
+/// reject dangerous loop variables). Case-sensitive (holds both `REPLY` and
+/// `reply`, etc.).
+#[allow(dead_code)] // consumed by resolve_simple_expansion / loop-var guard (later layers)
+pub(crate) const VOLATILE_VARS_GVC: &[&str] = &[
+    "_",
+    "RANDOM",
+    "SECONDS",
+    "LINENO",
+    "BASH_COMMAND",
+    "FUNCNAME",
+    "EPOCHSECONDS",
+    "EPOCHREALTIME",
+    "SRANDOM",
+    "BASHPID",
+    "REPLY",
+    "reply",
+    "PIPESTATUS",
+    "pipestatus",
+    "BASH_SOURCE",
+    "DIRSTACK",
+    "GROUPS",
+    "BASH_ARGV",
+    "BASH_ARGC",
+    "BASH_SUBSHELL",
+    "BASH_LINENO",
+    "BASH_REMATCH",
+    "MATCH",
+    "match",
+    "MBEGIN",
+    "MEND",
+    "mbegin",
+    "mend",
+    "OPTARG",
+    "OPTIND",
+    "argv",
+    "FIGNORE",
+    "fignore",
+    "PSVAR",
+    "psvar",
+    "WATCH",
+    "watch",
+    "HISTCHARS",
+    "histchars",
+    "PS1",
+    "PROMPT",
+    "prompt",
+    "PS2",
+    "PROMPT2",
+    "PS3",
+    "PROMPT3",
+    "PS4",
+    "PROMPT4",
+    "RPS1",
+    "RPROMPT",
+    "RPS2",
+    "RPROMPT2",
+];
+
+/// TS `H3i`: command-prefix WRAPPERS stripped by the [`xeg`] var-write pre-scan.
+pub(crate) const XEG_WRAPPERS: &[&str] = &["command", "builtin", "noglob", "nocorrect", "time"];
+
+/// TS `qVc`: declare-family assignment builtins whose `NAME=value` operands
+/// write shell variables (used by [`xeg`]).
+pub(crate) const XEG_ASSIGN_BUILTINS: &[&str] =
+    &["declare", "typeset", "local", "export", "readonly"];
+
+/// TS `jVc`: special builtins whose PRECEDING `VAR=value` env assignments persist
+/// in the current shell (used by [`xeg`]).
+pub(crate) const XEG_SPECIAL_BUILTINS: &[&str] = &[
+    ":", "break", "continue", "return", "exit", "shift", "times", "set", "export", "readonly",
+    "unset",
+];
+
+/// TS `itg`: `print` short options that consume a following value operand
+/// (used by [`xeg`]'s `print -v NAME` handler).
+pub(crate) const XEG_PRINT_VALUE_FLAGS: &[&str] = &["-f", "-C", "-x", "-X", "-u"];
+
+/// TS `O3i` (`ast.ts`): a lowercase-matched exec-influencing var name, or one of
+/// the `ld_`/`dyld_`/`bash_func_` dynamic-linker / exported-function prefixes.
+#[must_use]
+pub(crate) fn o3i(name: &str) -> bool {
+    let t = name.to_ascii_lowercase();
+    DANGEROUS_VAR_NTG.contains(&t.as_str())
+        || t.starts_with("ld_")
+        || t.starts_with("dyld_")
+        || t.starts_with("bash_func_")
+}
+
+/// TS `Itt` (`ast.ts`): a variable name that influences command execution
+/// (exec-influencing / integer-attr / `IFS` / `PS4` / `PROMPT4`). Writing or
+/// `unset`ting such a name defeats static analysis.
+#[must_use]
+pub(crate) fn itt(name: &str) -> bool {
+    o3i(name)
+        || name == "IFS"
+        || name == "PS4"
+        || name == "PROMPT4"
+        || DANGEROUS_VAR_Y3I.contains(&name)
+}
+
 // ── checkSemantics tail sets (ast.ts:2060-2204) — consumed by the semantic
 // cluster (later layer); defined here so all const sets live in one place. ──
 
@@ -412,6 +594,20 @@ lazy_re!(bare_var_unsafe_re, r"[ \t\n*?\[]");
 
 // BRACE_EXPANSION_RE (ast.ts:245): {a,b} or {a..b}. (Consumed by walker layers.)
 lazy_re!(brace_expansion_re, r"\{[^{}\s]*(,|\.\.)[^{}\s]*\}");
+
+// ── xeg (per-command var-write pre-scan) regexes ──
+// Wrapper flag stripped inside xeg's prefix loop: `/^-[-pvV]*$/` (bare `-`, `--`,
+// and `command`-style `-pvV` combinations).
+lazy_re!(xeg_wrapper_flag_re, r"^-[-pvV]*$");
+// Leading `VAR[sub]?+?=` assignment word (JS `\w` → ASCII `[A-Za-z0-9_]`).
+lazy_re!(xeg_assign_word_re, r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=");
+// mapfile/readarray value-consuming short flag: `/^-[dnOsuCc]$/`.
+lazy_re!(xeg_mapfile_flag_re, r"^-[dnOsuCc]$");
+// pushd/popd `-n` flag (no directory change): `/^-[a-zA-Z]*n[a-zA-Z]*$/`.
+lazy_re!(xeg_pushd_n_re, r"^-[a-zA-Z]*n[a-zA-Z]*$");
+// popd stack-index operands that do NOT change PWD: `/^\+0*[1-9]/` and `/^-0+$/`.
+lazy_re!(xeg_popd_plus_re, r"^\+0*[1-9]");
+lazy_re!(xeg_popd_minus_re, r"^-0+$");
 // PROC_ENVIRON_RE (ast.ts:2197): `.*` (procfs resolves `..`), NOT `[^/]*`.
 lazy_re!(proc_environ_re, r"/proc/.*/environ");
 // NEWLINE_HASH_RE (ast.ts:2204): newline, then 0+ space/tab, then `#`.
@@ -1116,23 +1312,68 @@ pub(crate) fn collect_commands(
     }
 
     if kind == "unset_command" {
-        // `unset FOO BAR`, `unset -f func`. Safe — only removes vars/functions.
+        // `unset FOO BAR`, `unset -f func`. Only -f/-v flags are allowed; an
+        // operand must be a bare identifier, and `unset` of an exec-influencing
+        // variable ([`itt`]) defeats static analysis → deny (byte-exact reason).
         let mut argv: Vec<String> = Vec::new();
+        let mut is_func = false; // `-f` seen (function unset — no var tracking)
+        let mut seen_name = false; // a NAME operand has been consumed
         for child in children(node) {
             match child.kind() {
                 "unset" => argv.push(node_text(child, src).to_string()),
                 "variable_name" => {
                     let name = node_text(child, src).to_string();
+                    if !valid_var_name_re().is_match(&name) {
+                        return Some(too_complex(child));
+                    }
                     argv.push(name.clone());
-                    // SECURITY: remove from varScope so later `$VAR` rejects.
-                    var_scope.remove(&name);
+                    seen_name = true;
+                    if is_func {
+                        continue;
+                    }
+                    if itt(&name) {
+                        return Some(ParseForSecurityResult::TooComplex {
+                            reason: format!(
+                                "'unset' targets shell variable {name} (exec-influencing / integer-attr / IFS / PS4)"
+                            ),
+                        });
+                    }
+                    // SECURITY: set empty so a later bare `$VAR` rejects.
+                    var_scope.insert(name, String::new());
                 }
                 "word" => {
                     let arg = match walk_argument(Some(child), src, commands, var_scope) {
                         Ok(s) => s,
                         Err(e) => return Some(e),
                     };
-                    argv.push(arg);
+                    if arg.starts_with('-') {
+                        // A flag after a name, or a flag other than -f/-v, cannot
+                        // be statically modelled.
+                        if seen_name || (arg != "-f" && arg != "-v") {
+                            return Some(too_complex(child));
+                        }
+                        if arg == "-f" {
+                            is_func = true;
+                        }
+                        argv.push(arg);
+                        continue;
+                    }
+                    if !valid_var_name_re().is_match(&arg) {
+                        return Some(too_complex(child));
+                    }
+                    argv.push(arg.clone());
+                    seen_name = true;
+                    if is_func {
+                        continue;
+                    }
+                    if itt(&arg) {
+                        return Some(ParseForSecurityResult::TooComplex {
+                            reason: format!(
+                                "'unset' targets shell variable {arg} (exec-influencing / integer-attr / IFS / PS4)"
+                            ),
+                        });
+                    }
+                    var_scope.insert(arg, String::new());
                 }
                 _ => return Some(too_complex(child)),
             }
@@ -1273,6 +1514,380 @@ pub(crate) fn walk_file_redirect(
 /// handled → `too_complex` (over-ask). Rebuilds `.text` from argv when a `$VAR`
 /// was resolved or a newline is present (rule-matching fidelity).
 #[allow(dead_code)]
+/// TS `/^[A-Za-z_][A-Za-z0-9_]*/` leading-identifier match (`.match()[0]`), used
+/// by [`xeg`] to reduce an operand like `arr[0]` to the bare NAME `arr`.
+fn leading_ident(u: &str) -> Option<&str> {
+    let b = u.as_bytes();
+    let first = *b.first()?;
+    if !(first == b'_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() && (b[i] == b'_' || b[i].is_ascii_alphanumeric()) {
+        i += 1;
+    }
+    Some(&u[..i])
+}
+
+/// TS `Xeg` (checkSemantics var-write pre-scan, `ast.ts`). Tracks which shell
+/// variables a single simple command WRITES (`read`/`mapfile`/`getopts`/`printf
+/// -v`/`declare`-family/`cd`/`pushd`/`popd`/…) and denies when it writes an
+/// exec-influencing name ([`itt`]) whose runtime value cannot be statically
+/// verified. On success (`None`) `var_scope` is updated with [`VAR_PLACEHOLDER`]
+/// for the written names so a later `$VAR` correctly rejects as a bare arg.
+fn xeg(
+    argv: &[String],
+    env_vars: &[(String, String)],
+    var_scope: &mut HashMap<String, String>,
+) -> Option<ParseForSecurityResult> {
+    /// Names this command writes (checked against [`itt`] at the end).
+    let mut written: Vec<String> = Vec::new();
+    macro_rules! push_name {
+        ($u:expr) => {
+            if let Some(id) = leading_ident($u) {
+                written.push(id.to_string());
+            }
+        };
+    }
+    macro_rules! deny {
+        ($reason:expr) => {
+            return Some(ParseForSecurityResult::TooComplex { reason: $reason })
+        };
+    }
+
+    // ── wrapper-strip prefix loop (H3i wrappers, `!`, leading assignments) ──
+    let mut a: &[String] = argv;
+    let mut saw_v = false; // `command -v/-V` — suppresses cd/pushd/popd PWD tracking
+    loop {
+        let u = match a.first() {
+            Some(x) => x.as_str(),
+            None => break,
+        };
+        if XEG_WRAPPERS.contains(&u) {
+            let mut d = 1;
+            while d < a.len() && xeg_wrapper_flag_re().is_match(&a[d]) {
+                if a[d].contains('v') || a[d].contains('V') {
+                    saw_v = true;
+                }
+                d += 1;
+            }
+            a = &a[d..];
+        } else if u == "!" {
+            a = &a[1..];
+        } else if xeg_assign_word_re().is_match(u) {
+            push_name!(u);
+            a = &a[1..];
+        } else {
+            break;
+        }
+    }
+
+    let c: Option<&str> = a.first().map(String::as_str);
+    match c {
+        None => {
+            for e in env_vars {
+                push_name!(&e.0);
+            }
+        }
+        Some(c) if XEG_ASSIGN_BUILTINS.contains(&c) => {
+            let mut seen_dd = false;
+            for p in a.iter().skip(1) {
+                if !seen_dd && p == "--" {
+                    seen_dd = true;
+                    continue;
+                }
+                if !seen_dd && declare_m_re().is_match(p) {
+                    deny!(format!(
+                        "'{c} {p}' (wrapped form) — zsh -m/+m pattern-assigns every matching variable; cannot statically model target set"
+                    ));
+                }
+                if !seen_dd && p.starts_with('-') {
+                    continue;
+                }
+                if p.contains('=') {
+                    push_name!(p);
+                }
+            }
+        }
+        Some("read") => {
+            let mut u = 1;
+            let mut dd = false;
+            let mut wrote = false;
+            while u < a.len() {
+                let f = &a[u];
+                if !dd && f == "--" {
+                    dd = true;
+                    u += 1;
+                    continue;
+                }
+                if !dd && f.starts_with('-') {
+                    if READ_DATA_FLAGS.contains(&f.as_str()) {
+                        u += 2;
+                        continue;
+                    }
+                    let fb = f.as_bytes();
+                    let mut m = false;
+                    let mut g = 1;
+                    while g < f.len() {
+                        let y = fb[g];
+                        if y == b'a' || y == b'A' {
+                            let val = if g < f.len() - 1 {
+                                f[g + 1..].to_string()
+                            } else {
+                                a.get(u + 1).cloned().unwrap_or_default()
+                            };
+                            if !val.is_empty() {
+                                push_name!(&val);
+                                wrote = true;
+                            }
+                            m = g == f.len() - 1;
+                            break;
+                        }
+                        let flag = format!("-{}", y as char);
+                        if READ_DATA_FLAGS.contains(&flag.as_str()) {
+                            m = g == f.len() - 1;
+                            break;
+                        }
+                        g += 1;
+                    }
+                    u += if m { 2 } else { 1 };
+                    continue;
+                }
+                push_name!(f);
+                wrote = true;
+                u += 1;
+            }
+            if !wrote {
+                written.push("REPLY".to_string());
+            }
+        }
+        Some("printf") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || !d.starts_with('-') {
+                    break;
+                }
+                if d == "-v" {
+                    if let Some(n) = a.get(u + 1) {
+                        push_name!(n);
+                    }
+                    u += 2;
+                    continue;
+                }
+                if d.starts_with("-v") {
+                    push_name!(&d[2..]);
+                }
+                u += 1;
+            }
+        }
+        Some("getopts") => {
+            let off = usize::from(a.get(1).map(String::as_str) == Some("--"));
+            if let Some(n) = a.get(2 + off) {
+                push_name!(n);
+            }
+            written.push("OPTARG".to_string());
+            var_scope.insert("OPTIND".to_string(), VAR_PLACEHOLDER.to_string());
+        }
+        Some("wait") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || !d.starts_with('-') {
+                    break;
+                }
+                let db = d.as_bytes();
+                let mut p = 1;
+                while p < d.len() {
+                    if db[p] == b'p' {
+                        if p < d.len() - 1 {
+                            push_name!(&d[p + 1..]);
+                        } else if let Some(n) = a.get(u + 1) {
+                            push_name!(n);
+                            u += 1;
+                        }
+                        break;
+                    }
+                    p += 1;
+                }
+                u += 1;
+            }
+        }
+        Some(c) if c == "unset" || c == "unsetenv" => {
+            let mut is_func = false;
+            let mut seen_name = false;
+            for f in a.iter().skip(1) {
+                if f.starts_with('-') {
+                    if seen_name {
+                        deny!(format!(
+                            "'unset … {f}' (wrapped form) — flag after name; getopt stops at first non-option"
+                        ));
+                    }
+                    if f != "-f" && f != "-v" {
+                        deny!(format!(
+                            "'unset {f}' (wrapped form) — flag other than -f/-v (zsh -m pattern-unset, bash -n nameref) cannot be statically modelled"
+                        ));
+                    }
+                    if f == "-f" {
+                        is_func = true;
+                    }
+                    continue;
+                }
+                seen_name = true;
+                if !valid_var_name_re().is_match(f) {
+                    deny!(format!(
+                        "'unset {f}' (wrapped form) — non-identifier operand may pathname-expand; cannot statically know which var is unset"
+                    ));
+                }
+                if is_func {
+                    continue;
+                }
+                if itt(f) {
+                    deny!(format!(
+                        "'unset' targets shell variable {f} (exec-influencing / integer-attr / IFS / PS4)"
+                    ));
+                }
+                var_scope.insert(f.clone(), String::new());
+            }
+        }
+        Some("print") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || d == "-" || !d.starts_with('-') {
+                    break;
+                }
+                let db = d.as_bytes();
+                let mut p = false;
+                let mut f = 1;
+                while f < d.len() {
+                    let m = db[f];
+                    if m == b'v' {
+                        let val = if f < d.len() - 1 {
+                            d[f + 1..].to_string()
+                        } else {
+                            a.get(u + 1).cloned().unwrap_or_default()
+                        };
+                        if !val.is_empty() {
+                            push_name!(&val);
+                        }
+                        p = f == d.len() - 1;
+                        break;
+                    }
+                    let flag = format!("-{}", m as char);
+                    if XEG_PRINT_VALUE_FLAGS.contains(&flag.as_str()) {
+                        p = f == d.len() - 1;
+                        break;
+                    }
+                    f += 1;
+                }
+                if p {
+                    u += 1;
+                }
+                u += 1;
+            }
+        }
+        Some("set") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || !set_flag_re().is_match(d) {
+                    break;
+                }
+                let p = d.get(1..).and_then(|s| s.find('A')).map(|i| i + 1);
+                match p {
+                    None => {
+                        if d.ends_with('o') {
+                            u += 1;
+                        }
+                        u += 1;
+                        continue;
+                    }
+                    Some(p) => {
+                        if p < d.len() - 1 {
+                            push_name!(&d[p + 1..]);
+                        } else if let Some(n) = a.get(u + 1) {
+                            push_name!(n);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        Some(c) if c == "mapfile" || c == "readarray" => {
+            let mut wrote = false;
+            let mut d = 1;
+            while d < a.len() {
+                let p = &a[d];
+                if p.starts_with('-') {
+                    if xeg_mapfile_flag_re().is_match(p) {
+                        d += 1;
+                    }
+                    d += 1;
+                    continue;
+                }
+                push_name!(p);
+                wrote = true;
+                d += 1;
+            }
+            if !wrote {
+                written.push("MAPFILE".to_string());
+            }
+        }
+        Some(c) if !saw_v && (c == "cd" || c == "chdir" || c == "pushd" || c == "popd") => {
+            let mut suppress = false;
+            if c == "pushd" || c == "popd" {
+                for p in a.iter().skip(1) {
+                    if p == "--" {
+                        break;
+                    }
+                    if xeg_pushd_n_re().is_match(p) {
+                        suppress = true;
+                        break;
+                    }
+                    if c == "popd"
+                        && (xeg_popd_plus_re().is_match(p) || xeg_popd_minus_re().is_match(p))
+                    {
+                        suppress = true;
+                        break;
+                    }
+                }
+            }
+            if !suppress {
+                var_scope.insert("PWD".to_string(), VAR_PLACEHOLDER.to_string());
+                var_scope.insert("OLDPWD".to_string(), VAR_PLACEHOLDER.to_string());
+            }
+            if c == "pushd" || c == "popd" {
+                var_scope.insert("DIRSTACK".to_string(), VAR_PLACEHOLDER.to_string());
+                var_scope.insert("dirstack".to_string(), VAR_PLACEHOLDER.to_string());
+            }
+        }
+        Some(_) => {}
+    }
+
+    // jVc special builtins: PRECEDING `VAR=value` env assignments persist.
+    if let Some(c) = c {
+        if !env_vars.is_empty() && XEG_SPECIAL_BUILTINS.contains(&c) {
+            for e in env_vars {
+                push_name!(&e.0);
+            }
+        }
+    }
+
+    // Itt battery on every written name; track survivors as placeholders.
+    let label =
+        c.unwrap_or_else(|| env_vars.first().map(|e| e.0.as_str()).unwrap_or("undefined"));
+    for u in &written {
+        if itt(u) {
+            deny!(format!(
+                "'{label}' writes shell variable {u} (exec-influencing / integer-attr / IFS) — value cannot be statically verified"
+            ));
+        }
+        var_scope.insert(u.clone(), VAR_PLACEHOLDER.to_string());
+    }
+    None
+}
+
 pub(crate) fn walk_command(
     node: Node,
     extra_redirects: &[Redirect],
@@ -1329,6 +1944,13 @@ pub(crate) fn walk_command(
             }
             _ => return too_complex(child),
         }
+    }
+
+    // SECURITY (TS `Xeg`): scan the resolved argv for builtin var-writes; deny
+    // when an exec-influencing name is written, else record placeholders so a
+    // later `$VAR` reference correctly rejects.
+    if let Some(err) = xeg(&argv, &env_vars, var_scope) {
+        return err;
     }
 
     // SECURITY: rebuild .text from argv when node.text contains `$<ident>` (a
@@ -4384,5 +5006,94 @@ EOF
             ),
             SemanticCheckResult::Ok => panic!("newline-# not denied"),
         }
+    }
+
+    // ── PERM-AST-VARNAME-01: dangerous-variable-name battery ──
+
+    #[test]
+    fn dangerous_var_predicates() {
+        // O3i: lowercase ntg names + ld_/dyld_/bash_func_ prefixes (case-insensitive).
+        assert!(o3i("PATH"));
+        assert!(o3i("path"));
+        assert!(o3i("BASH_ENV"));
+        assert!(o3i("LD_PRELOAD"));
+        assert!(o3i("DYLD_INSERT_LIBRARIES"));
+        assert!(o3i("BASH_FUNC_foo%%"));
+        assert!(!o3i("FOO"));
+        assert!(!o3i("MY_PATH_HELPER"));
+        // Itt = O3i | IFS | PS4 | PROMPT4 | Y3i.
+        assert!(itt("IFS"));
+        assert!(itt("PS4"));
+        assert!(itt("PROMPT4"));
+        assert!(itt("RANDOM")); // Y3i
+        assert!(itt("SECONDS"));
+        assert!(itt("status")); // Y3i exact-case member
+        assert!(!itt("STATUS"));
+        assert!(!itt("HOME_DIR"));
+    }
+
+    #[test]
+    fn unset_dangerous_var_denied() {
+        // `unset PATH` / `unset BASH_ENV` must be too-complex (byte-exact reason).
+        assert_eq!(
+            pfs("unset PATH"),
+            Err("'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
+                .to_string())
+        );
+        assert_eq!(
+            pfs("unset BASH_ENV"),
+            Err(
+                "'unset' targets shell variable BASH_ENV (exec-influencing / integer-attr / IFS / PS4)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            pfs("unset IFS"),
+            Err("'unset' targets shell variable IFS (exec-influencing / integer-attr / IFS / PS4)"
+                .to_string())
+        );
+        // -f (function unset) suppresses the var battery even for a dangerous name.
+        let cs = pfs("unset -f PATH").expect("unset -f is a function unset");
+        assert_eq!(cs[0].argv, vec!["unset", "-f", "PATH"]);
+        // Ordinary vars are still fine.
+        let cs = pfs("unset FOO BAR").expect("plain unset");
+        assert_eq!(cs[0].argv, vec!["unset", "FOO", "BAR"]);
+    }
+
+    #[test]
+    fn builtin_write_dangerous_var_denied() {
+        // `read PATH` writes an exec-influencing var → deny (byte-exact reason).
+        assert_eq!(
+            pfs("read PATH"),
+            Err("'read' writes shell variable PATH (exec-influencing / integer-attr / IFS) — value cannot be statically verified".to_string())
+        );
+        // mapfile into a dangerous name.
+        assert_eq!(
+            pfs("mapfile IFS"),
+            Err("'mapfile' writes shell variable IFS (exec-influencing / integer-attr / IFS) — value cannot be statically verified".to_string())
+        );
+        // printf -v LD_PRELOAD.
+        assert_eq!(
+            pfs("printf -v LD_PRELOAD x"),
+            Err("'printf' writes shell variable LD_PRELOAD (exec-influencing / integer-attr / IFS) — value cannot be statically verified".to_string())
+        );
+        // `read FOO` (benign) → simple; FOO tracked as placeholder so a later
+        // bare $FOO rejects.
+        let cs = pfs("read FOO").expect("benign read");
+        assert_eq!(cs[0].argv, vec!["read", "FOO"]);
+        assert!(pfs("read FOO && echo $FOO").is_err());
+    }
+
+    #[test]
+    fn wrapped_unset_dangerous_var_denied() {
+        // `command unset PATH` reaches `unset` as a plain command (wrapper-stripped)
+        // → xeg's wrapped-unset battery denies.
+        assert_eq!(
+            pfs("command unset PATH"),
+            Err("'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
+                .to_string())
+        );
+        // Non-identifier wrapped-unset operand.
+        assert!(pfs("command unset 'a b'").is_err());
     }
 }

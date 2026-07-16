@@ -354,6 +354,13 @@ pub(crate) struct ExecutorPump<'a, 'e> {
     /// where the post-stream loop's `apply_abort_to_pending` produces the
     /// synthetics. `None` ⇒ never aborted ⇒ always dispatch.
     pub(crate) user_cancel: Option<&'a CancellationToken>,
+    /// P2-04 (MessageDisplay `displayContent`): `true` when a `MessageDisplay`
+    /// hook is registered for this turn, in which case live per-token
+    /// `text_delta` emission is suppressed in [`dispatch_event`] so the
+    /// orchestrator's completed-message pass renders the full (possibly
+    /// hook-substituted) text exactly once. `false` ⇒ byte-identical live
+    /// streaming (the no-hook common case).
+    pub(crate) suppress_live_text: bool,
 }
 
 /// Like [`pump_stream`], but drives a [`StreamingToolExecutor`] DURING the
@@ -384,6 +391,10 @@ async fn pump_stream_inner(
     mut pump: Option<ExecutorPump<'_, '_>>,
 ) -> Result<PumpedTurn, PumpFailure> {
     let mut acc = BlockAccumulator::new();
+    // P2-04: suppress live per-token text emission while a `MessageDisplay` hook
+    // is registered (only the executor-driven pump carries the flag; the plain
+    // `pump_stream` test helper defaults to `false` = live streaming).
+    let suppress_live_text = pump.as_ref().map(|p| p.suppress_live_text).unwrap_or(false);
     let mut turn = PumpedTurn::default();
     // Mirrors the binary's `Hr`: set true the moment a non-thinking content
     // block STARTS (text / tool_use / etc.). Gates the caller's mid-stream
@@ -445,7 +456,7 @@ async fn pump_stream_inner(
                 real_content_started = true;
             }
         }
-        let action = match dispatch_event(event, &mut acc, output).await {
+        let action = match dispatch_event(event, &mut acc, output, suppress_live_text).await {
             Ok(a) => a,
             Err(e) => {
                 return Err(build_failure(

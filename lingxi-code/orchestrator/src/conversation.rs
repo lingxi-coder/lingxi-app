@@ -4742,6 +4742,56 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .await;
     }
 
+    /// Fire the `MessageDisplay` completed-message pass and return the hook's
+    /// display override, if any — the orchestrator twin of claude-code's `Qff`
+    /// (BIN off 229876575). After an assistant message's text blocks finalize,
+    /// claude-code fires `MessageDisplay` once with `{turnId, messageId:
+    /// randomUUID(), index:0, final:!0, delta:<joined text>}` and folds the last
+    /// `displayContent` any hook returns into the message's separate
+    /// `displayedMessageContent` (the stored `message.content` is NEVER touched —
+    /// "Display-only"). On a hook exception it logs
+    /// `MessageDisplay hook failed for completed message; emitting original text:`
+    /// and displays the original.
+    ///
+    /// `message_id` is a fresh per-pass UUID (claude-code `zfn.randomUUID()`),
+    /// distinct from the assistant message's own id. Returns `Some(text)` when a
+    /// hook supplied `displayContent`, else `None` (caller displays the original).
+    /// Best-effort: a failing / blocking hook yields `None`, never affecting the
+    /// stored message or the turn.
+    async fn fire_message_display_completed(&self, turn_id: &str, text: &str) -> Option<String> {
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let agg = self
+            .hooks
+            .execute(
+                HookEvent::MessageDisplay {
+                    turn_id: turn_id.to_string(),
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    index: 0,
+                    is_final: true,
+                    delta: text.to_string(),
+                },
+                ctx,
+            )
+            .await;
+        // claude-code's `try { … } catch(c) { log; return original }` — a
+        // `MessageDisplay` hook that errored (non-zero exit / transport failure /
+        // timeout) never overrides the display: log the byte-exact fallback and
+        // fall through to the original text.
+        if agg.display_content.is_none()
+            && agg.all_results.iter().any(|(_, r)| {
+                matches!(
+                    r.outcome,
+                    hooks::response::HookOutcome::Error | hooks::response::HookOutcome::Timeout
+                )
+            })
+        {
+            tracing::warn!(
+                "MessageDisplay hook failed for completed message; emitting original text: {text}"
+            );
+        }
+        agg.display_content
+    }
+
     /// Fire the `Stop` lifecycle hooks at end-of-turn and classify the result
     /// (hooks B4, TS `handleStopHooks` + `query.ts:1267-1306`).
     ///
@@ -6003,6 +6053,18 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             let turn_id = uuid::Uuid::new_v4().to_string();
             self.fire_message_display(&turn_id, assistant_id).await;
 
+            // P2-04 (MessageDisplay `displayContent`): a registered
+            // `MessageDisplay` hook makes the live pump SUPPRESS per-token text
+            // deltas so the completed-message pass below renders the full
+            // (possibly hook-substituted) text once — faithful to claude-code
+            // `Qff` (BIN off 229876575), whose live render flows through the
+            // display flush, not raw deltas. `false` (no hook) ⇒ byte-identical
+            // live streaming. Cheap subscription gate (declared-event only).
+            let display_hook_active = self
+                .hooks
+                .has_hooks_for(&hooks::events::HookEventType::MessageDisplay)
+                .await;
+
             let mut exec = match &user_cancel {
                 Some(token) => {
                     crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
@@ -6088,9 +6150,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // a fresh executor, register its tool_uses, and flow on
                             // as the turn's `pumped` result.
                             let pumped_from_recovery = llm_response_to_pumped_turn(&resp);
-                            for blk in &pumped_from_recovery.assistant_blocks {
-                                if let ContentBlock::Text { text } = blk {
-                                    self.output.emit_text(text).await;
+                            // P2-04: when a `MessageDisplay` hook is active the
+                            // completed-message pass below is the single on-screen
+                            // render (with `displayContent` substitution) — skip the
+                            // direct whole-body emit here to avoid double display.
+                            if !display_hook_active {
+                                for blk in &pumped_from_recovery.assistant_blocks {
+                                    if let ContentBlock::Text { text } = blk {
+                                        self.output.emit_text(text).await;
+                                    }
                                 }
                             }
                             exec = match &user_cancel {
@@ -6279,6 +6347,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 executor: &mut exec,
                                 assistant_id,
                                 user_cancel: user_cancel.as_ref(),
+                                suppress_live_text: display_hook_active,
                             },
                         )
                         .await
@@ -6476,9 +6545,14 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                             // path `pump_stream` calls `dispatch_event` → `emit_text` for each
                             // `TextDelta`; the non-streaming path has no SSE events, so we
                             // replicate the whole-body emit here.
-                            for blk in &pumped_from_fallback.assistant_blocks {
-                                if let ContentBlock::Text { text } = blk {
-                                    self.output.emit_text(text).await;
+                            // P2-04: suppressed when a `MessageDisplay` hook is active — the
+                            // completed-message pass renders the (possibly substituted) text
+                            // once, so skip the direct emit to avoid double display.
+                            if !display_hook_active {
+                                for blk in &pumped_from_fallback.assistant_blocks {
+                                    if let ContentBlock::Text { text } = blk {
+                                        self.output.emit_text(text).await;
+                                    }
                                 }
                             }
 
@@ -6679,6 +6753,36 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             {
                 let mut s = self.session.lock().await;
                 s.history.push(assistant_msg.clone());
+            }
+
+            // P2-04 (MessageDisplay `displayContent`): completed-message pass.
+            // Once the assistant text blocks are finalized, fire `MessageDisplay`
+            // with `final:true` + the joined visible text and render the result
+            // ON SCREEN — substituting the hook's `displayContent` when present,
+            // else the original text. The stored `assistant_msg` / JSONL keep the
+            // ORIGINAL content (claude-code stores the override on a separate
+            // `displayedMessageContent`, never `message.content`). Gated on a
+            // registered `MessageDisplay` hook — when active the live per-token
+            // deltas were suppressed in the pump, so this is the single on-screen
+            // render; when inactive this whole block is skipped (byte-identical).
+            if display_hook_active {
+                let joined: String = pumped
+                    .assistant_blocks
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => text.as_str(),
+                        _ => "",
+                    })
+                    .collect();
+                // claude-code `Qff`: skip firing entirely when the joined text is
+                // empty (`if(s==="")return i`).
+                if !joined.is_empty() {
+                    let on_screen = self
+                        .fire_message_display_completed(&turn_id, &joined)
+                        .await
+                        .unwrap_or(joined);
+                    self.output.emit_text(&on_screen).await;
+                }
             }
 
             // Finding #73 (streaming twin): advance the per-turn todo/task

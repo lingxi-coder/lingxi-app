@@ -132,7 +132,11 @@ pub struct HookResponse {
     /// `hookSpecificOutput.displayContent` returned by a `MessageDisplay` hook
     /// (binary-confirmed at BIN off 201757586; description: "Text displayed in
     /// place of the delta. Omit (or return the delta unchanged) to display the
-    /// original."). Additive default `None`. TODO: wire at the render site.
+    /// original."). Additive default `None`. Applied by the orchestrator's
+    /// completed-message `MessageDisplay` pass (P2-04): when `Some`, the joined
+    /// assistant text is rendered ON SCREEN as this value while the stored
+    /// message / JSONL keep the original (claude-code's `displayedMessageContent`,
+    /// `Qff`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_content: Option<String>,
     /// `hookSpecificOutput.watchPaths` returned by a `FileChanged` / `CwdChanged`
@@ -331,8 +335,10 @@ pub struct AggregateHookResult {
     /// The last `displayContent` any folded `MessageDisplay` hook returned
     /// (binary-confirmed at BIN off 201757586). When `Some`, the orchestrator
     /// should substitute this text for the assistant delta on-screen (without
-    /// affecting the stored message). `None` when no hook set it.
-    /// TODO: wire the display-override at the message-display render site.
+    /// affecting the stored message). `None` when no hook set it. Consumed by the
+    /// orchestrator's completed-message `MessageDisplay` pass (P2-04,
+    /// `fire_message_display_completed`): the joined assistant text is rendered
+    /// ON SCREEN as this value while the stored message / JSONL keep the original.
     pub display_content: Option<String>,
     /// Every `hookSpecificOutput.watchPaths` entry folded from the `FileChanged`
     /// / `CwdChanged` hook results, in execution order (claude-code `v3r` / `E3r`

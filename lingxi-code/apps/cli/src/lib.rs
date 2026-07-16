@@ -942,7 +942,16 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
             if permission::auto_mode_disabled_from_settings_json(&raw) {
                 auto_mode_disabled = true;
             }
-            if permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(&raw) {
+            // `Pq()` reads `skipDangerousModePermissionPrompt` from
+            // {userSettings, localSettings, flagSettings, policySettings} —
+            // DELIBERATELY EXCLUDING projectSettings, so a repo-controllable
+            // `.lingxi/settings.json` cannot suppress the bg-bypass disclaimer
+            // downgrade (same repo-trust threat MODE-SETTINGS-AUTO-TRUST-01
+            // guards). Only the user tier is loaded here; local/flag/policy are
+            // not read at this surface (their omission is over-ask-safe).
+            if source != permission::PermissionRuleSource::ProjectSettings
+                && permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(&raw)
+            {
                 skip_dangerous_mode_permission_prompt = true;
             }
         }

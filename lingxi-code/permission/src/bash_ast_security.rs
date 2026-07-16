@@ -839,6 +839,14 @@ pub(crate) fn too_complex(node: Node) -> ParseForSecurityResult {
     ParseForSecurityResult::TooComplex { reason }
 }
 
+/// TS `LVc.homedir()` (`os.homedir()`): the current user's home directory, used
+/// by [`resolve_simple_expansion`] to resolve an untracked `$HOME`. Empty when
+/// unset (mirrors `os.homedir()` returning `""`). `HOME` is the posix source of
+/// truth; the platform-specific fallbacks are an accepted divergence.
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
 /// TS `resolveSimpleExpansion` (ast.ts:1937). Resolve a `simple_expansion`
 /// (`$VAR`) node against `var_scope`. `Ok(s)` = the resolved value (the real
 /// literal for tracked literals, [`VAR_PLACEHOLDER`] for shell-controlled vars);
@@ -870,12 +878,24 @@ pub(crate) fn resolve_simple_expansion(
         None => return Err(too_complex(node)),
     };
     if let Some(tv) = var_scope.get(&var_name) {
+        // GVc: a generally-volatile variable NAME (RANDOM/SECONDS/REPLY/PS*/…)
+        // never yields its tracked literal — its runtime value differs. Inside a
+        // string it degrades to a placeholder only when also a safe-env name
+        // (except BASHPID, whose value is a concrete pid); bare, it rejects.
+        if VOLATILE_VARS_GVC.contains(&var_name.as_str()) {
+            if inside_string && SAFE_ENV_VARS.contains(&var_name.as_str()) && var_name != "BASHPID"
+            {
+                return Ok(VAR_PLACEHOLDER.to_string());
+            }
+            return Err(too_complex(node));
+        }
         if contains_any_placeholder(tv) {
-            // Non-literal: bare → reject, inside string → VAR_PLACEHOLDER.
+            // Non-literal: bare → reject, inside string → the COMPOSITE value (so
+            // a prefix like `pre__TRACKED_VAR__` survives into rule matching).
             if !inside_string {
                 return Err(too_complex(node));
             }
-            return Ok(VAR_PLACEHOLDER.to_string());
+            return Ok(tv.clone());
         }
         // Pure literal — return it directly so downstream path validation sees
         // the REAL value. Bare args additionally reject empty / IFS+glob chars.
@@ -888,6 +908,15 @@ pub(crate) fn resolve_simple_expansion(
             }
         }
         return Ok(tv.clone());
+    }
+    // Untracked `$HOME` resolves to the real home directory (bare additionally
+    // rejects an empty / word-split-unsafe value).
+    if var_name == "HOME" {
+        let s = home_dir();
+        if !inside_string && (s.is_empty() || bare_var_unsafe_re().is_match(&s)) {
+            return Err(too_complex(node));
+        }
+        return Ok(s);
     }
     // Untracked: SAFE_ENV_VARS / special+positional vars resolvable only inside
     // strings (value is shell-controlled).
@@ -4179,12 +4208,16 @@ mod tests {
     #[test]
     fn resolve_untracked_safe_env_only_inside_string() {
         let scope = HashMap::new();
-        // $HOME bare → reject; inside string → placeholder.
-        assert!(resolve("ls $HOME", &scope, false).is_err());
-        assert_eq!(
-            resolve(r#"echo "$HOME""#, &scope, true),
-            Ok(VAR_PLACEHOLDER.to_string())
-        );
+        // 2.1.211: untracked $HOME resolves to the REAL home directory (bare and
+        // inside-string alike); bare additionally rejects an empty / unsafe value.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let bare = resolve("ls $HOME", &scope, false);
+        if home.is_empty() || bare_var_unsafe_re().is_match(&home) {
+            assert!(bare.is_err());
+        } else {
+            assert_eq!(bare, Ok(home.clone()));
+        }
+        assert_eq!(resolve(r#"echo "$HOME""#, &scope, true), Ok(home));
         // IFS only safe inside a string (bare $IFS is the injection primitive).
         assert!(resolve("echo $IFS", &scope, false).is_err());
         assert_eq!(
@@ -5658,5 +5691,48 @@ EOF
             Err("zsh \"$name[expr]\" / \"$name:mod\" inside double-quotes — recursive eval"
                 .to_string())
         );
+    }
+
+    // ── PERM-AST-EXPANSION-01: resolveSimpleExpansion (ozn) parity ──
+
+    #[test]
+    fn resolve_gvc_tracked_name_never_literal() {
+        let mut scope = HashMap::new();
+        // A GVc name assigned a literal still must NOT resolve to that literal.
+        scope.insert("RANDOM".to_string(), "5".to_string());
+        // RANDOM is also a safe-env name → placeholder inside a string, reject bare.
+        assert_eq!(
+            resolve(r#"echo "$RANDOM""#, &scope, true),
+            Ok(VAR_PLACEHOLDER.to_string())
+        );
+        assert!(resolve("echo $RANDOM", &scope, false).is_err());
+        // BASHPID is GVc + safe-env but excluded → reject even inside a string.
+        scope.insert("BASHPID".to_string(), "123".to_string());
+        assert!(resolve(r#"echo "$BASHPID""#, &scope, true).is_err());
+        // REPLY is GVc but NOT safe-env → reject inside a string too.
+        scope.insert("REPLY".to_string(), "x".to_string());
+        assert!(resolve(r#"echo "$REPLY""#, &scope, true).is_err());
+    }
+
+    #[test]
+    fn resolve_placeholder_composite_returned_inside_string() {
+        let mut scope = HashMap::new();
+        // A tracked value carrying a placeholder returns the COMPOSITE inside a
+        // string (not a bare placeholder) so the prefix survives rule matching.
+        scope.insert("V".to_string(), format!("pre{CMDSUB_PLACEHOLDER}"));
+        assert_eq!(
+            resolve(r#"echo "$V""#, &scope, true),
+            Ok(format!("pre{CMDSUB_PLACEHOLDER}"))
+        );
+        assert!(resolve("echo $V", &scope, false).is_err());
+    }
+
+    #[test]
+    fn resolve_untracked_home_resolves_to_homedir() {
+        let scope = HashMap::new();
+        let home = std::env::var("HOME").unwrap_or_default();
+        // Inside a string, $HOME resolves to the actual home path (not a
+        // placeholder) — byte-faithful to ozn's HOME arm.
+        assert_eq!(resolve(r#"echo "$HOME""#, &scope, true), Ok(home));
     }
 }

@@ -383,20 +383,43 @@ fn git_subcommand_is_read_only(rest: &[&str]) -> bool {
     }
 }
 
-/// `git remote show` positional-write guard — port of the TS callback
-/// (`readOnlyCommandValidation.ts:478-487`). `args` are the tokens after
-/// `git remote show`. Allows an optional `-n`, then exactly ONE remote name
-/// matching `/^[a-zA-Z0-9_-]+$/`; anything else is dangerous.
+/// `git remote show` positional-write guard — port of the 2.1.211 TS callback.
+/// `args` are the tokens after `git remote show`. 2.1.211 REQUIRES the `-n`
+/// (no-network) flag so only the offline form is auto-allowed: it splits args
+/// on `--`, drops `-n` from the pre-`--` segment, then requires exactly ONE
+/// remaining token that (a) came with `-n` present and (b) matches
+/// `/^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/` (first char NOT `-`). Without `-n`,
+/// `git remote show origin` contacts the network and is dangerous.
 fn git_remote_show_is_dangerous(args: &[&str]) -> bool {
-    let positional: Vec<&str> = args.iter().copied().filter(|a| *a != "-n").collect();
+    // Split on the `--` end-of-options marker (TS `t.indexOf("--")`).
+    let (pre, post): (&[&str], Vec<&str>) = match args.iter().position(|a| *a == "--") {
+        Some(i) => (&args[..i], args[i + 1..].to_vec()),
+        None => (args, Vec::new()),
+    };
+    let has_no_network = pre.contains(&"-n");
+    let positional: Vec<&str> = pre
+        .iter()
+        .copied()
+        .filter(|a| *a != "-n")
+        .chain(post.into_iter())
+        .collect();
     if positional.len() != 1 {
         return true;
     }
+    // The offline `-n` flag is mandatory (2.1.211 `if(!n.includes("-n"))return!0`).
+    if !has_no_network {
+        return true;
+    }
     let name = positional[0];
-    name.is_empty()
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    // `/^[a-zA-Z0-9_][a-zA-Z0-9_-]*$/`: non-empty, first byte alphanumeric/`_`.
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        None => true,
+        Some(first) => {
+            !(first.is_ascii_alphanumeric() || first == b'_')
+                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        }
+    }
 }
 
 /// `git remote` positional-write guard — port of the TS callback
@@ -753,7 +776,10 @@ mod test_git_read_only {
         assert!(command_is_read_only("git reflog show"));
         assert!(command_is_read_only("git remote"));
         assert!(command_is_read_only("git remote -v"));
-        assert!(command_is_read_only("git remote show origin"));
+        // 2.1.211: `git remote show` is read-only ONLY with the `-n` (offline)
+        // flag; the network-contacting form asks.
+        assert!(command_is_read_only("git remote show -n origin"));
+        assert!(!command_is_read_only("git remote show origin"));
         assert!(command_is_read_only("git stash list"));
         assert!(command_is_read_only("git stash show"));
         assert!(command_is_read_only("git config --get user.name"));
@@ -811,9 +837,12 @@ mod test_git_read_only {
         assert!(!command_is_read_only("git reflog delete HEAD@{0}"));
         assert!(!command_is_read_only("git remote add origin url"));
         assert!(!command_is_read_only("git remote remove origin"));
-        // `git remote show` requires exactly one alphanumeric name.
+        // `git remote show` requires `-n` + exactly one name whose first char
+        // is alphanumeric/underscore (not `-`).
         assert!(!command_is_read_only("git remote show"));
-        assert!(!command_is_read_only("git remote show a b"));
+        assert!(!command_is_read_only("git remote show -n a b"));
+        assert!(!command_is_read_only("git remote show -n -origin"));
+        assert!(command_is_read_only("git remote show -n -- origin"));
     }
 
     #[test]

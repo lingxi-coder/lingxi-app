@@ -68,6 +68,12 @@ pub const POWERSHELL_DANGEROUS_PATTERNS: &[&str] = &[
     "start-job",
     "sajb",
     "start-threadjob", // bundled PS 6.1+; takes -ScriptBlock like Start-Job
+    // WMI/CIM process-creation escape hatches (2.1.211 Zqr additions)
+    "invoke-wmimethod",
+    "iwmi", // alias
+    "invoke-cimmethod",
+    "icim", // alias
+    "wmic", // legacy CLI; the .exe variant is covered by the .exe suffix check
     // Event/session code exec
     "register-objectevent",
     "register-engineevent",

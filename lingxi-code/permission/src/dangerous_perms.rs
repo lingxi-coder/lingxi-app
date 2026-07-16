@@ -115,11 +115,24 @@ pub fn is_dangerous_powershell_permission(tool_name: &str, rule_content: &Option
     }
 
     // Tool-level allow (PowerShell with no content, or PowerShell(*)).
-    let content = match rule_content {
+    let raw = match rule_content {
         None => return true,
         Some(c) if c.is_empty() => return true,
-        Some(c) => c.trim().to_lowercase(),
+        Some(c) => c,
     };
+
+    // Whitespace/star-only content (`PowerShell(**)`, `PowerShell( * )`) —
+    // 2.1.211 `Zqr`'s `/^[\s*]+$/` test, run on the UNTRIMMED content before
+    // the trim/lowercase below.
+    if !raw.is_empty()
+        && raw
+            .chars()
+            .all(|c| c == '*' || c.is_whitespace())
+    {
+        return true;
+    }
+
+    let content = raw.trim().to_lowercase();
 
     // Standalone wildcard (*) matches everything.
     if content == "*" {
@@ -433,6 +446,35 @@ mod tests {
             POWERSHELL_TOOL_NAME,
             &content("*")
         ));
+    }
+
+    #[test]
+    fn powershell_wmi_cim_are_dangerous() {
+        // 2.1.211 Zqr WMI/CIM process-creation escape hatches.
+        for pat in [
+            "invoke-wmimethod:*",
+            "iwmi:*",
+            "invoke-cimmethod:*",
+            "icim:*",
+            "wmic:*",
+            "wmic.exe:*", // .exe variant
+        ] {
+            assert!(
+                is_dangerous_powershell_permission(POWERSHELL_TOOL_NAME, &content(pat)),
+                "{pat} must be dangerous"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_whitespace_star_only_is_dangerous() {
+        // 2.1.211 Zqr `/^[\s*]+$/` on the untrimmed content.
+        for pat in ["**", " * ", "  ", "\t*"] {
+            assert!(
+                is_dangerous_powershell_permission(POWERSHELL_TOOL_NAME, &content(pat)),
+                "{pat:?} must be dangerous"
+            );
+        }
     }
 
     #[test]

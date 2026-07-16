@@ -1690,7 +1690,10 @@ pub(crate) fn walk_variable_assignment(
         });
     }
     // SECURITY: PS4 is expanded at trace time after `set -x` — allowlist only.
-    if name == "PS4" {
+    // 2.1.211 applies the same battery to PROMPT4 (the zsh alias for PS4, so
+    // `PROMPT4='$(cmd)'` + xtrace executes). Reason strings keep the "PS4"
+    // wording even for PROMPT4, matching CC.
+    if name == "PS4" || name == "PROMPT4" {
         if is_append {
             return Err(ParseForSecurityResult::TooComplex {
                 reason:
@@ -3571,6 +3574,20 @@ EOF
             match parse_for_security(cmd) {
                 ParseForSecurityResult::Simple { .. } => {
                     panic!("DANGEROUS command wrongly Simple: {cmd:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn prompt4_assignment_guarded_like_ps4() {
+        // 2.1.211: the PS4 battery also applies to PROMPT4 (zsh alias for PS4).
+        // A cmdsub-derived value must be TooComplex, not Simple.
+        for cmd in ["PS4='$(id)' set -x", "PROMPT4='$(id)' set -x"] {
+            match parse_for_security(cmd) {
+                ParseForSecurityResult::Simple { .. } => {
+                    panic!("cmdsub-derived trace-prompt var wrongly Simple: {cmd:?}")
                 }
                 _ => {}
             }

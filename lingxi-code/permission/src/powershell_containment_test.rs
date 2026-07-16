@@ -785,3 +785,16 @@ fn param_in_list_matches_lkn() {
     // Non-matching prefix.
     assert!(!param_in_list("-zz", list));
 }
+
+#[test]
+fn null_redirect_targets_skipped() {
+    // 2.1.211 `xXt`: `> $null` / `> ${null}` discard idioms are skipped before
+    // path validation (case-insensitive, trimmed).
+    assert!(is_null_redirect("$null"));
+    assert!(is_null_redirect("${null}"));
+    assert!(is_null_redirect("  $NULL  "));
+    assert!(is_null_redirect("${NULL}"));
+    // A real path is not a null redirect.
+    assert!(!is_null_redirect("out.txt"));
+    assert!(!is_null_redirect("$env:TEMP\\x"));
+}

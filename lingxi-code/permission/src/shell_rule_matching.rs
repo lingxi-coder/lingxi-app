@@ -23,6 +23,10 @@ use std::sync::{Mutex, OnceLock};
 /// never appear in a real command, so they are collision-free placeholders.
 const ESCAPED_STAR_PLACEHOLDER: &str = "\u{0}ESCAPED_STAR\u{0}";
 const ESCAPED_BACKSLASH_PLACEHOLDER: &str = "\u{0}ESCAPED_BACKSLASH\u{0}";
+/// Placeholder for a `/**/` (globstar) run, mirroring the TS `\x00GLOBSTAR\x00`
+/// sentinel. A globstar run compiles to `/(?:.*/)?` (zero-or-more path
+/// segments), so `cat /a/**/b` matches `cat /a/b` as well as `cat /a/x/y/b`.
+const GLOBSTAR_PLACEHOLDER: &str = "\u{0}GLOBSTAR\u{0}";
 
 /// A parsed shell permission rule (claude-code `ShellPermissionRule`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,16 +91,55 @@ pub fn parse_shell_rule(rule: &str) -> ShellRule {
     ShellRule::Exact(rule.to_string())
 }
 
+/// Collapse runs of spaces/tabs to a single space — 2.1.211 `replace(/[ \t]+/g," ")`.
+/// Used by the `normalize_whitespace` mode of the wildcard matcher (`Ale`'s `n`
+/// flag / `cxt`) to make a Bash rule authored with single spaces still match a
+/// command with doubled internal whitespace.
+fn collapse_whitespace(s: &str) -> std::borrow::Cow<'_, str> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"[ \t]+").unwrap());
+    re.replace_all(s, " ")
+}
+
 /// Match `command` against a wildcard `pattern` where `*` matches any sequence
 /// (dotAll — `*` spans embedded newlines), `\*` a literal `*`, and `\\` a
-/// literal `\`. Faithful to `matchWildcardPattern`.
+/// literal `\`. Faithful to `matchWildcardPattern` (`Ale`) with both extra
+/// flags defaulted off — the shared entry point used by the Grep/Glob/hooks
+/// path (`Ale(t,e)` two-arg). Bash/PowerShell rule matching goes through
+/// [`match_wildcard_pattern_ex`] instead.
 ///
 /// Special case: when the pattern ends in ` *` (space + the ONLY unescaped
 /// wildcard), the trailing space-and-args is made optional so `git *` matches
 /// both `git add` and bare `git` (aligning with `git:*` prefix semantics).
 #[must_use]
 pub fn match_wildcard_pattern(pattern: &str, command: &str, case_insensitive: bool) -> bool {
-    let trimmed = pattern.trim();
+    match_wildcard_pattern_ex(pattern, command, case_insensitive, false)
+}
+
+/// Full `matchWildcardPattern` (`Ale(e,t,r,n)`): `case_insensitive` = TS `r`,
+/// `normalize_whitespace` = TS `n`. When `normalize_whitespace` is true, runs of
+/// spaces/tabs in BOTH the (trimmed) pattern and the command collapse to a
+/// single space before matching (`i`/`s` in `Ale`). The Bash wildcard-rule path
+/// always enables it (`cxt(e,t)=Ale(e,t,!1,!0)`); the PowerShell path uses
+/// `Ale(...,!0,!0)` (both flags on).
+#[must_use]
+pub fn match_wildcard_pattern_ex(
+    pattern: &str,
+    command: &str,
+    case_insensitive: bool,
+    normalize_whitespace: bool,
+) -> bool {
+    let trimmed_raw = pattern.trim();
+    // TS `i` (pattern) and `s` (command) — collapse `[ \t]+`→" " only when the
+    // whitespace-normalize flag is on. The pattern is trimmed first (TS `o`).
+    let (trimmed_owned, command_owned);
+    let (trimmed, command): (&str, &str) = if normalize_whitespace {
+        trimmed_owned = collapse_whitespace(trimmed_raw).into_owned();
+        command_owned = collapse_whitespace(command).into_owned();
+        (trimmed_owned.as_str(), command_owned.as_str())
+    } else {
+        (trimmed_raw, command)
+    };
 
     // Phase 1: replace escape sequences `\*` and `\\` with placeholders so the
     // regex-escaping pass below leaves them alone.
@@ -143,13 +186,27 @@ pub fn match_wildcard_pattern(pattern: &str, command: &str, case_insensitive: bo
         escaped.push(c);
     }
 
-    // Phase 3: unescaped `*` → `.*`.
-    let with_wildcards = escaped.replace('*', ".*");
+    // Phase 2.5 (GLOBSTAR): replace each `/(?:**/)+` run (`/**/`, `/**/**/`, …)
+    // with a placeholder BEFORE the `*`→`.*` pass, exactly as TS applies `fmg`
+    // between metachar-escaping and `replaceAll("*",".*")`. The metachar-escape
+    // does not touch `*` or `/`, and escaped stars are already placeholders, so
+    // only genuine unescaped globstar runs match here.
+    static GLOBSTAR_RE: OnceLock<Regex> = OnceLock::new();
+    let globstar_re = GLOBSTAR_RE.get_or_init(|| Regex::new(r"/(?:\*\*/)+").unwrap());
+    let with_globstar = globstar_re
+        .replace_all(&escaped, GLOBSTAR_PLACEHOLDER)
+        .into_owned();
+
+    // Phase 3: unescaped `*` → `.*`. The GLOBSTAR placeholder holds no `*`.
+    let with_wildcards = with_globstar.replace('*', ".*");
 
     // Phase 4: placeholders → literal-regex forms. The placeholders were escaped
     // in phase 2 only via their (absent) metacharacters; the literal text
-    // `\u{0}ESCAPED_STAR\u{0}` survives intact, so replace it wholesale.
+    // `\u{0}ESCAPED_STAR\u{0}` survives intact, so replace it wholesale. The
+    // GLOBSTAR placeholder becomes `/(?:.*/)?` (zero-or-more `/`-delimited
+    // segments), matching TS `mmg`→`/(?:.*/)?`.
     let mut regex_pattern = with_wildcards
+        .replace(GLOBSTAR_PLACEHOLDER, "/(?:.*/)?")
         .replace(ESCAPED_STAR_PLACEHOLDER, "\\*")
         .replace(ESCAPED_BACKSLASH_PLACEHOLDER, "\\\\");
 
@@ -299,5 +356,88 @@ mod tests {
         // `.` in the pattern is a literal dot, not "any char".
         assert!(match_wildcard_pattern("cat a.txt", "cat a.txt", false));
         assert!(!match_wildcard_pattern("cat a.txt", "cat axtxt", false));
+    }
+
+    // ----- PERM-WILD-01: whitespace-normalize mode (`Ale`'s 4th param / `cxt`) -----
+
+    #[test]
+    fn wildcard_normalize_collapses_command_whitespace() {
+        // A wildcard rule with a fixed internal space matches a command whose
+        // internal whitespace is doubled/tabbed ONLY under normalize mode.
+        // Without it, the literal ` ` in the pattern requires a single space.
+        assert!(match_wildcard_pattern_ex(
+            "git commit *",
+            "git  commit -m x",
+            false,
+            true
+        ));
+        assert!(match_wildcard_pattern_ex(
+            "git commit *",
+            "git\tcommit -m x",
+            false,
+            true
+        ));
+        // Off (the three-arg Grep/Glob/hooks default) → doubled space does NOT match.
+        assert!(!match_wildcard_pattern(
+            "git commit *",
+            "git  commit -m x",
+            false
+        ));
+        assert!(!match_wildcard_pattern_ex(
+            "git commit *",
+            "git  commit -m x",
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn wildcard_normalize_collapses_pattern_whitespace() {
+        // Doubled whitespace on the PATTERN side is likewise collapsed under
+        // normalize, so an accidentally double-spaced rule still matches.
+        assert!(match_wildcard_pattern_ex(
+            "git  commit *",
+            "git commit -m x",
+            false,
+            true
+        ));
+        assert!(!match_wildcard_pattern_ex(
+            "git  commit *",
+            "git commit -m x",
+            false,
+            false
+        ));
+    }
+
+    // ----- PERM-WILD-02: `/**/` globstar → `/(?:.*/)?` (zero-or-more segments) -----
+
+    #[test]
+    fn wildcard_globstar_matches_zero_segments() {
+        // `/a/**/b` matches `/a/b` (zero intermediate segments) — the case the
+        // naive `**`→`.*.*` port REJECTED because it required an extra `/`-chunk.
+        assert!(match_wildcard_pattern("cat /a/**/b", "cat /a/b", false));
+    }
+
+    #[test]
+    fn wildcard_globstar_matches_many_segments() {
+        assert!(match_wildcard_pattern("cat /a/**/b", "cat /a/x/b", false));
+        assert!(match_wildcard_pattern("cat /a/**/b", "cat /a/x/y/b", false));
+    }
+
+    #[test]
+    fn wildcard_globstar_boundary_not_greedy_past_b() {
+        // Still anchored: a path that does not end in `/b` must not match.
+        assert!(!match_wildcard_pattern("cat /a/**/b", "cat /a/x/c", false));
+    }
+
+    #[test]
+    fn wildcard_globstar_repeated_run() {
+        // `/**/**/` collapses to a single zero-or-more-segments matcher.
+        assert!(match_wildcard_pattern("cat /a/**/**/b", "cat /a/b", false));
+        assert!(match_wildcard_pattern(
+            "cat /a/**/**/b",
+            "cat /a/x/y/b",
+            false
+        ));
     }
 }

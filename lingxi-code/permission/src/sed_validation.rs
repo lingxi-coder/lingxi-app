@@ -64,6 +64,88 @@ pub const SED_ASK_MESSAGE: &str =
 pub const SED_ASK_REASON: &str =
     "sed command contains operations that require explicit approval (e.g., write commands, execute commands)";
 
+/// Byte-locked ask REASON from the 2.1.211 `mQi` over-length / tokenize-mismatch
+/// pre-check (the first `mQi` branch, `command.length > c5e || $4r(command)`).
+pub const SED_OVER_LENGTH_REASON: &str =
+    "sed command could not be statically validated (command is over-length or contains characters bash and the analyzer tokenize differently)";
+
+/// Byte-locked ask REASON from the 2.1.211 `mQi` redirect-borne branch (`Unu`).
+/// Currently emitted only by the (deferred) redirect-borne AST analysis; kept
+/// here so downstream wiring can reference the exact bytes.
+pub const SED_REDIRECT_BORNE_REASON: &str =
+    "sed command carries redirect-borne content that cannot be statically validated (swallowed arguments, unanalyzable heredoc, or expansion in a redirect target)";
+
+/// 2.1.211 `c5e` (`1e4`): the maximum sed command length that is statically
+/// validated. Anything longer is over-length and must ask.
+pub const SED_MAX_COMMAND_LEN: usize = 10_000;
+
+/// 2.1.211 `$4r`: does the command contain characters that bash and the static
+/// analyzer tokenize differently (so it cannot be statically validated)? 1:1 with
+///
+/// ```js
+/// function $4r(e){return M3i.test(e)||N3i.test(e)||F3i.test(e)
+///   ||rzn.test(e)||nzn.test(e)||U3i.test(e)}
+/// ```
+///
+/// - `M3i` = `/[\x00-\x08\x0B-\x1F\x7F]/` — control chars (excludes `\t`/`\n`).
+/// - `N3i` = a lone UTF-16 surrogate. A Rust `&str` is always valid UTF-8, so a
+///   lone surrogate cannot occur — this arm never fires here and is omitted.
+/// - `F3i` = `/\\[ \t]|(?:^|[^ \t\\])(?:\\\\)*\\\n|[ \t](?:\\\\)+\\\n/` —
+///   backslash-space/tab, or a line-continuation.
+/// - `rzn` = `/~\[/`.
+/// - `nzn` = `/(?:^|[\s;&|])=[a-zA-Z_]/`.
+/// - `U3i` = `/<\d*-\d*>/`.
+#[must_use]
+pub fn sed_command_untokenizable(command: &str) -> bool {
+    use std::sync::LazyLock;
+    // M3i control-char class (hand-tested; no regex needed).
+    if command.bytes().any(|b| {
+        matches!(b, 0x00..=0x08 | 0x0B..=0x1F | 0x7F)
+    }) {
+        return true;
+    }
+    // F3i: backslash-space/tab, or a backslash line-continuation.
+    static F3I: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\\[ \t]|(?:^|[^ \t\\])(?:\\\\)*\\\n|[ \t](?:\\\\)+\\\n").unwrap()
+    });
+    // rzn: `~[`.
+    static RZN: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"~\[").unwrap());
+    // nzn: an unquoted assignment `=` after start / whitespace / `;` / `&` / `|`.
+    static NZN: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?:^|[\s;&|])=[a-zA-Z_]").unwrap());
+    // U3i: a `<n-m>` brace-range.
+    static U3I: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"<\d*-\d*>").unwrap());
+    F3I.is_match(command)
+        || RZN.is_match(command)
+        || NZN.is_match(command)
+        || U3I.is_match(command)
+}
+
+/// 2.1.211 `mQi` over-length / tokenize-mismatch pre-check (the first `mQi`
+/// branch). Returns the byte-locked over-length ASK verdict when `command`
+/// exceeds [`SED_MAX_COMMAND_LEN`] or is [`sed_command_untokenizable`];
+/// otherwise `None`.
+///
+/// ## Divergence (documented)
+/// 2.1.211's `mQi` runs on the WHOLE bash command (`e.command`, memoized once
+/// across subcommands). This port receives a single `sed` subcommand from the
+/// caller and applies the check to that subcommand — an over-ask-safe
+/// approximation (a subcommand is a substring of the whole command, so this only
+/// ever asks on a narrower slice, never allows more). The `mQi` second branch —
+/// the `Unu` redirect-borne AST analysis emitting [`SED_REDIRECT_BORNE_REASON`]
+/// — needs the bash tree-sitter parser and the whole-command Xwu orchestration
+/// (in [`crate::policy`]); it is deferred.
+#[must_use]
+fn sed_precheck_verdict(command: &str) -> Option<SedVerdict> {
+    if command.len() > SED_MAX_COMMAND_LEN || sed_command_untokenizable(command) {
+        return Some(SedVerdict::Unsafe {
+            message: SED_ASK_MESSAGE.to_string(),
+            reason: SED_OVER_LENGTH_REASON.to_string(),
+        });
+    }
+    None
+}
+
 /// Verdict for whether a single `sed` subcommand may be auto-allowed in
 /// `acceptEdits` mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1176,6 +1258,11 @@ pub fn sed_auto_allow_verdict(
     roots: &FsRoots,
     additional: &[PathBuf],
 ) -> SedVerdict {
+    // 2.1.211 `mQi` over-length / tokenize-mismatch pre-check (runs before the
+    // allowlist `jQt`, exactly as `Xwu` consults `mQi` before `jQt`).
+    if let Some(v) = sed_precheck_verdict(command) {
+        return v;
+    }
     // Read-only allowlist (no file writes): line-printing or stdout substitution.
     if sed_command_is_allowed_by_allowlist(command, false) {
         return SedVerdict::Safe;
@@ -1233,6 +1320,11 @@ pub fn sed_constraint_verdict(
     if allow_file_writes {
         // `acceptEdits`: the in-place allowlist + working-dir containment.
         return sed_auto_allow_verdict(command, roots, additional);
+    }
+    // 2.1.211 `mQi` over-length / tokenize-mismatch pre-check (runs before the
+    // allowlist `jQt`, in every mode — `Xwu` consults `mQi` before `jQt`).
+    if let Some(v) = sed_precheck_verdict(command) {
+        return v;
     }
     // Non-`acceptEdits`: read-only allowlist only. An in-place / file-writing sed
     // is NOT allowed here (TS `allowFileWrites: false`), so it asks.
@@ -1412,6 +1504,58 @@ mod tests {
         assert!(has_file_args(&tokenize("'s/a/b/' file.txt")));
         // glob counts as a file arg
         assert!(has_file_args(&tokenize("-n p *.log")));
+    }
+
+    // ── mQi over-length / tokenize-mismatch pre-check (SED-XWU-RESTRUCTURE-01) ──
+
+    fn over_length_reason(v: &SedVerdict) -> &str {
+        match v {
+            SedVerdict::Unsafe { reason, .. } => reason.as_str(),
+            SedVerdict::Safe => panic!("expected Unsafe"),
+        }
+    }
+
+    #[test]
+    fn over_length_sed_asks_with_over_length_reason() {
+        // A command longer than SED_MAX_COMMAND_LEN is over-length → ask with the
+        // byte-locked over-length reason, even though it is otherwise a plain
+        // stdout substitution the allowlist would accept.
+        let long = format!("sed 's/a/{}/'", "b".repeat(SED_MAX_COMMAND_LEN));
+        let v = verdict(&long);
+        assert_eq!(over_length_reason(&v), SED_OVER_LENGTH_REASON);
+        // Same in the general (non-acceptEdits) verdict.
+        let v2 = sed_constraint_verdict(&long, false, &roots(), &[]);
+        assert_eq!(over_length_reason(&v2), SED_OVER_LENGTH_REASON);
+    }
+
+    #[test]
+    fn untokenizable_sed_asks_with_over_length_reason() {
+        // $4r cases: control char, backslash-space, `~[`, unquoted `=x`, `<n-m>`.
+        for cmd in [
+            "sed 's/a/b/'\u{0007}",  // M3i: BEL control char
+            "sed \\ 's/a/b/'",       // F3i: backslash-space
+            "sed 's/~[x]/y/' f",     // rzn: ~[
+            "sed =foo 's/a/b/'",     // nzn: `=` after whitespace then letter
+            "sed 's/a/b/' <1-5>",    // U3i: <n-m> brace-range
+        ] {
+            let v = verdict(cmd);
+            assert_eq!(
+                over_length_reason(&v),
+                SED_OVER_LENGTH_REASON,
+                "{cmd:?} must ask via the over-length/tokenize-mismatch pre-check"
+            );
+        }
+    }
+
+    #[test]
+    fn untokenizable_predicate_negative_cases() {
+        // Ordinary seds are tokenizable → not flagged by the pre-check.
+        assert!(!sed_command_untokenizable("sed -n p file"));
+        assert!(!sed_command_untokenizable("sed 's/a/b/g' file.txt"));
+        assert!(!sed_command_untokenizable("sed -i 's/foo/bar/' ./x"));
+        // …and they remain Safe through the full verdict.
+        assert_eq!(verdict("sed -n p file"), SedVerdict::Safe);
+        assert_eq!(verdict("sed 's/a/b/'"), SedVerdict::Safe);
     }
 
     #[test]

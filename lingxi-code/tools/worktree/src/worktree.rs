@@ -10,7 +10,7 @@
 //! lingxi-tools`). The `parity_workflow_tools` driver cross-checks the
 //! locked literals.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -862,15 +862,15 @@ async fn kill_worktree_tmux_session(
 /// on a successful `remove`; `` `Exited worktree but could not remove it —
 /// kept at ${path}. ${cwdPhrase}` `` (em dash) when `remove_worktree` fails
 /// (non-fatal — see [`Self::call`]'s removal step). `cwdPhrase` is 206's
-/// `y9o`: normal branch (byte-exact) `` `Session is now back in ${cwd}.` ``.
-/// 206 also has a missing-original-cwd fallback branch
-/// (`originalCwdMissing`/`restoredCwd`/`fellBackToWorktree`, with a
-/// `Consider restarting Claude/LingXi from an existing directory.` suffix)
-/// that this port deliberately does NOT implement: `session_cwd.swap`
-/// unconditionally assumes `session.original_cwd` still exists, so there is
-/// no `restoredCwd`/`fellBackToWorktree` substrate to drive that branch
-/// faithfully — inventing one would risk a non-byte-exact guess. Documented
-/// residual, not a gap: only the normal branch is reachable.
+/// `y9o`/`kAs` (@222211173): normal branch (byte-exact)
+/// `` `Session is now back in ${cwd}.` ``; and the missing-original-cwd
+/// fallback — when `session.original_cwd` no longer exists on disk,
+/// [`Self::restore_cwd`] (206 `xCd`) falls back through
+/// `[worktree_path, $HOME, temp_dir]` and the phrase becomes
+/// `` `The original directory ${cwd} no longer exists, so the session is now
+/// in ${restoredCwd}.` ``, plus
+/// `` ` Consider restarting LingXi from an existing directory.` `` UNLESS the
+/// fallback landed on the worktree itself (`fellBackToWorktree`).
 ///
 /// ERRORCODE 4/5 OMITTED: the 206 oracle also refuses removal when the
 /// CALLING session isn't the worktree's owner (a pinned/subagent worktree
@@ -881,15 +881,115 @@ async fn kill_worktree_tmux_session(
 /// worktree-ownership or pinned-agent-cwd concept (`session_cwd.swap` always
 /// moves the whole session) — these two guards are deliberately omitted, not
 /// forgotten.
+/// Result of [`ExitWorktreeTool::restore_cwd`] — 206 `xCd`'s
+/// `{restoredCwd, originalCwdMissing, fellBackToWorktree}`. Drives the
+/// `y9o`/`kAs` cwd-restore phrase in the exit message.
+struct CwdRestore {
+    /// The directory the session was actually restored to.
+    restored_cwd: PathBuf,
+    /// `true` when `original_cwd` no longer existed and a fallback was used.
+    original_cwd_missing: bool,
+    /// `true` when the fallback landed on the worktree path itself (206
+    /// `o === n`) — suppresses the "Consider restarting" advice.
+    fell_back_to_worktree: bool,
+}
+
 pub struct ExitWorktreeTool {
     ctx: BuiltinToolContext,
+    /// Probe for whether a directory still exists on disk — drives 206 `xCd`'s
+    /// missing-original-cwd fallback (`IS(e)` chdir + `realpath` ENOENT check).
+    /// Production wires a real `std::fs` probe (see [`Self::new`]); tests inject
+    /// a stub to exercise the exists / missing branches without touching the FS.
+    dir_exists: fn(&std::path::Path) -> bool,
 }
 
 impl ExitWorktreeTool {
-    /// Construct a new tool wired to the shared builtin context.
+    /// Construct a new tool wired to the shared builtin context. The cwd-restore
+    /// directory probe defaults to a real `std::fs::metadata` existence check.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            dir_exists: |p| std::fs::metadata(p).is_ok(),
+        }
+    }
+
+    /// Test constructor: the cwd-restore probe reports every directory as still
+    /// existing, so `original_cwd` is always taken (the normal
+    /// `Session is now back in {cwd}.` branch). Used by the message goldens,
+    /// which populate synthetic (non-on-disk) `original_cwd` paths.
+    #[cfg(test)]
+    fn new_assuming_cwd_exists(ctx: BuiltinToolContext) -> Self {
+        Self {
+            ctx,
+            dir_exists: |_| true,
+        }
+    }
+
+    /// Test constructor with an explicit directory-existence stub, for
+    /// exercising 206 `xCd`'s missing-original-cwd fallback branches.
+    #[cfg(test)]
+    fn new_with_dir_exists(ctx: BuiltinToolContext, dir_exists: fn(&std::path::Path) -> bool) -> Self {
+        Self { ctx, dir_exists }
+    }
+
+    /// Restore the session's cwd on exit — a faithful port of 206's `xCd`
+    /// (@222210592). If `original_cwd` still exists, swap the session back to
+    /// it (`original_cwd_missing = false`). If it is gone, fall back through
+    /// `[worktree_path, $HOME, temp_dir]` — 206's `[n, ICd.homedir(), sG()]`,
+    /// where `n` (the first candidate) is the worktree path — picking the first
+    /// that exists, and recording whether the fallback landed on the worktree
+    /// (`fell_back_to_worktree`). The shared `session_cwd` is swapped to the
+    /// resolved directory either way.
+    ///
+    /// Called AFTER the worktree removal (206 order: `het()` remove precedes
+    /// `xCd`), so on a successful `remove` the worktree path no longer exists
+    /// and the fallback skips past it to `$HOME`; on `keep` (or a failed
+    /// remove) the worktree still exists and is used.
+    ///
+    /// Deviations from 206, both documented and low-risk: (a) 206 rethrows on a
+    /// NON-ENOENT `IS(e)` error (e.g. a permissions failure), whereas this port
+    /// folds every "not usable" result into the missing→fallback path — the
+    /// port's cwd is logical (no real `chdir`), so there is no reason to hard-
+    /// fail a restore; (b) 206's temp dir is `CLAUDE_CODE_TMPDIR || "/tmp"`,
+    /// this uses [`std::env::temp_dir`] (`TMPDIR || /tmp`) — the same last-resort
+    /// directory in practice.
+    fn restore_cwd(&self, original_cwd: &Path, worktree_path: &Path) -> CwdRestore {
+        let exists = self.dir_exists;
+        if exists(original_cwd) {
+            self.ctx.session_cwd.swap(
+                original_cwd.to_path_buf(),
+                vec![original_cwd.to_path_buf()],
+            );
+            return CwdRestore {
+                restored_cwd: original_cwd.to_path_buf(),
+                original_cwd_missing: false,
+                fell_back_to_worktree: false,
+            };
+        }
+        // `original_cwd` is gone — 206's fallback order `[n=worktreePath,
+        // homedir(), sG()]`.
+        let mut candidates: Vec<PathBuf> = vec![worktree_path.to_path_buf()];
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(home));
+        }
+        candidates.push(std::env::temp_dir());
+        // 206 rethrows if NONE of the fallbacks work; `/tmp` effectively always
+        // exists, so the `unwrap_or` (keeping `original_cwd`) is a degenerate
+        // last resort that keeps this infallible.
+        let restored = candidates
+            .into_iter()
+            .find(|p| exists(p))
+            .unwrap_or_else(|| original_cwd.to_path_buf());
+        let fell_back_to_worktree = restored == *worktree_path;
+        self.ctx
+            .session_cwd
+            .swap(restored.clone(), vec![restored.clone()]);
+        CwdRestore {
+            restored_cwd: restored,
+            original_cwd_missing: true,
+            fell_back_to_worktree,
+        }
     }
 
     async fn emit_started(&self, invocation_id: &str, branch_name: &str) {
@@ -1170,13 +1270,10 @@ impl Tool for ExitWorktreeTool {
             }
         }
 
-        // 3. Restore the session's original cwd. `swap` (not `set_on_swap`)
-        // so the orchestrator's registered cache-invalidation callback
-        // (Task 5) fires exactly like it does for `EnterWorktree`.
-        self.ctx.session_cwd.swap(
-            session.original_cwd.clone(),
-            vec![session.original_cwd.clone()],
-        );
+        // 3. (Restore of the session cwd is deferred to step 6, AFTER the
+        // worktree removal — 206 order: `het()` remove precedes `xCd` restore,
+        // so the missing-original-cwd fallback sees the post-removal on-disk
+        // state of the worktree, not its pre-removal state.)
 
         // 4. Tmux: kill on `remove`, BEFORE the git-level worktree removal —
         // mirrors 206's `HCd.call` ordering (`if(s)await rPe(s)` precedes its
@@ -1228,6 +1325,14 @@ impl Tool for ExitWorktreeTool {
             false
         };
 
+        // 5b. Restore the session's cwd (206 `xCd`, run AFTER removal). On a
+        // successful `remove` the worktree path is now gone, so a missing-
+        // original-cwd fallback skips past it to `$HOME`; on `keep` (or a
+        // failed remove) the worktree still exists and is the fallback target.
+        // `swap` (not `set_on_swap`) so the orchestrator's registered cache-
+        // invalidation callback fires exactly as it does for `EnterWorktree`.
+        let cwd_restore = self.restore_cwd(&session.original_cwd, &session.worktree_path);
+
         // 6. Clear the session record — a further `ExitWorktree` call (with
         // no intervening `EnterWorktree`) now takes the no-op path. This runs
         // regardless of `remove_failed`: 206 considers the session exited
@@ -1265,15 +1370,28 @@ impl Tool for ExitWorktreeTool {
         let original_cwd_display = session.original_cwd.to_string_lossy().into_owned();
         let worktree_path_display = session.worktree_path.to_string_lossy().into_owned();
 
-        // 206 `y9o(originalCwd, state)` — normal branch only (byte-exact).
-        // The missing-cwd fallback (`originalCwdMissing`/`restoredCwd`/
-        // `fellBackToWorktree`, plus a "Consider restarting Claude/LingXi
-        // from an existing directory." suffix) is a documented-unreachable
-        // residual: this port's `session_cwd.swap` unconditionally assumes
-        // `session.original_cwd` still exists, so there is no
-        // `restoredCwd`/`fellBackToWorktree` substrate to drive that branch
-        // faithfully (see the module doc above `ExitWorktreeTool`).
-        let cwd_restored_phrase = format!("Session is now back in {original_cwd_display}.");
+        // 206 `kAs(originalCwd, xCdResult)` — full port (@222211173):
+        //   • cwd still exists → `Session is now back in {original_cwd}.`
+        //   • cwd gone, fell back to the worktree →
+        //       `The original directory {original_cwd} no longer exists, so the
+        //        session is now in {restored_cwd}.`
+        //   • cwd gone, fell back to $HOME/tmp (NOT the worktree) → the same,
+        //     plus ` Consider restarting LingXi from an existing directory.`
+        //     (`Claude`→`LingXi` product-name rebrand, matching this file's
+        //     other user-facing strings).
+        let cwd_restored_phrase = if !cwd_restore.original_cwd_missing {
+            format!("Session is now back in {original_cwd_display}.")
+        } else {
+            let restored_display = cwd_restore.restored_cwd.to_string_lossy();
+            let base = format!(
+                "The original directory {original_cwd_display} no longer exists, so the session is now in {restored_display}."
+            );
+            if cwd_restore.fell_back_to_worktree {
+                base
+            } else {
+                format!("{base} Consider restarting LingXi from an existing directory.")
+            }
+        };
 
         let tmux_session_name_for_data: Option<String> = if is_remove {
             None
@@ -1341,7 +1459,6 @@ impl Tool for ExitWorktreeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tool_api::test_support::{
@@ -1920,7 +2037,7 @@ mod tests {
         let (bctx, sink) = make_bctx(mock);
         bctx.bus.attach_sink(sink.clone()).await;
         let boot_cwd = bctx.cwd();
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
             .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
@@ -1953,7 +2070,7 @@ mod tests {
             None,
         );
         let session_cwd = bctx.cwd();
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let mut sub = fresh_ctx();
         sub.cwd = Some(PathBuf::from("/tmp/isolated/agent-wt"));
         let err = tool
@@ -1991,7 +2108,7 @@ mod tests {
             tmux_session_name: None,
         });
         bctx.session_cwd.swap(wt.clone(), vec![wt.clone()]);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
             .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
             .await
@@ -2026,7 +2143,7 @@ mod tests {
             tmux_session_name: None,
         });
         bctx.session_cwd.swap(wt.clone(), vec![wt]);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let _ = tool
             .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
@@ -2047,7 +2164,7 @@ mod tests {
         let original_cwd = PathBuf::from("/tmp/repo-keep");
         let worktree_path = PathBuf::from("/tmp/repo-keep/.lingxi/worktrees/feat");
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
@@ -2074,6 +2191,135 @@ mod tests {
         assert!(!names.contains(&WORKTREE_REMOVED.to_string()));
     }
 
+    // ── 206 `xCd` missing-original-cwd fallback (residual #2) ───────────────
+
+    #[tokio::test]
+    async fn exit_restore_cwd_uses_original_when_it_exists() {
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-r1"));
+        let (bctx, _sink) = make_bctx(mock);
+        let original = PathBuf::from("/tmp/repo-r1");
+        let wt = PathBuf::from("/tmp/repo-r1/.lingxi/worktrees/feat");
+        let tool = ExitWorktreeTool::new_with_dir_exists(bctx, |_| true);
+        let r = tool.restore_cwd(&original, &wt);
+        assert!(!r.original_cwd_missing);
+        assert!(!r.fell_back_to_worktree);
+        assert_eq!(r.restored_cwd, original);
+        assert_eq!(tool.ctx.cwd(), original, "session swapped back to original");
+    }
+
+    #[tokio::test]
+    async fn exit_restore_cwd_falls_back_to_worktree_when_original_gone() {
+        // `original_cwd` gone but the worktree still exists (the `keep`
+        // situation): 206's `n` = worktree path is the first fallback, so the
+        // session lands on the worktree and `fell_back_to_worktree` is set.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-r2"));
+        let (bctx, _sink) = make_bctx(mock);
+        let original = PathBuf::from("/tmp/repo-r2-gone");
+        let wt = PathBuf::from("/tmp/repo-r2/.lingxi/worktrees/feat");
+        // Only `original` is missing; the worktree (and everything else) exists.
+        let tool = ExitWorktreeTool::new_with_dir_exists(bctx, |p| {
+            p != std::path::Path::new("/tmp/repo-r2-gone")
+        });
+        let r = tool.restore_cwd(&original, &wt);
+        assert!(r.original_cwd_missing);
+        assert!(r.fell_back_to_worktree, "landed on the worktree (first fallback)");
+        assert_eq!(r.restored_cwd, wt);
+        assert_eq!(tool.ctx.cwd(), wt);
+    }
+
+    #[tokio::test]
+    async fn exit_restore_cwd_falls_back_past_worktree_to_tmp_when_both_gone() {
+        // BOTH `original_cwd` and the worktree are gone (the `remove`
+        // situation, where the worktree was just deleted): the fallback skips
+        // past the worktree to a real dir; here the stub reports only the
+        // temp dir as existing, so `fell_back_to_worktree` is NOT set.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-r3"));
+        let (bctx, _sink) = make_bctx(mock);
+        let original = PathBuf::from("/tmp/repo-r3-gone");
+        let wt = PathBuf::from("/tmp/repo-r3-gone/.lingxi/worktrees/feat");
+        let tool = ExitWorktreeTool::new_with_dir_exists(bctx, |p| {
+            p == std::env::temp_dir().as_path()
+        });
+        let r = tool.restore_cwd(&original, &wt);
+        assert!(r.original_cwd_missing);
+        assert!(!r.fell_back_to_worktree, "did NOT land on the worktree");
+        assert_eq!(r.restored_cwd, std::env::temp_dir());
+        assert_eq!(tool.ctx.cwd(), std::env::temp_dir());
+    }
+
+    #[tokio::test]
+    async fn exit_keep_missing_original_cwd_message_falls_back_to_worktree() {
+        // `keep` + `original_cwd` gone → 206 `kAs` missing branch with
+        // `fellBackToWorktree` (worktree still on disk): the message names the
+        // restored dir but OMITS the "Consider restarting" advice.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-km"));
+        let (bctx, _sink) = make_bctx(mock.clone());
+        let original_cwd = PathBuf::from("/tmp/repo-km-gone");
+        let worktree_path = PathBuf::from("/tmp/repo-km/.lingxi/worktrees/feat");
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
+        // Only the original cwd is missing.
+        let tool = ExitWorktreeTool::new_with_dir_exists(bctx, |p| {
+            p != std::path::Path::new("/tmp/repo-km-gone")
+        });
+        let res = tool
+            .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("keep must succeed even when original cwd is gone");
+        assert_eq!(
+            res.model_content.as_deref(),
+            Some(
+                "Exited worktree. Your work is preserved at \
+                 /tmp/repo-km/.lingxi/worktrees/feat on branch worktree-feat. \
+                 The original directory /tmp/repo-km-gone no longer exists, so \
+                 the session is now in /tmp/repo-km/.lingxi/worktrees/feat."
+            )
+        );
+        assert_eq!(tool.ctx.cwd(), worktree_path, "fell back to the worktree");
+    }
+
+    #[tokio::test]
+    async fn exit_remove_missing_original_cwd_message_advises_restart() {
+        // `remove` + BOTH original cwd and worktree gone → 206 `kAs` missing
+        // branch WITHOUT `fellBackToWorktree`: appends
+        // "Consider restarting LingXi from an existing directory." The exact
+        // fallback dir is env-dependent ($HOME/tmp), so this asserts the stable
+        // prefix + suffix rather than pinning it.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-rm"));
+        let (bctx, _sink) = make_bctx(mock.clone());
+        let original_cwd = PathBuf::from("/tmp/repo-rm-gone");
+        let worktree_path = PathBuf::from("/tmp/repo-rm-gone/.lingxi/worktrees/feat");
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
+        // Only the temp dir exists — original + worktree both gone.
+        let tool = ExitWorktreeTool::new_with_dir_exists(bctx, |p| {
+            p == std::env::temp_dir().as_path()
+        });
+        let res = tool
+            .call(
+                json!({ "action": "remove", "discard_changes": true }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("remove must succeed even when original cwd is gone");
+        let msg = res.model_content.unwrap_or_default();
+        assert!(
+            msg.starts_with(
+                "Exited and removed worktree at /tmp/repo-rm-gone/.lingxi/worktrees/feat."
+            ),
+            "unexpected prefix: {msg}"
+        );
+        assert!(
+            msg.contains(
+                "The original directory /tmp/repo-rm-gone no longer exists, so the session is now in "
+            ),
+            "missing kAs body: {msg}"
+        );
+        assert!(
+            msg.ends_with(" Consider restarting LingXi from an existing directory."),
+            "expected restart advice suffix: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn exit_remove_result_exact_message_with_discard_changes() {
         let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-remove"));
@@ -2082,7 +2328,7 @@ mod tests {
         let original_cwd = PathBuf::from("/tmp/repo-remove");
         let worktree_path = PathBuf::from("/tmp/repo-remove/.lingxi/worktrees/feat");
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
                 json!({ "action": "remove", "discard_changes": true }),
@@ -2120,7 +2366,7 @@ mod tests {
         let original_cwd = PathBuf::from("/tmp/repo-remove-fail");
         let worktree_path = PathBuf::from("/tmp/repo-remove-fail/.lingxi/worktrees/feat");
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
                 json!({ "action": "remove", "discard_changes": true }),
@@ -2167,7 +2413,7 @@ mod tests {
             "worktree-feat",
             Some("deadbeef".to_string()),
         );
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
             .await
@@ -2192,7 +2438,7 @@ mod tests {
         let original_cwd = PathBuf::from("/tmp/repo-unknown");
         let worktree_path = PathBuf::from("/tmp/repo-unknown/.lingxi/worktrees/feat");
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
             .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
             .await
@@ -2229,7 +2475,7 @@ mod tests {
             "worktree-feat",
             None,
         );
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
             .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
             .await
@@ -2265,7 +2511,7 @@ mod tests {
             "worktree-feat",
             Some("deadbeef".to_string()),
         );
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let err = tool
             .call(json!({ "action": "remove" }), fresh_ctx(), fresh_tx())
             .await
@@ -2299,7 +2545,7 @@ mod tests {
         let original_cwd = PathBuf::from("/tmp/repo-force");
         let worktree_path = PathBuf::from("/tmp/repo-force/.lingxi/worktrees/feat");
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
                 json!({ "action": "remove", "discard_changes": true }),
@@ -2330,7 +2576,7 @@ mod tests {
         let original_cwd = PathBuf::from("/tmp/repo-detached-exit");
         let worktree_path = PathBuf::from("/tmp/repo-detached-exit/.lingxi/worktrees/feat");
         populate_session(&bctx, &original_cwd, &worktree_path, "HEAD", None);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
@@ -2447,7 +2693,7 @@ mod tests {
             "worktree-feat",
             "wt-x",
         );
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
                 json!({ "action": "remove", "discard_changes": true }),
@@ -2495,7 +2741,7 @@ mod tests {
             "worktree-feat",
             "wt-y",
         );
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(
                 json!({ "action": "remove", "discard_changes": true }),
@@ -2536,7 +2782,7 @@ mod tests {
             "worktree-feat",
             "wt-z",
         );
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let res = tool
             .call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
             .await
@@ -2583,7 +2829,7 @@ mod tests {
                 "/tmp/repo-tmux-inert-{action}/.lingxi/worktrees/feat"
             ));
             populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
-            let tool = ExitWorktreeTool::new(bctx);
+            let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
             let input = if action == "remove" {
                 json!({ "action": "remove", "discard_changes": true })
             } else {
@@ -2605,7 +2851,7 @@ mod tests {
     fn exit_is_destructive_and_user_facing_name_follow_action() {
         let mock = Arc::new(MockWorktreeManager::new());
         let (bctx, _sink) = make_bctx(mock);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         assert!(tool.is_destructive(&json!({ "action": "remove" })));
         assert!(!tool.is_destructive(&json!({ "action": "keep" })));
         assert_eq!(
@@ -2624,7 +2870,7 @@ mod tests {
     fn exit_should_defer_is_true() {
         let mock = Arc::new(MockWorktreeManager::new());
         let (bctx, _sink) = make_bctx(mock);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         assert!(tool.should_defer());
     }
 
@@ -2632,7 +2878,7 @@ mod tests {
     fn exit_input_schema_matches_206_contract() {
         let mock = Arc::new(MockWorktreeManager::new());
         let (bctx, _sink) = make_bctx(mock);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let schema = tool.input_schema();
         assert_eq!(schema["required"], json!(["action"]));
         assert_eq!(schema["additionalProperties"], json!(false));
@@ -2650,7 +2896,7 @@ mod tests {
     async fn exit_description_is_206_byte_exact() {
         let mock = Arc::new(MockWorktreeManager::new());
         let (bctx, _sink) = make_bctx(mock);
-        let tool = ExitWorktreeTool::new(bctx);
+        let tool = ExitWorktreeTool::new_assuming_cwd_exists(bctx);
         let desc = tool
             .description(
                 &json!({}),

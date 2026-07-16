@@ -572,7 +572,7 @@ pub(crate) fn too_complex(node: Node) -> ParseForSecurityResult {
     } else if DANGEROUS_TYPES.contains(&t) {
         format!("Contains {t}")
     } else {
-        format!("Unhandled node type: {t}")
+        format!("Contains shell syntax ({t}) that cannot be statically analyzed")
     };
     ParseForSecurityResult::TooComplex { reason }
 }
@@ -3150,7 +3150,7 @@ mod tests {
         // too-complex on the outer string.
         assert_eq!(
             cmd_argvs(r#"cd "$(echo /etc)""#),
-            Err("Unhandled node type: string".to_string())
+            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
         );
     }
 
@@ -3183,7 +3183,7 @@ mod tests {
         // no content children. Guard B (text len > 2) → reject.
         assert_eq!(
             cmd_argvs(r#"echo " ""#),
-            Err("Unhandled node type: string".to_string())
+            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
         );
         // Genuine empty `""` (len == 2) is fine → argv element "".
         let argvs = cmd_argvs(r#"echo """#).expect("simple");

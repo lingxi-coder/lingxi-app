@@ -78,11 +78,19 @@ pub fn is_dangerous_bash_permission(tool_name: &str, rule_content: &Option<Strin
     }
 
     // Tool-level allow (Bash with no content, or Bash(*)) — allows ALL commands.
-    let content = match rule_content {
+    let raw = match rule_content {
         None => return true,
         Some(c) if c.is_empty() => return true,
-        Some(c) => c.trim().to_lowercase(),
+        Some(c) => c,
     };
+
+    // Whitespace/star-only content (`Bash(**)`, `Bash( * )`) — 2.1.211 `Qqr`'s
+    // caller `Xqr`'s `/^[\s*]+$/` test on the UNTRIMMED content.
+    if !raw.is_empty() && raw.chars().all(|c| c == '*' || c.is_whitespace()) {
+        return true;
+    }
+
+    let content = raw.trim().to_lowercase();
 
     // Standalone wildcard (*) matches everything.
     if content == "*" {
@@ -94,11 +102,45 @@ pub fn is_dangerous_bash_permission(tool_name: &str, rule_content: &Option<Strin
     for pattern in dangerous_bash_patterns() {
         let lower_pattern = pattern.to_lowercase();
         if matches_pattern_shape(&content, &lower_pattern) {
+            // 2.1.211 `Qqr` python `-m <module>.<sub>` carve-out: a rule like
+            // `Bash(python -m foo.bar:*)` is NOT dangerous (it can only reach the
+            // `{pattern} -…*` arm, so testing the exemption after any match is
+            // safe). The `_Tu`/`bTu` curl/wget/kubectl/aws/gcloud/gsutil
+            // subcommand machinery is externally inert (`TTu` — the pattern list
+            // — contains none of those bases) and is intentionally omitted.
+            if is_python_dash_m_exempt(&lower_pattern, &content) {
+                continue;
+            }
             return true;
         }
     }
 
     false
+}
+
+/// 2.1.211 `Qqr` carve-out: `content` matched the `{pattern} -…*` dangerous arm,
+/// but `pattern` is a `python`/`pythonN.N` interpreter AND the argument is a bare
+/// `-m <module>.<submodule>` invocation → NOT dangerous. Mirrors
+/// `/^python[\d.]*$/.test(o) && /^-m\s+\w+\.[\w.]+(\s*:|\s+)$/.test(s)` where
+/// `s` is the arg with the trailing `*` stripped.
+fn is_python_dash_m_exempt(pattern: &str, content: &str) -> bool {
+    use std::sync::LazyLock;
+    static PYTHON_BASE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^python[\d.]*$").unwrap());
+    static DASH_M: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^-m\s+\w+\.[\w.]+(\s*:|\s+)$").unwrap());
+    if !PYTHON_BASE.is_match(pattern) {
+        return false;
+    }
+    // `i = content after "{pattern} "`, `s = i` with the trailing `*` removed.
+    let Some(i) = content.strip_prefix(&format!("{pattern} ")) else {
+        return false;
+    };
+    let s = match i.strip_suffix('*') {
+        Some(s) => s,
+        None => return false,
+    };
+    DASH_M.is_match(s)
 }
 
 /// Checks if a `PowerShell` permission rule is dangerous for auto mode. 1:1 with
@@ -381,6 +423,40 @@ mod tests {
         let found = find_dangerous_classifier_permissions(&rules);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rule_display, "Shell(python:*)");
+    }
+
+    #[test]
+    fn bash_whitespace_star_only_is_dangerous() {
+        // 2.1.211 `Xqr`'s `/^[\s*]+$/` untrimmed check.
+        for pat in ["**", " * ", "  ", "\t*"] {
+            assert!(
+                is_dangerous_bash_permission(BASH_TOOL_NAME, &content(pat)),
+                "{pat:?} must be dangerous"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_python_dash_m_module_is_exempt() {
+        // 2.1.211 `Qqr` carve-out: `python -m <module>.<sub>` is NOT dangerous,
+        // but a bare `python …*` / other `python -flag*` still is.
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python -m foo.bar:*")
+        ));
+        assert!(!is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python3 -m pkg.sub *")
+        ));
+        // Not the -m module shape → still dangerous.
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python -c*")
+        ));
+        assert!(is_dangerous_bash_permission(
+            BASH_TOOL_NAME,
+            &content("python:*")
+        ));
     }
 
     #[test]

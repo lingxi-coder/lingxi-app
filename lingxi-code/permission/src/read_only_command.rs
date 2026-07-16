@@ -77,10 +77,12 @@ const READONLY_BASE_COMMANDS: &[&str] = &[
     // `test`/`getconf`; the port previously over-allowed those two read-only.)
     "sleep", "which", "type", "expr", "seq", "tsort", "pr",
     // Hand-written read-only regex commands whose simple forms reduce to a
-    // base-word + metachar-free-args shape (`pwd`, `whoami`, `ls`, `find`,
-    // `cd`, `arch`, `alias`). `echo`/`grep`/`rg`/`jq`/`uniq`/`history` are
-    // handled with their TS-specific guards in `is_read_only_subcommand`.
-    "pwd", "whoami", "ls", "find", "cd", "arch", "alias",
+    // base-word + metachar-free-args shape (`ls`, `find`, `cd`).
+    // `pwd`/`whoami`/`alias`/`arch` are NOT base words — 2.1.211 keeps them in
+    // the exact-match set `OPg` / the `arch` regex (bare / `-h` / `--help` only),
+    // gated in `is_read_only_subcommand`. `echo`/`grep`/`rg`/`jq`/`uniq`/
+    // `history` are handled with their TS-specific guards there too.
+    "ls", "find", "cd",
 ];
 
 /// `find` primary actions that WRITE / execute / side-effect — binary `vDp`
@@ -289,6 +291,19 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     if base == "find" {
         return !words.any(|w| FIND_DANGEROUS_ACTIONS.contains(&w));
     }
+    // `pwd`/`whoami`/`alias` — 2.1.211 exact-match-only set `OPg`: read-only
+    // ONLY as a single bare token (`pwd -L`, `alias k=v` ask).
+    if matches!(base, "pwd" | "whoami" | "alias") {
+        return words.next().is_none();
+    }
+    // `arch` — 2.1.211 `/^arch(?:\s+(?:--help|-h))?\s*$/`: bare, or a lone
+    // `-h`/`--help`.
+    if base == "arch" {
+        return match words.next() {
+            None => true,
+            Some(a) => words.next().is_none() && matches!(a, "-h" | "--help"),
+        };
+    }
     READONLY_BASE_COMMANDS.contains(&base)
 }
 
@@ -430,23 +445,22 @@ fn git_remote_is_dangerous(args: &[&str]) -> bool {
     args.iter().any(|a| *a != "-v" && *a != "--verbose")
 }
 
-/// `git reflog` write-subcommand guard — port of the TS callback
-/// (`readOnlyCommandValidation.ts:283-303`). `args` are the tokens after
-/// `git reflog`. The FIRST non-flag positional is the subcommand: `expire` /
-/// `delete` / `exists` write to `.git/logs/**` and are dangerous; `show` or a
-/// ref name is safe.
+/// `git reflog` write-subcommand guard — port of the 2.1.211 TS callback.
+/// `args` are the tokens after `git reflog`. 2.1.211 uses an ALLOWLIST gate on
+/// the first token (must be a flag, or exactly `show`/`list`; anything else —
+/// incl. a bare ref name — is dangerous), PLUS a denylist of write subcommands
+/// (`expire`/`delete`/`exists`/`drop`/`write`) matched anywhere in the args.
 fn git_reflog_is_dangerous(args: &[&str]) -> bool {
-    const DANGEROUS_SUBCOMMANDS: &[&str] = &["expire", "delete", "exists"];
-    for token in args {
-        if token.is_empty() || token.starts_with('-') {
-            continue;
+    const SAFE_SUBCOMMANDS: &[&str] = &["show", "list"];
+    const DANGEROUS_SUBCOMMANDS: &[&str] = &["expire", "delete", "exists", "drop", "write"];
+    // First-token allowlist (TS `if(o&&!o.startsWith("-")&&!r.has(o))return!0`).
+    if let Some(first) = args.first() {
+        if !first.is_empty() && !first.starts_with('-') && !SAFE_SUBCOMMANDS.contains(first) {
+            return true;
         }
-        // First non-flag positional decides: dangerous subcommand, or a safe
-        // `show`/ref (after which further positionals are ref args → safe).
-        return DANGEROUS_SUBCOMMANDS.contains(token);
     }
-    // No positional = bare `git reflog` = safe (shows the reflog).
-    false
+    // Denylist anywhere in the args (TS `for(i of t)if(n.has(i))return!0`).
+    args.iter().any(|a| DANGEROUS_SUBCOMMANDS.contains(a))
 }
 
 /// Does `token` (a `-…` flag) contain a short-flag `l`, marking a list request?
@@ -607,6 +621,37 @@ mod tests {
         assert!(command_is_read_only("rg needle"));
         assert!(command_is_read_only("echo hello world"));
         assert!(command_is_read_only("find . -name '*.rs'"));
+    }
+
+    #[test]
+    fn exact_match_base_commands_reject_args() {
+        // 2.1.211 `OPg`: pwd/whoami/alias are read-only ONLY as a bare token.
+        assert!(command_is_read_only("pwd"));
+        assert!(command_is_read_only("whoami"));
+        assert!(command_is_read_only("alias"));
+        assert!(!command_is_read_only("pwd -L"));
+        assert!(!command_is_read_only("whoami --foo"));
+        assert!(!command_is_read_only("alias k=v"));
+        // 2.1.211 `arch` regex: bare, or a lone `-h`/`--help`.
+        assert!(command_is_read_only("arch"));
+        assert!(command_is_read_only("arch -h"));
+        assert!(command_is_read_only("arch --help"));
+        assert!(!command_is_read_only("arch -x"));
+        assert!(!command_is_read_only("arch x86_64 uname"));
+    }
+
+    #[test]
+    fn git_reflog_allowlist_gate() {
+        // 2.1.211: first token must be a flag or exactly show/list; the
+        // {expire,delete,exists,drop,write} denylist matches anywhere.
+        assert!(command_is_read_only("git reflog"));
+        assert!(command_is_read_only("git reflog show"));
+        assert!(command_is_read_only("git reflog list"));
+        assert!(!command_is_read_only("git reflog drop"));
+        assert!(!command_is_read_only("git reflog write"));
+        assert!(!command_is_read_only("git reflog expire --all"));
+        // A bare ref name is no longer auto-allowed (allowlist gate).
+        assert!(!command_is_read_only("git reflog main"));
     }
 
     #[test]

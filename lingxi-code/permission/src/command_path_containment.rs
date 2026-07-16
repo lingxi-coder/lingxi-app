@@ -846,6 +846,27 @@ fn has_glob_metachar(s: &str) -> bool {
 /// Unlike TS `validatePath`, the deny-rule / allow-rule / sandbox-allowlist
 /// branches of `isPathAllowed` are NOT evaluated here — those outcomes are
 /// produced by [`crate::policy`]'s rule walks (see the module-level scope note).
+/// TS `SUr(path)`: `true` when a `..` segment appears AFTER a real directory
+/// segment (a possible symlink escape). Splits on `/` (also `\` on Windows),
+/// skips empty and `.` segments, and flags a `..` seen once any non-`..` segment
+/// has been passed.
+fn dotdot_after_directory_segment(path: &str) -> bool {
+    let mut seen_real = false;
+    for seg in path.split(|c| c == '/' || (cfg!(target_os = "windows") && c == '\\')) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if seen_real {
+                return true;
+            }
+        } else {
+            seen_real = true;
+        }
+    }
+    false
+}
+
 fn validate_path(path: &str, operation_type: OperationType, roots: &FsRoots) -> PathGuard {
     let home = roots
         .home
@@ -878,6 +899,19 @@ fn validate_path(path: &str, operation_type: OperationType, roots: &FsRoots) -> 
     {
         return PathGuard::Ask(
             "Shell expansion syntax in paths requires manual approval".to_string(),
+        );
+    }
+
+    // 4a. `..`-after-directory traversal (claude-code `SUr`, run by `EUr` after
+    //     the shell-expansion guard, before the brace/glob guards). A `..`
+    //     segment appearing AFTER a real directory segment may follow a symlink
+    //     outside the working directory (`expand_path` would otherwise collapse
+    //     `..` lexically and mask the escape), so it ASKS — even when the path
+    //     resolves back inside cwd (`sub/../ok.txt`).
+    if dotdot_after_directory_segment(&clean_path) {
+        return PathGuard::Ask(
+            "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
+                .to_string(),
         );
     }
 
@@ -1746,6 +1780,37 @@ mod tests {
             ),
             vec!["A".to_string(), "B".to_string(), "C".to_string()]
         );
+    }
+
+    // ── PATH-04: `..`-after-directory traversal pre-guard (SUr) ────────────
+
+    #[test]
+    fn dotdot_after_real_segment_is_flagged() {
+        assert!(dotdot_after_directory_segment("sub/../ok.txt"));
+        assert!(dotdot_after_directory_segment("a/b/../c"));
+        assert!(dotdot_after_directory_segment("./sub/../x"));
+        // Leading `..` (no real segment yet) is NOT flagged.
+        assert!(!dotdot_after_directory_segment("../foo"));
+        assert!(!dotdot_after_directory_segment("../../x"));
+        assert!(!dotdot_after_directory_segment("foo/bar"));
+        assert!(!dotdot_after_directory_segment("./x"));
+    }
+
+    #[test]
+    fn cat_dotdot_after_segment_asks_with_traversal_message() {
+        // `cat sub/../ok.txt` resolves inside cwd but still asks (symlink escape
+        // defense) with the byte-locked message.
+        let a = check_command_path_containment("cat sub/../ok.txt", &roots(), &[]).expect("ask");
+        assert_eq!(
+            a.message,
+            "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
+        );
+        // A leading `..` escaping cwd gets the generic containment message, NOT
+        // the traversal one (SUr does not fire).
+        let b = check_command_path_containment("cat ../secret", &roots(), &[]).expect("ask");
+        assert!(!b
+            .message
+            .contains("traversal after a directory segment"));
     }
 
     fn svec(v: &[&str]) -> Vec<String> {

@@ -218,53 +218,207 @@ fn filter_out_flags(args: &[String]) -> Vec<String> {
     result
 }
 
-/// TS `parsePatternCommand` (`pathValidation.ts:142-184`): for grep/rg-style
-/// commands the first non-flag is the PATTERN and the rest are paths. Tracks the
-/// `-e`/`--regexp`/`-f`/`--file` pattern flags (which mark the pattern as found)
-/// and the `--` end-of-options delimiter. `flags_with_args` are flags that
-/// consume the following arg. Returns `defaults` when no paths were collected.
+/// TS `tAu(arg, prefixes)` (`pathValidation.ts`): extract the VALUE of an
+/// attached flag form — `--file=X` → `X` (when `--file` ∈ prefixes) or a 2-char
+/// short flag `-fX` → `X` (when `-f` ∈ prefixes). `None` for a bare/non-matching
+/// flag.
+fn attached_flag_value(arg: &str, prefixes: &[&str]) -> Option<String> {
+    if !arg.starts_with('-') {
+        return None;
+    }
+    if let Some(eq) = arg.find('=') {
+        if prefixes.contains(&&arg[..eq]) {
+            return Some(arg[eq + 1..].to_string());
+        }
+        return None;
+    }
+    for p in prefixes {
+        if p.len() == 2 && p.starts_with('-') && arg.starts_with(p) && arg != *p {
+            return Some(arg[2..].to_string());
+        }
+    }
+    None
+}
+
+/// TS `Zwu` (`parsePatternCommand`, `pathValidation.ts`): grep/rg-style
+/// extraction. The first non-flag is the PATTERN and the rest are paths;
+/// `-e`/`--regexp`/`-f`/`--file` mark the pattern as found, and `-f`/`--file`
+/// ADDITIONALLY push their argument (the pattern FILE) as a path to validate
+/// (PATH-05 — `--file=X`, `-f X`, and attached `-fX` after positional start via
+/// `tAu`). `flags_with_args` consume the following arg; `--` ends options.
+/// Returns `defaults` when no paths were collected.
 fn parse_pattern_command(
     args: &[String],
     flags_with_args: &[&str],
     defaults: &[&str],
 ) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
-    let mut pattern_found = false;
-    let mut after_double_dash = false;
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if !after_double_dash && arg == "--" {
+    let mut pattern_found = false; // o
+    let mut after_double_dash = false; // i
+    let mut positional_started = false; // s
+    let mut a = 0;
+    while a < args.len() {
+        let l = &args[a];
+        if !after_double_dash && !positional_started && l == "--" {
             after_double_dash = true;
-            i += 1;
+            a += 1;
             continue;
         }
-        if !after_double_dash && arg.starts_with('-') {
-            let flag = arg.split('=').next().unwrap_or(arg);
-            if matches!(flag, "-e" | "--regexp" | "-f" | "--file") {
+        if !after_double_dash && !positional_started && l != "-" && l.starts_with('-') {
+            let eq = l.find('=');
+            let u = match eq {
+                Some(e) => &l[..e],
+                None => l.as_str(),
+            };
+            if matches!(u, "-e" | "--regexp" | "-f" | "--file") {
                 pattern_found = true;
+                if u == "-f" || u == "--file" {
+                    let d = match eq {
+                        Some(e) => Some(l[e + 1..].to_string()),
+                        None => args.get(a + 1).cloned(),
+                    };
+                    if let Some(d) = d {
+                        if !d.is_empty() {
+                            paths.push(d);
+                        }
+                    }
+                }
             }
-            // Skip next arg if this flag needs one (and isn't `--flag=val`).
-            if flags_with_args.contains(&flag) && !arg.contains('=') {
-                i += 1;
+            if flags_with_args.contains(&u) && eq.is_none() {
+                a += 1;
             }
-            i += 1;
+            a += 1;
             continue;
         }
-        // First non-flag is the pattern, rest are paths.
+        // After the first positional, flag parsing is disabled; an attached
+        // `-fX`/`--file=X` still contributes its pattern-file path.
+        if positional_started && !after_double_dash {
+            if let Some(cv) = attached_flag_value(l, &["-f", "--file"]) {
+                paths.push(cv);
+            }
+        }
+        positional_started = true;
         if !pattern_found {
             pattern_found = true;
-            i += 1;
+            a += 1;
             continue;
         }
-        paths.push(arg.clone());
-        i += 1;
+        paths.push(l.clone());
+        a += 1;
     }
     if paths.is_empty() {
         defaults.iter().map(|s| (*s).to_string()).collect()
     } else {
         paths
     }
+}
+
+/// TS `hQi(flagsWithArgs)` (`pathValidation.ts`): the cut/paste/column extractor
+/// family. Skips leading flags (consuming the arg of any flag in the set), then
+/// once the first positional appears EVERY subsequent token (including flags) is
+/// a path; `--` also starts the positional-passthrough. No `=`-form handling
+/// (matches the binary, which tests `flagsWithArgs.has(wholeArg)`).
+fn hqi_extract(args: &[String], flags_with_args: &[&str]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut after_double_dash = false; // n
+    let mut positional_started = false; // o
+    let mut i = 0;
+    while i < args.len() {
+        let s = &args[i];
+        if after_double_dash || positional_started {
+            result.push(s.clone());
+        } else if s == "--" {
+            after_double_dash = true;
+        } else if s != "-" && s.starts_with('-') {
+            if flags_with_args.contains(&s.as_str()) {
+                i += 1;
+            }
+        } else {
+            result.push(s.clone());
+            positional_started = true;
+        }
+        i += 1;
+    }
+    result
+}
+
+/// TS `PATH_EXTRACTORS.awk` (`pathValidation.ts`): awk's bespoke extractor. Skips
+/// the program text; `-F`/`--field-separator`/`-v`/`--assign` consume their arg
+/// (never a path) and `-e`/`--source` mark the program found; `-f`/`--file`/
+/// `-E`/`--exec` push their SCRIPT-FILE argument (incl. `=`/attached forms via
+/// `tAu` after positional start). The first bare positional is the program (when
+/// none was given via a flag); the rest are data files.
+fn extract_awk(args: &[String]) -> Vec<String> {
+    const CONSUME_ARG: [&str; 6] = [
+        "-F",
+        "--field-separator",
+        "-v",
+        "--assign",
+        "-e",
+        "--source",
+    ];
+    const SCRIPT_FILE: [&str; 4] = ["-f", "--file", "-E", "--exec"];
+    let mut n: Vec<String> = Vec::new();
+    let mut after_double_dash = false; // o
+    let mut program_found = false; // i
+    let mut positional_started = false; // s
+    let mut a = 0;
+    while a < args.len() {
+        let l = &args[a];
+        if !after_double_dash && !positional_started && l == "--" {
+            after_double_dash = true;
+            a += 1;
+            continue;
+        }
+        if !after_double_dash && !positional_started && l != "-" && l.starts_with('-') {
+            let eq = l.find('=');
+            let u = match eq {
+                Some(e) => &l[..e],
+                None => l.as_str(),
+            };
+            if CONSUME_ARG.contains(&u) {
+                if u == "-e" || u == "--source" {
+                    program_found = true;
+                }
+                if eq.is_none() {
+                    a += 1;
+                }
+                a += 1;
+                continue;
+            }
+            if SCRIPT_FILE.contains(&u) {
+                program_found = true;
+                match eq {
+                    Some(e) => n.push(l[e + 1..].to_string()),
+                    None => {
+                        if let Some(d) = args.get(a + 1) {
+                            n.push(d.clone());
+                            a += 1;
+                        }
+                    }
+                }
+                a += 1;
+                continue;
+            }
+            // Unknown flag → ignore.
+            a += 1;
+            continue;
+        }
+        if positional_started && !after_double_dash {
+            if let Some(cv) = attached_flag_value(l, &["-f", "--file", "-E", "--exec"]) {
+                n.push(cv);
+            }
+        }
+        positional_started = true;
+        if !program_found {
+            program_found = true;
+            a += 1;
+            continue;
+        }
+        n.push(l.clone());
+        a += 1;
+    }
+    n
 }
 
 /// TS `PATH_EXTRACTORS[command](args)` (`pathValidation.ts:190-509`): extract
@@ -358,7 +512,36 @@ fn extract_paths(command: &str, args: &[String], home: Option<&str>) -> Vec<Stri
         "jq" => extract_jq(args),
         // git: only `git diff --no-index A B` extracts paths (exactly 2).
         "git" => extract_git(args),
-        // All remaining simple commands: just filter out flags.
+        // awk: bespoke extractor (skip program, validate -f/-E script files).
+        "awk" => extract_awk(args),
+        // cut/paste/column: hQi flag-arg consumption then positional passthrough.
+        "cut" => hqi_extract(
+            args,
+            &[
+                "-d",
+                "--delimiter",
+                "-f",
+                "--fields",
+                "-b",
+                "--bytes",
+                "-c",
+                "--characters",
+                "--output-delimiter",
+            ],
+        ),
+        "paste" => hqi_extract(args, &["-d", "--delimiters"]),
+        "column" => hqi_extract(
+            args,
+            &[
+                "-s",
+                "--separator",
+                "-o",
+                "--output-separator",
+                "-c",
+                "--output-width",
+            ],
+        ),
+        // All remaining simple commands: just filter out flags (TS `Bx`).
         _ => filter_out_flags(args),
     }
 }
@@ -500,17 +683,18 @@ fn extract_sed(args: &[String]) -> Vec<String> {
     paths
 }
 
-/// TS `PATH_EXTRACTORS.jq` (`pathValidation.ts:433-488`).
+/// TS `PATH_EXTRACTORS.jq` (`pathValidation.ts`). PATH-05: `-f`/`--from-file`
+/// pushes its SCRIPT-FILE argument (`--from-file=X`, `-f X`), and
+/// `--slurpfile`/`--rawfile` push the FILE (the SECOND arg after the flag — the
+/// first is the variable name). The remaining consume-one flags
+/// (`-e`/`--arg`/`--argjson`/`--args`/`--jsonargs`/`-L`/`--library-path`/
+/// `--indent`/`--tab`) skip their arg. The first bare positional is the filter.
 fn extract_jq(args: &[String]) -> Vec<String> {
-    const FLAGS_WITH_ARGS: [&str; 14] = [
+    const CONSUME_ARG: [&str; 10] = [
         "-e",
         "--expression",
-        "-f",
-        "--from-file",
         "--arg",
         "--argjson",
-        "--slurpfile",
-        "--rawfile",
         "--args",
         "--jsonargs",
         "-L",
@@ -523,18 +707,43 @@ fn extract_jq(args: &[String]) -> Vec<String> {
     let mut after_double_dash = false;
     let mut i = 0;
     while i < args.len() {
-        let arg = &args[i];
-        if !after_double_dash && arg == "--" {
+        let s = &args[i];
+        if !after_double_dash && s == "--" {
             after_double_dash = true;
             i += 1;
             continue;
         }
-        if !after_double_dash && arg.starts_with('-') {
-            let flag = arg.split('=').next().unwrap_or(arg);
-            if matches!(flag, "-e" | "--expression") {
+        if !after_double_dash && s.starts_with('-') {
+            let eq = s.find('=');
+            let l = match eq {
+                Some(e) => &s[..e],
+                None => s.as_str(),
+            };
+            if matches!(l, "-e" | "--expression") {
                 filter_found = true;
             }
-            if FLAGS_WITH_ARGS.contains(&flag) && !arg.contains('=') {
+            if matches!(l, "-f" | "--from-file") {
+                filter_found = true;
+                match eq {
+                    Some(e) => paths.push(s[e + 1..].to_string()),
+                    None => {
+                        if let Some(c) = args.get(i + 1) {
+                            paths.push(c.clone());
+                            i += 1;
+                        }
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            if matches!(l, "--slurpfile" | "--rawfile") {
+                if let Some(c) = args.get(i + 2) {
+                    paths.push(c.clone());
+                }
+                i += 3;
+                continue;
+            }
+            if CONSUME_ARG.contains(&l) && eq.is_none() {
                 i += 1;
             }
             i += 1;
@@ -546,7 +755,7 @@ fn extract_jq(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        paths.push(arg.clone());
+        paths.push(s.clone());
         i += 1;
     }
     paths
@@ -557,8 +766,9 @@ fn extract_jq(args: &[String]) -> Vec<String> {
 /// `diff`). Every other git subcommand is git's own security boundary → no paths.
 fn extract_git(args: &[String]) -> Vec<String> {
     if args.first().map(String::as_str) == Some("diff") && args.iter().any(|a| a == "--no-index") {
-        let file_paths = filter_out_flags(&args[1..]);
-        return file_paths.into_iter().take(2).collect();
+        // PATH-05: ALL positional args after `diff` (TS `Bx(e.slice(1))`), not a
+        // 2-path cap — `git diff --no-index A B C` validates every operand.
+        return filter_out_flags(&args[1..]);
     }
     Vec::new()
 }
@@ -636,6 +846,27 @@ fn has_glob_metachar(s: &str) -> bool {
 /// Unlike TS `validatePath`, the deny-rule / allow-rule / sandbox-allowlist
 /// branches of `isPathAllowed` are NOT evaluated here — those outcomes are
 /// produced by [`crate::policy`]'s rule walks (see the module-level scope note).
+/// TS `SUr(path)`: `true` when a `..` segment appears AFTER a real directory
+/// segment (a possible symlink escape). Splits on `/` (also `\` on Windows),
+/// skips empty and `.` segments, and flags a `..` seen once any non-`..` segment
+/// has been passed.
+fn dotdot_after_directory_segment(path: &str) -> bool {
+    let mut seen_real = false;
+    for seg in path.split(|c| c == '/' || (cfg!(target_os = "windows") && c == '\\')) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if seen_real {
+                return true;
+            }
+        } else {
+            seen_real = true;
+        }
+    }
+    false
+}
+
 fn validate_path(path: &str, operation_type: OperationType, roots: &FsRoots) -> PathGuard {
     let home = roots
         .home
@@ -668,6 +899,19 @@ fn validate_path(path: &str, operation_type: OperationType, roots: &FsRoots) -> 
     {
         return PathGuard::Ask(
             "Shell expansion syntax in paths requires manual approval".to_string(),
+        );
+    }
+
+    // 4a. `..`-after-directory traversal (claude-code `SUr`, run by `EUr` after
+    //     the shell-expansion guard, before the brace/glob guards). A `..`
+    //     segment appearing AFTER a real directory segment may follow a symlink
+    //     outside the working directory (`expand_path` would otherwise collapse
+    //     `..` lexically and mask the escape), so it ASKS — even when the path
+    //     resolves back inside cwd (`sub/../ok.txt`).
+    if dotdot_after_directory_segment(&clean_path) {
+        return PathGuard::Ask(
+            "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
+                .to_string(),
         );
     }
 
@@ -898,6 +1142,93 @@ pub fn check_command_path_containment(
         }
     }
     None
+}
+
+/// PATH-01: a resolved command-path target for the policy's deny-rule walk.
+pub struct CommandPathTarget {
+    /// The resolved absolute path (as a string) to match against deny rules.
+    pub resolved: String,
+    /// `true` for write/create-op commands (checked against Edit-deny rules);
+    /// `false` for read-op commands (checked against Read-deny rules).
+    pub is_write: bool,
+    /// The byte-exact message CC surfaces for a rule-typed command-path deny
+    /// (`yPg`'s `S`, the containment template reused when `decisionReason.type
+    /// === "rule"`).
+    pub blocked_message: String,
+}
+
+/// PATH-01: extract every RESOLVED command-path target (in- OR out-of-cwd) for
+/// the policy's Read/Edit deny-rule walk — the companion to
+/// [`check_command_path_containment`] (which containment-ASKS). Mirrors the same
+/// per-subcommand extraction, but records every path that reaches
+/// [`PathGuard::Check`] (a resolved absolute path) rather than only out-of-cwd
+/// ones, because a deny rule matches an in-cwd path too (`cat secret.env`).
+/// Subcommands that would themselves ASK (mv/cp with flags, compound-cd-write,
+/// or a pre-guard ask like `..`-traversal / shell-expansion) contribute no deny
+/// targets — matching CC, where those asks preempt the `EUr`→`Ptt` deny walk.
+#[must_use]
+pub fn command_path_deny_targets(
+    command: &str,
+    roots: &FsRoots,
+    additional: &[PathBuf],
+) -> Vec<CommandPathTarget> {
+    let subs = crate::shell_command::split_command(command);
+    let compound_has_cd = compound_has_cd(&subs);
+    let home = roots
+        .home
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let mut targets = Vec::new();
+    for sub in &subs {
+        let stripped = crate::shell_command::strip_safe_wrappers(sub);
+        let tokens = split_argv(&stripped);
+        let Some((base, args)) = tokens.split_first() else {
+            continue;
+        };
+        let Some((mut operation_type, action_verb)) = command_spec(base) else {
+            continue;
+        };
+        if base == "sed"
+            && matches!(
+                crate::sed_validation::sed_constraint_verdict(&stripped, false, roots, additional),
+                crate::sed_validation::SedVerdict::Safe
+            )
+        {
+            operation_type = OperationType::Read;
+        }
+        // mv/cp with flags and compound-cd-write are ASK cases → no deny target.
+        if matches!(base.as_str(), "mv" | "cp") && args.iter().any(|a| a.starts_with('-')) {
+            continue;
+        }
+        if compound_has_cd && operation_type != OperationType::Read {
+            continue;
+        }
+        if base == "cd" {
+            continue;
+        }
+        let paths = extract_paths(base, args, home.as_deref());
+        for path in &paths {
+            // Only paths that clear every pre-guard (resolved) are deny-checked;
+            // a pre-guard Ask preempts the deny walk in CC.
+            if let PathGuard::Check(resolved) = validate_path(path, operation_type, roots) {
+                let dirs = all_working_directories(roots, additional);
+                let dir_list = format_directory_list(&dirs);
+                let resolved_str = resolved.to_string_lossy().into_owned();
+                let blocked_message = format!(
+                    "{base} in '{resolved_str}' was blocked. For security, LingXi may only {action_verb} the allowed working directories for this session: {dir_list}."
+                );
+                targets.push(CommandPathTarget {
+                    resolved: resolved_str,
+                    is_write: matches!(
+                        operation_type,
+                        OperationType::Write | OperationType::Create
+                    ),
+                    blocked_message,
+                });
+            }
+        }
+    }
+    targets
 }
 
 /// Does any subcommand start with `cd`? (TS `compoundCommandHasCd`.) Gates the
@@ -1447,6 +1778,126 @@ mod tests {
             extract_paths("grep", &svec(&["-r", "pattern"]), None),
             vec![".".to_string()]
         );
+    }
+
+    // ── PATH-05: 2.1.211 extractor rework ──────────────────────────────────
+
+    #[test]
+    fn grep_f_pattern_file_is_validated() {
+        // `grep -f /etc/shadow x.txt` — the pattern FILE (/etc/shadow) is pushed
+        // AND the data file (x.txt).
+        assert_eq!(
+            extract_paths("grep", &svec(&["-f", "/etc/shadow", "x.txt"]), None),
+            vec!["/etc/shadow".to_string(), "x.txt".to_string()]
+        );
+        // `--file=` and attached `-f` forms.
+        assert_eq!(
+            extract_paths("grep", &svec(&["--file=/etc/shadow"]), None),
+            vec!["/etc/shadow".to_string()]
+        );
+        // rg too (with the `.` default absent because a path was collected).
+        assert_eq!(
+            extract_paths("rg", &svec(&["-f", "/etc/shadow"]), None),
+            vec!["/etc/shadow".to_string()]
+        );
+    }
+
+    #[test]
+    fn awk_program_skipped_separator_not_a_path() {
+        // `awk -F : '{print}' data.txt` — the `:` separator is consumed (not a
+        // path), the `{print}` program is skipped, only data.txt is validated.
+        assert_eq!(
+            extract_paths("awk", &svec(&["-F", ":", "{print}", "data.txt"]), None),
+            vec!["data.txt".to_string()]
+        );
+        // `awk '$1>5' f.txt` — the program (with `$`) is NOT treated as a path.
+        assert_eq!(
+            extract_paths("awk", &svec(&["$1>5", "f.txt"]), None),
+            vec!["f.txt".to_string()]
+        );
+        // `-f script.awk data.txt` — the script FILE is validated.
+        assert_eq!(
+            extract_paths("awk", &svec(&["-f", "script.awk", "data.txt"]), None),
+            vec!["script.awk".to_string(), "data.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn cut_paste_column_consume_flag_args() {
+        // `cut -d , -f 1 file.txt` — `,` and `1` are flag args, only file.txt.
+        assert_eq!(
+            extract_paths("cut", &svec(&["-d", ",", "-f", "1", "file.txt"]), None),
+            vec!["file.txt".to_string()]
+        );
+        // `column -s / f` — `/` is the separator arg, only `f` is a path.
+        assert_eq!(
+            extract_paths("column", &svec(&["-s", "/", "f"]), None),
+            vec!["f".to_string()]
+        );
+        // `paste -d , a b` — `,` consumed, a and b are paths.
+        assert_eq!(
+            extract_paths("paste", &svec(&["-d", ",", "a", "b"]), None),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn jq_from_file_and_slurpfile_validated() {
+        // `-f prog.jq a.json` — the program file AND data file.
+        assert_eq!(
+            extract_paths("jq", &svec(&["-f", "prog.jq", "a.json"]), None),
+            vec!["prog.jq".to_string(), "a.json".to_string()]
+        );
+        // `--slurpfile v data.json '.'` — the FILE (data.json, 2nd arg) is pushed,
+        // the variable name `v` is not.
+        assert_eq!(
+            extract_paths("jq", &svec(&["--slurpfile", "v", "data.json", "."]), None),
+            vec!["data.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn git_diff_no_index_takes_all_positionals() {
+        // `git diff --no-index A B C` — all three positionals validated (no 2-cap).
+        assert_eq!(
+            extract_paths(
+                "git",
+                &svec(&["diff", "--no-index", "A", "B", "C"]),
+                None
+            ),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+    }
+
+    // ── PATH-04: `..`-after-directory traversal pre-guard (SUr) ────────────
+
+    #[test]
+    fn dotdot_after_real_segment_is_flagged() {
+        assert!(dotdot_after_directory_segment("sub/../ok.txt"));
+        assert!(dotdot_after_directory_segment("a/b/../c"));
+        assert!(dotdot_after_directory_segment("./sub/../x"));
+        // Leading `..` (no real segment yet) is NOT flagged.
+        assert!(!dotdot_after_directory_segment("../foo"));
+        assert!(!dotdot_after_directory_segment("../../x"));
+        assert!(!dotdot_after_directory_segment("foo/bar"));
+        assert!(!dotdot_after_directory_segment("./x"));
+    }
+
+    #[test]
+    fn cat_dotdot_after_segment_asks_with_traversal_message() {
+        // `cat sub/../ok.txt` resolves inside cwd but still asks (symlink escape
+        // defense) with the byte-locked message.
+        let a = check_command_path_containment("cat sub/../ok.txt", &roots(), &[]).expect("ask");
+        assert_eq!(
+            a.message,
+            "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
+        );
+        // A leading `..` escaping cwd gets the generic containment message, NOT
+        // the traversal one (SUr does not fire).
+        let b = check_command_path_containment("cat ../secret", &roots(), &[]).expect("ask");
+        assert!(!b
+            .message
+            .contains("traversal after a directory segment"));
     }
 
     fn svec(v: &[&str]) -> Vec<String> {

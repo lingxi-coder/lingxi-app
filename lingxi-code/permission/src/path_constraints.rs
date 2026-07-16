@@ -613,11 +613,13 @@ pub fn check_path_constraints(
         });
     }
 
-    // 3. Compound `cd` + output redirection (`validateOutputRedirections`,
-    //    `pathValidation.ts:935`). Any redirection in a command that also `cd`s
-    //    asks, because the redirect target can't be resolved against the final
-    //    cwd.
-    if has_cd && !all_redirs.is_empty() {
+    // 3. Compound `cd` + output redirection (`validateOutputRedirections` /
+    //    `SPg`, `pathValidation.ts:935`). `SPg` only raises this ask when a
+    //    cd-compound has a redirect target OTHER than `/dev/null`
+    //    (`n && e.some(o => o.target !== "/dev/null")`), so a `/dev/null`-only
+    //    redirect set (`cmd > /dev/null 2>&1`) falls through to normal cd/target
+    //    validation instead of over-asking.
+    if has_cd && all_redirs.iter().any(|r| r.target != "/dev/null") {
         return Some(PathConstraintAsk {
             message: "Commands that change directories and write via output redirection require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
             reason: "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass".to_string(),
@@ -1067,6 +1069,33 @@ mod tests {
             a.reason,
             "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass"
         );
+    }
+
+    // ── cd-compound + /dev/null-only redirect is exempt (PERM-PATH-08) ─────
+
+    #[test]
+    fn cd_compound_dev_null_only_redirect_not_asked() {
+        // `SPg` only raises the cd-compound-redirect ask for a target OTHER than
+        // /dev/null; a /dev/null-only redirect set falls through to cd/target
+        // validation (cd target under cwd → no ask).
+        assert!(check("cd sub && echo x > /dev/null 2>&1").is_none());
+        assert!(check("cd ./sub && cmd > /dev/null").is_none());
+        assert!(check("cd sub && cmd 2> /dev/null").is_none());
+    }
+
+    #[test]
+    fn cd_compound_non_dev_null_redirect_still_asks() {
+        // A real (non-/dev/null) redirect target in a cd-compound still asks.
+        let a = check("cd sub && echo x > out.txt").expect("should ask");
+        assert_eq!(
+            a.reason,
+            "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass"
+        );
+        // Mixed /dev/null + real target → still asks (some target != /dev/null).
+        let a = check("cd sub && echo x > /dev/null > out.txt").expect("should ask");
+        assert!(a.message.starts_with(
+            "Commands that change directories and write via output redirection"
+        ));
     }
 
     // ── command fully inside cwd → no constraint (rides allow rule) ─────────

@@ -630,6 +630,29 @@ pub fn check_path_constraints(
     None
 }
 
+/// Resolve the SIMPLE output-redirect targets of `command` to absolute path
+/// strings — the create/write targets that reach TS `validateOutputRedirections`
+/// (`SPg`) and thus the Edit-deny-rule walk (`EUr`). Dangerous-expansion targets,
+/// `/dev/null`, and `/dev/tcp`/`/dev/udp` network devices are EXCLUDED (they ask
+/// via their own guards in [`check_path_constraints`], never reaching `SPg`).
+///
+/// Consumed by [`crate::policy`] to deny a redirect whose resolved target matches
+/// an `Edit(...)` deny rule (`Output redirection to '<path>' was blocked by a deny
+/// rule.`), before the working-dir containment ask.
+#[must_use]
+pub fn write_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
+    let mut out = Vec::new();
+    for sub in crate::shell_command::split_command(command) {
+        for r in extract_redirections(&sub) {
+            if r.dangerous || r.target == "/dev/null" || is_network_device_target(&r.target) {
+                continue;
+            }
+            out.push(expand_redirect_target(&r.target, roots).to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
 /// Shell-expansion pre-guard for a `cd` target — TS `validatePath`'s `$`/`%`/`=`
 /// and tilde-variant checks (`pathValidation.ts:401-436`). A bare `~`/`~/…` is
 /// NOT flagged here (it is expanded and containment-checked); a tilde VARIANT

@@ -559,6 +559,17 @@ impl PermissionPolicy {
                     //     walk, roots- + shell-gated). The `astCommands` branch is dropped
                     //     in favor of the `split_command` path (documented in
                     //     `path_constraints`).
+                    // 2b-deny. Output-redirect target vs `Edit(...)` DENY rule
+                    //     (claude-code `EUr`→`Ptt`, the `create`-op deny walk that
+                    //     runs BEFORE the containment ask). A redirect whose
+                    //     resolved target matches an Edit-deny rule is DENIED (not
+                    //     asked), e.g. `echo x > denied.txt` under `deny:[Edit(denied.txt)]`.
+                    //     (The read-op command-path deny walk — `cat secret.env` vs
+                    //     `Read(secret.env)` — needs the PATH_EXTRACTORS op split and
+                    //     is a documented follow-up.)
+                    if let Some(deny) = self.output_redirect_deny(&sources, command, roots) {
+                        return deny;
+                    }
                     if let Some(ask) = crate::path_constraints::check_path_constraints(
                         command,
                         roots,
@@ -1305,6 +1316,48 @@ impl PermissionPolicy {
     /// FIRST subcommand's ask (1:1 with the per-subcommand
     /// `checkCommandAndSuggestRules` short-circuit), or `None` for a non-shell
     /// tool / no command / every subcommand safe.
+    /// Deny an output redirection whose resolved target matches an `Edit(<path>)`
+    /// CONTENT deny rule (claude-code `EUr`→`Ptt`, the `create`-op deny walk that
+    /// runs before the containment ask). Returns a rule-typed `Deny` carrying the
+    /// byte-exact `Output redirection to '<path>' was blocked by a deny rule.`
+    /// explanation, or `None` when no simple write target matches. Walks sources
+    /// in priority order; only `Edit(pattern)` CONTENT deny rules participate (a
+    /// tool-wide `Edit` deny, and the read-op command-path deny walk, are
+    /// documented follow-ups). Roots are supplied by the caller (guard is
+    /// roots-gated like the sibling path guards).
+    fn output_redirect_deny(
+        &self,
+        sources: &[PermissionRuleSource],
+        command: &str,
+        roots: &FsRoots,
+    ) -> Option<PermissionResult> {
+        for target in crate::path_constraints::write_redirect_targets(command, roots) {
+            for src in sources {
+                let Some(rules) = self.deny_rules.get(src) else {
+                    continue;
+                };
+                for rule in rules {
+                    if rule.value.tool_name != "Edit" {
+                        continue;
+                    }
+                    let Some(pattern) = rule.value.rule_content.as_deref() else {
+                        continue;
+                    };
+                    if path_matches_rule_pattern(&target, pattern, rule.source, roots) {
+                        return Some(PermissionResult::Deny {
+                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                            explanation: Some(format!(
+                                "Output redirection to '{target}' was blocked by a deny rule."
+                            )),
+                            metadata: PermissionMetadata::default(),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn shell_bash_safety_ask(
         tool_name: &str,
         input: &serde_json::Value,

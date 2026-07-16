@@ -53,6 +53,14 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// A source of the LIVE main-loop model id (claude-code `wi()` / `getModel()`),
+/// read by the auto `set_permission_mode` gate to evaluate `One()`'s model
+/// reason against the model the session is CURRENTLY on. Mirrors
+/// `agent::DefaultModelProvider`: returns `None` when the value cannot be read
+/// without blocking (a contended session lock), so the caller fails OPEN (no
+/// rejection) rather than stall the control_request.
+pub type LiveModelProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Enforcing gate over a [`PermissionPolicy`] (see module docs).
 pub struct PolicyPermissionGate {
     /// The loaded rule policy. `authorize` reads its allow/deny/ask buckets.
@@ -67,6 +75,15 @@ pub struct PolicyPermissionGate {
     /// check, mirroring claude-code reading `toolPermissionContext.mode` LIVE.
     /// Read briefly per check (the value is `Copy`, never held across an `await`).
     mode_override: std::sync::RwLock<Option<PermissionMode>>,
+    /// LIVE main-loop model source (claude-code `wi()`), filled post-orchestrator
+    /// via [`Self::live_model_provider_handle`] so the auto `set_permission_mode`
+    /// gate can evaluate `One()`'s model reason (`dUe(wi())`) against the model
+    /// the session is CURRENTLY on (mutated by `/model` switches / resume), not
+    /// the boot snapshot. Empty ⇒ the live model gate is skipped (the boot gate
+    /// already downgraded an auto-unsupported boot model, so a fresh session
+    /// never reaches this path in `Auto`); a contended read returns `None` and
+    /// likewise skips (fail-open, matching every other post-orch live cell).
+    live_model_provider: Arc<std::sync::OnceLock<LiveModelProvider>>,
 }
 
 impl PolicyPermissionGate {
@@ -77,7 +94,37 @@ impl PolicyPermissionGate {
             policy,
             inner,
             mode_override: std::sync::RwLock::new(None),
+            live_model_provider: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Handle to the set-once LIVE-model cell (cycle-break): the composition root
+    /// grabs this BEFORE coercing the gate to `Arc<dyn PermissionGate>`, then
+    /// fills it once the orchestrator (owner of the live `session.model`) exists,
+    /// so the auto `set_permission_mode` gate reads the CURRENT model. Same
+    /// pattern as `agent::OrchestratorHandle::default_model_provider_handle`.
+    #[must_use]
+    pub fn live_model_provider_handle(&self) -> Arc<std::sync::OnceLock<LiveModelProvider>> {
+        Arc::clone(&self.live_model_provider)
+    }
+
+    /// `dUe(wi())` at the LIVE `set_permission_mode` surface: does the model the
+    /// session is CURRENTLY on FAIL the auto-mode model gate? Reads the live-model
+    /// provider ([`Self::live_model_provider_handle`]) and returns `false`
+    /// (fail-open, no rejection) when the provider is unset or the model cannot be
+    /// read without blocking. The provider is resolved as `"firstParty"` here
+    /// (multi-provider provider-mapping into the gate is deferred — see
+    /// [`crate::auto_gate`]; the BOOT gate makes the same assumption), so the
+    /// shared exclusion list (`claude-3-*`, `opus-4-0/4-1/4-5`, `sonnet-4-0/4-5`,
+    /// `haiku-4-5`) is authoritative while the non-1P-only exclusions stay off.
+    fn live_model_unsupported_for_auto(&self) -> bool {
+        let Some(provider) = self.live_model_provider.get() else {
+            return false;
+        };
+        let Some(model) = provider() else {
+            return false;
+        };
+        !crate::auto_gate::model_supports_auto_mode(&model, "firstParty")
     }
 
     /// Authorize under the LIVE mode: the `set_permission_mode` override when
@@ -556,21 +603,26 @@ impl PermissionGate for PolicyPermissionGate {
     /// - `auto` is gated by claude-code 2.1.207's `Nle`
     ///   (`setPermissionModeWithGuards`): `if(e==="auto"&&!P0()){...error:
     ///   \`Cannot set permission mode to auto: ${Jce(One())}\`}`. We evaluate the
-    ///   two runtime-available `P0()` inputs — the `disableAutoMode` settings
-    ///   killswitch ([`crate::PermissionPolicy::auto_mode_disabled`]) and the
-    ///   local denial circuit-breaker — and reject with the byte-exact message
-    ///   for the [`crate::auto_gate::AutoGateDenialReason::Settings`] /
-    ///   [`crate::auto_gate::AutoGateDenialReason::CircuitBreaker`] cases.
+    ///   three runtime-available `P0()` inputs in `One()`'s precedence — the
+    ///   `disableAutoMode` settings killswitch
+    ///   ([`crate::PermissionPolicy::auto_mode_disabled`]), the local denial
+    ///   circuit-breaker, then the model gate (`dUe(wi())`) against the LIVE
+    ///   session model (via [`Self::live_model_provider_handle`]) — and reject
+    ///   with the byte-exact message for the
+    ///   [`crate::auto_gate::AutoGateDenialReason::Settings`] /
+    ///   [`crate::auto_gate::AutoGateDenialReason::CircuitBreaker`] /
+    ///   [`crate::auto_gate::AutoGateDenialReason::Model`] cases. So a live
+    ///   runtime switch to `auto` after a `/model` to an auto-unsupported model
+    ///   is now rejected here (`auto mode unavailable for this model`), matching
+    ///   the binary — not only downgraded at boot.
     ///
-    ///   REMAINDER (documented): `P0()`'s third input, the model gate
-    ///   (`dUe(wi())`), is not evaluated at THIS live surface — the policy does
-    ///   not carry the active model/provider. The model gate is enforced
-    ///   authoritatively at BOOT (the [`crate::auto_gate::apply_auto_mode_gate`]
-    ///   mode-load downgrade in the engine boot), so a session on an
-    ///   auto-unsupported model boots in `Default` and never reaches this path
-    ///   in `Auto`. A live runtime switch to `auto` on an unsupported model is
-    ///   the only uncovered case (parity gap: it is accepted here where the
-    ///   binary would reject with `auto mode unavailable for this model`).
+    ///   REMAINDER (documented): the live model gate resolves the provider as
+    ///   `"firstParty"` (multi-provider provider-mapping into the gate is
+    ///   deferred — the BOOT gate makes the same assumption), so `dUe`'s non-1P
+    ///   exclusions (`opus-4-6`/`sonnet-4-6`/`*haiku*` off Bedrock/Vertex) are
+    ///   not enforced at this surface; the shared exclusion list is. When the
+    ///   live-model cell is unset (headless / pre-orchestrator), the model check
+    ///   is skipped and the boot downgrade remains the authoritative enforcement.
     async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
         let Some(parsed) = parse_settable_mode(mode) else {
             // Unknown mode: accept + ack, but do not mutate the live mode.
@@ -585,9 +637,9 @@ impl PermissionGate for PolicyPermissionGate {
             }
         }
         if parsed == PermissionMode::Auto {
-            // `Nle`: reject `auto` when `!P0()`. Report `One()`'s reason
-            // (settings precedes circuit-breaker), rendering the byte-exact
-            // `Cannot set permission mode to auto: <Jce(reason)>`.
+            // `Nle`: reject `auto` when `!P0()`. Report `One()`'s reason in the
+            // binary's precedence (settings → circuit-breaker → model), rendering
+            // the byte-exact `Cannot set permission mode to auto: <Jce(reason)>`.
             let reason = if self.policy.auto_mode_disabled {
                 Some(crate::auto_gate::AutoGateDenialReason::Settings)
             } else if self
@@ -598,6 +650,8 @@ impl PermissionGate for PolicyPermissionGate {
                 .is_circuit_broken()
             {
                 Some(crate::auto_gate::AutoGateDenialReason::CircuitBreaker)
+            } else if self.live_model_unsupported_for_auto() {
+                Some(crate::auto_gate::AutoGateDenialReason::Model)
             } else {
                 None
             };

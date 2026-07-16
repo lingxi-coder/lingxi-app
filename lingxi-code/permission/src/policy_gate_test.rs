@@ -1112,8 +1112,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_permission_mode_accepts_auto_when_gate_open() {
-        // Killswitch off, breaker not tripped → auto is accepted (the model gate
-        // is enforced at boot, not this live surface — see the fn doc).
+        // Killswitch off, breaker not tripped, and NO live-model cell set (so the
+        // model gate is skipped, fail-open) → auto is accepted.
         let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
         let gate = PolicyPermissionGate::new(
             Arc::new(policy),
@@ -1122,6 +1122,86 @@ mod tests {
         gate.set_permission_mode("auto")
             .await
             .expect("auto accepted when the gate is open");
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_rejects_auto_on_unsupported_live_model() {
+        // Killswitch off, breaker not tripped, but the LIVE session model is on
+        // the `dUe` shared exclusion list → `One()` returns "model" (`Nle` rejects
+        // with the byte-exact model message). Mirrors a `/model` switch to an
+        // auto-unsupported model followed by a live switch to auto.
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let provider: crate::policy_gate::LiveModelProvider =
+            Arc::new(|| Some("claude-sonnet-4-5".to_string()));
+        gate.live_model_provider_handle()
+            .set(provider)
+            .unwrap_or_else(|_| panic!("cell set once"));
+        assert_eq!(
+            gate.set_permission_mode("auto").await.unwrap_err(),
+            "Cannot set permission mode to auto: auto mode unavailable for this model"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_accepts_auto_on_supported_live_model() {
+        // Live model supports auto → the model branch passes; auto is accepted.
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let provider: crate::policy_gate::LiveModelProvider =
+            Arc::new(|| Some("claude-opus-4-8".to_string()));
+        gate.live_model_provider_handle()
+            .set(provider)
+            .unwrap_or_else(|_| panic!("cell set once"));
+        gate.set_permission_mode("auto")
+            .await
+            .expect("auto accepted on a supported live model");
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_settings_precedes_live_model() {
+        // Both the settings killswitch AND an unsupported live model close the
+        // gate → `One()` precedence reports "settings" (settings > model).
+        let mut policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        policy.auto_mode_disabled = true;
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let provider: crate::policy_gate::LiveModelProvider =
+            Arc::new(|| Some("claude-sonnet-4-5".to_string()));
+        gate.live_model_provider_handle()
+            .set(provider)
+            .unwrap_or_else(|_| panic!("cell set once"));
+        assert_eq!(
+            gate.set_permission_mode("auto").await.unwrap_err(),
+            "Cannot set permission mode to auto: auto mode disabled by settings"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_permission_mode_auto_fails_open_when_live_model_unreadable() {
+        // The provider returns None (a contended session lock) → the model gate is
+        // skipped (fail-open) and auto is accepted, matching every other post-orch
+        // live cell's non-blocking read.
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let provider: crate::policy_gate::LiveModelProvider = Arc::new(|| None);
+        gate.live_model_provider_handle()
+            .set(provider)
+            .unwrap_or_else(|_| panic!("cell set once"));
+        gate.set_permission_mode("auto")
+            .await
+            .expect("auto accepted when the live model is unreadable");
     }
 
     #[test]

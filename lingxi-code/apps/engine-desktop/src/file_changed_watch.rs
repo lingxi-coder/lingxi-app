@@ -27,14 +27,17 @@
 //! and restarts (`updateWatchPaths`, also exposed as
 //! [`FileChangedWatcherHandle::update_watch_paths`]).
 //!
-//! The `onCwdChangedForHooks` re-resolution (`:133-175`, firing `CwdChanged`
-//! hooks + re-resolving matchers against a new cwd + restarting) is NOT ported
-//! here: it depends on a mid-session cwd-change signal threaded from the Bash
-//! tool's persistent-cwd tracking through the orchestrator (the adjacent cwd
-//! seam) plus a `CwdChanged`-firer that returns `watchPaths`, neither of which
-//! this composition root yet surfaces. The static matcher-path resolution — the
-//! common case (`.envrc` / `.env` direnv-style watches) — is faithfully
-//! reproduced.
+//! The `onCwdChanged` watcher rebind (`:133-175`, function `g`) IS ported: a
+//! mid-session `cd` that moves the persistent shell cwd is signalled from the
+//! Bash tool through the orchestrator's `CwdChanged` firer into
+//! [`FileChangedWatcherHandle::on_cwd_changed`] (via the
+//! [`hooks::WatcherRebinder`] seam), which re-resolves the retained ORIGINAL
+//! matchers against the new cwd, REPLACES the watch set (`r=x.watchPaths`, not a
+//! union), and restarts — guarded against an unchanged cwd (`if(_===S)return`).
+//! Only the pure watch-set rebind lives here: the `CwdChanged` HOOKS themselves
+//! fire shell-side (the Bash tool's `CwdChanged` firer, claude-code's `hjc()` /
+//! `E3r`), so this rebind NEVER re-fires them — the two halves of `g` split
+//! across the shell tool and the watcher without double-firing.
 //!
 //! ## Directory-watch vs file-watch (chokidar parity)
 //! chokidar watches the exact file paths; the in-tree primitive
@@ -152,6 +155,14 @@ enum WatcherControl {
     /// dynamic-`watchPaths` feedback loop `:108-131` and the exposed interface
     /// method).
     AddWatchPaths(Vec<PathBuf>),
+    /// The persistent shell cwd moved to `new_cwd`: re-resolve the ORIGINAL
+    /// matchers against it, REPLACE the watch set, and restart — the
+    /// watcher-rebind half of claude-code's `onCwdChanged` (`fileChangedWatcher.ts`
+    /// function `g`: `t=S ... r=x.watchPaths ... if(o)m()`). The `CwdChanged`
+    /// hooks are fired elsewhere (the Bash tool's `CwdChanged` firer), so this
+    /// variant NEVER fires them — it is the pure watch-set rebind, guarded
+    /// against an unchanged cwd (`if(_===S)return`) in the supervisor.
+    CwdChanged { new_cwd: PathBuf },
 }
 
 /// Handle owning the spawned watcher supervisor. Dropping it aborts the
@@ -190,17 +201,102 @@ impl FileChangedWatcherHandle {
             let _ = tx.send(WatcherControl::AddWatchPaths(paths));
         }
     }
+
+    /// `onCwdChanged`: the persistent shell cwd moved to `new_cwd` — re-resolve
+    /// the original `FileChanged` matchers against it, REPLACE the watch set, and
+    /// restart. Mirrors the watcher-rebind half of claude-code's `onCwdChanged`
+    /// (`fileChangedWatcher.ts` function `g`). The supervisor guards an unchanged
+    /// cwd (`if(_===S)return`), so callers may fire unconditionally. A no-op on
+    /// an empty handle or once the supervisor has exited (the send is swallowed).
+    /// This does NOT fire the `CwdChanged` hooks — those fire via the Bash tool's
+    /// `CwdChanged` firer, so the two never double-fire.
+    pub fn on_cwd_changed(&self, new_cwd: PathBuf) {
+        if let Some(tx) = &self.control {
+            let _ = tx.send(WatcherControl::CwdChanged { new_cwd });
+        }
+    }
+
+    /// A [`hooks::WatcherRebinder`] over this watcher's control channel, or `None`
+    /// for an empty handle (no supervisor to signal). The composition root wires
+    /// this into the orchestrator's `CwdChanged` firer so a mid-session `cd`
+    /// rebinds the watcher. Cloning the sender lets the rebinder outlive a move
+    /// of the handle (the runtime still owns the handle for RAII teardown).
+    #[must_use]
+    pub fn rebinder(&self) -> Option<Arc<dyn hooks::WatcherRebinder>> {
+        self.control
+            .clone()
+            .map(|control| Arc::new(ControlRebinder { control }) as Arc<dyn hooks::WatcherRebinder>)
+    }
+}
+
+/// A [`hooks::WatcherRebinder`] backed by a clone of the supervisor's control
+/// channel. Lets the `CwdChanged` firer signal a cwd rebind without owning the
+/// watcher handle (which the runtime holds for RAII teardown). Fire-and-forget:
+/// a send onto a closed channel (supervisor gone) is swallowed.
+struct ControlRebinder {
+    control: mpsc::UnboundedSender<WatcherControl>,
+}
+
+impl hooks::WatcherRebinder for ControlRebinder {
+    fn rebind(&self, new_cwd: PathBuf) {
+        let _ = self.control.send(WatcherControl::CwdChanged { new_cwd });
+    }
+}
+
+/// A late-bound [`hooks::WatcherRebinder`]: the orchestrator's `CwdChanged` firer
+/// is constructed BEFORE the file-changed watcher spawns, so it holds this
+/// deferred rebinder whose inner cell is [`set`](DeferredWatcherRebinder::set)
+/// once the watcher exists. Until then — and forever, when no watcher spawns at
+/// all (no `FileChanged` hooks configured) — `rebind` is a silent no-op,
+/// matching claude-code's `if(o)m()` (restart only runs when the watcher was
+/// initialized). Cheaply cloneable: clones share the same inner cell, so the
+/// firer's clone observes a `set` on the composition-root's copy.
+#[derive(Clone, Default)]
+pub struct DeferredWatcherRebinder {
+    inner: Arc<std::sync::Mutex<Option<Arc<dyn hooks::WatcherRebinder>>>>,
+}
+
+impl DeferredWatcherRebinder {
+    /// An empty deferred rebinder (its cell unset). `rebind` is a no-op until
+    /// [`set`](DeferredWatcherRebinder::set) populates it.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Populate the cell with the concrete rebinder once the watcher exists.
+    /// Every clone shares the cell, so the firer's clone rebinds through it.
+    pub fn set(&self, rebinder: Arc<dyn hooks::WatcherRebinder>) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = Some(rebinder);
+        }
+    }
+}
+
+impl hooks::WatcherRebinder for DeferredWatcherRebinder {
+    fn rebind(&self, new_cwd: PathBuf) {
+        let inner = self.inner.lock().ok().and_then(|g| g.clone());
+        if let Some(inner) = inner {
+            inner.rebind(new_cwd);
+        }
+    }
 }
 
 /// The file-changed watcher. Owns the resolved watch paths + the fire seam and
 /// spawns the supervisor that drives the per-directory watch loops.
 pub struct FileChangedWatcher {
+    /// The ORIGINAL `FileChanged` hook matchers (pipe-separated filename lists),
+    /// retained so a mid-session cwd move can re-resolve them against the new cwd
+    /// (`onCwdChanged`). Without this, only the already-resolved absolute paths
+    /// survive and a relative matcher could never be re-anchored.
+    matchers: Vec<String>,
     /// The set of file paths to fire for (resolved from the hook matchers).
     watch_paths: Vec<PathBuf>,
     /// The deduplicated parent directories initially watched.
     watch_dirs: Vec<PathBuf>,
     /// The cwd the matchers resolved against — the parent-directory fallback for
-    /// paths added later via the dynamic `watchPaths` feedback loop.
+    /// paths added later via the dynamic `watchPaths` feedback loop, and the
+    /// baseline the `onCwdChanged` guard compares a new cwd against.
     cwd: PathBuf,
     firer: Arc<dyn FileChangedFirer>,
 }
@@ -213,6 +309,7 @@ impl FileChangedWatcher {
         let watch_paths = resolve_watch_paths(matchers, cwd);
         let watch_dirs = watch_dirs_for(&watch_paths, cwd);
         Self {
+            matchers: matchers.iter().map(|m| (*m).to_string()).collect(),
             watch_paths,
             watch_dirs,
             cwd: cwd.to_path_buf(),
@@ -245,6 +342,7 @@ impl FileChangedWatcher {
     /// `if (paths.length === 0) return` (`fileChangedWatcher.ts:43`).
     pub async fn spawn(self, fs: Arc<dyn FileSystem>) -> FileChangedWatcherHandle {
         let Self {
+            matchers,
             watch_paths,
             watch_dirs: _,
             cwd,
@@ -258,6 +356,7 @@ impl FileChangedWatcher {
             fs,
             firer,
             control_tx: control_tx.clone(),
+            matchers,
             cwd,
             watch_paths: watch_paths.into_iter().collect(),
             dir_tasks: Vec::new(),
@@ -280,6 +379,8 @@ struct Supervisor {
     /// Cloned into each watch loop so a fired hook's `watchPaths` can drive a
     /// restart without a back-reference to the handle.
     control_tx: mpsc::UnboundedSender<WatcherControl>,
+    /// The ORIGINAL matchers, re-resolved against a new cwd on `onCwdChanged`.
+    matchers: Vec<String>,
     cwd: PathBuf,
     watch_paths: BTreeSet<PathBuf>,
     dir_tasks: Vec<AbortOnDrop>,
@@ -305,6 +406,30 @@ impl Supervisor {
                     if changed {
                         self.restart().await;
                     }
+                }
+                WatcherControl::CwdChanged { new_cwd } => {
+                    // Watcher-rebind half of claude-code's `onCwdChanged`
+                    // (function `g`). Guard an unchanged cwd (`if(_===S)return`):
+                    // `self.cwd` is the cwd the current matchers resolved
+                    // against.
+                    if new_cwd == self.cwd {
+                        continue;
+                    }
+                    // Re-resolve the ORIGINAL matchers against the new cwd and
+                    // REPLACE the watch set — NOT a union (`r=x.watchPaths`, not
+                    // the `Mo([...w,...r])` of `updateWatchPaths`). Any paths
+                    // added earlier via the dynamic `watchPaths` feedback loop are
+                    // intentionally dropped, matching claude-code where `g`
+                    // reassigns `r` from the re-resolution. The `CwdChanged` hooks
+                    // are fired shell-side (the Bash tool's `CwdChanged` firer),
+                    // so this NEVER fires them — no double-fire.
+                    let matcher_refs: Vec<&str> =
+                        self.matchers.iter().map(String::as_str).collect();
+                    self.watch_paths = resolve_watch_paths(&matcher_refs, &new_cwd)
+                        .into_iter()
+                        .collect();
+                    self.cwd = new_cwd;
+                    self.restart().await;
                 }
             }
         }
@@ -679,6 +804,175 @@ mod tests {
         );
 
         drop(handle);
+    }
+
+    /// Spawn a watcher over a relative matcher resolved against `cwd`, waiting
+    /// for the initial dir watch. Returns `(handle, watched-record, wait_for)`.
+    /// Shared setup for the `on_cwd_changed` tests below.
+    async fn spawn_relative(
+        matcher: &str,
+        cwd: &Path,
+        firer: Arc<dyn FileChangedFirer>,
+    ) -> (
+        FileChangedWatcherHandle,
+        Arc<Mutex<Vec<String>>>,
+        impl Fn(PathBuf) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    ) {
+        let fs = Arc::new(RecordingFs::default());
+        let watched = fs.watched.clone();
+        let watcher = FileChangedWatcher::new(&[matcher], cwd, firer);
+        let handle = watcher.spawn(fs as Arc<dyn FileSystem>).await;
+        let watched_for_wait = watched.clone();
+        let wait_for = move |needle: PathBuf| {
+            let watched = watched_for_wait.clone();
+            Box::pin(async move {
+                for _ in 0..400 {
+                    if watched
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|d| Path::new(d) == needle)
+                    {
+                        return true;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                false
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        };
+        (handle, watched, wait_for)
+    }
+
+    #[tokio::test]
+    async fn on_cwd_changed_rebinds_relative_matcher_to_new_cwd() {
+        // The onCwdChanged watcher rebind: a relative matcher (".envrc") resolved
+        // against cwd A must, after a mid-session `cd` to B, be re-resolved
+        // against B — REPLACE semantics: B's dir is watched and A's dir is NOT
+        // re-watched by the rebind restart (it is dropped from the new set).
+        let root = tempfile::tempdir().unwrap();
+        let dir_a = root.path().join("a");
+        let dir_b = root.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let firer: Arc<dyn FileChangedFirer> = Arc::new(RecordingFirer::default());
+        let (handle, watched, wait_for) = spawn_relative(".envrc", &dir_a, firer).await;
+        assert!(wait_for(dir_a.clone()).await, "dir A watched on spawn");
+
+        // Observe ONLY what the rebind restart watches (drop the spawn record).
+        watched.lock().unwrap().clear();
+        handle.on_cwd_changed(dir_b.clone());
+        assert!(
+            wait_for(dir_b.clone()).await,
+            "dir B watched after cwd rebind (matcher re-resolved against B)"
+        );
+        // REPLACE not union: the rebind restart watches ONLY B, never re-watches A.
+        {
+            let w = watched.lock().unwrap();
+            assert!(
+                w.iter().any(|d| Path::new(d) == dir_b),
+                "dir B in the rebind watch set"
+            );
+            assert!(
+                !w.iter().any(|d| Path::new(d) == dir_a),
+                "dir A dropped from the watch set (REPLACE, not union)"
+            );
+        }
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn on_cwd_changed_noops_when_cwd_unchanged() {
+        // Guard `if(_===S)return`: rebinding to the SAME cwd triggers no restart,
+        // so the fake FS is never asked to (re-)watch anything.
+        let root = tempfile::tempdir().unwrap();
+        let dir_a = root.path().join("a");
+        std::fs::create_dir_all(&dir_a).unwrap();
+
+        let firer: Arc<dyn FileChangedFirer> = Arc::new(RecordingFirer::default());
+        let (handle, watched, wait_for) = spawn_relative(".envrc", &dir_a, firer).await;
+        assert!(wait_for(dir_a.clone()).await, "dir A watched on spawn");
+
+        watched.lock().unwrap().clear();
+        handle.on_cwd_changed(dir_a.clone());
+        // Give the supervisor ample time to (not) process a restart.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(
+            watched.lock().unwrap().is_empty(),
+            "unchanged cwd must not restart the watcher"
+        );
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn rebinder_forwards_cwd_change_to_supervisor() {
+        // `handle.rebinder()` yields a WatcherRebinder whose `rebind(new_cwd)`
+        // drives the same re-resolve+restart as `on_cwd_changed` — the seam the
+        // composition root injects into the orchestrator's CwdChanged firer.
+        // (`rebind` resolves through the `dyn WatcherRebinder` vtable — no `use`.)
+        let root = tempfile::tempdir().unwrap();
+        let dir_a = root.path().join("a");
+        let dir_b = root.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let firer: Arc<dyn FileChangedFirer> = Arc::new(RecordingFirer::default());
+        let (handle, watched, wait_for) = spawn_relative(".envrc", &dir_a, firer).await;
+        assert!(wait_for(dir_a.clone()).await, "dir A watched on spawn");
+
+        let rebinder = handle.rebinder().expect("live handle yields a rebinder");
+        watched.lock().unwrap().clear();
+        rebinder.rebind(dir_b.clone());
+        assert!(
+            wait_for(dir_b.clone()).await,
+            "dir B watched after rebinder.rebind (same path as on_cwd_changed)"
+        );
+        drop(handle);
+    }
+
+    #[test]
+    fn on_cwd_changed_and_rebinder_are_noops_on_empty_handle() {
+        // An empty handle owns no supervisor: on_cwd_changed must not panic and
+        // rebinder() yields None (nothing to signal). The no-FileChanged-hook
+        // case — the rebind is inherently a no-op (matches claude-code's `if(o)`).
+        let handle = FileChangedWatcherHandle::empty();
+        handle.on_cwd_changed(PathBuf::from("/nowhere"));
+        assert!(
+            handle.rebinder().is_none(),
+            "empty handle yields no rebinder"
+        );
+    }
+
+    #[test]
+    fn deferred_rebinder_forwards_only_after_set() {
+        // The late-binding adapter: before `set`, rebind is a silent no-op; after
+        // `set`, it forwards to the wrapped rebinder. Clones share the cell, so a
+        // firer holding one clone rebinds through a `set` on another.
+        use hooks::WatcherRebinder as _;
+        #[derive(Default)]
+        struct Recording {
+            seen: Mutex<Vec<PathBuf>>,
+        }
+        impl hooks::WatcherRebinder for Recording {
+            fn rebind(&self, new_cwd: PathBuf) {
+                self.seen.lock().unwrap().push(new_cwd);
+            }
+        }
+
+        let deferred = DeferredWatcherRebinder::new();
+        let firer_clone = deferred.clone();
+        // Before set: no-op (nothing panics, nothing recorded).
+        firer_clone.rebind(PathBuf::from("/early"));
+
+        let inner = Arc::new(Recording::default());
+        deferred.set(inner.clone());
+        // After set on `deferred`, the firer's clone forwards through the shared cell.
+        firer_clone.rebind(PathBuf::from("/late"));
+        assert_eq!(
+            *inner.seen.lock().unwrap(),
+            vec![PathBuf::from("/late")],
+            "only the post-set rebind reaches the wrapped rebinder"
+        );
     }
 
     #[tokio::test]

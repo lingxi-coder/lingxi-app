@@ -35,6 +35,7 @@ pub mod task_created_firer;
 pub mod teammate_idle_firer;
 pub mod terminal_seq;
 pub mod user_config;
+pub mod watcher_rebinder;
 
 pub use async_registry::AsyncHookRegistry;
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};
@@ -65,3 +66,4 @@ pub use ssrf_guard::{IpRange, SsrfError, SsrfGuard};
 pub use task_completed_firer::{OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer};
 pub use task_created_firer::{OptionalTaskCreatedFirer, TaskCreatedFire, TaskCreatedFirer};
 pub use teammate_idle_firer::{OptionalTeammateIdleFirer, TeammateIdleFire, TeammateIdleFirer};
+pub use watcher_rebinder::{OptionalWatcherRebinder, WatcherRebinder};

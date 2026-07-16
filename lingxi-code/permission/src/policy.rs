@@ -982,6 +982,27 @@ impl PermissionPolicy {
                 rule_uses_glob(rule),
             );
         };
+        // GENFIELD-01: generic `field:pattern` content matcher (claude-code
+        // `Mjr`), used by the DENY and ASK content walks ONLY (`Mjr(o,e,t,"deny")`
+        // / `Mjr(o,e,t,"ask")` — never the allow walk). A content rule of the form
+        // `field:pattern` matches when: the rule targets this tool, the field is
+        // NOT the tool's dedicated `ruleContentField` (those keep their dedicated
+        // matchers below), the input OWNS that field as a primitive, and the
+        // pattern glob-matches (`_pi`) the stringified, trimmed value. This lets
+        // `deny:["Agent(subagent_type:foo*)"]` / `deny:["WebSearch(query:*secret*)"]`
+        // match, which the dedicated-key logic below cannot express. Gated on
+        // DENY/ASK (over-restrict only — never broadens an allow).
+        if rule_uses_glob(rule) && rule.value.tool_name == tool_name {
+            if let Some((field, pat)) = split_field_pattern(pattern) {
+                if Some(field) != tool_rule_content_field(tool_name) {
+                    if let Some(value) = input.get(field).and_then(stringify_primitive) {
+                        if glob_name_matches(pat, value.trim()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
         let group_ok = match file_tool_kind(tool_name) {
             FileToolKind::NonFile => {
                 // Shell tools: CONTENT rule matches the command (any-subcommand,
@@ -1633,6 +1654,53 @@ fn rule_uses_glob(rule: &PermissionRule) -> bool {
         rule.behavior,
         PermissionBehavior::Deny | PermissionBehavior::Ask
     )
+}
+
+/// Split a `field:pattern` rule-content string on the FIRST `:` (claude-code
+/// `Mjr`: `l=s.indexOf(":"); if(l<=0)continue`). Returns `(field, pattern)` with
+/// both sides trimmed, or `None` when there is no `:`, the `:` is at position 0,
+/// or either side is empty after trimming.
+#[must_use]
+fn split_field_pattern(content: &str) -> Option<(&str, &str)> {
+    let idx = content.find(':')?;
+    if idx == 0 {
+        return None;
+    }
+    let field = content[..idx].trim();
+    let pattern = content[idx + 1..].trim();
+    if field.is_empty() || pattern.is_empty() {
+        return None;
+    }
+    Some((field, pattern))
+}
+
+/// A tool's dedicated `ruleContentField` — 1:1 with claude-code's per-tool
+/// declaration (`command` for Bash/PowerShell, `file_path` for Edit/Write,
+/// `path` for Glob/Grep, `notebook_path` for NotebookEdit). The generic
+/// `field:pattern` matcher SKIPS this field (those keep their dedicated
+/// matchers). Any other tool has no dedicated field (`None`).
+#[must_use]
+fn tool_rule_content_field(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "Bash" | "PowerShell" => Some("command"),
+        "Edit" | "Write" => Some("file_path"),
+        "Glob" | "Grep" => Some("path"),
+        "NotebookEdit" => Some("notebook_path"),
+        _ => None,
+    }
+}
+
+/// Stringify a JSON primitive for generic content matching — 1:1 with
+/// claude-code `L1g`: strings pass through, numbers/booleans stringify, and any
+/// non-primitive (null/array/object) yields `None` (no match).
+#[must_use]
+fn stringify_primitive(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
 }
 
 /// claude-code `_pi(pattern, value)`: anchored, dotall glob where `*`→`.*` and

@@ -3082,4 +3082,113 @@ mod tests {
         assert!(!glob_name_matches("Web*", "MyWebFetch")); // anchored at start
         assert!(!glob_name_matches("Web", "WebFetch")); // exact, no wildcard
     }
+
+    // ---- GENFIELD-01: generic `field:pattern` content matcher (Mjr) --------
+
+    /// `deny:["WebSearch(query:*secret*)"]` glob-matches the input's `query`
+    /// field — a content rule the dedicated-key logic cannot express.
+    #[test]
+    fn genfield_deny_matches_arbitrary_field() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebSearch(query:*secret*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebSearch", &serde_json::json!({ "query": "top secret plans" })),
+            PermissionResult::Deny { .. }
+        ));
+        // Non-matching query → no deny.
+        assert!(!matches!(
+            p.authorize("WebSearch", &serde_json::json!({ "query": "public data" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// `deny:["Agent(subagent_type:foo*)"]` matches the Agent input's
+    /// `subagent_type` (not Agent's dedicated key).
+    #[test]
+    fn genfield_deny_matches_agent_subagent_type() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Agent(subagent_type:foo*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({ "subagent_type": "foobar" })),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(!matches!(
+            p.authorize("Agent", &serde_json::json!({ "subagent_type": "other" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// An ASK content rule uses the generic matcher too.
+    #[test]
+    fn genfield_ask_matches_arbitrary_field() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["WebSearch(query:*danger*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebSearch", &serde_json::json!({ "query": "danger zone" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    /// The generic matcher must NOT broaden an ALLOW rule (claude-code calls Mjr
+    /// only for deny/ask). An `allow:["WebSearch(query:*)"]` does not allow the
+    /// call — it falls through to the Default-mode ask.
+    #[test]
+    fn genfield_allow_rule_does_not_match() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["WebSearch(query:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebSearch", &serde_json::json!({ "query": "anything" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    /// The generic matcher requires the input to OWN the field: a rule on a
+    /// missing field does not match.
+    #[test]
+    fn genfield_absent_field_no_match() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebSearch(missing:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(!matches!(
+            p.authorize("WebSearch", &serde_json::json!({ "query": "x" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn split_field_pattern_semantics() {
+        assert_eq!(split_field_pattern("query:foo*"), Some(("query", "foo*")));
+        assert_eq!(split_field_pattern(" a : b "), Some(("a", "b")));
+        assert_eq!(split_field_pattern("nocolon"), None);
+        assert_eq!(split_field_pattern(":leading"), None);
+        assert_eq!(split_field_pattern("field:"), None);
+    }
+
+    #[test]
+    fn stringify_primitive_semantics() {
+        assert_eq!(
+            stringify_primitive(&serde_json::json!("s")).as_deref(),
+            Some("s")
+        );
+        assert_eq!(
+            stringify_primitive(&serde_json::json!(42)).as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            stringify_primitive(&serde_json::json!(true)).as_deref(),
+            Some("true")
+        );
+        assert!(stringify_primitive(&serde_json::json!(null)).is_none());
+        assert!(stringify_primitive(&serde_json::json!([1, 2])).is_none());
+        assert!(stringify_primitive(&serde_json::json!({ "a": 1 })).is_none());
+    }
 }

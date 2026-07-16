@@ -196,6 +196,188 @@ pub(crate) const SAFE_ENV_VARS: &[&str] = &[
 /// BashTool shell; a placeholder would lie).
 pub(crate) const SPECIAL_VAR_NAMES: &[&str] = &["?", "$", "!", "#", "0", "-"];
 
+// ── Dangerous variable-name battery (TS `ntg`/`Y3i`/`GVc`, `O3i`/`Itt`) ──
+
+/// TS `ntg`: lowercase exec-influencing / shell-behavior var names, matched
+/// case-INSENSITIVELY by [`o3i`]. Membership via lowercased `.contains`.
+pub(crate) const DANGEROUS_VAR_NTG: &[&str] = &[
+    "path",
+    "home",
+    "tmpprefix",
+    "bash_env",
+    "env",
+    "cdpath",
+    "globignore",
+    "shell",
+    "fpath",
+    "bash_loadables_path",
+    "module_path",
+    "manpath",
+    "mailpath",
+    "readnullcmd",
+    "nullcmd",
+    "histfile",
+    "zdotdir",
+    "functions",
+    "commands",
+    "aliases",
+    "galiases",
+    "saliases",
+    "lang",
+    "language",
+    "lc_all",
+    "lc_ctype",
+    "lc_collate",
+    "lc_messages",
+    "lc_numeric",
+    "lc_time",
+    "histchars",
+    "textdomain",
+    "textdomaindir",
+];
+
+/// TS `Y3i`: integer-attribute / volatile shell vars matched by EXACT case
+/// (part of the [`itt`] battery).
+pub(crate) const DANGEROUS_VAR_Y3I: &[&str] = &[
+    "RANDOM",
+    "SECONDS",
+    "LINENO",
+    "OPTIND",
+    "MAILCHECK",
+    "HISTCMD",
+    "SRANDOM",
+    "EPOCHSECONDS",
+    "EPOCHREALTIME",
+    "COLUMNS",
+    "LINES",
+    "SHLVL",
+    "ERRNO",
+    "TMOUT",
+    "HISTSIZE",
+    "SAVEHIST",
+    "TRY_BLOCK_ERROR",
+    "TRY_BLOCK_INTERRUPT",
+    "KEYTIMEOUT",
+    "LISTMAX",
+    "LOGCHECK",
+    "PERIOD",
+    "FUNCNEST",
+    "UID",
+    "EUID",
+    "GID",
+    "EGID",
+    "ZLE_RPROMPT_INDENT",
+    "MBEGIN",
+    "MEND",
+    "PPID",
+    "ARGC",
+    "ZSH_SUBSHELL",
+    "TTYIDLE",
+    "status",
+];
+
+/// TS `GVc`: generally-volatile shell vars whose runtime value cannot be a
+/// tracked literal (gated FIRST in [`resolve_simple_expansion`] and used to
+/// reject dangerous loop variables). Case-sensitive (holds both `REPLY` and
+/// `reply`, etc.).
+#[allow(dead_code)] // consumed by resolve_simple_expansion / loop-var guard (later layers)
+pub(crate) const VOLATILE_VARS_GVC: &[&str] = &[
+    "_",
+    "RANDOM",
+    "SECONDS",
+    "LINENO",
+    "BASH_COMMAND",
+    "FUNCNAME",
+    "EPOCHSECONDS",
+    "EPOCHREALTIME",
+    "SRANDOM",
+    "BASHPID",
+    "REPLY",
+    "reply",
+    "PIPESTATUS",
+    "pipestatus",
+    "BASH_SOURCE",
+    "DIRSTACK",
+    "GROUPS",
+    "BASH_ARGV",
+    "BASH_ARGC",
+    "BASH_SUBSHELL",
+    "BASH_LINENO",
+    "BASH_REMATCH",
+    "MATCH",
+    "match",
+    "MBEGIN",
+    "MEND",
+    "mbegin",
+    "mend",
+    "OPTARG",
+    "OPTIND",
+    "argv",
+    "FIGNORE",
+    "fignore",
+    "PSVAR",
+    "psvar",
+    "WATCH",
+    "watch",
+    "HISTCHARS",
+    "histchars",
+    "PS1",
+    "PROMPT",
+    "prompt",
+    "PS2",
+    "PROMPT2",
+    "PS3",
+    "PROMPT3",
+    "PS4",
+    "PROMPT4",
+    "RPS1",
+    "RPROMPT",
+    "RPS2",
+    "RPROMPT2",
+];
+
+/// TS `H3i`: command-prefix WRAPPERS stripped by the [`xeg`] var-write pre-scan.
+pub(crate) const XEG_WRAPPERS: &[&str] = &["command", "builtin", "noglob", "nocorrect", "time"];
+
+/// TS `qVc`: declare-family assignment builtins whose `NAME=value` operands
+/// write shell variables (used by [`xeg`]).
+pub(crate) const XEG_ASSIGN_BUILTINS: &[&str] =
+    &["declare", "typeset", "local", "export", "readonly"];
+
+/// TS `jVc`: special builtins whose PRECEDING `VAR=value` env assignments persist
+/// in the current shell (used by [`xeg`]).
+pub(crate) const XEG_SPECIAL_BUILTINS: &[&str] = &[
+    ":", "break", "continue", "return", "exit", "shift", "times", "set", "export", "readonly",
+    "unset",
+];
+
+/// TS `itg`: `print` short options that consume a following value operand
+/// (used by [`xeg`]'s `print -v NAME` handler).
+pub(crate) const XEG_PRINT_VALUE_FLAGS: &[&str] = &["-f", "-C", "-x", "-X", "-u"];
+
+/// TS `O3i` (`ast.ts`): a lowercase-matched exec-influencing var name, or one of
+/// the `ld_`/`dyld_`/`bash_func_` dynamic-linker / exported-function prefixes.
+#[must_use]
+pub(crate) fn o3i(name: &str) -> bool {
+    let t = name.to_ascii_lowercase();
+    DANGEROUS_VAR_NTG.contains(&t.as_str())
+        || t.starts_with("ld_")
+        || t.starts_with("dyld_")
+        || t.starts_with("bash_func_")
+}
+
+/// TS `Itt` (`ast.ts`): a variable name that influences command execution
+/// (exec-influencing / integer-attr / `IFS` / `PS4` / `PROMPT4`). Writing or
+/// `unset`ting such a name defeats static analysis.
+#[must_use]
+pub(crate) fn itt(name: &str) -> bool {
+    o3i(name)
+        || name == "IFS"
+        || name == "PS4"
+        || name == "PROMPT4"
+        || DANGEROUS_VAR_Y3I.contains(&name)
+}
+
 // ── checkSemantics tail sets (ast.ts:2060-2204) — consumed by the semantic
 // cluster (later layer); defined here so all const sets live in one place. ──
 
@@ -412,6 +594,28 @@ lazy_re!(bare_var_unsafe_re, r"[ \t\n*?\[]");
 
 // BRACE_EXPANSION_RE (ast.ts:245): {a,b} or {a..b}. (Consumed by walker layers.)
 lazy_re!(brace_expansion_re, r"\{[^{}\s]*(,|\.\.)[^{}\s]*\}");
+
+// ── xeg (per-command var-write pre-scan) regexes ──
+// Wrapper flag stripped inside xeg's prefix loop: `/^-[-pvV]*$/` (bare `-`, `--`,
+// and `command`-style `-pvV` combinations).
+lazy_re!(xeg_wrapper_flag_re, r"^-[-pvV]*$");
+// Leading `VAR[sub]?+?=` assignment word (JS `\w` → ASCII `[A-Za-z0-9_]`).
+lazy_re!(xeg_assign_word_re, r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=");
+// mapfile/readarray value-consuming short flag: `/^-[dnOsuCc]$/`.
+lazy_re!(xeg_mapfile_flag_re, r"^-[dnOsuCc]$");
+// pushd/popd `-n` flag (no directory change): `/^-[a-zA-Z]*n[a-zA-Z]*$/`.
+lazy_re!(xeg_pushd_n_re, r"^-[a-zA-Z]*n[a-zA-Z]*$");
+// popd stack-index operands that do NOT change PWD: `/^\+0*[1-9]/` and `/^-0+$/`.
+lazy_re!(xeg_popd_plus_re, r"^\+0*[1-9]");
+lazy_re!(xeg_popd_minus_re, r"^-0+$");
+
+// ── pUr/HVc (body-write invalidation pre-scan) regexes ──
+// HVc `word` flag that is safe to skip: `/^-[fvn]+$/`.
+lazy_re!(hvc_fvn_flag_re, r"^-[fvn]+$");
+// HVc backslash-escaped bare NAME operand: `/^\\?[A-Za-z_][A-Za-z0-9_]*$/`.
+lazy_re!(hvc_bslash_name_re, r"^\\?[A-Za-z_][A-Za-z0-9_]*$");
+// pUr declaration-command `NAME+?=` prefix: `/^([A-Za-z_][A-Za-z0-9_]*)\+?=/`.
+lazy_re!(pur_decl_assign_re, r"^([A-Za-z_][A-Za-z0-9_]*)\+?=");
 // PROC_ENVIRON_RE (ast.ts:2197): `.*` (procfs resolves `..`), NOT `[^/]*`.
 lazy_re!(proc_environ_re, r"/proc/.*/environ");
 // NEWLINE_HASH_RE (ast.ts:2204): newline, then 0+ space/tab, then `#`.
@@ -506,6 +710,11 @@ lazy_re!(
 );
 // jq `system(` detector inside extractSafeCatHeredoc (ast.ts:1773): `/\bsystem\s*\(/`.
 lazy_re!(jq_system_re, r"\bsystem\s*\(");
+// walkString zsh `$name:mod` modifier differential: `/^:[a-zA-Z&]/`.
+lazy_re!(zsh_colon_mod_re, r"^:[a-zA-Z&]");
+// walkString zsh `$name[expr]` / `$name:mod` on a special var: `/^\w*(\[|:[a-zA-Z&])/`
+// (JS `\w` → ASCII `[A-Za-z0-9_]`).
+lazy_re!(zsh_name_subscript_re, r"^[A-Za-z0-9_]*(\[|:[a-zA-Z&])");
 // awk program battery (TS `YVc`, permissionSetup.ts). The regex-crate has no
 // lookbehind, so `(?<![A-Za-z_])` is emulated with `(?:^|[^A-Za-z_])` — we only
 // test `is_match`, so consuming the guard char is harmless.
@@ -630,6 +839,14 @@ pub(crate) fn too_complex(node: Node) -> ParseForSecurityResult {
     ParseForSecurityResult::TooComplex { reason }
 }
 
+/// TS `LVc.homedir()` (`os.homedir()`): the current user's home directory, used
+/// by [`resolve_simple_expansion`] to resolve an untracked `$HOME`. Empty when
+/// unset (mirrors `os.homedir()` returning `""`). `HOME` is the posix source of
+/// truth; the platform-specific fallbacks are an accepted divergence.
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
 /// TS `resolveSimpleExpansion` (ast.ts:1937). Resolve a `simple_expansion`
 /// (`$VAR`) node against `var_scope`. `Ok(s)` = the resolved value (the real
 /// literal for tracked literals, [`VAR_PLACEHOLDER`] for shell-controlled vars);
@@ -661,12 +878,24 @@ pub(crate) fn resolve_simple_expansion(
         None => return Err(too_complex(node)),
     };
     if let Some(tv) = var_scope.get(&var_name) {
+        // GVc: a generally-volatile variable NAME (RANDOM/SECONDS/REPLY/PS*/…)
+        // never yields its tracked literal — its runtime value differs. Inside a
+        // string it degrades to a placeholder only when also a safe-env name
+        // (except BASHPID, whose value is a concrete pid); bare, it rejects.
+        if VOLATILE_VARS_GVC.contains(&var_name.as_str()) {
+            if inside_string && SAFE_ENV_VARS.contains(&var_name.as_str()) && var_name != "BASHPID"
+            {
+                return Ok(VAR_PLACEHOLDER.to_string());
+            }
+            return Err(too_complex(node));
+        }
         if contains_any_placeholder(tv) {
-            // Non-literal: bare → reject, inside string → VAR_PLACEHOLDER.
+            // Non-literal: bare → reject, inside string → the COMPOSITE value (so
+            // a prefix like `pre__TRACKED_VAR__` survives into rule matching).
             if !inside_string {
                 return Err(too_complex(node));
             }
-            return Ok(VAR_PLACEHOLDER.to_string());
+            return Ok(tv.clone());
         }
         // Pure literal — return it directly so downstream path validation sees
         // the REAL value. Bare args additionally reject empty / IFS+glob chars.
@@ -679,6 +908,15 @@ pub(crate) fn resolve_simple_expansion(
             }
         }
         return Ok(tv.clone());
+    }
+    // Untracked `$HOME` resolves to the real home directory (bare additionally
+    // rejects an empty / word-split-unsafe value).
+    if var_name == "HOME" {
+        let s = home_dir();
+        if !inside_string && (s.is_empty() || bare_var_unsafe_re().is_match(&s)) {
+            return Err(too_complex(node));
+        }
+        return Ok(s);
     }
     // Untracked: SAFE_ENV_VARS / special+positional vars resolvable only inside
     // strings (value is shell-controlled).
@@ -754,6 +992,324 @@ fn node_text<'a>(node: Node, src: &'a [u8]) -> &'a str {
 fn children(node: Node<'_>) -> Vec<Node<'_>> {
     let mut cursor = node.walk();
     node.children(&mut cursor).collect()
+}
+
+/// TS `P3i` (ast.ts): best-effort STATIC text of an argument node. `None` = the
+/// node is not statically representable (used only by the [`pur`] pre-scan).
+fn p3i(node: Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "word" | "number" => Some(unescape_word(node_text(node, src))),
+        "raw_string" => Some(strip_raw_string(node_text(node, src))),
+        "string" => {
+            let inner: Vec<Node> = children(node)
+                .into_iter()
+                .filter(|c| c.kind() != "\"")
+                .collect();
+            if inner.is_empty() {
+                return Some(String::new());
+            }
+            if inner.len() == 1 && inner[0].kind() == "string_content" {
+                return Some(node_text(inner[0], src).to_string());
+            }
+            None
+        }
+        "concatenation" => {
+            let mut t = String::new();
+            for c in children(node) {
+                t.push_str(&p3i(c, src)?);
+            }
+            Some(t)
+        }
+        _ => None,
+    }
+}
+
+/// TS `HVc` (ast.ts): mark every variable an `unset` (given its operand nodes)
+/// may remove as unknown ([`VAR_PLACEHOLDER`]) in `scope`. A non-identifier /
+/// pattern operand invalidates the WHOLE scope (fail-safe over-invalidation).
+fn hvc(operands: &[Node], src: &[u8], scope: &mut HashMap<String, String>) {
+    let invalidate_all = |scope: &mut HashMap<String, String>| {
+        let keys: Vec<String> = scope.keys().cloned().collect();
+        for k in keys {
+            scope.insert(k, VAR_PLACEHOLDER.to_string());
+        }
+    };
+    for n in operands {
+        match n.kind() {
+            "unset" | "file_redirect" | "heredoc_redirect" | "herestring_redirect" => continue,
+            "variable_name" => {
+                let name = node_text(*n, src).replace('\\', "");
+                scope.insert(name, VAR_PLACEHOLDER.to_string());
+                continue;
+            }
+            "word" => {
+                let text = node_text(*n, src);
+                if text.starts_with('-') {
+                    if text == "--" || hvc_fvn_flag_re().is_match(text) {
+                        continue;
+                    }
+                    invalidate_all(scope);
+                    continue;
+                }
+                if hvc_bslash_name_re().is_match(text) {
+                    let name = text.strip_prefix('\\').unwrap_or(text).to_string();
+                    scope.insert(name, VAR_PLACEHOLDER.to_string());
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        invalidate_all(scope);
+    }
+}
+
+/// TS `pUr` (ast.ts): recursively pre-scan `node`, marking every variable its
+/// body MAY write (assignments, loop vars, `read`/`mapfile`/`unset`,
+/// `cd`→PWD/OLDPWD, `pushd`/`popd`→DIRSTACK) as unknown in `scope`. Isolated
+/// scopes (`function_definition`/`subshell`/`command_substitution`/
+/// `process_substitution`) do NOT leak writes and are skipped.
+fn pur(node: Node, src: &[u8], scope: &mut HashMap<String, String>) {
+    let kind = node.kind();
+    if matches!(
+        kind,
+        "function_definition" | "subshell" | "command_substitution" | "process_substitution"
+    ) {
+        return;
+    }
+    if kind == "pipeline" {
+        // Only the LAST non-separator stage runs in the current shell.
+        let mut last: Option<Node> = None;
+        for c in children(node) {
+            if !SEPARATOR_TYPES.contains(&c.kind()) {
+                last = Some(c);
+            }
+        }
+        if let Some(l) = last {
+            pur(l, src, scope);
+        }
+        return;
+    }
+    if kind == "list" || kind == "program" {
+        let kids = children(node);
+        for (n, o) in kids.iter().enumerate() {
+            if SEPARATOR_TYPES.contains(&o.kind()) {
+                continue;
+            }
+            // Skip a background job (`cmd &`) — it runs in a subshell.
+            if kids.get(n + 1).map(|x| x.kind()) == Some("&") {
+                continue;
+            }
+            pur(*o, src, scope);
+        }
+        return;
+    }
+    if kind == "variable_assignment" {
+        for r in children(node) {
+            if r.kind() == "variable_name" {
+                scope.insert(node_text(r, src).to_string(), VAR_PLACEHOLDER.to_string());
+                break;
+            }
+        }
+    }
+    if kind == "for_statement" {
+        for r in children(node) {
+            if r.kind() == "variable_name" {
+                scope.insert(node_text(r, src).to_string(), VAR_PLACEHOLDER.to_string());
+                break;
+            }
+        }
+    }
+    if kind == "unset_command" {
+        hvc(&children(node), src, scope);
+    }
+    if kind == "command" {
+        let mut name_node: Option<Node> = None;
+        let mut cmd: Option<String> = None;
+        let mut o: Vec<String> = Vec::new();
+        let mut arg_nodes: Vec<Node> = Vec::new();
+        let mut saw_name = false;
+        for p in children(node) {
+            if p.kind() == "command_name" {
+                name_node = Some(p);
+                let first = children(p).into_iter().next().unwrap_or(p);
+                cmd = p3i(first, src);
+                saw_name = true;
+            } else if !saw_name
+                || matches!(
+                    p.kind(),
+                    "file_redirect" | "herestring_redirect" | "heredoc_redirect"
+                )
+            {
+                // leading assignments / redirects — not positional args
+            } else {
+                o.push(p3i(p, src).unwrap_or_default());
+                arg_nodes.push(p);
+            }
+        }
+        // Strip command-prefix wrappers (env-style assignments write vars).
+        let mut idx = 0usize;
+        while cmd
+            .as_deref()
+            .is_some_and(|c| XEG_WRAPPERS.contains(&c) || c == "!")
+        {
+            while idx < o.len() {
+                let p = &o[idx];
+                if xeg_wrapper_flag_re().is_match(p) {
+                    idx += 1;
+                } else if xeg_assign_word_re().is_match(p) {
+                    if let Some(id) = leading_ident(p) {
+                        scope.insert(id.to_string(), VAR_PLACEHOLDER.to_string());
+                    }
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+            cmd = o.get(idx).cloned();
+            idx += 1;
+        }
+        let args: &[String] = o.get(idx..).unwrap_or(&[]);
+        let unwrapped_arg_nodes: &[Node] = arg_nodes.get(idx..).unwrap_or(&[]);
+        let mark = |scope: &mut HashMap<String, String>, p: &str| {
+            if valid_var_name_re().is_match(p) {
+                scope.insert(p.to_string(), VAR_PLACEHOLDER.to_string());
+            }
+        };
+        match cmd.as_deref() {
+            Some("read") => {
+                scope.insert("REPLY".to_string(), VAR_PLACEHOLDER.to_string());
+                let mut p = 0;
+                let mut dd = false;
+                while p < args.len() {
+                    let m = &args[p];
+                    if !dd && m == "--" {
+                        dd = true;
+                        p += 1;
+                        continue;
+                    }
+                    if !dd && m.starts_with('-') {
+                        if READ_DATA_FLAGS.contains(&m.as_str()) {
+                            p += 2;
+                            continue;
+                        }
+                        let mb = m.as_bytes();
+                        let mut g = 1;
+                        let mut consumed = false;
+                        while g < m.len() {
+                            let y = mb[g];
+                            if y == b'a' || y == b'A' {
+                                let val = if g < m.len() - 1 {
+                                    m[g + 1..].to_string()
+                                } else {
+                                    args.get(p + 1).cloned().unwrap_or_default()
+                                };
+                                mark(scope, &val);
+                                consumed = g == m.len() - 1;
+                                break;
+                            }
+                            let flag = format!("-{}", y as char);
+                            if READ_DATA_FLAGS.contains(&flag.as_str()) {
+                                consumed = g == m.len() - 1;
+                                break;
+                            }
+                            g += 1;
+                        }
+                        p += if consumed { 2 } else { 1 };
+                        continue;
+                    }
+                    mark(scope, m);
+                    p += 1;
+                }
+            }
+            Some(c) if c == "mapfile" || c == "readarray" => {
+                scope.insert("MAPFILE".to_string(), VAR_PLACEHOLDER.to_string());
+                let mut p = 0;
+                while p < args.len() {
+                    let f = &args[p];
+                    if f.starts_with('-') {
+                        if xeg_mapfile_flag_re().is_match(f) {
+                            p += 1;
+                        }
+                        p += 1;
+                        continue;
+                    }
+                    mark(scope, f);
+                    p += 1;
+                }
+            }
+            Some("unset") => hvc(unwrapped_arg_nodes, src, scope),
+            _ => {}
+        }
+        // Recurse into children, but skip env-prefix `variable_assignment`s when
+        // the command is an ordinary external command (those writes are local).
+        let cname = name_node
+            .and_then(|n| children(n).into_iter().next())
+            .filter(|c| c.kind() == "word")
+            .map(|c| unescape_word(node_text(c, src)));
+        let skip_env_assigns = cname
+            .as_deref()
+            .is_some_and(|u| {
+                !XEG_SPECIAL_BUILTINS.contains(&u)
+                    && !XEG_WRAPPERS.contains(&u)
+                    && !XEG_ASSIGN_BUILTINS.contains(&u)
+            });
+        for p in children(node) {
+            if p.kind() == "variable_assignment" && skip_env_assigns {
+                continue;
+            }
+            pur(p, src, scope);
+        }
+        return;
+    }
+    if kind == "declaration_command" {
+        for r in children(node) {
+            if matches!(
+                r.kind(),
+                "string" | "raw_string" | "word" | "number" | "concatenation" | "variable_name"
+            ) {
+                let text = node_text(r, src);
+                let cleaned: String = text.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
+                if let Some(caps) = pur_decl_assign_re().captures(&cleaned) {
+                    scope.insert(caps[1].to_string(), VAR_PLACEHOLDER.to_string());
+                } else if let Some(eq) = cleaned.find('=') {
+                    // `x=$…` with a `$` before the `=` → invalidate the whole scope.
+                    if eq > 0 && cleaned[..eq].contains('$') {
+                        let keys: Vec<String> = scope.keys().cloned().collect();
+                        for k in keys {
+                            scope.insert(k, VAR_PLACEHOLDER.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for r in children(node) {
+        pur(r, src, scope);
+    }
+}
+
+/// TS `E3i(scope, node)` = `pUr(node, scope)` (argument swap only).
+fn e3i(scope: &mut HashMap<String, String>, node: Node, src: &[u8]) {
+    pur(node, src, scope);
+}
+
+/// TS `dUr` (ast.ts): merge a walked body scope back into `outer`. Any variable
+/// the body changed becomes unknown; any outer variable the body did not carry
+/// forward becomes unknown (it may have been unset inside the body).
+fn dur(outer: &mut HashMap<String, String>, body: &HashMap<String, String>) {
+    for (k, v) in body {
+        if let Some(o) = outer.get(k) {
+            if o != v {
+                outer.insert(k.clone(), VAR_PLACEHOLDER.to_string());
+            }
+        }
+    }
+    let keys: Vec<String> = outer.keys().cloned().collect();
+    for k in keys {
+        if !body.contains_key(&k) {
+            outer.insert(k, VAR_PLACEHOLDER.to_string());
+        }
+    }
 }
 
 /// A leading `name=value` / `name+=value` assignment (TS
@@ -953,13 +1509,23 @@ pub(crate) fn collect_commands(
     }
 
     if kind == "for_statement" {
+        // NOTE: the TS `mP()` env-scrub gate (reject for/while outright when
+        // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set) is a runtime feature flag; the
+        // port runs the flag-OFF default (full static analysis).
         let mut loop_var: Option<String> = None;
         let mut do_group: Option<Node> = None;
         for child in children(node) {
             match child.kind() {
                 "variable_name" => loop_var = Some(node_text(child, src).to_string()),
                 "do_group" => do_group = Some(child),
-                "for" | "in" | "select" | ";" => {}
+                // SECURITY: `select` reads stdin into $REPLY — cannot model.
+                "select" => {
+                    return Some(ParseForSecurityResult::TooComplex {
+                        reason: "select statement reads stdin into $REPLY; cannot statically model"
+                            .to_string(),
+                    })
+                }
+                "for" | "in" | ";" => {}
                 "command_substitution" => {
                     if let Some(err) = collect_command_substitution(child, commands, var_scope, src)
                     {
@@ -979,16 +1545,38 @@ pub(crate) fn collect_commands(
             (Some(v), Some(g)) => (v, g),
             _ => return Some(too_complex(node)),
         };
-        // SECURITY: PS4/IFS as loop var bypasses assignment validation.
-        if loop_var == "PS4" || loop_var == "IFS" {
+        // SECURITY: a loop var that aliases an exec-influencing / integer-attr /
+        // safe-env / volatile name bypasses assignment validation.
+        if loop_var == "PS4"
+            || loop_var == "IFS"
+            || o3i(&loop_var)
+            || DANGEROUS_VAR_Y3I.contains(&loop_var.as_str())
+            || SAFE_ENV_VARS.contains(&loop_var.as_str())
+            || VOLATILE_VARS_GVC.contains(&loop_var.as_str())
+        {
             return Some(ParseForSecurityResult::TooComplex {
                 reason: format!("{loop_var} as loop variable bypasses assignment validation"),
             });
         }
-        // Loop var is ALWAYS unknown-value (VAR_PLACEHOLDER) in the REAL scope;
-        // body uses a COPY so body assignments don't leak past `done`.
-        var_scope.insert(loop_var, VAR_PLACEHOLDER.to_string());
+        // SECURITY: refuse to clobber a tracked literal with the loop var — the
+        // post-loop value cannot be statically determined.
+        if let Some(existing) = var_scope.get(&loop_var) {
+            if !contains_any_placeholder(existing) {
+                let truncated: String = existing.chars().take(40).collect();
+                let quoted = serde_json::to_string(&truncated).unwrap_or_else(|_| "\"\"".to_string());
+                return Some(ParseForSecurityResult::TooComplex {
+                    reason: format!(
+                        "for-loop variable '{loop_var}' would overwrite tracked literal {quoted}; post-loop value cannot be statically determined"
+                    ),
+                });
+            }
+        }
+        // Delete the loop var (its post-loop value is unknown), then walk the body
+        // on a COPY seeded by the body-write pre-scan; merge writes back after.
+        var_scope.remove(&loop_var);
         let mut body_scope = var_scope.clone();
+        e3i(&mut body_scope, do_group, src);
+        body_scope.remove(&loop_var);
         for c in children(do_group) {
             if matches!(c.kind(), "do" | "done" | ";") {
                 continue;
@@ -997,10 +1585,28 @@ pub(crate) fn collect_commands(
                 return Some(err);
             }
         }
+        dur(var_scope, &body_scope);
         return None;
     }
 
     if kind == "if_statement" || kind == "while_statement" {
+        // (`mP()` env-scrub gate omitted — flag-OFF default = analyze.)
+        let is_while = kind == "while_statement";
+        // For a `while`, snapshot the pre-loop key set + values, then pre-scan the
+        // WHOLE loop into the REAL scope (every var the body may write is unknown
+        // before the condition runs — the loop may iterate ≥1 times).
+        let orig_keys: Option<std::collections::HashSet<String>> = if is_while {
+            Some(var_scope.keys().cloned().collect())
+        } else {
+            None
+        };
+        let snapshot: Option<HashMap<String, String>> = if is_while {
+            let snap = var_scope.clone();
+            e3i(var_scope, node, src);
+            Some(snap)
+        } else {
+            None
+        };
         let mut seen_then = false;
         for child in children(node) {
             match child.kind() {
@@ -1010,71 +1616,122 @@ pub(crate) fn collect_commands(
                     continue;
                 }
                 "do_group" => {
-                    // while body: scope COPY (body assignments don't leak past
-                    // done); inherits any `read VAR` tracking already in the real
-                    // scope from the condition.
-                    let mut body_scope = var_scope.clone();
+                    let mut d = var_scope.clone();
+                    e3i(&mut d, child, src);
                     for c in children(child) {
                         if matches!(c.kind(), "do" | "done" | ";") {
                             continue;
                         }
-                        if let Some(err) = collect_commands(c, commands, &mut body_scope, src) {
+                        if let Some(err) = collect_commands(c, commands, &mut d, src) {
                             return Some(err);
                         }
                     }
+                    dur(var_scope, &d);
                     continue;
                 }
                 "elif_clause" | "else_clause" => {
-                    let mut branch_scope = var_scope.clone();
+                    let mut d = var_scope.clone();
                     for c in children(child) {
                         if matches!(c.kind(), "elif" | "else" | "then" | ";") {
                             continue;
                         }
-                        if let Some(err) = collect_commands(c, commands, &mut branch_scope, src) {
+                        if let Some(err) = collect_commands(c, commands, &mut d, src) {
                             return Some(err);
                         }
                     }
+                    dur(var_scope, &d);
                     continue;
                 }
                 _ => {}
             }
-            // Condition (seen_then=false) uses REAL varScope; then-body uses a COPY.
-            let before = commands.len();
-            if seen_then {
-                let mut copy = var_scope.clone();
-                if let Some(err) = collect_commands(child, commands, &mut copy, src) {
-                    return Some(err);
+            // A condition (seen_then=false) or then-body child. Walk on a COPY.
+            let mut l = var_scope.clone();
+            let c_start = commands.len();
+            if let Some(err) = collect_commands(child, commands, &mut l, src) {
+                return Some(err);
+            }
+            if !seen_then {
+                // Condition: reconcile the copy `l` back into the REAL scope, but
+                // FAIL CLOSED whenever a tracked literal may have changed or been
+                // unset (the condition may short-circuit / pipeline / subshell).
+                // `ref_map` holds the ORIGINAL literals (while: pre-scan snapshot;
+                // if: the scope as it stood before this child).
+                let ref_map: HashMap<String, String> =
+                    snapshot.clone().unwrap_or_else(|| var_scope.clone());
+                for (d, p) in &l {
+                    if let Some(f) = ref_map.get(d) {
+                        if !contains_any_placeholder(f) && p != f {
+                            return Some(ParseForSecurityResult::TooComplex {
+                                reason: format!(
+                                    "'{d}' was tracked as literal '{f}' but condition may modify it (||/pipeline/unset/&&-short-circuit) — cannot prove downstream value"
+                                ),
+                            });
+                        }
+                    }
+                    var_scope.insert(d.clone(), p.clone());
                 }
-            } else {
-                if let Some(err) = collect_commands(child, commands, var_scope, src) {
-                    return Some(err);
-                }
-                // `while read VAR`: track condition `read VAR` names in REAL scope
-                // (value UNKNOWN → VAR_PLACEHOLDER) so the body COPY inherits them.
-                for i in before..commands.len() {
-                    let c = &commands[i];
-                    if c.argv.first().map(String::as_str) != Some("read") {
+                let cur_keys: Vec<String> = var_scope.keys().cloned().collect();
+                for d in cur_keys {
+                    if l.contains_key(&d) {
                         continue;
                     }
-                    let names: Vec<String> = c.argv[1..]
+                    if let Some(p) = ref_map.get(&d) {
+                        if !contains_any_placeholder(p) {
+                            return Some(ParseForSecurityResult::TooComplex {
+                                reason: format!(
+                                    "'{d}' was tracked as literal '{p}' but condition may unset it (&&-short-circuit) — cannot prove downstream value"
+                                ),
+                            });
+                        }
+                    }
+                    var_scope.insert(d, VAR_PLACEHOLDER.to_string());
+                }
+                // `read` in the condition writes its operands (and REPLY) with a
+                // runtime value; deny if it would clobber a tracked literal.
+                for i in c_start..commands.len() {
+                    if commands[i].argv.first().map(String::as_str) != Some("read") {
+                        continue;
+                    }
+                    let names: Vec<String> = commands[i].argv[1..]
                         .iter()
-                        .filter(|a| !a.starts_with('-') && valid_var_name_re().is_match(a))
+                        .filter(|m| !m.starts_with('-') && valid_var_name_re().is_match(m))
                         .cloned()
                         .collect();
-                    for a in names {
-                        // SECURITY: fail closed when a tracked literal would be
-                        // overwritten by a `read` that may not execute.
-                        if let Some(existing) = var_scope.get(&a) {
-                            if !contains_any_placeholder(existing) {
+                    for m in names {
+                        if let Some(g) = var_scope.get(&m) {
+                            if !contains_any_placeholder(g) {
                                 return Some(ParseForSecurityResult::TooComplex {
                                     reason: format!(
-                                        "'read {a}' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal '{existing}'"
+                                        "'read {m}' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal '{g}'"
                                     ),
                                 });
                             }
                         }
-                        var_scope.insert(a, VAR_PLACEHOLDER.to_string());
+                        var_scope.insert(m, VAR_PLACEHOLDER.to_string());
                     }
+                    if let Some(f) = var_scope.get("REPLY") {
+                        if !contains_any_placeholder(f) {
+                            let f = f.clone();
+                            return Some(ParseForSecurityResult::TooComplex {
+                                reason: format!(
+                                    "'read' in condition may write stdin to REPLY; cannot prove it overwrites tracked literal '{f}'"
+                                ),
+                            });
+                        }
+                    }
+                    var_scope.insert("REPLY".to_string(), VAR_PLACEHOLDER.to_string());
+                }
+            } else {
+                dur(var_scope, &l);
+            }
+        }
+        // A `while` loop may run ZERO times: any var introduced solely inside it
+        // is not guaranteed to exist afterward — drop keys not present pre-loop.
+        if let Some(o) = orig_keys {
+            let cur: Vec<String> = var_scope.keys().cloned().collect();
+            for k in cur {
+                if !o.contains(&k) {
+                    var_scope.remove(&k);
                 }
             }
         }
@@ -1116,23 +1773,68 @@ pub(crate) fn collect_commands(
     }
 
     if kind == "unset_command" {
-        // `unset FOO BAR`, `unset -f func`. Safe — only removes vars/functions.
+        // `unset FOO BAR`, `unset -f func`. Only -f/-v flags are allowed; an
+        // operand must be a bare identifier, and `unset` of an exec-influencing
+        // variable ([`itt`]) defeats static analysis → deny (byte-exact reason).
         let mut argv: Vec<String> = Vec::new();
+        let mut is_func = false; // `-f` seen (function unset — no var tracking)
+        let mut seen_name = false; // a NAME operand has been consumed
         for child in children(node) {
             match child.kind() {
                 "unset" => argv.push(node_text(child, src).to_string()),
                 "variable_name" => {
                     let name = node_text(child, src).to_string();
+                    if !valid_var_name_re().is_match(&name) {
+                        return Some(too_complex(child));
+                    }
                     argv.push(name.clone());
-                    // SECURITY: remove from varScope so later `$VAR` rejects.
-                    var_scope.remove(&name);
+                    seen_name = true;
+                    if is_func {
+                        continue;
+                    }
+                    if itt(&name) {
+                        return Some(ParseForSecurityResult::TooComplex {
+                            reason: format!(
+                                "'unset' targets shell variable {name} (exec-influencing / integer-attr / IFS / PS4)"
+                            ),
+                        });
+                    }
+                    // SECURITY: set empty so a later bare `$VAR` rejects.
+                    var_scope.insert(name, String::new());
                 }
                 "word" => {
                     let arg = match walk_argument(Some(child), src, commands, var_scope) {
                         Ok(s) => s,
                         Err(e) => return Some(e),
                     };
-                    argv.push(arg);
+                    if arg.starts_with('-') {
+                        // A flag after a name, or a flag other than -f/-v, cannot
+                        // be statically modelled.
+                        if seen_name || (arg != "-f" && arg != "-v") {
+                            return Some(too_complex(child));
+                        }
+                        if arg == "-f" {
+                            is_func = true;
+                        }
+                        argv.push(arg);
+                        continue;
+                    }
+                    if !valid_var_name_re().is_match(&arg) {
+                        return Some(too_complex(child));
+                    }
+                    argv.push(arg.clone());
+                    seen_name = true;
+                    if is_func {
+                        continue;
+                    }
+                    if itt(&arg) {
+                        return Some(ParseForSecurityResult::TooComplex {
+                            reason: format!(
+                                "'unset' targets shell variable {arg} (exec-influencing / integer-attr / IFS / PS4)"
+                            ),
+                        });
+                    }
+                    var_scope.insert(arg, String::new());
                 }
                 _ => return Some(too_complex(child)),
             }
@@ -1273,6 +1975,380 @@ pub(crate) fn walk_file_redirect(
 /// handled → `too_complex` (over-ask). Rebuilds `.text` from argv when a `$VAR`
 /// was resolved or a newline is present (rule-matching fidelity).
 #[allow(dead_code)]
+/// TS `/^[A-Za-z_][A-Za-z0-9_]*/` leading-identifier match (`.match()[0]`), used
+/// by [`xeg`] to reduce an operand like `arr[0]` to the bare NAME `arr`.
+fn leading_ident(u: &str) -> Option<&str> {
+    let b = u.as_bytes();
+    let first = *b.first()?;
+    if !(first == b'_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() && (b[i] == b'_' || b[i].is_ascii_alphanumeric()) {
+        i += 1;
+    }
+    Some(&u[..i])
+}
+
+/// TS `Xeg` (checkSemantics var-write pre-scan, `ast.ts`). Tracks which shell
+/// variables a single simple command WRITES (`read`/`mapfile`/`getopts`/`printf
+/// -v`/`declare`-family/`cd`/`pushd`/`popd`/…) and denies when it writes an
+/// exec-influencing name ([`itt`]) whose runtime value cannot be statically
+/// verified. On success (`None`) `var_scope` is updated with [`VAR_PLACEHOLDER`]
+/// for the written names so a later `$VAR` correctly rejects as a bare arg.
+fn xeg(
+    argv: &[String],
+    env_vars: &[(String, String)],
+    var_scope: &mut HashMap<String, String>,
+) -> Option<ParseForSecurityResult> {
+    // Names this command writes (checked against `itt` at the end).
+    let mut written: Vec<String> = Vec::new();
+    macro_rules! push_name {
+        ($u:expr) => {
+            if let Some(id) = leading_ident($u) {
+                written.push(id.to_string());
+            }
+        };
+    }
+    macro_rules! deny {
+        ($reason:expr) => {
+            return Some(ParseForSecurityResult::TooComplex { reason: $reason })
+        };
+    }
+
+    // ── wrapper-strip prefix loop (H3i wrappers, `!`, leading assignments) ──
+    let mut a: &[String] = argv;
+    let mut saw_v = false; // `command -v/-V` — suppresses cd/pushd/popd PWD tracking
+    loop {
+        let u = match a.first() {
+            Some(x) => x.as_str(),
+            None => break,
+        };
+        if XEG_WRAPPERS.contains(&u) {
+            let mut d = 1;
+            while d < a.len() && xeg_wrapper_flag_re().is_match(&a[d]) {
+                if a[d].contains('v') || a[d].contains('V') {
+                    saw_v = true;
+                }
+                d += 1;
+            }
+            a = &a[d..];
+        } else if u == "!" {
+            a = &a[1..];
+        } else if xeg_assign_word_re().is_match(u) {
+            push_name!(u);
+            a = &a[1..];
+        } else {
+            break;
+        }
+    }
+
+    let c: Option<&str> = a.first().map(String::as_str);
+    match c {
+        None => {
+            for e in env_vars {
+                push_name!(&e.0);
+            }
+        }
+        Some(c) if XEG_ASSIGN_BUILTINS.contains(&c) => {
+            let mut seen_dd = false;
+            for p in a.iter().skip(1) {
+                if !seen_dd && p == "--" {
+                    seen_dd = true;
+                    continue;
+                }
+                if !seen_dd && declare_m_re().is_match(p) {
+                    deny!(format!(
+                        "'{c} {p}' (wrapped form) — zsh -m/+m pattern-assigns every matching variable; cannot statically model target set"
+                    ));
+                }
+                if !seen_dd && p.starts_with('-') {
+                    continue;
+                }
+                if p.contains('=') {
+                    push_name!(p);
+                }
+            }
+        }
+        Some("read") => {
+            let mut u = 1;
+            let mut dd = false;
+            let mut wrote = false;
+            while u < a.len() {
+                let f = &a[u];
+                if !dd && f == "--" {
+                    dd = true;
+                    u += 1;
+                    continue;
+                }
+                if !dd && f.starts_with('-') {
+                    if READ_DATA_FLAGS.contains(&f.as_str()) {
+                        u += 2;
+                        continue;
+                    }
+                    let fb = f.as_bytes();
+                    let mut m = false;
+                    let mut g = 1;
+                    while g < f.len() {
+                        let y = fb[g];
+                        if y == b'a' || y == b'A' {
+                            let val = if g < f.len() - 1 {
+                                f[g + 1..].to_string()
+                            } else {
+                                a.get(u + 1).cloned().unwrap_or_default()
+                            };
+                            if !val.is_empty() {
+                                push_name!(&val);
+                                wrote = true;
+                            }
+                            m = g == f.len() - 1;
+                            break;
+                        }
+                        let flag = format!("-{}", y as char);
+                        if READ_DATA_FLAGS.contains(&flag.as_str()) {
+                            m = g == f.len() - 1;
+                            break;
+                        }
+                        g += 1;
+                    }
+                    u += if m { 2 } else { 1 };
+                    continue;
+                }
+                push_name!(f);
+                wrote = true;
+                u += 1;
+            }
+            if !wrote {
+                written.push("REPLY".to_string());
+            }
+        }
+        Some("printf") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || !d.starts_with('-') {
+                    break;
+                }
+                if d == "-v" {
+                    if let Some(n) = a.get(u + 1) {
+                        push_name!(n);
+                    }
+                    u += 2;
+                    continue;
+                }
+                if d.starts_with("-v") {
+                    push_name!(&d[2..]);
+                }
+                u += 1;
+            }
+        }
+        Some("getopts") => {
+            let off = usize::from(a.get(1).map(String::as_str) == Some("--"));
+            if let Some(n) = a.get(2 + off) {
+                push_name!(n);
+            }
+            written.push("OPTARG".to_string());
+            var_scope.insert("OPTIND".to_string(), VAR_PLACEHOLDER.to_string());
+        }
+        Some("wait") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || !d.starts_with('-') {
+                    break;
+                }
+                let db = d.as_bytes();
+                let mut p = 1;
+                while p < d.len() {
+                    if db[p] == b'p' {
+                        if p < d.len() - 1 {
+                            push_name!(&d[p + 1..]);
+                        } else if let Some(n) = a.get(u + 1) {
+                            push_name!(n);
+                            u += 1;
+                        }
+                        break;
+                    }
+                    p += 1;
+                }
+                u += 1;
+            }
+        }
+        Some(c) if c == "unset" || c == "unsetenv" => {
+            let mut is_func = false;
+            let mut seen_name = false;
+            for f in a.iter().skip(1) {
+                if f.starts_with('-') {
+                    if seen_name {
+                        deny!(format!(
+                            "'unset … {f}' (wrapped form) — flag after name; getopt stops at first non-option"
+                        ));
+                    }
+                    if f != "-f" && f != "-v" {
+                        deny!(format!(
+                            "'unset {f}' (wrapped form) — flag other than -f/-v (zsh -m pattern-unset, bash -n nameref) cannot be statically modelled"
+                        ));
+                    }
+                    if f == "-f" {
+                        is_func = true;
+                    }
+                    continue;
+                }
+                seen_name = true;
+                if !valid_var_name_re().is_match(f) {
+                    deny!(format!(
+                        "'unset {f}' (wrapped form) — non-identifier operand may pathname-expand; cannot statically know which var is unset"
+                    ));
+                }
+                if is_func {
+                    continue;
+                }
+                if itt(f) {
+                    deny!(format!(
+                        "'unset' targets shell variable {f} (exec-influencing / integer-attr / IFS / PS4)"
+                    ));
+                }
+                var_scope.insert(f.clone(), String::new());
+            }
+        }
+        Some("print") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || d == "-" || !d.starts_with('-') {
+                    break;
+                }
+                let db = d.as_bytes();
+                let mut p = false;
+                let mut f = 1;
+                while f < d.len() {
+                    let m = db[f];
+                    if m == b'v' {
+                        let val = if f < d.len() - 1 {
+                            d[f + 1..].to_string()
+                        } else {
+                            a.get(u + 1).cloned().unwrap_or_default()
+                        };
+                        if !val.is_empty() {
+                            push_name!(&val);
+                        }
+                        p = f == d.len() - 1;
+                        break;
+                    }
+                    let flag = format!("-{}", m as char);
+                    if XEG_PRINT_VALUE_FLAGS.contains(&flag.as_str()) {
+                        p = f == d.len() - 1;
+                        break;
+                    }
+                    f += 1;
+                }
+                if p {
+                    u += 1;
+                }
+                u += 1;
+            }
+        }
+        Some("set") => {
+            let mut u = 1;
+            while u < a.len() {
+                let d = &a[u];
+                if d == "--" || !set_flag_re().is_match(d) {
+                    break;
+                }
+                let p = d.get(1..).and_then(|s| s.find('A')).map(|i| i + 1);
+                match p {
+                    None => {
+                        if d.ends_with('o') {
+                            u += 1;
+                        }
+                        u += 1;
+                        continue;
+                    }
+                    Some(p) => {
+                        if p < d.len() - 1 {
+                            push_name!(&d[p + 1..]);
+                        } else if let Some(n) = a.get(u + 1) {
+                            push_name!(n);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        Some(c) if c == "mapfile" || c == "readarray" => {
+            let mut wrote = false;
+            let mut d = 1;
+            while d < a.len() {
+                let p = &a[d];
+                if p.starts_with('-') {
+                    if xeg_mapfile_flag_re().is_match(p) {
+                        d += 1;
+                    }
+                    d += 1;
+                    continue;
+                }
+                push_name!(p);
+                wrote = true;
+                d += 1;
+            }
+            if !wrote {
+                written.push("MAPFILE".to_string());
+            }
+        }
+        Some(c) if !saw_v && (c == "cd" || c == "chdir" || c == "pushd" || c == "popd") => {
+            let mut suppress = false;
+            if c == "pushd" || c == "popd" {
+                for p in a.iter().skip(1) {
+                    if p == "--" {
+                        break;
+                    }
+                    if xeg_pushd_n_re().is_match(p) {
+                        suppress = true;
+                        break;
+                    }
+                    if c == "popd"
+                        && (xeg_popd_plus_re().is_match(p) || xeg_popd_minus_re().is_match(p))
+                    {
+                        suppress = true;
+                        break;
+                    }
+                }
+            }
+            if !suppress {
+                var_scope.insert("PWD".to_string(), VAR_PLACEHOLDER.to_string());
+                var_scope.insert("OLDPWD".to_string(), VAR_PLACEHOLDER.to_string());
+            }
+            if c == "pushd" || c == "popd" {
+                var_scope.insert("DIRSTACK".to_string(), VAR_PLACEHOLDER.to_string());
+                var_scope.insert("dirstack".to_string(), VAR_PLACEHOLDER.to_string());
+            }
+        }
+        Some(_) => {}
+    }
+
+    // jVc special builtins: PRECEDING `VAR=value` env assignments persist.
+    if let Some(c) = c {
+        if !env_vars.is_empty() && XEG_SPECIAL_BUILTINS.contains(&c) {
+            for e in env_vars {
+                push_name!(&e.0);
+            }
+        }
+    }
+
+    // Itt battery on every written name; track survivors as placeholders.
+    let label =
+        c.unwrap_or_else(|| env_vars.first().map(|e| e.0.as_str()).unwrap_or("undefined"));
+    for u in &written {
+        if itt(u) {
+            deny!(format!(
+                "'{label}' writes shell variable {u} (exec-influencing / integer-attr / IFS) — value cannot be statically verified"
+            ));
+        }
+        var_scope.insert(u.clone(), VAR_PLACEHOLDER.to_string());
+    }
+    None
+}
+
 pub(crate) fn walk_command(
     node: Node,
     extra_redirects: &[Redirect],
@@ -1329,6 +2405,13 @@ pub(crate) fn walk_command(
             }
             _ => return too_complex(child),
         }
+    }
+
+    // SECURITY (TS `Xeg`): scan the resolved argv for builtin var-writes; deny
+    // when an exec-influencing name is written, else record placeholders so a
+    // later `$VAR` reference correctly rejects.
+    if let Some(err) = xeg(&argv, &env_vars, var_scope) {
+        return err;
     }
 
     // SECURITY: rebuild .text from argv when node.text contains `$<ident>` (a
@@ -1506,9 +2589,12 @@ pub(crate) fn walk_string(
 ) -> Result<String, ParseForSecurityResult> {
     let mut result = String::new();
     let mut cursor: i64 = -1;
-    let mut saw_dynamic = false;
-    let mut saw_literal = false;
-    for child in children(node) {
+    let mut saw_dynamic = false; // TS `s`: a placeholder part is present
+    let mut saw_literal = false; // TS `a`: a non-empty literal part is present
+    let mut saw_empty = false; // TS `l`: a part resolved to the empty string
+    let kids = children(node);
+    for (idx, child) in kids.iter().enumerate() {
+        let child = *child;
         // Index gap = dropped literal newline(s). Skipped before the first child
         // (cursor == -1) and before a `"` delimiter (whitespace-only quirk).
         if cursor != -1 && (child.start_byte() as i64) > cursor && child.kind() != "\"" {
@@ -1556,10 +2642,32 @@ pub(crate) fn walk_string(
             },
             "simple_expansion" => {
                 let v = resolve_simple_expansion(child, src, var_scope, true)?;
-                if v == VAR_PLACEHOLDER {
+                // SECURITY (zsh differential): `"$name[expr]"` / `"$name:mod"` —
+                // when the next sibling is a string_content that begins a subscript
+                // or a `:modifier`, zsh recursively evaluates it.
+                if let Some(d) = kids.get(idx + 1) {
+                    if d.kind() == "string_content" {
+                        let dt = node_text(*d, src);
+                        let is_special =
+                            children(child).iter().any(|f| f.kind() == "special_variable_name");
+                        if dt.starts_with('[')
+                            || zsh_colon_mod_re().is_match(dt)
+                            || (is_special && zsh_name_subscript_re().is_match(dt))
+                        {
+                            return Err(ParseForSecurityResult::TooComplex {
+                                reason:
+                                    "zsh \"$name[expr]\" / \"$name:mod\" inside double-quotes — recursive eval"
+                                        .to_string(),
+                            });
+                        }
+                    }
+                }
+                if contains_any_placeholder(&v) {
                     saw_dynamic = true;
-                } else {
+                } else if !v.is_empty() {
                     saw_literal = true;
+                } else {
+                    saw_empty = true;
                 }
                 result.push_str(&v);
             }
@@ -1574,15 +2682,31 @@ pub(crate) fn walk_string(
             _ => return Err(too_complex(child)),
         }
     }
-    // Guard A: solo-placeholder string (`"$(cmd)"` / `"$VAR"`) → reject.
-    if saw_dynamic && !saw_literal {
-        return Err(too_complex(node));
+    // Guard A: a string mixing a dynamic part with ≤1 char of literal residue
+    // (`"x$(cmd)"`) cannot be safely path/rule-matched → reject.
+    if saw_dynamic {
+        let residue = result.replace(CMDSUB_PLACEHOLDER, "").replace(VAR_PLACEHOLDER, "");
+        if residue.chars().count() <= 1 {
+            return Err(too_complex(node));
+        }
     }
-    // Guard B: whitespace-only-string quirk — no content children but the source
-    // span is longer than bare `""` (text byte-len > 2).
-    let text_len = node.end_byte() - node.start_byte();
-    if !saw_literal && !saw_dynamic && text_len > 2 {
-        return Err(too_complex(node));
+    // Guard B: a delimiters-only string node (hidden text, no parsed parts). Return
+    // the inner slice UNLESS it hides an unparsed command substitution.
+    if !saw_literal && !saw_dynamic && !saw_empty {
+        let text = node_text(node, src);
+        if text.chars().count() > 2 {
+            let mut ch = text.chars();
+            ch.next();
+            ch.next_back();
+            let inner = ch.as_str().to_string();
+            if inner.contains('`') || inner.contains("$(") {
+                return Err(ParseForSecurityResult::TooComplex {
+                    reason: "Delimiters-only string node contains unparsed command substitution"
+                        .to_string(),
+                });
+            }
+            return Ok(inner);
+        }
     }
     Ok(result)
 }
@@ -3084,12 +4208,16 @@ mod tests {
     #[test]
     fn resolve_untracked_safe_env_only_inside_string() {
         let scope = HashMap::new();
-        // $HOME bare → reject; inside string → placeholder.
-        assert!(resolve("ls $HOME", &scope, false).is_err());
-        assert_eq!(
-            resolve(r#"echo "$HOME""#, &scope, true),
-            Ok(VAR_PLACEHOLDER.to_string())
-        );
+        // 2.1.211: untracked $HOME resolves to the REAL home directory (bare and
+        // inside-string alike); bare additionally rejects an empty / unsafe value.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let bare = resolve("ls $HOME", &scope, false);
+        if home.is_empty() || bare_var_unsafe_re().is_match(&home) {
+            assert!(bare.is_err());
+        } else {
+            assert_eq!(bare, Ok(home.clone()));
+        }
+        assert_eq!(resolve(r#"echo "$HOME""#, &scope, true), Ok(home));
         // IFS only safe inside a string (bare $IFS is the injection primitive).
         assert!(resolve("echo $IFS", &scope, false).is_err());
         assert_eq!(
@@ -3322,12 +4450,11 @@ mod tests {
 
     #[test]
     fn walk_string_whitespace_only_quirk_rejects() {
-        // tree-sitter attributes a whitespace-only `" "` to the closing quote →
-        // no content children. Guard B (text len > 2) → reject.
-        assert_eq!(
-            cmd_argvs(r#"echo " ""#),
-            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
-        );
+        // 2.1.211: tree-sitter attributes a whitespace-only `" "` to the closing
+        // quote → no content children. Guard B now RETURNS the inner slice (a
+        // literal space) since it hides no command substitution.
+        let argvs = cmd_argvs(r#"echo " ""#).expect("simple");
+        assert_eq!(argvs[0], vec!["echo".to_string(), " ".to_string()]);
         // Genuine empty `""` (len == 2) is fine → argv element "".
         let argvs = cmd_argvs(r#"echo """#).expect("simple");
         assert_eq!(argvs[0], vec!["echo".to_string(), String::new()]);
@@ -4384,5 +5511,228 @@ EOF
             ),
             SemanticCheckResult::Ok => panic!("newline-# not denied"),
         }
+    }
+
+    // ── PERM-AST-VARNAME-01: dangerous-variable-name battery ──
+
+    #[test]
+    fn dangerous_var_predicates() {
+        // O3i: lowercase ntg names + ld_/dyld_/bash_func_ prefixes (case-insensitive).
+        assert!(o3i("PATH"));
+        assert!(o3i("path"));
+        assert!(o3i("BASH_ENV"));
+        assert!(o3i("LD_PRELOAD"));
+        assert!(o3i("DYLD_INSERT_LIBRARIES"));
+        assert!(o3i("BASH_FUNC_foo%%"));
+        assert!(!o3i("FOO"));
+        assert!(!o3i("MY_PATH_HELPER"));
+        // Itt = O3i | IFS | PS4 | PROMPT4 | Y3i.
+        assert!(itt("IFS"));
+        assert!(itt("PS4"));
+        assert!(itt("PROMPT4"));
+        assert!(itt("RANDOM")); // Y3i
+        assert!(itt("SECONDS"));
+        assert!(itt("status")); // Y3i exact-case member
+        assert!(!itt("STATUS"));
+        assert!(!itt("HOME_DIR"));
+    }
+
+    #[test]
+    fn unset_dangerous_var_denied() {
+        // `unset PATH` / `unset BASH_ENV` must be too-complex (byte-exact reason).
+        assert_eq!(
+            pfs("unset PATH"),
+            Err("'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
+                .to_string())
+        );
+        assert_eq!(
+            pfs("unset BASH_ENV"),
+            Err(
+                "'unset' targets shell variable BASH_ENV (exec-influencing / integer-attr / IFS / PS4)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            pfs("unset IFS"),
+            Err("'unset' targets shell variable IFS (exec-influencing / integer-attr / IFS / PS4)"
+                .to_string())
+        );
+        // -f (function unset) suppresses the var battery even for a dangerous name.
+        let cs = pfs("unset -f PATH").expect("unset -f is a function unset");
+        assert_eq!(cs[0].argv, vec!["unset", "-f", "PATH"]);
+        // Ordinary vars are still fine.
+        let cs = pfs("unset FOO BAR").expect("plain unset");
+        assert_eq!(cs[0].argv, vec!["unset", "FOO", "BAR"]);
+    }
+
+    #[test]
+    fn builtin_write_dangerous_var_denied() {
+        // `read PATH` writes an exec-influencing var → deny (byte-exact reason).
+        assert_eq!(
+            pfs("read PATH"),
+            Err("'read' writes shell variable PATH (exec-influencing / integer-attr / IFS) — value cannot be statically verified".to_string())
+        );
+        // mapfile into a dangerous name.
+        assert_eq!(
+            pfs("mapfile IFS"),
+            Err("'mapfile' writes shell variable IFS (exec-influencing / integer-attr / IFS) — value cannot be statically verified".to_string())
+        );
+        // printf -v LD_PRELOAD.
+        assert_eq!(
+            pfs("printf -v LD_PRELOAD x"),
+            Err("'printf' writes shell variable LD_PRELOAD (exec-influencing / integer-attr / IFS) — value cannot be statically verified".to_string())
+        );
+        // `read FOO` (benign) → simple; FOO tracked as placeholder so a later
+        // bare $FOO rejects.
+        let cs = pfs("read FOO").expect("benign read");
+        assert_eq!(cs[0].argv, vec!["read", "FOO"]);
+        assert!(pfs("read FOO && echo $FOO").is_err());
+    }
+
+    #[test]
+    fn wrapped_unset_dangerous_var_denied() {
+        // `command unset PATH` reaches `unset` as a plain command (wrapper-stripped)
+        // → xeg's wrapped-unset battery denies.
+        assert_eq!(
+            pfs("command unset PATH"),
+            Err("'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
+                .to_string())
+        );
+        // Non-identifier wrapped-unset operand.
+        assert!(pfs("command unset 'a b'").is_err());
+    }
+
+    // ── PERM-AST-VARSCOPE-01: loop/branch scope machinery ──
+
+    #[test]
+    fn select_statement_rejected() {
+        assert_eq!(
+            pfs("select x in a b; do echo $x; done"),
+            Err("select statement reads stdin into $REPLY; cannot statically model".to_string())
+        );
+    }
+
+    #[test]
+    fn loop_var_guard_widened() {
+        // O3i / Y3i / SAFE_ENV / GVc loop vars bypass assignment validation.
+        for name in ["PATH", "RANDOM", "HOME", "REPLY", "IFS", "PS4"] {
+            let cmd = format!("for {name} in a b; do echo hi; done");
+            assert_eq!(
+                pfs(&cmd),
+                Err(format!("{name} as loop variable bypasses assignment validation")),
+                "loop var {name} must be rejected"
+            );
+        }
+        // An ordinary loop var is fine.
+        assert!(pfs("for i in a b; do echo hi; done").is_ok());
+    }
+
+    #[test]
+    fn for_loop_overwrites_tracked_literal_denied() {
+        // `X=status` is a tracked literal; using X as the loop var clobbers it and
+        // the post-loop value is unknowable → deny (JSON.stringify-quoted).
+        assert_eq!(
+            pfs("X=status; for X in a b; do echo hi; done"),
+            Err("for-loop variable 'X' would overwrite tracked literal \"status\"; post-loop value cannot be statically determined".to_string())
+        );
+    }
+
+    #[test]
+    fn for_body_write_invalidates_outer_literal() {
+        // Outer literal Y=safe; the loop body reassigns Y from an unknown source.
+        // After the loop Y must be treated as unknown (placeholder), so a bare $Y
+        // rejects rather than resolving to the stale "safe" literal (under-ask).
+        assert!(
+            pfs("Y=safe; for i in a b; do Y=$RANDOM; done; git $Y").is_err(),
+            "post-loop $Y must not resolve to the stale pre-loop literal"
+        );
+    }
+
+    #[test]
+    fn while_read_overwrites_tracked_literal_denied() {
+        // `V=lit` then a plain `while read V` — the pre-scan marks V unknown and
+        // the condition-modify reconciliation fires FIRST (byte-faithful to CC).
+        assert_eq!(
+            pfs("V=lit; while read V; do echo hi; done"),
+            Err("'V' was tracked as literal 'lit' but condition may modify it (||/pipeline/unset/&&-short-circuit) — cannot prove downstream value".to_string())
+        );
+        // A PIPELINED read isolates the var-write from the condition copy, so the
+        // dedicated read-clobbers-literal reason is what surfaces.
+        assert_eq!(
+            pfs("V=lit; if echo x | read V; then echo hi; fi"),
+            Err("'read V' in condition may not execute (||/pipeline/subshell); cannot prove it overwrites tracked literal 'lit'".to_string())
+        );
+    }
+
+    // ── PERM-AST-STRING-01: walkString guards ──
+
+    #[test]
+    fn string_literal_residue_one_char_rejected() {
+        // `"x$(cmd)"`: one literal char + a cmdsub → residue ≤ 1 → reject
+        // (previously accepted = under-ask).
+        assert_eq!(
+            cmd_argvs(r#"echo "x$(id)""#),
+            Err("Contains shell syntax (string) that cannot be statically analyzed".to_string())
+        );
+        // Two literal chars survive.
+        let argvs = cmd_argvs(r#"echo "xy$(id)""#).expect("simple");
+        // inner id extracted first, then the outer echo command.
+        assert_eq!(argvs.last().unwrap()[0], "echo");
+        assert_eq!(argvs.last().unwrap()[1], format!("xy{CMDSUB_PLACEHOLDER}"));
+    }
+
+    #[test]
+    fn string_zsh_subscript_modifier_rejected() {
+        // `"$name[0]"` — next sibling string_content starts with `[` → recursive
+        // eval differential.
+        let scope_cmd = r#"echo "$HOME[0]""#;
+        assert_eq!(
+            cmd_argvs(scope_cmd),
+            Err("zsh \"$name[expr]\" / \"$name:mod\" inside double-quotes — recursive eval"
+                .to_string())
+        );
+    }
+
+    // ── PERM-AST-EXPANSION-01: resolveSimpleExpansion (ozn) parity ──
+
+    #[test]
+    fn resolve_gvc_tracked_name_never_literal() {
+        let mut scope = HashMap::new();
+        // A GVc name assigned a literal still must NOT resolve to that literal.
+        scope.insert("RANDOM".to_string(), "5".to_string());
+        // RANDOM is also a safe-env name → placeholder inside a string, reject bare.
+        assert_eq!(
+            resolve(r#"echo "$RANDOM""#, &scope, true),
+            Ok(VAR_PLACEHOLDER.to_string())
+        );
+        assert!(resolve("echo $RANDOM", &scope, false).is_err());
+        // BASHPID is GVc + safe-env but excluded → reject even inside a string.
+        scope.insert("BASHPID".to_string(), "123".to_string());
+        assert!(resolve(r#"echo "$BASHPID""#, &scope, true).is_err());
+        // REPLY is GVc but NOT safe-env → reject inside a string too.
+        scope.insert("REPLY".to_string(), "x".to_string());
+        assert!(resolve(r#"echo "$REPLY""#, &scope, true).is_err());
+    }
+
+    #[test]
+    fn resolve_placeholder_composite_returned_inside_string() {
+        let mut scope = HashMap::new();
+        // A tracked value carrying a placeholder returns the COMPOSITE inside a
+        // string (not a bare placeholder) so the prefix survives rule matching.
+        scope.insert("V".to_string(), format!("pre{CMDSUB_PLACEHOLDER}"));
+        assert_eq!(
+            resolve(r#"echo "$V""#, &scope, true),
+            Ok(format!("pre{CMDSUB_PLACEHOLDER}"))
+        );
+        assert!(resolve("echo $V", &scope, false).is_err());
+    }
+
+    #[test]
+    fn resolve_untracked_home_resolves_to_homedir() {
+        let scope = HashMap::new();
+        let home = std::env::var("HOME").unwrap_or_default();
+        // Inside a string, $HOME resolves to the actual home path (not a
+        // placeholder) — byte-faithful to ozn's HOME arm.
+        assert_eq!(resolve(r#"echo "$HOME""#, &scope, true), Ok(home));
     }
 }

@@ -169,12 +169,18 @@ fn has_process_substitution(command: &str) -> bool {
     false
 }
 
-/// Does `target` carry shell-expansion / glob / history / tilde syntax that
-/// can't be safely path-validated? — union of TS `hasDangerousExpansion`
-/// (`commands.ts:830-858`) and the residue `isSimpleTarget` (`:798-817`)
-/// rejects. A target that is NOT simple is dangerous (the TS design invariant:
-/// every redirect target is EITHER simple — captured & validated — OR dangerous
-/// — flagged → ask).
+/// Does `target` carry shell-expansion / glob / history / tilde syntax that a
+/// redirect target can't be safely path-validated with? — mirrors 2.1.211's
+/// `eLe` dangerous-classification for a redirect target `g`:
+/// `/^~|[*?[]/.test(g)` (leading `~` or a `*`/`?`/`[` anywhere) and
+/// `g.startsWith("!") || g.startsWith("=")`. `$`/backtick expansions surface via
+/// parse-tree nodes in `eLe`; the port (no AST) approximates them literally.
+///
+/// NOTE: `%` is NOT dangerous here — it is Windows-gated inside `EUr` (create
+/// op), not `eLe`. `{`/`}` are NOT dangerous either — they flow to `EUr`'s
+/// create-op brace guard (see [`check_path_constraints`]). This is why a bare
+/// `file%1` redirect target passes and a braced target gets the brace message
+/// rather than the shell-expansion one.
 fn target_has_dangerous_expansion(target: &str) -> bool {
     if target.is_empty() {
         // Empty target: TS treats `''` as not-simple AND not-dangerous (handled
@@ -183,22 +189,33 @@ fn target_has_dangerous_expansion(target: &str) -> bool {
         return false;
     }
     target.contains('$')
-        || target.contains('%')
         || target.contains('`')
         || target.contains('*')
         || target.contains('?')
         || target.contains('[')
-        || target.contains('{')
         || target.starts_with('!')
         || target.starts_with('=')
         || target.starts_with('~')
 }
 
-/// One extracted output redirection: a file `target` plus whether the target
-/// carried dangerous expansion (→ ask) instead of being a simple path.
+/// `^[A-Za-z0-9./_-]+$` — the `>&` (fd-duplication-or-file) charset gate in
+/// 2.1.211's `eLe` (`if(d&&!/^[A-Za-z0-9./_-]+$/.test(g))` → shell_expansion). A
+/// `>&`-operator target with any other char is treated as dangerous.
+fn redirect_target_charset_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'_' | b'-'))
+}
+
+/// One extracted output redirection: a file `target`, whether the target carried
+/// dangerous expansion (→ shell-expansion ask), and whether it is a braced
+/// write target (→ `EUr` create-op brace-guard ask).
 struct Redirection {
     target: String,
+    /// Dangerous shell expansion (`eLe` shell_expansion) → "Shell expansion …".
     dangerous: bool,
+    /// Non-dangerous target containing `{`/`}` → `EUr` create brace guard.
+    brace: bool,
 }
 
 /// Strip ONE leading and ONE trailing `'`/`"` (TS `validatePath`'s
@@ -395,8 +412,18 @@ fn extract_redirections(sub: &str) -> Vec<Redirection> {
                         continue;
                     }
                     let target = strip_surrounding_quotes(raw).to_string();
-                    let dangerous = target_has_dangerous_expansion(&target);
-                    out.push(Redirection { target, dangerous });
+                    // `eLe`: dangerous = leading `~`/glob/`!`/`=`/`$`/backtick,
+                    // OR (for a `>&` operator) a non-`[A-Za-z0-9./_-]` charset.
+                    let dangerous = target_has_dangerous_expansion(&target)
+                        || (op == ">&" && !redirect_target_charset_ok(&target));
+                    // A non-dangerous target with `{`/`}` is a braced write
+                    // target → `EUr` create-op brace guard (not shell_expansion).
+                    let brace = !dangerous && (target.contains('{') || target.contains('}'));
+                    out.push(Redirection {
+                        target,
+                        dangerous,
+                        brace,
+                    });
                     idx += 2;
                     continue;
                 }
@@ -438,12 +465,51 @@ fn command_has_network_device_redirect(subs: &[String]) -> bool {
     false
 }
 
-/// Extract the `cd` target from a subcommand if its first word is `cd`. TS `cd`
-/// extractor (`pathValidation.ts:195`): all args join into ONE path; with no
-/// args the target is the home dir (which is always inside no working dir but is
-/// never a constraint violation — see [`check_path_constraints`], where a bare
-/// `cd` is treated as a no-op since home-dir containment is not a write).
-fn extract_cd_target(sub: &str) -> Option<String> {
+/// Outcome of parsing a `cd` subcommand's arguments — mirrors 2.1.211's `cd`
+/// COMMAND_EXTRACTOR (`GQt.cd`, first-positional-only) plus the `gPg.cd`
+/// multi-positional guard (`yPg`).
+enum CdParse {
+    /// The subcommand's first word is not `cd`.
+    NotCd,
+    /// `cd` with ≥2 positional directory arguments — the zsh `cd OLD NEW`
+    /// substitution form, which cannot be statically validated → ask.
+    MultiPositional,
+    /// `cd` with exactly one positional directory target to validate.
+    Target(String),
+    /// Bare `cd` (or flags only) → the home dir. Treated as benign (a `cd` with
+    /// no positional target is not a write and, matching the port's prior
+    /// behavior, is not containment-checked).
+    Bare,
+}
+
+/// Port of 2.1.211's `Bx` positional extractor: collect the positional
+/// (non-flag) args from a command's argv. A `--` terminator turns on
+/// "everything after is positional"; a bare `-` counts as a positional; a
+/// leading `-x` flag (`-` prefix, not exactly `-`) before the first positional
+/// is skipped; once the first positional (or `--`) is seen, every subsequent arg
+/// is positional (including later flags).
+fn cd_positionals(args: &[String]) -> Vec<&String> {
+    let mut out = Vec::new();
+    let mut seen_double_dash = false; // TS `r`
+    let mut seen_positional = false; // TS `n`
+    for a in args {
+        if seen_double_dash || seen_positional {
+            out.push(a);
+        } else if a == "--" {
+            seen_double_dash = true;
+        } else if a == "-" || !a.starts_with('-') {
+            out.push(a);
+            seen_positional = true;
+        }
+        // else: a flag (`-P`, `-L`, …) before the first positional → skipped.
+    }
+    out
+}
+
+/// Parse a subcommand's leading `cd` argv into a [`CdParse`]. Mirrors
+/// 2.1.211's `GQt.cd` (extract only the FIRST positional) gated by `gPg.cd`
+/// (≥2 positionals → the zsh multi-positional ask, `yPg`).
+fn parse_cd(sub: &str) -> CdParse {
     // Reuse the redirect tokenizer's word splitting, but only the leading words
     // up to any redirection/control operator form the `cd` argv.
     let tokens = tokenize_redirects(sub);
@@ -454,23 +520,23 @@ fn extract_cd_target(sub: &str) -> Option<String> {
             Token::Op { .. } => break,
         }
     }
-    let (base, args) = words.split_first()?;
+    let Some((base, args)) = words.split_first() else {
+        return CdParse::NotCd;
+    };
     if base != "cd" {
-        return None;
+        return CdParse::NotCd;
     }
-    // Filter flags (`cd -P`, `cd -L`, `cd -`), then join the rest. A bare `cd`
-    // (no positional args) → None (home dir, treated as benign).
-    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-    if positional.is_empty() {
-        return None;
+    let positional = cd_positionals(args);
+    // `gPg.cd`: n <= 1 positional is OK; ≥2 → the zsh `cd OLD NEW` ask.
+    if positional.len() > 1 {
+        return CdParse::MultiPositional;
     }
-    Some(
-        positional
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    // `GQt.cd`: validate only the FIRST positional (identical to the single
+    // element here); no positional → home dir (benign).
+    match positional.first() {
+        Some(first) => CdParse::Target((*first).clone()),
+        None => CdParse::Bare,
+    }
 }
 
 /// Does any subcommand `cd` somewhere? (TS `compoundCommandHasCd`.) Used to gate
@@ -547,11 +613,13 @@ pub fn check_path_constraints(
         });
     }
 
-    // 3. Compound `cd` + output redirection (`validateOutputRedirections`,
-    //    `pathValidation.ts:935`). Any redirection in a command that also `cd`s
-    //    asks, because the redirect target can't be resolved against the final
-    //    cwd.
-    if has_cd && !all_redirs.is_empty() {
+    // 3. Compound `cd` + output redirection (`validateOutputRedirections` /
+    //    `SPg`, `pathValidation.ts:935`). `SPg` only raises this ask when a
+    //    cd-compound has a redirect target OTHER than `/dev/null`
+    //    (`n && e.some(o => o.target !== "/dev/null")`), so a `/dev/null`-only
+    //    redirect set (`cmd > /dev/null 2>&1`) falls through to normal cd/target
+    //    validation instead of over-asking.
+    if has_cd && all_redirs.iter().any(|r| r.target != "/dev/null") {
         return Some(PathConstraintAsk {
             message: "Commands that change directories and write via output redirection require explicit approval to ensure paths are evaluated correctly. For security, LingXi cannot automatically determine the final working directory when 'cd' is used in compound commands.".to_string(),
             reason: "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass".to_string(),
@@ -563,6 +631,15 @@ pub fn check_path_constraints(
     for r in &all_redirs {
         if r.target == "/dev/null" {
             continue;
+        }
+        // `EUr` create-op brace guard (evaluated before containment): bash may
+        // brace-expand `{a,b}` to paths outside the working dir → ask with the
+        // byte-exact brace message (distinct from the shell-expansion ask).
+        if r.brace {
+            return Some(PathConstraintAsk {
+                message: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
+                reason: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
+            });
         }
         let resolved = expand_redirect_target(&r.target, roots);
         if !path_in_allowed_working_path(Path::new(&resolved), &work_dirs, roots) {
@@ -584,8 +661,18 @@ pub fn check_path_constraints(
 
     // 5/6. `cd` target validation (`validateCommandPaths`, `pathValidation.ts:603`).
     for sub in &subs {
-        let Some(cd_arg) = extract_cd_target(sub) else {
-            continue;
+        let cd_arg = match parse_cd(sub) {
+            CdParse::NotCd | CdParse::Bare => continue,
+            // `gPg.cd` failed (≥2 positional dir args): the zsh `cd OLD NEW`
+            // substitution form can't be statically validated → ask
+            // (byte-exact, no product name; `yPg`, `bashMissKind:cd-multi-positional`).
+            CdParse::MultiPositional => {
+                return Some(PathConstraintAsk {
+                    message: "cd with two or more directory arguments requires manual approval. zsh's \"cd OLD NEW\" form substitutes OLD\u{2192}NEW in $PWD, producing a target path that cannot be statically validated.".to_string(),
+                    reason: "cd with two or more directory arguments".to_string(),
+                });
+            }
+            CdParse::Target(target) => target,
         };
         // 5. Compound `cd` + write — TS asks for ANY write op in a cd-compound
         //    (`pathValidation.ts:645`). `cd` itself is a read op, so this fires
@@ -644,7 +731,14 @@ pub fn write_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
     let mut out = Vec::new();
     for sub in crate::shell_command::split_command(command) {
         for r in extract_redirections(&sub) {
-            if r.dangerous || r.target == "/dev/null" || is_network_device_target(&r.target) {
+            // Dangerous (shell_expansion), braced (create-op brace guard),
+            // /dev/null, and /dev/tcp|udp network targets never reach the
+            // Edit-deny-rule walk — they ask via their own guards.
+            if r.dangerous
+                || r.brace
+                || r.target == "/dev/null"
+                || is_network_device_target(&r.target)
+            {
                 continue;
             }
             out.push(expand_redirect_target(&r.target, roots).to_string_lossy().into_owned());
@@ -819,6 +913,51 @@ mod tests {
         );
     }
 
+    // ── redirect-target danger classification drift (PERM-PATH-07) ─────────
+
+    #[test]
+    fn percent_redirect_target_is_not_dangerous() {
+        // `%` is Windows-gated in EUr, not flagged by eLe → a `file%1` target
+        // in cwd containment-passes (the port previously over-asked on `%`).
+        assert!(check("echo x > file%1").is_none());
+        assert!(check("echo x > out%.log").is_none());
+    }
+
+    #[test]
+    fn brace_redirect_target_gets_brace_message() {
+        // A braced write target flows to EUr's create-op brace guard, NOT the
+        // shell-expansion ask.
+        let a = check("echo x > {a,b}.txt").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory"
+        );
+        assert_eq!(a.reason, a.message);
+    }
+
+    #[test]
+    fn brace_redirect_message_precedes_containment() {
+        // Even an out-of-cwd braced target gets the brace message (brace guard
+        // runs before the working-dir containment check in EUr).
+        let a = check("echo x > /etc/{a,b}").expect("should ask");
+        assert!(a
+            .message
+            .starts_with("Brace characters in write target require manual approval"));
+    }
+
+    #[test]
+    fn ampersand_fd_redirect_charset_asks() {
+        // `>&` target with a non-[A-Za-z0-9./_-] char → eLe charset gate →
+        // shell-expansion ask.
+        let a = check("echo x >& out+log").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Shell expansion syntax in paths requires manual approval"
+        );
+        // A charset-clean `>&file` under cwd is a plain file redirect → no ask.
+        assert!(check("echo x >& out.log").is_none());
+    }
+
     // ── process substitution → ask ─────────────────────────────────────────
 
     #[test]
@@ -875,6 +1014,51 @@ mod tests {
         assert!(check("cd -P sub").is_none());
     }
 
+    // ── cd multi-positional (zsh `cd OLD NEW`) → ask (PERM-PATH-03) ─────────
+
+    #[test]
+    fn cd_multi_positional_asks() {
+        // Two positional dir args = zsh `cd OLD NEW` substitution form → ask,
+        // even when both resolve under cwd (where the join-all port silently
+        // passed).
+        for cmd in ["cd sub other", "cd a b c", "cd ./x ./y", "cd -- a b"] {
+            let a = check(cmd).unwrap_or_else(|| panic!("{cmd} should ask"));
+            assert_eq!(
+                a.message,
+                "cd with two or more directory arguments requires manual approval. \
+                 zsh's \"cd OLD NEW\" form substitutes OLD\u{2192}NEW in $PWD, producing \
+                 a target path that cannot be statically validated.",
+                "cmd={cmd}"
+            );
+            assert_eq!(a.reason, "cd with two or more directory arguments", "cmd={cmd}");
+        }
+    }
+
+    #[test]
+    fn cd_single_positional_with_flags_not_multi() {
+        // Flags before the first positional don't count; a single positional is
+        // validated normally (here inside cwd → no ask).
+        assert!(check("cd -P sub").is_none());
+        assert!(check("cd -L -P ./sub").is_none());
+        // A bare `-` is a single positional (OLDPWD), resolves under cwd lexically.
+        assert!(check("cd -").is_none());
+    }
+
+    #[test]
+    fn cd_multi_positional_flag_after_positional_counts() {
+        // Once the first positional is seen, later flags also count → ≥2 → ask.
+        let a = check("cd sub -P").expect("should ask");
+        assert_eq!(a.reason, "cd with two or more directory arguments");
+    }
+
+    #[test]
+    fn cd_single_positional_first_only_validated() {
+        // Single positional outside cwd still asks via containment (first
+        // positional only, no join artifacts).
+        let a = check("cd /tmp").expect("should ask");
+        assert!(a.message.starts_with("cd in '/tmp' was blocked."));
+    }
+
     #[test]
     fn cd_with_redirection_compound_asks() {
         // `cd .lingxi/ && echo x > settings.json` — cd + redirection compound.
@@ -885,6 +1069,33 @@ mod tests {
             a.reason,
             "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass"
         );
+    }
+
+    // ── cd-compound + /dev/null-only redirect is exempt (PERM-PATH-08) ─────
+
+    #[test]
+    fn cd_compound_dev_null_only_redirect_not_asked() {
+        // `SPg` only raises the cd-compound-redirect ask for a target OTHER than
+        // /dev/null; a /dev/null-only redirect set falls through to cd/target
+        // validation (cd target under cwd → no ask).
+        assert!(check("cd sub && echo x > /dev/null 2>&1").is_none());
+        assert!(check("cd ./sub && cmd > /dev/null").is_none());
+        assert!(check("cd sub && cmd 2> /dev/null").is_none());
+    }
+
+    #[test]
+    fn cd_compound_non_dev_null_redirect_still_asks() {
+        // A real (non-/dev/null) redirect target in a cd-compound still asks.
+        let a = check("cd sub && echo x > out.txt").expect("should ask");
+        assert_eq!(
+            a.reason,
+            "Compound command contains cd with output redirection - manual approval required to prevent path resolution bypass"
+        );
+        // Mixed /dev/null + real target → still asks (some target != /dev/null).
+        let a = check("cd sub && echo x > /dev/null > out.txt").expect("should ask");
+        assert!(a.message.starts_with(
+            "Commands that change directories and write via output redirection"
+        ));
     }
 
     // ── command fully inside cwd → no constraint (rides allow rule) ─────────

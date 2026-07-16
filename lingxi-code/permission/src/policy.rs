@@ -185,8 +185,36 @@ impl PermissionPolicy {
             is_windows: cfg!(target_os = "windows"),
             is_macos: cfg!(target_os = "macos"),
         };
-        match crate::powershell_containment::validate_ps_statements(&parse.statements, &ctx, false)
-        {
+        // PS-CD-03 (part 1): compute the compound-cd flag — 1:1 with claude-code
+        // `y = u.length>1 && u.some(({element:V})=>P5r(V.name))`: a compound
+        // command (>1 command) that contains a cd-like element (`P5r`). Was
+        // hardcoded `false`, making the compound-cd containment ask dead code
+        // (an under-ask: `cd sub; Get-Content ..\secret` escaped it). NOTE
+        // (part 2, cross-lane `powershell_containment.rs`/ps lane): the branch's
+        // decisionReason still reuses its message rather than the distinct
+        // "Compound command contains cd with path operation …" string.
+        let all_names: Vec<&str> = parse
+            .statements
+            .iter()
+            .flat_map(|s| {
+                s.commands
+                    .iter()
+                    .filter_map(|e| match e {
+                        crate::powershell_containment::PsElement::Command(c) => {
+                            Some(c.name.as_str())
+                        }
+                        crate::powershell_containment::PsElement::Expression { .. } => None,
+                    })
+                    .chain(s.nested_commands.iter().map(|c| c.name.as_str()))
+            })
+            .collect();
+        let compound_cd =
+            all_names.len() > 1 && all_names.iter().any(|n| ps_element_is_cd_like(n));
+        match crate::powershell_containment::validate_ps_statements(
+            &parse.statements,
+            &ctx,
+            compound_cd,
+        ) {
             crate::powershell_containment::PsContainmentResult::Passthrough => None,
             crate::powershell_containment::PsContainmentResult::Ask { message, reason } => {
                 Some(ask_powershell_containment(message, reason))
@@ -389,6 +417,16 @@ impl PermissionPolicy {
         mode: PermissionMode,
     ) -> PermissionResult {
         let result = self.authorize_inner(tool_name, input, mode);
+        // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
+        // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an
+        // ALLOW for a shell command containing `&` is downgraded to a forced ask
+        // unless the AST parses cleanly with NO background `&` operator; the
+        // sandbox-auto-allow grant is exempt. Bash-ast-gated (Yqr's `a7t` is the
+        // tree-sitter parse, which is only available under the feature).
+        #[cfg(feature = "bash-ast")]
+        let result = self
+            .background_operator_ask(tool_name, input, &result)
+            .unwrap_or(result);
         // PERM.1 — DontAsk transform (claude-code `permissions.ts:503-517`):
         // applied LAST so no early-return ask escapes it. A remaining `ask`
         // becomes `deny`, EXCEPT for read-only / `AllowByDefault` tools — in TS
@@ -460,9 +498,22 @@ impl PermissionPolicy {
         if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, true) {
             return deny_with_rule_content(rule, tool_name, input);
         }
-        // 1c. Tool-wide ask (`EIo`).
+        // 1c. Tool-wide ask (`EIo`). SBXASK-01 / SBX-ASKWIDE-03: the matched
+        //     TOOL-WIDE ask rule is EXEMPTED for Bash when the sandbox auto-allow
+        //     would apply — claude-code `Qot`/`U1g`:
+        //       `y = e.name===$o && isSandboxingEnabled() &&
+        //            isAutoAllowBashIfSandboxedEnabled() && C6(t);
+        //        if(!y) return {behavior:"ask", ...}`.
+        //     When exempt, the ask is skipped and control falls through so the
+        //     1d sandbox auto-allow layer can decide. Content ask rules (1d) keep
+        //     asking (matches `zOg`, whose internal re-check still asks on a
+        //     matching ask rule). [`Self::shell_sandbox_auto_allows`] is the C6
+        //     analogue (shell-tool + sandbox enabled + auto-allow + would-sandbox)
+        //     and is inert (`false`) when no sandbox runtime is wired.
         if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, false) {
-            return ask_with_rule(rule, tool_name);
+            if !self.shell_sandbox_auto_allows(tool_name, input) {
+                return ask_with_rule(rule, tool_name);
+            }
         }
         // 1d. Content ask (`K5t(...,"ask")`, mSm step 5) — a matching content ask
         //     rule prompts. Placed AFTER the deny phase but BEFORE the per-tool
@@ -489,9 +540,28 @@ impl PermissionPolicy {
         //     mirror the too-complex branch: a parseable, resolvable-variable
         //     command (`A=/tmp; rm -rf $A/*`) is NOT force-asked here. Roots-
         //     independent, matching `GIu`'s raw text scan.
+        // EDIT-READDENY-02: an Edit-family (Editor-kind) call whose target is
+        //     covered by a Read deny rule (`CZn`) ASKS with the byte-locked
+        //     errorCode-13 message. Runs after the deny/ask rule walks (an
+        //     explicit Edit deny already returned) and is bypass-immune (CC's
+        //     `validateInput` runs regardless of permission mode) — this
+        //     protects a read-denied file from being edited, so it must not be
+        //     overridable by an allow rule / bypass. Roots-gated.
+        if file_tool_kind(tool_name) == FileToolKind::Editor
+            && self.edit_covered_by_read_deny(tool_name, input)
+        {
+            return ask_edit_read_deny_covered(tool_name);
+        }
+        // BYPASS-01 / ALLOWOVER-01: every guard ASK below is routed through
+        // `resolve_guard_ask`, which (1) lets bypassPermissions suppress a
+        // type-`other` guard ask (returning allow), (2) lets a tool-wide allow
+        // rule override a type-`other` guard ask (`nes`), and (3) preserves the
+        // dangerous-removal SafetyCheck asks against BOTH. Guard DENYs pass
+        // through unchanged.
+        let bypass = self.bypass_active(mode);
         #[cfg(feature = "bash-ast")]
         if let Some(ask) = Self::shell_dangerous_rm_variable_ask(tool_name, input) {
-            return ask;
+            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // 1f. CATASTROPHIC REMOVAL FORCED-ASK. This must run before every
         // allow-like shortcut, including sandbox auto-allow and exact allow:
@@ -510,7 +580,13 @@ impl PermissionPolicy {
                         &roots.cwd,
                         home.as_deref(),
                     ) {
-                        return ask_dangerous_removal(tool_name, danger);
+                        return self.resolve_guard_ask(
+                            ask_dangerous_removal(tool_name, danger),
+                            bypass,
+                            mode,
+                            &sources,
+                            tool_name,
+                        );
                     }
                 }
             }
@@ -544,7 +620,7 @@ impl PermissionPolicy {
             if tool_name == "PowerShell" {
                 if let Some(command) = shell_command::command_from_input(input) {
                     if let Some(result) = self.check_powershell_containment(command, roots) {
-                        return result;
+                        return self.resolve_guard_ask(result, bypass, mode, &sources, tool_name);
                     }
                 }
             } else if shell_command::is_shell_tool(tool_name) {
@@ -570,12 +646,29 @@ impl PermissionPolicy {
                     if let Some(deny) = self.output_redirect_deny(&sources, command, roots) {
                         return deny;
                     }
+                    // 2b-deny(read/cmd). PATH-01: a COMMAND-PATH target matching a
+                    //     Read-deny (read op) / Edit-deny (write/create op) CONTENT
+                    //     rule is DENIED (claude-code `EUr`→`Ptt` returns a
+                    //     rule-typed deny that `yPg` surfaces as `behavior:"deny"`)
+                    //     — e.g. `cat secret.env` under `deny:["Read(secret.env)"]`
+                    //     even inside cwd. Runs before the containment ask (deny
+                    //     beats ask) and is bypass-immune (a deny short-circuits
+                    //     before the mode layer in CC).
+                    if let Some(deny) = self.command_path_deny(&sources, command, roots) {
+                        return deny;
+                    }
                     if let Some(ask) = crate::path_constraints::check_path_constraints(
                         command,
                         roots,
                         &self.additional_working_dirs,
                     ) {
-                        return ask_path_constraint(tool_name, ask);
+                        return self.resolve_guard_ask(
+                            ask_path_constraint(tool_name, ask),
+                            bypass,
+                            mode,
+                            &sources,
+                            tool_name,
+                        );
                     }
                     // 2b'. Per-command PATH CONTAINMENT (claude-code
                     //      `validateCommandPaths` + `PATH_EXTRACTORS`, run per
@@ -601,7 +694,13 @@ impl PermissionPolicy {
                             &self.additional_working_dirs,
                         )
                     {
-                        return ask_path_constraint(tool_name, ask);
+                        return self.resolve_guard_ask(
+                            ask_path_constraint(tool_name, ask),
+                            bypass,
+                            mode,
+                            &sources,
+                            tool_name,
+                        );
                     }
                 }
             }
@@ -658,7 +757,7 @@ impl PermissionPolicy {
             }
         }
         if let Some(ask) = Self::shell_bash_safety_ask(tool_name, input) {
-            return ask;
+            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // 3. Allow. Shell tools need compound aggregation (a single allow rule
         //    matching ONE subcommand must not allow a whole compound command),
@@ -694,7 +793,7 @@ impl PermissionPolicy {
         //     containment check; without roots the sed layer is skipped
         //     (consistent with the other shell guards).
         if let Some(ask) = self.shell_sed_constraint_ask(tool_name, input, mode) {
-            return ask;
+            return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // 3a. AcceptEdits working-dir auto-allow (claude-code `checkWritePermissionForTool`
         //     step 3, `filesystem.ts:1360-1375`). In `AcceptEdits` mode an EDITOR
@@ -882,6 +981,14 @@ impl PermissionPolicy {
                     &rule.value.tool_name,
                     &rule.value.rule_content,
                 ) {
+                    // AUTO-06: mirror CC's per-rule strip log
+                    // `Ignoring dangerous permission ${ruleDisplay} from
+                    // ${sourceDisplay} (bypasses classifier)` (`SX`).
+                    tracing::debug!(
+                        "Ignoring dangerous permission {} from {} (bypasses classifier)",
+                        rule.value.to_rule_string(),
+                        crate::shadow::format_source(source),
+                    );
                     self.stripped_dangerous.push(rule);
                     self.stripped_positions.push((source, orig_idx));
                 } else {
@@ -964,7 +1071,7 @@ impl PermissionPolicy {
             // `toolMatchesRule`); content rules keep the phase-2 exact
             // tool-name match.
             return if rule.value.rule_content.is_none() {
-                tool_wide_name_matches(&rule.value.tool_name, tool_name)
+                tool_wide_name_matches_opts(&rule.value.tool_name, tool_name, rule_uses_glob(rule))
             } else {
                 rule.value.tool_name == tool_name
             };
@@ -973,9 +1080,36 @@ impl PermissionPolicy {
             // PERM.2 — tool-wide rule → tool-name match, INCLUDING the MCP
             // server-level prefix match (claude-code `toolMatchesRule`: rule
             // `mcp__server` matches tool `mcp__server__tool`; `mcp__server__*`
-            // matches all of that server's tools).
-            return tool_wide_name_matches(&rule.value.tool_name, tool_name);
+            // matches all of that server's tools). GLOB-01: DENY/ASK rules also
+            // glob-match (`h8`/`kqe` pass `globMatching:!0`); ALLOW rules do not
+            // (`nes` default opts).
+            return tool_wide_name_matches_opts(
+                &rule.value.tool_name,
+                tool_name,
+                rule_uses_glob(rule),
+            );
         };
+        // GENFIELD-01: generic `field:pattern` content matcher (claude-code
+        // `Mjr`), used by the DENY and ASK content walks ONLY (`Mjr(o,e,t,"deny")`
+        // / `Mjr(o,e,t,"ask")` — never the allow walk). A content rule of the form
+        // `field:pattern` matches when: the rule targets this tool, the field is
+        // NOT the tool's dedicated `ruleContentField` (those keep their dedicated
+        // matchers below), the input OWNS that field as a primitive, and the
+        // pattern glob-matches (`_pi`) the stringified, trimmed value. This lets
+        // `deny:["Agent(subagent_type:foo*)"]` / `deny:["WebSearch(query:*secret*)"]`
+        // match, which the dedicated-key logic below cannot express. Gated on
+        // DENY/ASK (over-restrict only — never broadens an allow).
+        if rule_uses_glob(rule) && rule.value.tool_name == tool_name {
+            if let Some((field, pat)) = split_field_pattern(pattern) {
+                if Some(field) != tool_rule_content_field(tool_name) {
+                    if let Some(value) = input.get(field).and_then(stringify_primitive) {
+                        if glob_name_matches(pat, value.trim()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
         let group_ok = match file_tool_kind(tool_name) {
             FileToolKind::NonFile => {
                 // Shell tools: CONTENT rule matches the command (any-subcommand,
@@ -1325,6 +1459,49 @@ impl PermissionPolicy {
     /// tool-wide `Edit` deny, and the read-op command-path deny walk, are
     /// documented follow-ups). Roots are supplied by the caller (guard is
     /// roots-gated like the sibling path guards).
+    /// PATH-01: deny a bash command whose extracted command-path target matches
+    /// a Read-deny (read op) / Edit-deny (write/create op) CONTENT rule
+    /// (claude-code `EUr`→`Ptt`, the `Ww(...,"deny")` walk that runs before
+    /// containment). Mirrors [`Self::output_redirect_deny`] but over the
+    /// positional command paths, using the byte-exact containment-template
+    /// message CC reuses for a rule-typed deny. Returns the FIRST match, or
+    /// `None`.
+    fn command_path_deny(
+        &self,
+        sources: &[PermissionRuleSource],
+        command: &str,
+        roots: &FsRoots,
+    ) -> Option<PermissionResult> {
+        for target in crate::command_path_containment::command_path_deny_targets(
+            command,
+            roots,
+            &self.additional_working_dirs,
+        ) {
+            let rule_tool = if target.is_write { "Edit" } else { "Read" };
+            for src in sources {
+                let Some(rules) = self.deny_rules.get(src) else {
+                    continue;
+                };
+                for rule in rules {
+                    if rule.value.tool_name != rule_tool {
+                        continue;
+                    }
+                    let Some(pattern) = rule.value.rule_content.as_deref() else {
+                        continue;
+                    };
+                    if path_matches_rule_pattern(&target.resolved, pattern, rule.source, roots) {
+                        return Some(PermissionResult::Deny {
+                            reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+                            explanation: Some(target.blocked_message.clone()),
+                            metadata: PermissionMetadata::default(),
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn output_redirect_deny(
         &self,
         sources: &[PermissionRuleSource],
@@ -1352,6 +1529,195 @@ impl PermissionPolicy {
                             metadata: PermissionMetadata::default(),
                         });
                     }
+                }
+            }
+        }
+        None
+    }
+
+    /// EDIT-READDENY-02: `CZn(path, ctx)` — is the Edit target covered by a
+    /// Read deny rule? 1:1 with claude-code 2.1.211:
+    /// ```text
+    /// function CZn(e,t){
+    ///   if(h8(t,Est,U2(t).filter((n)=>!$$y.has(n.source)))!==null)return!0;
+    ///   if(rws(t,"read","deny").size===0)return!1;
+    ///   return Yy(e).some((n)=>Ww(n,t,"read","deny")!==null)}
+    /// ```
+    /// (1) a TOOL-WIDE Read deny rule from a source NOT in
+    /// `$$y = {toolsNarrowing, cliArg, command}` (`toolsNarrowing` is unported),
+    /// OR (2) a read/deny CONTENT rule covering the resolved path
+    /// ([`path_matches_rule_pattern`] handles the raw+resolved `Yy` variants).
+    /// Roots-gated (returns `false` without roots).
+    fn edit_covered_by_read_deny(&self, tool_name: &str, input: &serde_json::Value) -> bool {
+        let Some(roots) = self.roots.as_ref() else {
+            return false;
+        };
+        // (1) tool-wide Read deny rule (excluding cliArg / command sources).
+        for src in SOURCES_BY_PRIORITY {
+            if matches!(
+                src,
+                PermissionRuleSource::CliArg | PermissionRuleSource::Command
+            ) {
+                continue;
+            }
+            if let Some(rules) = self.deny_rules.get(&src) {
+                if rules
+                    .iter()
+                    .any(|r| r.value.rule_content.is_none() && r.value.tool_name == "Read")
+                {
+                    return true;
+                }
+            }
+        }
+        // (2) read/deny CONTENT rule covering the path.
+        let Some(path) = input_path_for_tool(tool_name, input, roots) else {
+            return false;
+        };
+        for src in SOURCES_BY_PRIORITY {
+            let Some(rules) = self.deny_rules.get(&src) else {
+                continue;
+            };
+            for rule in rules {
+                if rule.value.tool_name != "Read" {
+                    continue;
+                }
+                let Some(pattern) = rule.value.rule_content.as_deref() else {
+                    continue;
+                };
+                if path_matches_rule_pattern(&path, pattern, rule.source, roots) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// BGOP-01: the `&` background-operator allow→ask downgrade — 1:1 with
+    /// claude-code `Yqr`. Given the FINAL permission result, returns
+    /// `Some(background_ask)` when the result is an ALLOW for a shell command
+    /// that (a) contains `&`, (b) is not the sandbox-auto-allow grant (`hTt`
+    /// reason, exempt), and (c) either fails to parse or whose AST contains a
+    /// background `&` operator (or an ERROR node) per `XAu`. `None` keeps the
+    /// original allow. Backgrounding defers execution past approval-time safety
+    /// checks, so the forced ask is a SafetyCheck with `classifier_approvable:
+    /// false`.
+    #[cfg(feature = "bash-ast")]
+    fn background_operator_ask(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        result: &PermissionResult,
+    ) -> Option<PermissionResult> {
+        if !shell_command::is_shell_tool(tool_name) {
+            return None;
+        }
+        let PermissionResult::Allow { reason, .. } = result else {
+            return None;
+        };
+        let command = shell_command::command_from_input(input)?;
+        if !command.contains('&') {
+            return None;
+        }
+        // Sandbox auto-allow (`hTt`) is exempt.
+        if matches!(
+            reason,
+            PermissionDecisionReason::Other { reason }
+                if reason == "Auto-allowed with sandbox (autoAllowBashIfSandboxed enabled)"
+        ) {
+            return None;
+        }
+        // Keep the allow only when the parse SUCCEEDS and shows NO background
+        // operator (`o && o!==NCe && !XAu(o)`); an unparseable command
+        // (`parse_raw` → `None`) is treated as "cannot confirm" → downgrade.
+        if let Some(tree) = crate::bash_tree_sitter::parse_raw(command) {
+            if !has_background_operator(tree.root_node()) {
+                return None;
+            }
+        }
+        Some(ask_background_operator(tool_name))
+    }
+
+    /// Whether bypassPermissions is in effect for this call — 1:1 with
+    /// claude-code U1g's `p = d==="bypassPermissions" || (d==="plan" &&
+    /// isBypassPermissionsModeAvailable)`, subject to the killswitch. Threaded
+    /// into the guard block so guard ASKS (except dangerous rm/rmdir) are
+    /// overridden to allow (BYPASS-01).
+    fn bypass_active(&self, mode: PermissionMode) -> bool {
+        if self.bypass_killswitch_active {
+            return false;
+        }
+        mode == PermissionMode::BypassPermissions
+            || (mode == PermissionMode::Plan && self.bypass_permissions_available)
+    }
+
+    /// Resolve a per-tool GUARD ask against the bypass override (BYPASS-01) and
+    /// the tool-wide allow walk (ALLOWOVER-01), 1:1 with the tail of claude-code
+    /// `U1g`:
+    /// ```text
+    /// if(l.behavior==="ask" && (f || !p && (Are(...)||sandboxOverride||qRu))) return l;
+    /// if(p) return {behavior:"allow", decisionReason:{type:"mode",mode:d}};
+    /// let m=nes(...); if(m) return {behavior:"allow", ..., rule:m};
+    /// return l;
+    /// ```
+    /// where `f` = the ask is a safetyCheck whose reason starts with "Dangerous
+    /// rm/rmdir operation". A SafetyCheck ask (our dangerous-removal guards) is
+    /// returned unchanged — it survives BOTH bypass and the tool-wide allow. A
+    /// type-`other` guard ask (path/sed/injection/PowerShell containment) is
+    /// (a) overridden to allow under bypass, else (b) overridden to allow by a
+    /// matching TOOL-WIDE allow rule (`nes`, tool-wide only, no glob), else
+    /// (c) returned as the ask. Non-`Ask` results (guard DENYs) pass through
+    /// unchanged — deny short-circuits before bypass in CC.
+    fn resolve_guard_ask(
+        &self,
+        ask: PermissionResult,
+        bypass: bool,
+        mode: PermissionMode,
+        sources: &[PermissionRuleSource],
+        tool_name: &str,
+    ) -> PermissionResult {
+        let PermissionResult::Ask { reason, .. } = &ask else {
+            return ask;
+        };
+        if let PermissionDecisionReason::SafetyCheck { reason, .. } = reason {
+            let dangerous_rm = reason.starts_with("Dangerous rm operation")
+                || reason.starts_with("Dangerous rmdir operation");
+            // A non-dangerous-rm safetyCheck ask is suppressed under bypass
+            // (matches CC's `f` predicate); dangerous-rm asks always survive.
+            if bypass && !dangerous_rm {
+                return allow_with_mode(mode);
+            }
+            return ask;
+        }
+        // type-`other` guard ask.
+        if bypass {
+            return allow_with_mode(mode);
+        }
+        if let Some(rule) = self.tool_wide_allow_match(sources, tool_name, mode) {
+            return allow_with_rule(rule);
+        }
+        ask
+    }
+
+    /// The TOOL-WIDE allow walk (`nes`): the first ALLOW rule with no content
+    /// (`ruleContent === void 0`) whose tool name matches (exact / MCP
+    /// server-level, NO glob — `nes` uses default opts) and that is available in
+    /// the effective mode ([`Self::rule_is_available_in_mode`], the auto-mode
+    /// dangerous-rule read filter). Consulted by [`Self::resolve_guard_ask`] so
+    /// a blanket allow overrides a type-`other` guard ask.
+    fn tool_wide_allow_match(
+        &self,
+        sources: &[PermissionRuleSource],
+        tool_name: &str,
+        mode: PermissionMode,
+    ) -> Option<&PermissionRule> {
+        for src in sources {
+            if let Some(rules) = self.allow_rules.get(src) {
+                if let Some(rule) = rules.iter().find(|r| {
+                    r.value.rule_content.is_none()
+                        && self.rule_is_available_in_mode(r, mode)
+                        && tool_wide_name_matches(&r.value.tool_name, tool_name)
+                }) {
+                    return Some(rule);
                 }
             }
         }
@@ -1565,7 +1931,34 @@ fn mcp_info_from_string(s: &str) -> Option<McpInfo<'_>> {
 /// runtime check uses (claude-code `filterToolsByDenyRules`, `tools.ts:262-269`).
 #[must_use]
 pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
+    // The public matcher keeps the ALLOW-walk semantics (claude-code `nes`
+    // uses default opts, `globMatching:false`): exact name or MCP server-level
+    // prefix, no glob. The DENY/ASK walks use the glob-aware variant below.
+    tool_wide_name_matches_opts(rule_tool_name, tool_name, false)
+}
+
+/// Glob-aware tool-wide name matcher — 1:1 with claude-code `URu` (`permissions.ts`).
+///
+/// `glob == true` (the DENY walk `h8` and ASK walk `kqe`, both passing
+/// `globMatching:!0`) enables:
+///   - a rule `toolName` containing `*` glob-matches the tool name via `_pi`
+///     (`*`→`.*`, anchored, dotall) — e.g. `Web*` matches `WebFetch`/`WebSearch`;
+///   - the MCP tool-part is glob-matched (`mcp__server__foo*` matches
+///     `mcp__server__footool`).
+///
+/// `glob == false` (the ALLOW walk `nes`, default opts) keeps exact-name /
+/// MCP server-level matching only. Alias/`proxyExpansion` (`sDn`/`toolAliases`)
+/// is NOT ported — no runtime tool-alias map is wired in the port, and the
+/// legacy static aliases are already normalized at parse time
+/// ([`crate::rule::normalize_legacy_tool_name`]); documented as a follow-up.
+#[must_use]
+fn tool_wide_name_matches_opts(rule_tool_name: &str, tool_name: &str, glob: bool) -> bool {
     if rule_tool_name == tool_name {
+        return true;
+    }
+    // Whole-name glob (`n&&UJe(toolName)&&bpi(toolName,i)`): applies to plain
+    // AND MCP rule names that contain `*`.
+    if glob && rule_tool_name.contains('*') && glob_name_matches(rule_tool_name, tool_name) {
         return true;
     }
     let (Some(rule_info), Some(tool_info)) = (
@@ -1574,8 +1967,111 @@ pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
     ) else {
         return false;
     };
-    (rule_info.tool_name.is_none() || rule_info.tool_name == Some("*"))
-        && rule_info.server_name == tool_info.server_name
+    if rule_info.server_name != tool_info.server_name {
+        return false;
+    }
+    match rule_info.tool_name {
+        None | Some("*") => true,
+        Some(rule_tool_part) => {
+            // MCP tool-part glob (`a.toolName!==void 0&&UJe(s.toolName)&&bpi(s.toolName,a.toolName)`).
+            glob
+                && rule_tool_part.contains('*')
+                && tool_info
+                    .tool_name
+                    .is_some_and(|tool_part| glob_name_matches(rule_tool_part, tool_part))
+        }
+    }
+}
+
+/// Whether a rule's tool-wide name match should use glob semantics — `true` for
+/// DENY and ASK rules (claude-code `h8`/`kqe` pass `globMatching:!0`), `false`
+/// for ALLOW rules (`nes` uses default opts). Keyed off the rule's behavior
+/// bucket, which is exactly the walk it participates in.
+#[must_use]
+fn rule_uses_glob(rule: &PermissionRule) -> bool {
+    matches!(
+        rule.behavior,
+        PermissionBehavior::Deny | PermissionBehavior::Ask
+    )
+}
+
+/// Split a `field:pattern` rule-content string on the FIRST `:` (claude-code
+/// `Mjr`: `l=s.indexOf(":"); if(l<=0)continue`). Returns `(field, pattern)` with
+/// both sides trimmed, or `None` when there is no `:`, the `:` is at position 0,
+/// or either side is empty after trimming.
+#[must_use]
+fn split_field_pattern(content: &str) -> Option<(&str, &str)> {
+    let idx = content.find(':')?;
+    if idx == 0 {
+        return None;
+    }
+    let field = content[..idx].trim();
+    let pattern = content[idx + 1..].trim();
+    if field.is_empty() || pattern.is_empty() {
+        return None;
+    }
+    Some((field, pattern))
+}
+
+/// A tool's dedicated `ruleContentField` — 1:1 with claude-code's per-tool
+/// declaration (`command` for Bash/PowerShell, `file_path` for Edit/Write,
+/// `path` for Glob/Grep, `notebook_path` for NotebookEdit). The generic
+/// `field:pattern` matcher SKIPS this field (those keep their dedicated
+/// matchers). Any other tool has no dedicated field (`None`).
+#[must_use]
+fn tool_rule_content_field(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "Bash" | "PowerShell" => Some("command"),
+        "Edit" | "Write" => Some("file_path"),
+        "Glob" | "Grep" => Some("path"),
+        "NotebookEdit" => Some("notebook_path"),
+        _ => None,
+    }
+}
+
+/// Stringify a JSON primitive for generic content matching — 1:1 with
+/// claude-code `L1g`: strings pass through, numbers/booleans stringify, and any
+/// non-primitive (null/array/object) yields `None` (no match).
+#[must_use]
+fn stringify_primitive(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
+}
+
+/// claude-code `_pi(pattern, value)`: anchored, dotall glob where `*`→`.*` and
+/// every other char is regex-escaped. Used for tool-name and content globbing.
+#[must_use]
+fn glob_name_matches(pattern: &str, value: &str) -> bool {
+    match cached_glob_regex(pattern) {
+        Some(re) => re.is_match(value),
+        None => false,
+    }
+}
+
+/// Compile+cache an anchored dotall `_pi` glob regex for `pattern`
+/// (`^` + segments joined by `.*` + `$`, with `(?s)` for dotall).
+fn cached_glob_regex(pattern: &str) -> Option<regex::Regex> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(pattern) {
+        return hit.clone();
+    }
+    let body: String = pattern
+        .split('*')
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(".*");
+    let compiled = regex::Regex::new(&format!("(?s)^{body}$")).ok();
+    cache
+        .lock()
+        .unwrap()
+        .insert(pattern.to_string(), compiled.clone());
+    compiled
 }
 
 /// The tool-specific permission-rule CONTENT key derived from a tool call's
@@ -1904,18 +2400,25 @@ fn ask_with_mode(mode: PermissionMode, tool_name: &str) -> PermissionResult {
 }
 
 /// Dangerous-removal ask: an `rm`/`rmdir` targeting a critical system path
-/// (claude-code `checkDangerousRemovalPaths`). Tagged with
-/// [`PermissionDecisionReason::Other`] (the TS `decisionReason.type: 'other'`),
-/// carrying the byte-locked message; offers no rule-saving suggestion (TS:
-/// "Don't provide suggestions — we don't want to encourage saving dangerous
-/// commands").
+/// (claude-code `checkDangerousRemovalPaths` → `yqe`). Tagged with
+/// [`PermissionDecisionReason::SafetyCheck`] `{ classifier_approvable: false }`
+/// (REASON-01) — the TS `yqe` sets `decisionReason:{type:"safetyCheck",reason:
+/// `Dangerous ${cmd} operation ${detail}`,classifierApprovable:!1}`. The
+/// safetyCheck tag is LOAD-BEARING: the bypass carve-out (`Are` + the
+/// "Dangerous rm/rmdir operation" reason prefix) inspects ONLY safetyCheck
+/// reasons, so this ask survives bypassPermissions while every type-`other`
+/// guard ask is overridden. `danger.reason` already carries the
+/// `Dangerous {rm,rmdir} operation …` prefix. Offers no rule-saving suggestion
+/// (TS: "Don't provide suggestions — we don't want to encourage saving
+/// dangerous commands").
 fn ask_dangerous_removal(
     tool_name: &str,
     danger: crate::dangerous_removal::DangerousRemoval,
 ) -> PermissionResult {
     PermissionResult::Ask {
-        reason: PermissionDecisionReason::Other {
+        reason: PermissionDecisionReason::SafetyCheck {
             reason: danger.reason,
+            classifier_approvable: false,
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
@@ -1978,21 +2481,111 @@ fn ask_path_constraint(
 /// [`crate::bash_security::bash_command_is_safe`] battery returned a detection
 /// (claude-code `bashCommandIsSafe` → `checkCommandAndSuggestRules` step 3
 /// returning `behavior: 'ask'`, `bashPermissions.ts:1223-1237`). Tagged
-/// [`PermissionDecisionReason::SafetyCheck`] carrying the byte-faithful validator
-/// `message`. `classifier_approvable` is `true`: the TS flow attaches a pending
-/// `BASH_CLASSIFIER` check that may auto-approve before the user responds (the
-/// classifier itself is unwired here, so this is a hint for a later batch). No
-/// rule-saving suggestion (TS: "Don't suggest saving a potentially dangerous
-/// command", `:1236`).
+/// [`PermissionDecisionReason::Other`] (REASON-01) — the TS battery asks are
+/// `decisionReason:{type:"other",reason:…,bashMissKind:…}`, NOT safetyCheck. The
+/// `other` tag is load-bearing: a tool-wide allow rule overrides these asks
+/// (`nes`, ALLOWOVER-01) and bypassPermissions suppresses them, whereas the
+/// safetyCheck-tagged dangerous-removal asks are NOT overridable. No rule-saving
+/// suggestion (TS: "Don't suggest saving a potentially dangerous command",
+/// `:1236`).
 fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
     PermissionResult::Ask {
-        reason: PermissionDecisionReason::SafetyCheck {
+        reason: PermissionDecisionReason::Other {
             reason: message.clone(),
-            classifier_approvable: true,
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// PS-CD-03 `P5r(name)`: is a PowerShell command element a `cd`-like directory
+/// change? `true` for the literal `cd..`/`cd\`/`cd/`/`cd~` forms and a bare drive
+/// letter (`/^[a-z]:$/`), or a name that normalizes
+/// ([`crate::powershell_containment::normalize_cmdlet`], `D_`) to
+/// `set-location`/`push-location`/`pop-location`/`new-psdrive` (plus the Windows
+/// `ndr`/`mount` aliases).
+fn ps_element_is_cd_like(name: &str) -> bool {
+    let t = name.to_lowercase();
+    if matches!(t.as_str(), "cd.." | "cd\\" | "cd/" | "cd~") {
+        return true;
+    }
+    // `/^[a-z]:$/` — a bare drive letter such as `c:`.
+    let b = t.as_bytes();
+    if b.len() == 2 && b[0].is_ascii_lowercase() && b[1] == b':' {
+        return true;
+    }
+    let r = crate::powershell_containment::normalize_cmdlet(name);
+    matches!(
+        r.as_str(),
+        "set-location" | "push-location" | "pop-location" | "new-psdrive"
+    ) || (cfg!(target_os = "windows") && matches!(r.as_str(), "ndr" | "mount"))
+}
+
+/// EDIT-READDENY-02 ask: the Edit target is covered by a Read deny rule
+/// (claude-code `CZn` → validateInput `{result:!1,behavior:"ask",message:eLi,
+/// errorCode:13}`). Tagged [`PermissionDecisionReason::Other`] carrying the
+/// byte-locked `eLi` message.
+fn ask_edit_read_deny_covered(tool_name: &str) -> PermissionResult {
+    let message =
+        "File is covered by a Read deny rule in your permission settings and cannot be edited.";
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::Other {
+            reason: message.to_string(),
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: message.to_string(),
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// `XAu(node)` — 1:1 with claude-code's background-operator AST walk: `true`
+/// when the subtree contains an `ERROR` node, or a `&` node whose parent is NOT
+/// a `binary_expression` (a real background operator; `&&`/`||`/`|` are distinct
+/// node kinds). A `&` under a `binary_expression` is skipped (not recursed).
+#[cfg(feature = "bash-ast")]
+fn has_background_operator(node: tree_sitter::Node) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "ERROR" {
+            return true;
+        }
+        if kind == "&" {
+            if node.kind() != "binary_expression" {
+                return true;
+            }
+            continue;
+        }
+        if has_background_operator(child) {
+            return true;
+        }
+    }
+    false
+}
+
+/// BGOP-01 background-operator forced ask (claude-code `Yqr`'s downgrade). Tagged
+/// [`PermissionDecisionReason::SafetyCheck`] with `classifier_approvable: false`
+/// (`classifierApprovable:!1`), carrying the byte-locked reason/message.
+#[cfg(feature = "bash-ast")]
+fn ask_background_operator(tool_name: &str) -> PermissionResult {
+    let reason = "This command uses the `&` background operator, which defers execution past approval-time safety checks. Approve only if you trust it.";
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::SafetyCheck {
+            reason: reason.to_string(),
+            classifier_approvable: false,
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: reason.to_string(),
             options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,

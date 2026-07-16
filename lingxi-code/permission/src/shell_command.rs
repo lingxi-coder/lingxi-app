@@ -360,15 +360,31 @@ pub fn strip_env_and_wrappers_fixedpoint(cmd: &str) -> Vec<String> {
 /// env-var stripping. Mirrors `filterRulesByContentsMatchingInput`'s
 /// `commandsToTry` construction.
 #[must_use]
-fn candidates(subcommand: &str, aggressive_env: bool) -> Vec<String> {
-    // Seed with BOTH the original (redirections preserved, so an exact rule like
-    // `Bash(cat x 2>&1)` can match) and the redirection-stripped form (so
-    // `Bash(python:*)` matches `python x.py > out`). Mirrors claude-code's
-    // two-element `commandsForMatching` (bashPermissions.ts:798-801).
+fn candidates(subcommand: &str, aggressive_env: bool, seed_original: bool) -> Vec<String> {
+    // 2.1.211 seeds `(r==="exact"?[a,l]:[l])` where `a` is the trimmed command
+    // and `l` its redirection-stripped form. So EXACT mode seeds BOTH the
+    // original (redirections preserved, so an exact rule like `Bash(cat x 2>&1)`
+    // can match) and the stripped form; PREFIX mode seeds ONLY the stripped form
+    // (a rule whose content contains redirection syntax is honored solely by the
+    // whole-command exact check, never a prefix-mode subcommand match).
+    //
+    // `seed_original` controls whether the redirection-preserving `a` is seeded:
+    // - EXACT-mode allow (`command_exact_allowed`) → true (matches CC `[a,l]`).
+    // - PREFIX-mode ALLOW (`command_fully_allowed`) → false (matches CC `[l]`;
+    //   dropping `a` only ever REMOVES an allow match → safe, more conservative).
+    // - DENY/ASK (`rule_matches_any_subcommand`) → true. CC's `[l]`-only prefix
+    //   seed is compensated by a SEPARATE whole-command exact-mode deny check;
+    //   the Rust deny evaluation (`policy.rs`) has no such companion, so keeping
+    //   `a` here preserves the deny of a redirection-content exact rule. Dropping
+    //   it would UNDER-DENY — the unsafe direction — so it is deliberately kept.
     let trimmed = subcommand.trim().to_string();
     let stripped = strip_output_redirections(subcommand);
-    let mut out: Vec<String> = vec![trimmed];
-    let mut seen: BTreeSet<String> = out.iter().cloned().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    if seed_original {
+        seen.insert(trimmed.clone());
+        out.push(trimmed);
+    }
     if seen.insert(stripped.clone()) {
         out.push(stripped);
     }
@@ -394,6 +410,26 @@ fn candidates(subcommand: &str, aggressive_env: bool) -> Vec<String> {
     out
 }
 
+/// claude-code `fou(pattern)` (the allow-mode xargs-retry gate): does `pattern`
+/// end (after `trimEnd`) in an UNESCAPED `*`? A trailing `*` preceded by an even
+/// number of backslashes is unescaped. Used to decide whether an ALLOW wildcard
+/// rule may retry against the `xargs <pattern>` form.
+fn pattern_ends_in_unescaped_star(pattern: &str) -> bool {
+    let t = pattern.trim_end();
+    let chars: Vec<char> = t.chars().collect();
+    if chars.last() != Some(&'*') {
+        return false;
+    }
+    // Count backslashes immediately before the trailing `*`.
+    let mut backslashes = 0usize;
+    let mut n = chars.len() as isize - 2;
+    while n >= 0 && chars[n as usize] == '\\' {
+        backslashes += 1;
+        n -= 1;
+    }
+    backslashes % 2 == 0
+}
+
 /// Does a parsed rule match a single candidate subcommand? Faithful to the
 /// per-rule arm of `filterRulesByContentsMatchingInput`.
 ///
@@ -404,7 +440,20 @@ fn candidates(subcommand: &str, aggressive_env: bool) -> Vec<String> {
 /// hidden uncovered subcommand can't be smuggled past `command_fully_allowed`.
 /// Deny/ask pass `false` (claude-code `skipCompoundCheck: true`) — a denied
 /// command stays denied even when compounded.
-fn rule_matches_candidate(rule: &ShellRule, candidate: &str, guard_compound: bool) -> bool {
+///
+/// `deny_or_ask` is the rule's behavior class (2.1.211 `ruleBehavior === "deny"
+/// || "ask"`). It controls the wildcard-rule `xargs`-wrapped retry: after the
+/// direct match fails, a deny/ask wildcard rule ALWAYS retries against
+/// `xargs <pattern>` (so `Bash(rm *)` still denies `xargs rm -rf foo`); an allow
+/// wildcard rule retries only when its pattern ends in an unescaped `*` (`fou`).
+/// Both direct and retry matches use the whitespace-normalizing `cxt` semantics
+/// (`Ale(...,!1,!0)`).
+fn rule_matches_candidate(
+    rule: &ShellRule,
+    candidate: &str,
+    guard_compound: bool,
+    deny_or_ask: bool,
+) -> bool {
     match rule {
         ShellRule::Exact(s) => candidate == s,
         ShellRule::Prefix(prefix) => {
@@ -417,7 +466,23 @@ fn rule_matches_candidate(rule: &ShellRule, candidate: &str, guard_compound: boo
             if guard_compound && split_command(candidate).len() > 1 {
                 return false;
             }
-            crate::shell_rule_matching::match_wildcard_pattern(pattern, candidate, false)
+            // `cxt(pattern, candidate)` — case-sensitive, whitespace-normalized.
+            if crate::shell_rule_matching::match_wildcard_pattern_ex(
+                pattern, candidate, false, true,
+            ) {
+                return true;
+            }
+            // Allow rules retry the xargs form only when the pattern ends in an
+            // unescaped `*`; deny/ask rules always retry.
+            if !deny_or_ask && !pattern_ends_in_unescaped_star(pattern) {
+                return false;
+            }
+            crate::shell_rule_matching::match_wildcard_pattern_ex(
+                &format!("xargs {pattern}"),
+                candidate,
+                false,
+                true,
+            )
         }
     }
 }
@@ -487,7 +552,9 @@ pub fn matches_excluded_pattern(pattern: &str, candidate: &str) -> bool {
         ShellRule::Prefix(p) => candidate == p || candidate.starts_with(&format!("{p} ")),
         ShellRule::Exact(e) => candidate == e,
         ShellRule::Wildcard(w) => {
-            crate::shell_rule_matching::match_wildcard_pattern(&w, candidate, false)
+            // 2.1.211 excluded-commands check uses `cxt` (whitespace-normalized,
+            // case-sensitive): `case"wildcard":if(cxt(u.pattern,d))return!0`.
+            crate::shell_rule_matching::match_wildcard_pattern_ex(&w, candidate, false, true)
         }
     }
 }
@@ -499,9 +566,10 @@ pub fn matches_excluded_pattern(pattern: &str, candidate: &str) -> bool {
 pub fn rule_matches_any_subcommand(rule_content: &str, command: &str) -> bool {
     let rule = parse_shell_rule(rule_content);
     for sub in split_command(command) {
-        for cand in candidates(&sub, true) {
-            // deny/ask: no compound guard (skipCompoundCheck) — stay denied.
-            if rule_matches_candidate(&rule, &cand, false) {
+        for cand in candidates(&sub, true, true) {
+            // deny/ask: no compound guard (skipCompoundCheck) — stay denied, and
+            // wildcard rules always retry the `xargs`-wrapped form.
+            if rule_matches_candidate(&rule, &cand, false, true) {
                 return true;
             }
         }
@@ -520,12 +588,13 @@ pub fn command_fully_allowed(allow_contents: &[&str], command: &str) -> bool {
     }
     let rules: Vec<ShellRule> = allow_contents.iter().map(|c| parse_shell_rule(c)).collect();
     subs.iter().all(|sub| {
-        let cands = candidates(sub, false);
+        let cands = candidates(sub, false, false);
         rules.iter().any(|rule| {
-            // allow: guard against a still-compound candidate over-covering.
+            // allow: guard against a still-compound candidate over-covering; a
+            // wildcard rule retries the `xargs` form only when it ends in `*`.
             cands
                 .iter()
-                .any(|cand| rule_matches_candidate(rule, cand, true))
+                .any(|cand| rule_matches_candidate(rule, cand, true, false))
         })
     })
 }
@@ -554,7 +623,7 @@ pub fn command_exact_allowed(allow_contents: &[&str], command: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    let cands = candidates(trimmed, false);
+    let cands = candidates(trimmed, false, true);
     allow_contents.iter().any(|content| {
         let rule = parse_shell_rule(content);
         cands.iter().any(|cand| match &rule {
@@ -757,6 +826,61 @@ mod tests {
         assert!(command_fully_allowed(&["npm run *"], "npm run"));
         // but an unrelated command is not
         assert!(!command_fully_allowed(&["git *"], "npm run"));
+    }
+
+    // ----- PERM-BASH-01: wildcard Bash rules retry the `xargs`-wrapped form -----
+
+    #[test]
+    fn wildcard_deny_retries_xargs_form() {
+        // A deny wildcard rule catches an `xargs`-prefixed command — the direct
+        // match fails, and deny/ask ALWAYS retries `xargs <pattern>`.
+        assert!(rule_matches_any_subcommand("rm *", "xargs rm -rf foo"));
+        // deny retries even when the pattern does NOT end in `*` (fou irrelevant
+        // for deny/ask).
+        assert!(rule_matches_any_subcommand("rm * bar", "xargs rm x bar"));
+        // an unrelated xargs command still is not denied.
+        assert!(!rule_matches_any_subcommand("rm *", "xargs ls foo"));
+    }
+
+    #[test]
+    fn wildcard_allow_xargs_gated_on_trailing_star() {
+        // Allow wildcard with trailing unescaped `*` (fou true) retries xargs.
+        assert!(command_fully_allowed(&["rm *"], "xargs rm foo"));
+        // Allow wildcard WITHOUT trailing `*` (fou false) does NOT retry xargs,
+        // so the xargs-wrapped form is NOT allowed (stays conservative).
+        assert!(!command_fully_allowed(&["rm * bar"], "xargs rm x bar"));
+        // Sanity: the same rule DOES allow the un-wrapped form.
+        assert!(command_fully_allowed(&["rm * bar"], "rm x bar"));
+    }
+
+    #[test]
+    fn wildcard_deny_xargs_direct_still_works() {
+        // The non-xargs direct match is unaffected by the retry.
+        assert!(rule_matches_any_subcommand("rm *", "rm -rf /tmp/x"));
+    }
+
+    // ----- PERM-CAND-01: prefix/allow mode seeds only the redirection-stripped
+    //       candidate; the redirection-preserving original is exact-mode only. --
+
+    #[test]
+    fn allow_prefix_mode_drops_redirection_preserving_seed() {
+        // An exact allow rule whose CONTENT contains redirection syntax must NOT
+        // be honored via the prefix-mode subcommand path (CC seeds only `[l]` in
+        // prefix mode). `foo > bar` seeds only the stripped `foo`, which the
+        // exact rule `foo > bar` does not equal → not allowed.
+        assert!(!command_fully_allowed(&["foo > bar"], "foo > bar"));
+        // But the whole-command EXACT-mode allow path DOES seed `[a,l]`, so the
+        // same rule matches there (redirection-preserving original retained).
+        assert!(command_exact_allowed(&["foo > bar"], "foo > bar"));
+    }
+
+    #[test]
+    fn deny_keeps_redirection_preserving_seed() {
+        // SAFETY: the deny/ask aggregation keeps the redirection-preserving seed
+        // (the Rust deny path has no companion whole-command exact check), so a
+        // redirection-content exact deny rule still denies.
+        assert!(rule_matches_any_subcommand("cat x 2>&1", "cat x 2>&1"));
+        assert!(rule_matches_any_subcommand("foo > bar", "foo > bar"));
     }
 
     // ----- ENV_VAR_PATTERN byte-faithfulness (R3-1) -----

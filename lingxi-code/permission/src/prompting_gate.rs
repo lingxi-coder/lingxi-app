@@ -1,7 +1,24 @@
 //! `InteractivePromptingGate` — stdin/stderr prompt loop.
 //!
-//! Drives the byte-locked claude-code prompt UX over injectable
-//! `AsyncRead` / `AsyncWrite` endpoints. Tests pipe via `tokio::io::duplex`.
+//! Drives a `[Y/n]` permission prompt over injectable `AsyncRead` /
+//! `AsyncWrite` endpoints. Tests pipe via `tokio::io::duplex`.
+//!
+//! ## Divergence — this is a LingXi plain-REPL surface, NOT claude-code parity
+//!
+//! Verified against the 2.1.211 binary: claude-code has **no** stdin `[Y/n]`
+//! permission prompt. `"needs your permission to use"` and `"[Y/n]"` have
+//! **zero** occurrences in the 2.1.211 strings corpus. In claude-code an
+//! unresolvable ask is resolved interactively by the TUI dialog, and in a
+//! non-interactive / headless context it is **denied** with the `GRu` message
+//! (`Permission to use ${tool} has been denied. …` — see
+//! [`crate::headless_gate::DenyOnAskGate`]). The lone sibling string
+//! `"Agent tool requires permission to spawn subagents."` is the Agent tool's
+//! auto-mode `checkPermissions` *passthrough message*, not a prompt.
+//!
+//! This gate is therefore an **intentional LingXi divergence** that backs the
+//! plain (non-TUI) REPL surface, where there is no dialog to render. The prompt
+//! literals below are LingXi's own strings — they are byte-locked by the tests
+//! only so the REPL UX stays stable, not because they mirror claude-code.
 //!
 //! M5-05 task progression:
 //! - Task 5: `format_prompt` byte-locks the prompt literals.
@@ -25,12 +42,17 @@ use crate::gate::{
 };
 
 /// Maximum number of consecutive invalid inputs the gate tolerates before
-/// erroring out. Locked at 3 per claude-code's `MAX_RETRIES` constant
-/// (see plan §"Reverse-engineered byte-locks").
+/// erroring out. This is a LingXi plain-REPL convention (claude-code has no
+/// stdin prompt loop, hence no such retry cap — see the module docs), fixed
+/// at 3.
 const MAX_RETRIES: u32 = 3;
 
-/// Format the byte-locked prompt for the stdio path's
+/// Format the prompt for the stdio path's
 /// `PermissionRequest::ToolUseConfirm` variant.
+///
+/// **Divergence:** these are LingXi's own plain-REPL strings — claude-code has
+/// no stdin `[Y/n]` permission prompt (see the module docs). They are locked by
+/// the tests to keep the REPL UX stable, not to mirror the binary.
 ///
 /// - Generic tools: `"Claude needs your permission to use {tool_name}\n[Y/n] "`
 ///   or `[y/N]` depending on the tool's default.
@@ -296,6 +318,21 @@ mod tests {
             s.as_bytes(),
             b"Agent tool requires permission to spawn subagents.\n[Y/n] "
         );
+    }
+
+    /// Divergence guard (PERM-GATE-PROMPT-01): these prompt literals are
+    /// LingXi's own plain-REPL strings, NOT claude-code parity. claude-code
+    /// 2.1.211 has no stdin `[Y/n]` permission prompt — the string
+    /// "needs your permission to use" and "[Y/n]" have zero occurrences in the
+    /// binary. This test documents that the strings are intentionally
+    /// LingXi-shaped so no future audit re-flags them as a byte-mismatch.
+    #[test]
+    fn prompt_strings_are_lingxi_divergence_not_cc_byte_lock() {
+        let s = format_prompt_tool_use("Read", PromptDefault::AllowByDefault);
+        // The literal contains the LingXi-only "[Y/n]" affordance that has no
+        // counterpart in the claude-code binary.
+        assert!(s.contains("[Y/n] "));
+        assert!(s.contains("Claude needs your permission to use"));
     }
 
     #[test]

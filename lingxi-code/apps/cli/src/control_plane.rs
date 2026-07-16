@@ -413,6 +413,11 @@ impl StdioControlPermissionGate {
         let mut request = json!({
             "subtype": "can_use_tool",
             "tool_name": name,
+            // claude-code `createCanUseTool` sends `display_name:h1e(tool_name)`
+            // UNCONDITIONALLY (a human-readable label the SDK host renders):
+            // strip any MCP `__`-namespaced prefix segments, `_`→space, and
+            // title-case each word initial (see `permission_display_name`).
+            "display_name": permission_display_name(name),
             "input": input,
             "tool_use_id": tool_use_id,
         });
@@ -422,6 +427,17 @@ impl StdioControlPermissionGate {
         if let Some(reason) = &ctx.decision_reason {
             request["decision_reason"] = json!(reason);
         }
+        // NOTE (PERM-GATE-WIRE-01 partial): claude-code also sends
+        // `decision_reason_type: decisionReason?.type` (the DISCRIMINATED reason
+        // kind — `rule`/`mode`/`subcommandResults`/… — which an SDK host parses
+        // for ask reasons where `decision_reason` text is `undefined`). Emitting
+        // it requires a `decision_reason_type` field on `PermissionCheckContext`
+        // (in the `traits` crate) populated at the `PolicyPermissionGate` Ask
+        // point; that cross-crate wiring is deferred, so the key is OMITTED for
+        // now. The remaining optional keys (`description`,
+        // `classifier_approvable`, `requires_user_interaction`) likewise await
+        // their producers, mirroring the `permission_suggestions`/`blocked_path`
+        // pattern above.
         // permission_suggestions / blocked_path: forwarded only when the policy
         // Ask supplies them. PARTIAL (stream-json P5 finding #9): LingXi's policy
         // `PermissionResult::Ask` does not model claude-code's
@@ -708,6 +724,38 @@ fn source_for_destination(dest: PermissionUpdateDestination) -> PermissionRuleSo
         PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
         PermissionUpdateDestination::Session => PermissionRuleSource::Session,
     }
+}
+
+/// Port of claude-code `h1e(e)` — the `display_name` a `can_use_tool`
+/// control_request carries for a tool.
+///
+/// ```js
+/// function h1e(e){return(e.split("__").pop()||e).replace(/_/g," ").replace(/\b\w/g,(r)=>r.toUpperCase())}
+/// ```
+///
+/// 1. Take the LAST `__`-delimited segment (strips an MCP `mcp__server__` prefix
+///    so only the bare tool name remains); if that segment is empty (a trailing
+///    `__`), fall back to the full name — matching JS `pop() || e`.
+/// 2. Replace every `_` with a space.
+/// 3. Title-case: uppercase the first word char of each word (JS `\b\w`).
+fn permission_display_name(name: &str) -> String {
+    let last = name.rsplit("__").next().unwrap_or(name);
+    let last = if last.is_empty() { name } else { last };
+    let spaced = last.replace('_', " ");
+    let mut out = String::with_capacity(spaced.len());
+    // JS `\w` is ASCII [A-Za-z0-9_]; after the `_`→space pass only alphanumerics
+    // remain as word chars. Uppercase the first word char after any boundary.
+    let mut prev_is_word = false;
+    for ch in spaced.chars() {
+        let is_word = ch.is_ascii_alphanumeric() || ch == '_';
+        if is_word && !prev_is_word {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push(ch);
+        }
+        prev_is_word = is_word;
+    }
+    out
 }
 
 #[async_trait]
@@ -1071,6 +1119,44 @@ mod tests {
                 reason: "not allowed".to_string()
             }
         );
+    }
+
+    // PERM-GATE-WIRE-01: h1e / display_name port.
+    #[test]
+    fn display_name_ports_h1e_byte_exact() {
+        // Simple tool name: title-case the single word.
+        assert_eq!(permission_display_name("Bash"), "Bash");
+        assert_eq!(permission_display_name("bash"), "Bash");
+        // snake_case tool: `_`→space, title-case each word.
+        assert_eq!(permission_display_name("web_fetch"), "Web Fetch");
+        // MCP-namespaced tool: strip the `mcp__server__` prefix, keep the bare
+        // tool name, then space+title-case.
+        assert_eq!(
+            permission_display_name("mcp__github__create_issue"),
+            "Create Issue"
+        );
+        // Digits are word chars but unchanged by upper-casing.
+        assert_eq!(permission_display_name("get_2fa_code"), "Get 2fa Code");
+        // Trailing `__` ⇒ empty last segment ⇒ JS `pop() || e` falls back to the
+        // full name.
+        assert_eq!(permission_display_name("Foo__"), "Foo  ");
+    }
+
+    #[tokio::test]
+    async fn can_use_tool_request_carries_display_name() {
+        // The outbound can_use_tool control_request must include `display_name`
+        // (claude-code sends it unconditionally).
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({});
+        let _check =
+            tokio::spawn(async move { gate.check("mcp__github__create_issue", &input).await });
+
+        let line = outbound_line(rx.recv().await.unwrap());
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["request"]["subtype"], "can_use_tool");
+        assert_eq!(frame["request"]["tool_name"], "mcp__github__create_issue");
+        assert_eq!(frame["request"]["display_name"], "Create Issue");
     }
 
     #[tokio::test]

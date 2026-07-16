@@ -185,8 +185,36 @@ impl PermissionPolicy {
             is_windows: cfg!(target_os = "windows"),
             is_macos: cfg!(target_os = "macos"),
         };
-        match crate::powershell_containment::validate_ps_statements(&parse.statements, &ctx, false)
-        {
+        // PS-CD-03 (part 1): compute the compound-cd flag — 1:1 with claude-code
+        // `y = u.length>1 && u.some(({element:V})=>P5r(V.name))`: a compound
+        // command (>1 command) that contains a cd-like element (`P5r`). Was
+        // hardcoded `false`, making the compound-cd containment ask dead code
+        // (an under-ask: `cd sub; Get-Content ..\secret` escaped it). NOTE
+        // (part 2, cross-lane `powershell_containment.rs`/ps lane): the branch's
+        // decisionReason still reuses its message rather than the distinct
+        // "Compound command contains cd with path operation …" string.
+        let all_names: Vec<&str> = parse
+            .statements
+            .iter()
+            .flat_map(|s| {
+                s.commands
+                    .iter()
+                    .filter_map(|e| match e {
+                        crate::powershell_containment::PsElement::Command(c) => {
+                            Some(c.name.as_str())
+                        }
+                        crate::powershell_containment::PsElement::Expression { .. } => None,
+                    })
+                    .chain(s.nested_commands.iter().map(|c| c.name.as_str()))
+            })
+            .collect();
+        let compound_cd =
+            all_names.len() > 1 && all_names.iter().any(|n| ps_element_is_cd_like(n));
+        match crate::powershell_containment::validate_ps_statements(
+            &parse.statements,
+            &ctx,
+            compound_cd,
+        ) {
             crate::powershell_containment::PsContainmentResult::Passthrough => None,
             crate::powershell_containment::PsContainmentResult::Ask { message, reason } => {
                 Some(ask_powershell_containment(message, reason))
@@ -2419,6 +2447,29 @@ fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
         pending_classifier_check: None,
         metadata: PermissionMetadata::default(),
     }
+}
+
+/// PS-CD-03 `P5r(name)`: is a PowerShell command element a `cd`-like directory
+/// change? `true` for the literal `cd..`/`cd\`/`cd/`/`cd~` forms and a bare drive
+/// letter (`/^[a-z]:$/`), or a name that normalizes
+/// ([`crate::powershell_containment::normalize_cmdlet`], `D_`) to
+/// `set-location`/`push-location`/`pop-location`/`new-psdrive` (plus the Windows
+/// `ndr`/`mount` aliases).
+fn ps_element_is_cd_like(name: &str) -> bool {
+    let t = name.to_lowercase();
+    if matches!(t.as_str(), "cd.." | "cd\\" | "cd/" | "cd~") {
+        return true;
+    }
+    // `/^[a-z]:$/` — a bare drive letter such as `c:`.
+    let b = t.as_bytes();
+    if b.len() == 2 && b[0].is_ascii_lowercase() && b[1] == b':' {
+        return true;
+    }
+    let r = crate::powershell_containment::normalize_cmdlet(name);
+    matches!(
+        r.as_str(),
+        "set-location" | "push-location" | "pop-location" | "new-psdrive"
+    ) || (cfg!(target_os = "windows") && matches!(r.as_str(), "ndr" | "mount"))
 }
 
 /// EDIT-READDENY-02 ask: the Edit target is covered by a Read deny rule

@@ -3519,6 +3519,30 @@ mod tests {
         }
     }
 
+    // ---- PS-CD-03: P5r cd-like element detection --------------------------
+
+    #[test]
+    fn pscd03_p5r_detects_cd_like_elements() {
+        // Literal cd forms + drive letters.
+        assert!(ps_element_is_cd_like("cd.."));
+        assert!(ps_element_is_cd_like("cd\\"));
+        assert!(ps_element_is_cd_like("cd/"));
+        assert!(ps_element_is_cd_like("cd~"));
+        assert!(ps_element_is_cd_like("C:"));
+        assert!(ps_element_is_cd_like("d:"));
+        // Cmdlets / aliases that normalize to a location change.
+        assert!(ps_element_is_cd_like("Set-Location"));
+        assert!(ps_element_is_cd_like("cd")); // alias → set-location
+        assert!(ps_element_is_cd_like("pushd")); // alias → push-location
+        assert!(ps_element_is_cd_like("popd")); // alias → pop-location
+        assert!(ps_element_is_cd_like("New-PSDrive"));
+        // Non-cd commands.
+        assert!(!ps_element_is_cd_like("Get-Content"));
+        assert!(!ps_element_is_cd_like("git"));
+        assert!(!ps_element_is_cd_like("echo"));
+        assert!(!ps_element_is_cd_like("cddir")); // not a cd form
+    }
+
     #[test]
     fn stringify_primitive_semantics() {
         assert_eq!(

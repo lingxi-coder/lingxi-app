@@ -428,6 +428,7 @@ mod tests {
             in_flight: None,
             backend: Some("daemon"),
             initial_prompt: Some("do the thing"),
+            detail: None,
             worker_pid: None,
         };
         write_job_state(home, "bc7c6b33", &job).unwrap();
@@ -499,6 +500,7 @@ mod tests {
             in_flight: None,
             backend: None,
             initial_prompt: None,
+            detail: None,
             worker_pid: None,
         };
         write_job_state(home, "aaaa1111", &state).unwrap();

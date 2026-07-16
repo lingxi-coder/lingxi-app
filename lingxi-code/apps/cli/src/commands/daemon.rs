@@ -161,6 +161,21 @@ fn emit_respawn_exhausted(short: &str, attempts: i64) {
     tracing::info!(event = "tengu_bg_respawn_exhausted", short, attempts);
 }
 
+/// `tengu_bg_spawn_cwd_gone` — a pending job's recorded working directory no
+/// longer exists, so the supervisor fails it closed instead of spawning a
+/// worker that would crash the moment it `chdir`s into the dead cwd. CC field
+/// shape `{short, attempt, via}` (binary `settleCwdGone`); `via:"cold"` mirrors
+/// CC's cold-spawn access-failure path (`settleCwdGone("cold", cwd)`).
+fn emit_spawn_cwd_gone(short: &str, attempt: i64, via: &str) {
+    tracing::info!(event = "tengu_bg_spawn_cwd_gone", short, attempt, via);
+}
+
+/// Byte-faithful `spawn_cwd_gone` job detail (CC `settleCwdGone`:
+/// `working directory no longer exists or is not accessible: ${cwd}`).
+fn cwd_gone_detail(cwd: &str) -> String {
+    format!("working directory no longer exists or is not accessible: {cwd}")
+}
+
 /// `daemon` subcommand args — no options (internal, spawned by `--bg`).
 #[derive(Debug, Clone, clap::Args)]
 pub struct Cli {}
@@ -456,6 +471,32 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
             continue;
         }
 
+        // CWD-GONE guard: never spawn a worker into a working directory that no
+        // longer exists. A detached headless worker would otherwise `chdir` into
+        // the dead cwd, crash opaquely, and (having no live transport) fail
+        // closed anyway. CC's `settleCwdGone` fails such a dispatch closed with a
+        // specific detail + `tengu_bg_spawn_cwd_gone{short, attempt, via}`; we
+        // mirror that, keeping the failure legible in the agent view.
+        if let Some(cwd) = job.cwd.as_deref() {
+            if !cwd.is_empty() && !Path::new(cwd).exists() {
+                let attempt = read_respawn_count(runtime_dir, &short);
+                emit_spawn_cwd_gone(&short, attempt, "cold");
+                if let Err(e) = agents_registry::update_job_state_with_detail(
+                    runtime_dir,
+                    &short,
+                    "failed",
+                    None,
+                    &cwd_gone_detail(cwd),
+                ) {
+                    tracing::warn!(
+                        "lingxi-cli daemon: could not mark cwd-gone job {short} failed: {e}"
+                    );
+                }
+                claimed.remove(&short);
+                continue;
+            }
+        }
+
         let mut worker_env = roster
             .workers
             .get(&short)
@@ -663,14 +704,21 @@ mod tests {
 
     /// Write a minimal pending `--bg` job (`state:"working"`) under `home`.
     fn seed_working_job(home: &Path, short: &str) {
+        // Seed an EXISTING cwd (the test home) so the supervisor's
+        // spawn_cwd_gone guard does not fail-close the fresh-spawn path these
+        // tests exercise. The dedicated cwd-gone test seeds a missing cwd.
+        seed_working_job_cwd(home, short, &home.display().to_string());
+    }
+
+    fn seed_working_job_cwd(home: &Path, short: &str, cwd: &str) {
         let respawn: Vec<String> = Vec::new();
         let job = agents_registry::JobStateWrite {
             state: "working",
             tempo: Some("active"),
             name: None,
             session_id: Some("11111111-1111-1111-1111-111111111111"),
-            cwd: Some("/work"),
-            origin_cwd: Some("/work"),
+            cwd: Some(cwd),
+            origin_cwd: Some(cwd),
             created_at: Some("2026-07-04T00:00:00.000Z"),
             intent: Some("do the thing"),
             display_intent: None,
@@ -679,6 +727,7 @@ mod tests {
             in_flight: None,
             backend: Some("daemon"),
             initial_prompt: Some("do the thing"),
+            detail: None,
             worker_pid: None,
         };
         agents_registry::write_job_state(home, short, &job).unwrap();
@@ -1053,6 +1102,58 @@ mod tests {
             "failed job is terminal (won't re-render as working)"
         );
         assert_eq!(job.worker_pid, None, "stale worker pid cleared");
+    }
+
+    // ---- spawn_cwd_gone (fail-closed, never spawn into a dead cwd) ----------
+
+    #[test]
+    fn pending_job_with_missing_cwd_is_failed_closed_not_spawned() {
+        let dir = tmpdir();
+        // A pending job whose recorded cwd no longer exists (never created).
+        let gone = dir.join("was-here-now-gone").display().to_string();
+        seed_working_job_cwd(&dir, "c0de9999", &gone);
+        assert!(!std::path::Path::new(&gone).exists());
+
+        let proc = FakeProc {
+            alive: HashMap::new(),
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        // NeverSpawner: the cwd-gone guard must fail the job WITHOUT spawning a
+        // worker into the dead cwd.
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut NeverSpawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+
+        let job = agents_registry::read_job(&dir, "c0de9999").unwrap();
+        assert_eq!(job.state, "failed", "cwd-gone job → failed");
+        assert!(
+            agents_registry::job_is_terminal(&job),
+            "failed job is terminal"
+        );
+        assert_eq!(job.worker_pid, None);
+        // Byte-faithful detail (CC `settleCwdGone`).
+        assert_eq!(
+            job.detail.as_deref(),
+            Some(
+                format!("working directory no longer exists or is not accessible: {gone}")
+                    .as_str()
+            )
+        );
+        // No live-worker roster record was created for the doomed job.
+        let roster = read_roster(&dir, 0, false).into_roster();
+        assert!(!roster.workers.contains_key("c0de9999"));
     }
 
     #[test]

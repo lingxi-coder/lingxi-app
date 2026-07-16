@@ -39,25 +39,23 @@ inline/attach `if(!1)` code is dead), and the mode difference is validation, not
 session-creation. Resolved above.
 </details>
 
-## 2. `kAs` missing-original-cwd fallback (ExitWorktree message)
+## 2. `kAs` missing-original-cwd fallback — ✅ RESOLVED (`fcf56f46e`, 2026-07-16)
 
-**What ships:** ExitWorktree's model message uses 206's `kAs` **normal branch**
-byte-exact: `Session is now back in {original_cwd}.`
+Ported 206's `xCd` restore (@222210592) + `kAs` message (@222211173). When
+ExitWorktree restores the session cwd and `original_cwd` no longer exists on
+disk, it falls back through `[worktree_path, $HOME, temp_dir]` (206's
+`[n=worktreePath, homedir(), sG()]`), tracking `fell_back_to_worktree`. The
+restore was moved to AFTER the worktree removal (206 order `het()`→`xCd`), so a
+successful `remove` skips the deleted worktree (→ `$HOME`) while `keep` falls
+back to the still-present worktree.
 
-**Why deferred:** 206's `xCd` restore returns `{restoredCwd, originalCwdMissing,
-fellBackToWorktree}` and `kAs` has a fallback string for when the original cwd
-was deleted while inside the worktree (`The original directory {cwd} no longer
-exists, so the session is now in {restoredCwd}.` + optional `Consider restarting
-LingXi from an existing directory.`). The port's `session_cwd.swap` has **no
-`restoredCwd`/`fellBackToWorktree` substrate** — it assumes the original cwd
-still exists. Rather than invent a fake `restoredCwd`, only the reachable normal
-branch was ported.
-
-**To build:** port 206's `xCd` restore logic — after the swap-back, stat
-`original_cwd`; if gone, fall back to home/tmp and set the missing-cwd flags,
-then emit the fallback `kAs` string. Touches ExitWorktree's restore path +
-`SessionCwd`. **Est: medium.** Low priority (rare edge — user deletes the repo
-dir mid-worktree-session).
+Message (`kAs`), byte-exact: missing + fell back to worktree → `The original
+directory {cwd} no longer exists, so the session is now in {restored}.`; missing
++ fell back to `$HOME`/tmp → same + ` Consider restarting LingXi from an existing
+directory.` Directory existence is probed via an injected `fn(&Path)->bool`
+(`new()` = real `std::fs`; tests inject stubs). Review APPROVE (opus, byte-exact,
+no bugs). Documented low-risk deviations: non-ENOENT stat errors fold into the
+fallback (206 rethrows); temp dir is `std::env::temp_dir()` vs `CLAUDE_CODE_TMPDIR`.
 
 ## 3. Real tmux reattach UX — manual QA only
 
@@ -93,3 +91,4 @@ green-lit.
 | WebFetch UTF-16 fast-path | `7a8fce999` |
 | **ExitWorktree model message = 206 `data.message`** (fixed mis-ported TUI-render surface) | `ae1c7ebde` |
 | **Residual #1: `--tmux` native-mode pre-flight** (not-Windows + tmux-installed for bare `--tmux`; classic skips) | `a69b9fb44` |
+| **Residual #2: ExitWorktree missing-original-cwd fallback** (206 `xCd`/`kAs`; fallback `[worktree, $HOME, tmp]`) | `fcf56f46e` |

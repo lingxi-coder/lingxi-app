@@ -11,6 +11,7 @@ pub mod context_collapse;
 pub mod prompt_too_long;
 pub use llm_client::model::context_window;
 pub mod grouping;
+pub mod invoked_skills;
 pub mod microcompact;
 pub mod orchestrator;
 pub mod partial;
@@ -48,9 +49,10 @@ pub use partial::{
 };
 pub use post_compact::{
     budget_post_compact_files, estimate_content_tokens, is_main_thread_compact,
-    restore_post_compact_files, restore_post_compact_skills, run_post_compact_cleanup,
-    select_post_compact_files, truncate_skill_content, FileRestoreCandidate, PostCompactBuilder,
-    PostCompactMessages, RestoredFile, RestoredSkill, SkillRestoreCandidate,
+    render_invoked_skills_attachment, restore_post_compact_files, restore_post_compact_skills,
+    run_post_compact_cleanup, select_post_compact_files, truncate_skill_content,
+    AttachedSkillContent, FileRestoreCandidate, PostCompactBuilder, PostCompactMessages,
+    RestoredFile, RestoredSkill, SkillRestoreCandidate, INVOKED_SKILLS_ATTACHMENT_PREAMBLE,
     SKILL_TRUNCATION_MARKER,
 };
 pub use prompt::{

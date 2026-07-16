@@ -1160,4 +1160,40 @@ mod tests {
             "prompt must contain built-in CLI commands example"
         );
     }
+
+    // P2-12 / `zSr`: a successful skill invocation records the skill in the
+    // process-global invoked-skill registry (main thread → key `":{name}"`), so
+    // its content can be re-injected after a compaction (`rRg`).
+    #[tokio::test]
+    async fn invocation_registers_skill_in_invoked_registry() {
+        let _g = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+
+        let desc = SkillDescriptor {
+            skill_root: Some(std::path::PathBuf::from("/skills/regtest")),
+            ..prompt_desc("regtest")
+        };
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+        tool.call(json!({"skill": "regtest"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+
+        // The registry now carries the main-thread row keyed `":regtest"` with
+        // the expanded skill content the model received (`body here`).
+        let content = compaction::invoked_skills::content_for_test(":regtest")
+            .expect("skill registered under main-thread key");
+        assert!(
+            content.contains("body here"),
+            "registered content must carry the expanded skill body; got: {content}"
+        );
+        // A skill NOT invoked leaves no row.
+        assert!(compaction::invoked_skills::content_for_test(":other").is_none());
+
+        compaction::invoked_skills::reset_for_test();
+    }
 }

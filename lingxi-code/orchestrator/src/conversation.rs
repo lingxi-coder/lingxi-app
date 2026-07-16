@@ -2484,12 +2484,23 @@ impl ConversationOrchestrator {
     /// observably from the snapshot only when a file changed or was deleted after
     /// its last read.
     ///
-    /// SKILL restoration (`rRg`/`kGo`) is NOT wired here: this orchestrator
-    /// carries no invoked-skill registry to source candidates from, so the skill
-    /// arm has no data seam yet (documented residual — the pure
-    /// [`compaction::restore_post_compact_skills`] helper exists and is
-    /// unit-tested, awaiting a runtime `invokedSkills` registry + skill-call-site
-    /// wiring).
+    /// SKILL restoration (`rRg`/`kGo`) IS wired here (P2-12): the Skill tool
+    /// records each invocation in the process-global
+    /// [`compaction::invoked_skills`] registry (`zSr`), and after the file arm we
+    /// [`compaction::invoked_skills::filter_for_agent`] the main-thread rows
+    /// (`agentId = None`), run [`compaction::restore_post_compact_skills`]
+    /// (`rRg`: `invokedAt` DESC, per-skill truncate 5000, budget 25000, registry
+    /// write-back on truncation/overflow), and emit the survivors as ONE `isMeta`
+    /// user message in the byte-faithful `invoked_skills` attachment shape
+    /// (`render_invoked_skills_attachment`). The registry outlives the compaction
+    /// (never cleared by `run_post_compact_cleanup`), so a skill invoked before
+    /// compaction re-enters the model's context afterwards.
+    ///
+    /// Residual: `LQn` already-present dedup runs against `&[]` here (no boundary
+    /// context is threaded, the same residual the file arm carries for
+    /// `already_attached`), so it degrades to a best-effort no-op — still a real
+    /// improvement (the skill content re-enters context; over-restoring an
+    /// already-visible skill is the only cost).
     async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
         // Snapshot then clear the read-file-state registries (the `eOt` snapshot
         // + `readFileState.clear()` step). Both the rich map and the `/files`
@@ -2504,10 +2515,42 @@ impl ConversationOrchestrator {
         };
         self.read_file_state.lock().await.clear();
 
-        if snapshot.is_empty() {
-            return Vec::new();
+        // The two arms are independent: skills restore from the process-global
+        // registry even when no file was read this session, so we do NOT early-
+        // return on an empty file snapshot.
+        let mut out: Vec<protocol::ConversationMessage> = Vec::new();
+
+        if !snapshot.is_empty() {
+            out.extend(self.restore_post_compact_files_arm(snapshot).await);
         }
 
+        // ── SKILL restoration (`rRg`) ──
+        // Source candidates from the process-global invoked-skill registry
+        // (`kGo` on the main thread, `agentId = None`), budget them (`rRg`), and
+        // emit the survivors as ONE `isMeta` user message in the byte-faithful
+        // `invoked_skills` attachment shape. `already_attached = &[]` (see the
+        // doc-comment residual).
+        let skill_candidates = compaction::invoked_skills::filter_for_agent(None);
+        let restored_skills = compaction::restore_post_compact_skills(skill_candidates, &[]);
+        if let Some(body) = compaction::render_invoked_skills_attachment(&restored_skills) {
+            out.push(protocol::ConversationMessage::user_meta(
+                protocol::MessageId::new(),
+                body,
+            ));
+        }
+
+        out
+    }
+
+    /// The FILE restoration arm of [`Self::restore_post_compact_attachments`]
+    /// (`eRg`/`XQn`): select recent files, RE-READ each from disk, fire the
+    /// per-file restore telemetry, budget the fresh contents, and render each as
+    /// a `<system-reminder>` meta user message. Split out so the skill arm can
+    /// run even when the file snapshot is empty.
+    async fn restore_post_compact_files_arm(
+        &self,
+        snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)>,
+    ) -> Vec<protocol::ConversationMessage> {
         let candidates: Vec<compaction::FileRestoreCandidate> = snapshot
             .into_iter()
             .map(|(path, entry)| compaction::FileRestoreCandidate {
@@ -14583,6 +14626,24 @@ mod post_compact_file_restore_tests {
         }
     }
 
+    /// Serialize + clean the process-global invoked-skill registry so these
+    /// tests (which now exercise the skill arm too) don't see rows registered by
+    /// a parallel test. Resets on acquire AND on drop (under the lock) so no row
+    /// leaks past the test. Hold the returned guard for the whole test body.
+    struct RegistryGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+    impl Drop for RegistryGuard {
+        fn drop(&mut self) {
+            compaction::invoked_skills::reset_for_test();
+        }
+    }
+    fn registry_guard() -> RegistryGuard {
+        let g = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+        RegistryGuard(g)
+    }
+
     async fn orch_with_bus(
         cwd: std::path::PathBuf,
         map: tool_api::read_file_state::ReadFileStateMap,
@@ -14614,6 +14675,7 @@ mod post_compact_file_restore_tests {
 
     #[tokio::test]
     async fn reread_restores_fresh_content_not_stale_snapshot() {
+        let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("live.txt");
         // Snapshot recorded "OLD"; on disk the file now holds "NEW CONTENT".
@@ -14645,6 +14707,7 @@ mod post_compact_file_restore_tests {
 
     #[tokio::test]
     async fn deleted_file_is_dropped_and_fires_error_event() {
+        let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
         // A path recorded in the snapshot but never written to disk (deleted).
         let missing = dir.path().join("gone.txt");
@@ -14671,6 +14734,7 @@ mod post_compact_file_restore_tests {
 
     #[tokio::test]
     async fn success_and_error_events_fire_per_file() {
+        let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
         let live = dir.path().join("a.txt");
         std::fs::write(&live, "alive").expect("write file");
@@ -14702,6 +14766,7 @@ mod post_compact_file_restore_tests {
 
     #[tokio::test]
     async fn empty_read_state_restores_nothing_and_fires_no_events() {
+        let _rg = registry_guard();
         let dir = tempfile::tempdir().expect("tempdir");
         let map = tool_api::read_file_state::new_read_file_state_map();
         let sink = Arc::new(telemetry::InMemorySink::new());
@@ -14710,6 +14775,80 @@ mod post_compact_file_restore_tests {
         let restored = orch.restore_post_compact_attachments().await;
         assert!(restored.is_empty());
         assert!(restore_names(&sink.events().await).is_empty());
+    }
+
+    // ── P2-12: post-compact SKILL restoration (`rRg`) ─────────────────────────
+
+    #[tokio::test]
+    async fn invoked_skill_reappears_as_attachment_post_compact() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No files read this turn — the skill arm must still run.
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        // A skill was invoked before the compaction (main thread → agentId None).
+        compaction::invoked_skills::register(
+            "deploy",
+            std::path::Path::new("/skills/deploy"),
+            "Deploy guidelines: run the pipeline.",
+            None,
+        );
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert_eq!(restored.len(), 1, "one invoked_skills meta message");
+        let body = restored[0].text_content();
+        assert!(
+            body.contains("The following skills were invoked EARLIER in this session"),
+            "byte-faithful invoked_skills preamble; got: {body}"
+        );
+        assert!(body.contains("### Skill: deploy"));
+        assert!(body.contains("Path: /skills/deploy"));
+        assert!(body.contains("Deploy guidelines: run the pipeline."));
+
+        // The registry SURVIVES compaction (not cleared) — a second restore still
+        // sees the skill (documented no-clear rationale).
+        let again = orch.restore_post_compact_attachments().await;
+        assert_eq!(again.len(), 1, "registry survives compaction");
+        assert!(again[0].text_content().contains("### Skill: deploy"));
+    }
+
+    #[tokio::test]
+    async fn no_invoked_skills_restores_no_skill_message() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        // Empty registry → no skill attachment (and no file snapshot → nothing).
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(restored.is_empty());
+    }
+
+    #[tokio::test]
+    async fn subagent_skill_not_restored_on_main_thread() {
+        let _rg = registry_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let map = tool_api::read_file_state::new_read_file_state_map();
+        let sink = Arc::new(telemetry::InMemorySink::new());
+        let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
+
+        // A skill invoked under a subagent (agentId Some) must NOT surface on the
+        // main-thread (agentId None) restore — `kGo` filters by agentId.
+        compaction::invoked_skills::register(
+            "child-skill",
+            std::path::Path::new("/skills/child"),
+            "child body",
+            Some("agent:child"),
+        );
+
+        let restored = orch.restore_post_compact_attachments().await;
+        assert!(
+            restored.is_empty(),
+            "subagent skill must not restore on the main thread"
+        );
     }
 }
 

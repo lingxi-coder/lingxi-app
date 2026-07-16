@@ -86,10 +86,16 @@ pub struct FileRestoreCandidate {
 
 /// A skill eligible for post-compact restoration.
 ///
-/// Mirrors the `{name, path, content, invokedAt}` rows `Lqn` builds from the
-/// invoked-skill registry (`bin/claude.exe` offset 203002250).
+/// Mirrors the `[key, {skillName, skillPath, content, invokedAt}]` entries `rRg`
+/// iterates from the invoked-skill registry (`bin/claude.exe` v2.1.207 `rRg`).
+/// The `key` is the registry key (`"{agentId}:{name}"`) so `rRg`'s `n_n`
+/// write-backs can target the row this candidate came from.
 #[derive(Debug, Clone)]
 pub struct SkillRestoreCandidate {
+    /// The registry key (`"{agentId}:{name}"`) this candidate came from — the
+    /// target of the `n_n` write-back when the content is truncated or the
+    /// budget overflows.
+    pub key: String,
     /// Skill name.
     pub name: String,
     /// Skill source path.
@@ -98,6 +104,92 @@ pub struct SkillRestoreCandidate {
     pub content: String,
     /// When the skill was last invoked; restoration sorts descending on this.
     pub invoked_at_ms: i64,
+}
+
+/// An already-attached item consulted by `LQn` when deduping a skill's content
+/// against the context already present at the compact boundary.
+///
+/// 1:1 with the two branches of `LQn(e,t)` (`bin/claude.exe` v2.1.207): an
+/// `invoked_skills` attachment already carrying a skill's content
+/// ([`Self::Attachment`]), or a plain message body whose `DYi` text extraction
+/// equals the content ([`Self::Body`]).
+#[derive(Debug, Clone)]
+pub enum AttachedSkillContent {
+    /// Content that already rode in a prior `invoked_skills` attachment.
+    Attachment(String),
+    /// A message body's text (`DYi` of a user-meta message).
+    Body(String),
+}
+
+/// `LQn` classification of a skill's content against already-attached context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillDedup {
+    /// Already present in an `invoked_skills` attachment → skip entirely.
+    Attachment,
+    /// Present as a plain message body → still counts, but never written back.
+    Body,
+    /// Not present anywhere.
+    None,
+}
+
+/// `LQn(alreadyAttached, content)` — is `content` already in context, and how?
+///
+/// 1:1 with `function LQn(e,t){let r=!1;for(let n=e.length-1;n>=0;n--){…}}`
+/// (`bin/claude.exe` v2.1.207): iterate the already-attached items from the end;
+/// a message-body match returns `Body` immediately, while an `invoked_skills`
+/// attachment match sets a flag; if no body match is found the flag decides
+/// between `Attachment` and `None`.
+fn lqn(already_attached: &[AttachedSkillContent], content: &str) -> SkillDedup {
+    let mut attachment_match = false;
+    for item in already_attached.iter().rev() {
+        match item {
+            AttachedSkillContent::Attachment(c) => {
+                if !attachment_match && c == content {
+                    attachment_match = true;
+                }
+            }
+            AttachedSkillContent::Body(c) => {
+                if c == content {
+                    return SkillDedup::Body;
+                }
+            }
+        }
+    }
+    if attachment_match {
+        SkillDedup::Attachment
+    } else {
+        SkillDedup::None
+    }
+}
+
+/// Preamble prepended to the model-visible `invoked_skills` post-compact
+/// attachment body.
+///
+/// Byte-exact with the `case"invoked_skills"` attachment renderer
+/// (`bin/claude.exe` v2.1.207): the `$r({content:…, isMeta:!0})` header, with
+/// the per-skill blocks (`### Skill: …`) appended after a newline by
+/// [`render_invoked_skills_attachment`].
+pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were invoked EARLIER in this session (before the conversation was compacted), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. The \"## Input\" sections below reflect the original arguments from when each skill was first invoked — they are NOT the user's current message. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.";
+
+/// Render restored skills into the model-visible `invoked_skills` attachment
+/// body, or `None` when there is nothing to restore.
+///
+/// 1:1 with the `case"invoked_skills"` renderer (`bin/claude.exe` v2.1.207):
+/// `e.skills.map((n)=>`### Skill: ${n.name}\nPath: ${n.path}\n${n.content}`).join("\n")`
+/// prefixed by [`INVOKED_SKILLS_ATTACHMENT_PREAMBLE`] and a newline. Emitted as a
+/// single `isMeta` user message (the caller wraps it in
+/// [`protocol::ConversationMessage::user_meta`]).
+#[must_use]
+pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<String> {
+    if skills.is_empty() {
+        return None;
+    }
+    let joined = skills
+        .iter()
+        .map(|s| format!("### Skill: {}\nPath: {}\n{}", s.name, s.path.display(), s.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!("{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n{joined}"))
 }
 
 /// A restored file attachment: the path plus the (possibly per-file-capped)
@@ -206,34 +298,74 @@ pub fn restore_post_compact_files(
     budget_post_compact_files(select_post_compact_files(candidates, already_attached))
 }
 
-/// Select and budget the invoked skills to restore after a compaction.
+/// Select and budget the invoked skills to restore after a compaction, applying
+/// the registry write-backs `rRg` performs (`n_n`).
 ///
-/// 1:1 with `Lqn(agentId)` (`bin/claude.exe` offset 203002250): sort invoked
-/// skills by `invokedAt` DESC, truncate each to
-/// [`POST_COMPACT_MAX_TOKENS_PER_SKILL`] (`X9p = 5000`) via
-/// [`truncate_skill_content`], then keep greedily while the running total stays
-/// `<=` [`POST_COMPACT_SKILLS_TOKEN_BUDGET`] (`Q9p = 25000`) — the binary's
-/// `if(n+s>Q9p)return!1; return n+=s,!0` filter.
+/// 1:1 with `rRg(agentId, alreadyAttached)` (`bin/claude.exe` v2.1.207). The
+/// `candidates` come from [`crate::invoked_skills::filter_for_agent`] (`kGo`);
+/// `already_attached` models the boundary context `LQn` dedups against:
+/// 1. Sort by `invokedAt` DESC (`sort(([,s],[,a])=>a.invokedAt-s.invokedAt)`).
+/// 2. Skip cleared/empty rows (`if(!a.content)continue`).
+/// 3. [`lqn`]-classify against `already_attached`: an `"attachment"` match
+///    skips the candidate entirely; a `"body"` match still counts but is never
+///    written back.
+/// 4. Truncate to [`POST_COMPACT_MAX_TOKENS_PER_SKILL`] (`K0g = 5000`) via
+///    [`truncate_skill_content`] (`sRg`).
+/// 5. Keep greedily while the running total stays `<=`
+///    [`POST_COMPACT_SKILLS_TOKEN_BUDGET`] (`Y0g = 25000`). On overflow, clear
+///    the registry row's content (`n_n(key,"")`) unless it was a body match,
+///    then drop the candidate.
+/// 6. On a kept-and-truncated candidate (`u !== content`, not a body match),
+///    persist the truncated content back to the registry (`n_n(key,u)`).
+///
+/// The write-backs mutate the process-global registry via
+/// [`crate::invoked_skills::write_back`] — a no-op for candidates whose key is
+/// not in the registry (e.g. the pure unit tests), so the selection/budget logic
+/// stays testable without a live registry.
 #[must_use]
-pub fn restore_post_compact_skills(candidates: Vec<SkillRestoreCandidate>) -> Vec<RestoredSkill> {
+pub fn restore_post_compact_skills(
+    candidates: Vec<SkillRestoreCandidate>,
+    already_attached: &[AttachedSkillContent],
+) -> Vec<RestoredSkill> {
     let mut sorted = candidates;
     sorted.sort_by(|a, b| b.invoked_at_ms.cmp(&a.invoked_at_ms));
 
     let mut running = 0u64;
     let mut out = Vec::new();
     for skill in sorted {
-        let content = truncate_skill_content(&skill.content, POST_COMPACT_MAX_TOKENS_PER_SKILL);
-        let cost = estimate_content_tokens(&content);
-        // `if (n + s > Q9p) return false;` — DROP on overflow (do not truncate
-        // to fit), matching the binary.
-        if running.saturating_add(cost) > POST_COMPACT_SKILLS_TOKEN_BUDGET {
+        // `if(!a.content)continue;` — skip cleared/empty registry rows.
+        if skill.content.is_empty() {
             continue;
         }
+        // `let l=LQn(t,a.content);` — dedup against the boundary context.
+        let dedup = lqn(already_attached, &skill.content);
+        // `if(l==="attachment")continue;` — already in an attachment → skip.
+        if dedup == SkillDedup::Attachment {
+            continue;
+        }
+        // `let c=l==="body"` — a body match still counts but never writes back.
+        let is_body = dedup == SkillDedup::Body;
+        // `u=sRg(a.content,K0g)` — per-skill truncation.
+        let truncated = truncate_skill_content(&skill.content, POST_COMPACT_MAX_TOKENS_PER_SKILL);
+        // `d=cy(u)` — token estimate of the truncated content.
+        let cost = estimate_content_tokens(&truncated);
+        // `if(n+d>Y0g){if(!c)n_n(s,"");continue}` — budget overflow: clear the
+        // registry content (unless a body match) and DROP (do not truncate-to-fit).
+        if running.saturating_add(cost) > POST_COMPACT_SKILLS_TOKEN_BUDGET {
+            if !is_body {
+                crate::invoked_skills::write_back(&skill.key, "");
+            }
+            continue;
+        }
+        // `n+=d;` then `if(!c&&u!==a.content)n_n(s,u)` — persist truncation.
         running = running.saturating_add(cost);
+        if !is_body && truncated != skill.content {
+            crate::invoked_skills::write_back(&skill.key, &truncated);
+        }
         out.push(RestoredSkill {
             name: skill.name,
             path: skill.path,
-            content,
+            content: truncated,
         });
     }
     out
@@ -386,7 +518,10 @@ impl PostCompactBuilder {
                 content: summary_text.to_string(),
             }],
             files: restore_post_compact_files(file_candidates, already_attached),
-            skills: restore_post_compact_skills(skill_candidates),
+            // Skill dedup has no boundary context in the pure builder shape
+            // (`already_attached = &[]`); the production path threads it in
+            // `rRg`. The builder has no production callers (see module docs).
+            skills: restore_post_compact_skills(skill_candidates, &[]),
         }
     }
 }
@@ -459,6 +594,10 @@ mod tests {
 
     fn skill(name: &str, path: &str, content: &str, invoked: i64) -> SkillRestoreCandidate {
         SkillRestoreCandidate {
+            // Namespace the pure-test keys so their (no-op) `write_back` calls
+            // can never collide with the real `":{name}"` keys the
+            // `invoked_skills` registry tests register in the same test binary.
+            key: format!("pt:{name}"),
             name: name.to_string(),
             path: PathBuf::from(path),
             content: content.to_string(),
@@ -627,7 +766,7 @@ mod tests {
             skill("A", "/a", &"x".repeat(40_000), 2),
             skill("B", "/b", "short", 5),
         ];
-        let restored = restore_post_compact_skills(candidates);
+        let restored = restore_post_compact_skills(candidates, &[]);
         // B invoked later → first; A capped + appended marker.
         assert_eq!(restored[0].name, "B");
         assert_eq!(restored[0].content, "short");
@@ -649,12 +788,75 @@ mod tests {
                 )
             })
             .collect();
-        let restored = restore_post_compact_skills(candidates);
+        let restored = restore_post_compact_skills(candidates, &[]);
         assert_eq!(
             restored.len(),
             5,
             "5 * ~5_000 = 25_000 <= 25_000; 6th drops"
         );
+    }
+
+    // --- P2-12 rRg semantics: dedup + registry write-back ------------------- //
+
+    #[test]
+    fn restore_skills_skips_empty_content_rows() {
+        // `if(!a.content)continue;` — a cleared registry row is skipped.
+        let candidates = vec![
+            skill("cleared", "/c", "", 5),
+            skill("live", "/l", "body", 4),
+        ];
+        let restored = restore_post_compact_skills(candidates, &[]);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].name, "live");
+    }
+
+    #[test]
+    fn restore_skills_lqn_attachment_match_skips() {
+        // A candidate whose content already rode in an `invoked_skills`
+        // attachment is skipped entirely (`if(l==="attachment")continue`).
+        let candidates = vec![
+            skill("dup", "/d", "already attached", 5),
+            skill("fresh", "/f", "fresh body", 4),
+        ];
+        let already = [AttachedSkillContent::Attachment("already attached".into())];
+        let restored = restore_post_compact_skills(candidates, &already);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].name, "fresh");
+    }
+
+    #[test]
+    fn restore_skills_lqn_body_match_still_restores() {
+        // A body match still restores (counts toward the budget), unlike an
+        // attachment match which skips. (The registry write-back distinction is
+        // asserted in `invoked_skills` where the global registry is available.)
+        let candidates = vec![skill("s", "/s", "shared body", 5)];
+        let already = [AttachedSkillContent::Body("shared body".into())];
+        let restored = restore_post_compact_skills(candidates, &already);
+        assert_eq!(restored.len(), 1, "body match restores; only attachment skips");
+        assert_eq!(restored[0].content, "shared body");
+    }
+
+    #[test]
+    fn render_invoked_skills_attachment_shape_is_byte_faithful() {
+        let restored = vec![
+            RestoredSkill {
+                name: "deploy".into(),
+                path: PathBuf::from("/skills/deploy"),
+                content: "Deploy guidelines".into(),
+            },
+            RestoredSkill {
+                name: "build".into(),
+                path: PathBuf::from("/skills/build"),
+                content: "Build guidelines".into(),
+            },
+        ];
+        let body = render_invoked_skills_attachment(&restored).expect("non-empty");
+        let expected = format!(
+            "{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n### Skill: deploy\nPath: /skills/deploy\nDeploy guidelines\n### Skill: build\nPath: /skills/build\nBuild guidelines"
+        );
+        assert_eq!(body, expected);
+        // Empty → None (no attachment).
+        assert!(render_invoked_skills_attachment(&[]).is_none());
     }
 
     #[test]

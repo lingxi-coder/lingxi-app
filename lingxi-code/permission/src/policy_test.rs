@@ -3442,6 +3442,36 @@ mod tests {
         }
     }
 
+    // ---- AUTO-06: read-time dangerous-allow filter (rce) ------------------
+
+    /// A dangerous allow rule present in the bucket while Auto mode is active is
+    /// ignored at authorize time (the `rce` read-time filter via
+    /// `rule_is_available_in_mode`), even without a mode-transition strip.
+    #[test]
+    fn auto06_dangerous_allow_rule_filtered_at_read_time() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(python:*)"] } }"#,
+            PermissionMode::Auto,
+        );
+        // Must NOT allow via the (dangerous) matched rule.
+        assert!(!matches!(
+            p.authorize("Bash", &bash("python evil.py")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::MatchedRule { .. },
+                ..
+            }
+        ));
+        // Control: in a non-auto mode the same rule DOES allow it.
+        let p2 = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(python:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p2.authorize("Bash", &bash("python evil.py")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
     #[test]
     fn stringify_primitive_semantics() {
         assert_eq!(

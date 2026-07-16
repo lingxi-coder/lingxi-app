@@ -930,6 +930,14 @@ impl PermissionPolicy {
                     &rule.value.tool_name,
                     &rule.value.rule_content,
                 ) {
+                    // AUTO-06: mirror CC's per-rule strip log
+                    // `Ignoring dangerous permission ${ruleDisplay} from
+                    // ${sourceDisplay} (bypasses classifier)` (`SX`).
+                    tracing::debug!(
+                        "Ignoring dangerous permission {} from {} (bypasses classifier)",
+                        rule.value.to_rule_string(),
+                        crate::shadow::format_source(source),
+                    );
                     self.stripped_dangerous.push(rule);
                     self.stripped_positions.push((source, orig_idx));
                 } else {

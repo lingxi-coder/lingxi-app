@@ -8,24 +8,36 @@ scoped out, each with what building it would take. None block the shipped work.
 
 ---
 
-## 1. `--tmux=<mode>` inner string not interpreted (presence-only gating)
+## 1. `--tmux=<mode>` inner string — ✅ RESOLVED (`a69b9fb44`, 2026-07-16)
 
-**What ships:** `--tmux` creates a detached tmux session iff the flag is present.
-The flag's *value* (`--tmux` native vs `--tmux=classic`, 206's mode string) is
-**threaded through config but not acted on** — any present value gates creation
-identically.
+**Correction to the original scope below:** binary analysis found 206's "iTerm2
+native panes" (the thing the `--tmux` help promises) is **vaporware** — `Dor()`
+(`isWorktreeModeEnabled`) is a stubbed `return !0`, and the pane/split-window
+code is all inside a dead `if(!1)` demo block. **Both** `--tmux` and
+`--tmux=classic` do the identical detached `a4i` create we already shipped.
 
-**Why deferred:** 206's classic-vs-native distinction changes terminal
-*attach/inline* behavior, which is a live-terminal UX concern with no unit-test
-surface. The session-creation half (the parity-critical part) is byte-faithful.
+The *real* native-vs-classic difference (binary @230041975,
+`re = Dor() && a.tmux===!0`) is a **pre-flight validation asymmetry**, now
+implemented:
+- **Bare `--tmux`** (native, `tmux_launch == Some("")`) hard-checks — before
+  creating the worktree — not-Windows (`--tmux is not supported on Windows`) and
+  tmux-installed via `tmux -V` (`i4i()`), erroring with the platform install
+  hint (`s4i()`: brew / apt|dnf / WSL|Cygwin / generic).
+- **`--tmux=classic`** skips the native pre-flight; a missing tmux degrades to
+  the existing non-fatal create-session warning.
 
-**To build:** interpret `tmux_launch: Option<String>`'s inner value in
-`engine-desktop`'s `apply_worktree_launch` — extract 206's mode branch (search
-the binary near the `--tmux` option handler + `createTmuxSessionForWorktree`
-launch path @216368487/@216369152, which does `tmux new-session … -- <execPath>
-<args>` for the inline/attach variant vs the plain detached `-d` session). Wire
-the two argv shapes. **Needs live-tmux manual QA** — not unit-testable.
-**Est: small-medium**, mostly QA.
+New `platform_posix::worktree_tmux::{tmux_is_installed, tmux_install_hint}`
+(byte-faithful to `i4i`/`s4i`), `BuildError::{TmuxNotSupportedOnWindows,
+TmuxNotInstalled}`. Review APPROVE (opus, byte-exact). Windows-reject branch
+(`cfg!(windows)`) untestable on a non-Windows host.
+
+<details><summary>Original (mis-scoped) note — kept for the record</summary>
+
+Originally documented as "interpret the mode string → two argv shapes / attach
+behavior, needs live-tmux QA." That was wrong: there are no two argv shapes (the
+inline/attach `if(!1)` code is dead), and the mode difference is validation, not
+session-creation. Resolved above.
+</details>
 
 ## 2. `kAs` missing-original-cwd fallback (ExitWorktree message)
 
@@ -80,3 +92,4 @@ green-lit.
 | `ky()` refinement | `2bff1578d` |
 | WebFetch UTF-16 fast-path | `7a8fce999` |
 | **ExitWorktree model message = 206 `data.message`** (fixed mis-ported TUI-render surface) | `ae1c7ebde` |
+| **Residual #1: `--tmux` native-mode pre-flight** (not-Windows + tmux-installed for bare `--tmux`; classic skips) | `a69b9fb44` |

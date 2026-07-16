@@ -58,6 +58,15 @@ pub struct OrchestratorCwdChangedFirer {
     /// claude-code, where `setCwdState(new)` (`Shell.ts:409`) updates the single
     /// global cwd every later `getCwd()` reads.
     current_cwd: Arc<std::sync::Mutex<PathBuf>>,
+    /// Optional file-changed-watcher rebinder — the watcher-rebind half of
+    /// claude-code's `onCwdChanged` (function `g`, `fileChangedWatcher.ts`).
+    /// After the `CwdChanged` hooks fire, the watcher re-resolves its
+    /// `FileChanged` matchers against the new cwd (REPLACING its watch set) and
+    /// restarts. Default `None` (mobile, or a desktop session with no
+    /// `FileChanged` hooks — the watcher only exists when those hooks do), which
+    /// makes the rebind a strict no-op. The `CwdChanged` hooks themselves are
+    /// fired ABOVE, so this MUST NOT re-fire them (no double-fire).
+    watcher_rebinder: hooks::OptionalWatcherRebinder,
 }
 
 impl OrchestratorCwdChangedFirer {
@@ -77,7 +86,19 @@ impl OrchestratorCwdChangedFirer {
             cwd,
             transcript_path,
             current_cwd,
+            watcher_rebinder: None,
         }
+    }
+
+    /// Attach the file-changed-watcher rebinder (the watcher-rebind half of
+    /// claude-code's `onCwdChanged`). The composition root injects this so that,
+    /// after a `cd` fires the `CwdChanged` hooks, the watcher re-resolves its
+    /// `FileChanged` matchers against the new cwd and restarts. Left unset
+    /// (mobile / no `FileChanged` hooks), the rebind is a strict no-op.
+    #[must_use]
+    pub fn with_watcher_rebinder(mut self, rebinder: Arc<dyn hooks::WatcherRebinder>) -> Self {
+        self.watcher_rebinder = Some(rebinder);
+        self
     }
 }
 
@@ -90,6 +111,10 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
         if let Ok(mut g) = self.current_cwd.lock() {
             g.clone_from(&fire.new);
         }
+        // Retained for the watcher-rebind step below (the hook `event` moves
+        // `fire.new`); this is the cwd the file-changed watcher re-resolves its
+        // `FileChanged` matchers against.
+        let new_cwd = fire.new.clone();
         // Map the fire's old/new shell cwd onto the `HookEvent::CwdChanged`
         // variant (`old` / `new`); the envelope builder serializes these as the
         // wire `old_cwd` / `new_cwd` (executor.rs build_lifecycle_envelope_body).
@@ -111,6 +136,15 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
         // caller's cwd update. The aggregate result is intentionally dropped —
         // `CwdChanged` is observational.
         let _ = self.hooks.execute(event, ctx).await;
+        // Watcher-rebind half of claude-code's `onCwdChanged` (function `g`):
+        // AFTER the `CwdChanged` hooks fire, ask the file-changed watcher to
+        // re-resolve its `FileChanged` matchers against the new cwd and restart
+        // (`t=S ... let x=await E3r(_,S); r=x.watchPaths ... if(o)m()`). The
+        // watcher itself guards an unchanged cwd (`if(_===S)return`), so we fire
+        // unconditionally. No-op when unset (mobile / no `FileChanged` hooks).
+        if let Some(rebinder) = &self.watcher_rebinder {
+            rebinder.rebind(new_cwd);
+        }
     }
 }
 
@@ -136,6 +170,66 @@ mod tests {
             PathBuf::from("/work/.t.jsonl"),
             Arc::new(Mutex::new(PathBuf::from("/work"))),
         );
+        firer
+            .fire(CwdChangedFire {
+                old: PathBuf::from("/work"),
+                new: PathBuf::from("/work/sub"),
+            })
+            .await;
+    }
+
+    /// Records every `new_cwd` a rebind is asked to forward — proves the firer
+    /// signals the file-changed watcher's rebind seam with the post-`cd` dir.
+    struct RecordingRebinder {
+        seen: Arc<Mutex<Vec<PathBuf>>>,
+    }
+    impl hooks::WatcherRebinder for RecordingRebinder {
+        fn rebind(&self, new_cwd: PathBuf) {
+            self.seen.lock().unwrap().push(new_cwd);
+        }
+    }
+
+    #[tokio::test]
+    async fn fire_forwards_new_cwd_to_watcher_rebinder() {
+        // The watcher-rebind half of `onCwdChanged`: an injected rebinder must
+        // receive `fire.new` so the file-changed watcher re-resolves its
+        // matchers against the new cwd. (The `CwdChanged` hooks are fired
+        // separately, above the rebind — this seam must NOT re-fire them.)
+        let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let rebinder = Arc::new(RecordingRebinder { seen: seen.clone() });
+        let firer = OrchestratorCwdChangedFirer::new(
+            noop_hook_executor(),
+            PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
+            Arc::new(Mutex::new(PathBuf::from("/work"))),
+        )
+        .with_watcher_rebinder(rebinder);
+        firer
+            .fire(CwdChangedFire {
+                old: PathBuf::from("/work"),
+                new: PathBuf::from("/work/sub"),
+            })
+            .await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![PathBuf::from("/work/sub")],
+            "fire must forward fire.new to the watcher rebinder"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_without_rebinder_never_rebinds() {
+        // Default firer (no rebinder wired — mobile / no FileChanged hooks): the
+        // fire is a clean no-op and never panics for the missing rebind seam.
+        // (The `CwdChanged` hook still fires — covered by
+        // `fire_maps_to_delivered_cwd_changed_event`.)
+        let firer = OrchestratorCwdChangedFirer::new(
+            noop_hook_executor(),
+            PathBuf::from("/work"),
+            PathBuf::from("/work/.t.jsonl"),
+            Arc::new(Mutex::new(PathBuf::from("/work"))),
+        );
+        assert!(firer.watcher_rebinder.is_none(), "default firer has no rebinder");
         firer
             .fire(CwdChangedFire {
                 old: PathBuf::from("/work"),

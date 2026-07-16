@@ -5908,13 +5908,24 @@ pub async fn build(
     // project-root cron file via the live cwd); the original cell is moved into
     // `.with_current_cwd(...)` below.
     let current_cwd_cell_for_snapshot = current_cwd_cell.clone();
+    // Watcher-rebind half of claude-code's `onCwdChanged`: a late-bound rebinder
+    // handed to the `CwdChanged` firer NOW, its inner cell filled after the
+    // file-changed watcher spawns below (the firer is built before the watcher).
+    // On a mid-session `cd` the firer signals this to re-resolve the `FileChanged`
+    // matchers against the new cwd and restart. Stays a no-op when no watcher
+    // spawns (no `FileChanged` hooks). The clone the firer holds shares the same
+    // cell as `file_changed_watcher_rebinder`, so the later `set` reaches it.
+    let file_changed_watcher_rebinder = file_changed_watch::DeferredWatcherRebinder::new();
     let cwd_changed_firer: hooks::OptionalCwdChangedFirer =
-        Some(Arc::new(orchestrator::OrchestratorCwdChangedFirer::new(
-            hooks.clone(),
-            cwd.clone(),
-            main_transcript_path.clone(),
-            current_cwd_cell.clone(),
-        )));
+        Some(Arc::new(
+            orchestrator::OrchestratorCwdChangedFirer::new(
+                hooks.clone(),
+                cwd.clone(),
+                main_transcript_path.clone(),
+                current_cwd_cell.clone(),
+            )
+            .with_watcher_rebinder(Arc::new(file_changed_watcher_rebinder.clone())),
+        ));
     // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
     // `DesktopRuntime` so the bridge composition root fills it once the
     // per-connection queue + spawner exist (`boot::assemble`).
@@ -6794,6 +6805,14 @@ pub async fn build(
             }
         }
     };
+    // Fill the `CwdChanged` firer's deferred rebinder cell now that the watcher
+    // exists (it spawns AFTER the firer is built). On a mid-session `cd` the
+    // firer rebinds this watcher — the watcher-rebind half of `onCwdChanged`.
+    // An empty handle (no `FileChanged` hooks / no resolved paths) yields no
+    // rebinder, so the cell stays unset and the rebind remains a strict no-op.
+    if let Some(rebinder) = file_changed_watcher.rebinder() {
+        file_changed_watcher_rebinder.set(rebinder);
+    }
 
     // Phase 2a §6.2: `provider_availability` is computed EARLY in build() (the
     // connected-provider default-model fallback consults it before the

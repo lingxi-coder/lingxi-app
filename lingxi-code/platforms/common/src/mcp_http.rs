@@ -99,6 +99,13 @@ where
 /// transport specs now carry are accepted (header order is irrelevant to the
 /// emitted HTTP request).
 ///
+/// `fetch_timeout` bounds the time-to-response-*headers* of each outbound POST
+/// (claude-code `jHs`/`YJr` — the fetch resolves once headers arrive and the
+/// timer is cleared, so a streaming `text/event-stream` body is read afterwards
+/// WITHOUT this bound). `None` disables the bound (byte-identical to the prior
+/// behavior). Callers pass `mcp::client::mcp_http_fetch_timeout_for(..)` (default
+/// `60_000`ms). A POST that exceeds it is dropped like any other POST failure.
+///
 /// # Errors
 ///
 /// - [`HttpConnectError::Transport`] if reqwest client construction fails.
@@ -108,6 +115,7 @@ pub async fn connect_http<H>(
     url: &str,
     auth_token: Option<&str>,
     extra_headers: &H,
+    fetch_timeout: Option<std::time::Duration>,
 ) -> Result<Connection, HttpConnectError>
 where
     H: Clone + Send + 'static,
@@ -129,6 +137,7 @@ where
     let post_url = url.to_string();
     let post_auth = auth_token.map(str::to_string);
     let post_extra = extra_headers.clone();
+    let post_fetch_timeout = fetch_timeout;
 
     // MCP Streamable HTTP session ID: captured from the `mcp-session-id`
     // response header on the initialize response and included as
@@ -150,13 +159,21 @@ where
                 }
             };
 
-            let response = match client
-                .post(&post_url)
-                .headers(headers)
-                .json(&frame)
-                .send()
-                .await
-            {
+            // `jHs`/`YJr`: the fetch timeout bounds only the time-to-response
+            // (`.send()` resolves on headers, like `await fetch(...)`); once we
+            // hold the response the streaming SSE body is read without this bound.
+            let send_fut = client.post(&post_url).headers(headers).json(&frame).send();
+            let sent = match post_fetch_timeout {
+                Some(t) => match tokio::time::timeout(t, send_fut).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        tracing::warn!("mcp http: POST timed out awaiting response headers");
+                        continue;
+                    }
+                },
+                None => send_fut.await,
+            };
+            let response = match sent {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "mcp http: POST failed");

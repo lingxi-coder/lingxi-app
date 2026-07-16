@@ -108,7 +108,7 @@ impl McpTransport for WindowsMcpTransport {
             }
             McpTransportSpec::Http { url, headers, .. } => {
                 // See `Sse` arm — OAuth + per-request headers_helper deferred.
-                let _conn = connect_http(url, None, headers)
+                let _conn = connect_http(url, None, headers, None)
                     .await
                     .map_err(McpError::from)?;
                 self.insert(id, WindowsMcpConnection::Http);

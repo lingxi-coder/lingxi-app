@@ -549,6 +549,9 @@ impl McpRegistry {
         // down (parity 2.1.207 P2-01).
         let config_timeout_ms = config.timeout_ms;
         let config_always_load = config.always_load;
+        // Transport kind feeds the `GLd` idle-timeout default (stdio 30 min /
+        // remote 5 min / in-process none) on the built `McpClient`.
+        let config_transport_kind = config.spec.transport_kind();
         self.connections.write().await.insert(
             server_name.clone(),
             McpConnectionState::Connected {
@@ -595,7 +598,10 @@ impl McpRegistry {
                     // with `request_timeout_ms`) into the BHs per-call resolver,
                     // and the server-level `alwaysLoad` flag into each listed
                     // tool's `always_load` bit (parity 2.1.207 P2-01).
-                    .with_config_options(config_timeout_ms, config_always_load),
+                    .with_config_options(config_timeout_ms, config_always_load)
+                    // Transport kind → `GLd` idle-timeout default (parity 2.1.207
+                    // P2-01 remainder).
+                    .with_transport_kind(config_transport_kind),
                 );
                 self.register_client(&server_name, client).await;
             }

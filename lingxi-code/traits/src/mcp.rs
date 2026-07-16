@@ -126,6 +126,22 @@ impl McpTransportSpec {
             Self::SdkControl { .. } => "sdk-control",
         }
     }
+
+    /// Transport-kind discriminator ([`McpTransportKind`]) for this spec. Used by
+    /// the MCP client to pick the `GLd` idle-timeout default (stdio / remote /
+    /// in-process) — see `mcp::client::mcp_tool_idle_timeout_for`.
+    #[must_use]
+    pub fn transport_kind(&self) -> McpTransportKind {
+        match self {
+            Self::Stdio { .. } => McpTransportKind::Stdio,
+            Self::Sse { .. } => McpTransportKind::Sse,
+            Self::Http { .. } => McpTransportKind::Http,
+            Self::WebSocket { .. } => McpTransportKind::WebSocket,
+            Self::InProcess { .. } => McpTransportKind::InProcess,
+            Self::SseIde { .. } => McpTransportKind::SseIde,
+            Self::SdkControl { .. } => McpTransportKind::SdkControl,
+        }
+    }
 }
 
 /// OAuth 2.1 PKCE configuration carried in [`McpTransportSpec`].

@@ -373,9 +373,18 @@ impl McpTransport for PosixMcpTransport {
                 // See `Sse` arm — retain the `Connection`; OAuth + per-request
                 // headers_helper deferred (M2-06).
                 let connection = Arc::new(
-                    connect_http(url, None, headers)
-                        .await
-                        .map_err(McpError::from)?,
+                    // `jHs`: bound each POST's time-to-response-headers at the
+                    // env/default fetch timeout (config `timeout` is carried on
+                    // `McpServerConfig`, above the transport, so the env/60_000ms
+                    // default applies here — parity 2.1.207 P2-01 remainder).
+                    connect_http(
+                        url,
+                        None,
+                        headers,
+                        Some(mcp::client::mcp_http_fetch_timeout_for(None)),
+                    )
+                    .await
+                    .map_err(McpError::from)?,
                 );
                 connection
                     .register_handler("ping", Arc::new(PingHandler))

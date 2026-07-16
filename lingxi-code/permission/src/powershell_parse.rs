@@ -351,31 +351,164 @@ pub trait PwshParser: Send + Sync {
     fn parse(&self, command: &str) -> ParseResult;
 }
 
-/// The production [`PwshParser`]: resolve `pwsh` (then `powershell`), run the
-/// embedded parse script via `-EncodedCommand`, and transform the JSON AST. Any
-/// failure (executable absent, non-zero exit, unparsed) → `valid=false`
-/// (passthrough). Wire this at the engine boot site on hosts that have
-/// PowerShell; leaving the gate's parser `None` keeps containment inert.
+/// Maximum command byte length the pwsh parser will attempt (claude-code
+/// `ZKi=NAg=4500`): a longer command passes through WITHOUT containment rather
+/// than spawning `pwsh` needlessly (`Buffer.byteLength(e,"utf8")>ZKi`).
+pub const PWSH_MAX_COMMAND_BYTES: usize = 4500;
+
+/// Number of spawn attempts before giving up (claude-code `xAg=2`).
+const PWSH_PARSE_ATTEMPTS: usize = 2;
+
+/// Default per-attempt `pwsh` timeout in ms (claude-code `AAg=5000`), overridable
+/// by `LINGXI_PWSH_PARSE_TIMEOUT_MS` / `CLAUDE_CODE_PWSH_PARSE_TIMEOUT_MS`.
+const PWSH_PARSE_DEFAULT_TIMEOUT_MS: u64 = 5000;
+
+/// Whether `command` contains a runtime-resolved `` `u{HEX} `` codepoint escape
+/// (claude-code `` /`u\{[0-9A-Fa-f]/ ``): a backtick, `u`, `{`, then a hex digit.
+/// Such a command cannot be statically validated and passes through.
+#[must_use]
+pub fn has_unicode_codepoint_escape(command: &str) -> bool {
+    let b = command.as_bytes();
+    let mut i = 0;
+    while i + 4 <= b.len() {
+        if b[i] == b'`' && b[i + 1] == b'u' && b[i + 2] == b'{' && b[i + 3].is_ascii_hexdigit() {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The GAg pre-check (claude-code): return `Some(passthrough)` when the command
+/// exceeds the byte cap or contains a `` `u{HEX} `` escape — in both cases
+/// claude-code returns an invalid parse (passthrough) WITHOUT spawning `pwsh`.
+#[must_use]
+pub fn parse_precheck(command: &str) -> Option<ParseResult> {
+    if command.len() > PWSH_MAX_COMMAND_BYTES {
+        return Some(ParseResult::default());
+    }
+    if has_unicode_codepoint_escape(command) {
+        return Some(ParseResult::default());
+    }
+    None
+}
+
+/// The per-attempt `pwsh` timeout (claude-code `RAg`): env override
+/// (`LINGXI_PWSH_PARSE_TIMEOUT_MS`, then `CLAUDE_CODE_PWSH_PARSE_TIMEOUT_MS`) when
+/// it parses to a positive integer, else [`PWSH_PARSE_DEFAULT_TIMEOUT_MS`].
+fn pwsh_parse_timeout() -> std::time::Duration {
+    let ms = ["LINGXI_PWSH_PARSE_TIMEOUT_MS", "CLAUDE_CODE_PWSH_PARSE_TIMEOUT_MS"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&t| t > 0)
+        .unwrap_or(PWSH_PARSE_DEFAULT_TIMEOUT_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Outcome of a bounded `pwsh` run for one executable name.
+enum PwshRun {
+    /// Exited 0; the captured stdout.
+    Success(Vec<u8>),
+    /// The executable was not found on PATH — the caller tries the next name.
+    NotFound,
+    /// Spawned but failed (non-zero exit, timeout after all attempts, or I/O).
+    Failed,
+}
+
+/// Spawn `exe` with the encoded command, draining stdout on a background thread
+/// (so a full pipe cannot deadlock the child) and killing the child if it does
+/// not exit within `timeout`. Retries up to [`PWSH_PARSE_ATTEMPTS`] on
+/// timeout/failure; a first-attempt "not found" returns immediately.
+fn run_pwsh(exe: &str, encoded: &str, timeout: std::time::Duration) -> PwshRun {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    for _ in 0..PWSH_PARSE_ATTEMPTS {
+        let spawned = Command::new(exe)
+            .args(PWSH_ARGS)
+            .arg(encoded)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(c) => c,
+            // Executable absent → let the caller try the next name (matches the
+            // port's prior pwsh→powershell fallback). Never retried.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PwshRun::NotFound,
+            Err(_) => return PwshRun::Failed,
+        };
+        // Drain stdout on a thread so the child can't block on a full pipe.
+        let reader = child.stdout.take().map(|mut out| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = out.read_to_end(&mut buf);
+                buf
+            })
+        });
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let buf = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+                    if status.success() {
+                        return PwshRun::Success(buf);
+                    }
+                    // Non-zero exit → retry (next loop iteration).
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = reader.and_then(|r| r.join().ok());
+                        // Timed out → retry.
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.and_then(|r| r.join().ok());
+                    return PwshRun::Failed;
+                }
+            }
+        }
+    }
+    PwshRun::Failed
+}
+
+/// The production [`PwshParser`]: pre-check the byte cap and `` `u{HEX} `` escape,
+/// resolve `pwsh` (then `powershell`), run the embedded parse script via
+/// `-EncodedCommand` under a timeout with a 2-attempt retry, and transform the
+/// JSON AST. Any failure (oversized command, `u{}` escape, executable absent,
+/// timeout, non-zero exit, unparsed) → `valid=false` (passthrough). Wire this at
+/// the engine boot site on hosts that have PowerShell; leaving the gate's parser
+/// `None` keeps containment inert.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemPwshParser;
 
 impl PwshParser for SystemPwshParser {
     fn parse(&self, command: &str) -> ParseResult {
+        // GAg pre-checks: oversized command / `u{HEX}` escape → passthrough, no spawn.
+        if let Some(passthrough) = parse_precheck(command) {
+            return passthrough;
+        }
         let script = build_pwsh_script(command);
         let encoded = encode_for_pwsh(&script);
+        let timeout = pwsh_parse_timeout();
         for exe in ["pwsh", "powershell"] {
-            match std::process::Command::new(exe)
-                .args(PWSH_ARGS)
-                .arg(&encoded)
-                .output()
-            {
-                Ok(out) if out.status.success() => {
-                    return parse_ps_ast_json(&String::from_utf8_lossy(&out.stdout));
+            match run_pwsh(exe, &encoded, timeout) {
+                PwshRun::Success(stdout) => {
+                    return parse_ps_ast_json(&String::from_utf8_lossy(&stdout));
                 }
-                // Non-zero exit from a resolved pwsh → treat as unparsed.
-                Ok(_) => return ParseResult::default(),
-                // Executable not found on PATH → try the next name.
-                Err(_) => {}
+                // Resolved but failed/timed out after all attempts → passthrough.
+                PwshRun::Failed => return ParseResult::default(),
+                // Executable not found → try the next name.
+                PwshRun::NotFound => {}
             }
         }
         ParseResult::default()

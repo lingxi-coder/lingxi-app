@@ -207,6 +207,48 @@ fn transform_module_qualifier_and_dash_normalization() {
     }
 }
 
+// ── PERM-PS-PARSE-07: parse-layer hardening (byte cap, u{} refusal) ──
+
+#[test]
+fn precheck_rejects_oversized_command() {
+    // 4500 bytes is allowed; 4501 passes through without spawning pwsh.
+    let ok = "a".repeat(PWSH_MAX_COMMAND_BYTES);
+    assert!(parse_precheck(&ok).is_none());
+    let too_long = "a".repeat(PWSH_MAX_COMMAND_BYTES + 1);
+    assert_eq!(parse_precheck(&too_long), Some(ParseResult::default()));
+    // Byte-length, not char count: a multibyte char pushes the boundary in bytes.
+    let multibyte = "é".repeat(PWSH_MAX_COMMAND_BYTES); // 2 bytes each → >4500 bytes
+    assert_eq!(parse_precheck(&multibyte), Some(ParseResult::default()));
+}
+
+#[test]
+fn precheck_refuses_unicode_codepoint_escape() {
+    assert!(has_unicode_codepoint_escape("Write-Output `u{1F600}"));
+    assert!(has_unicode_codepoint_escape("`u{41}"));
+    assert!(has_unicode_codepoint_escape("prefix `u{aB}cd"));
+    // Not an escape: no hex digit after `{`, or missing pieces.
+    assert!(!has_unicode_codepoint_escape("`u{ }"));
+    assert!(!has_unicode_codepoint_escape("`u{"));
+    assert!(!has_unicode_codepoint_escape("u{41}"));
+    assert!(!has_unicode_codepoint_escape("Get-Content notes.txt"));
+    // The pre-check turns a u{} command into a passthrough.
+    assert_eq!(
+        parse_precheck("Remove-Item /etc `u{263A}"),
+        Some(ParseResult::default())
+    );
+}
+
+#[test]
+fn system_parser_passthrough_on_oversized_and_escape() {
+    // These return before any spawn, so they are testable without pwsh installed.
+    let parser = SystemPwshParser;
+    assert_eq!(
+        parser.parse(&"x".repeat(PWSH_MAX_COMMAND_BYTES + 1)),
+        ParseResult::default()
+    );
+    assert_eq!(parser.parse("echo `u{263A}"), ParseResult::default());
+}
+
 #[test]
 fn transform_nested_commands() {
     // A statement with nestedCommands (e.g. inside a script block).

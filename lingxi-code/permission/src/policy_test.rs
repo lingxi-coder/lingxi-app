@@ -3001,4 +3001,85 @@ mod tests {
             "single-quoted literal must not trigger the forced-ask; reason: {reason_text}"
         );
     }
+
+    // ---- GLOB-01: tool-wide DENY/ASK glob + MCP tool-part glob -------------
+
+    /// A tool-wide DENY rule whose name contains `*` glob-matches multiple tools
+    /// (claude-code `h8` passes `globMatching:!0`; `Web*` blocks WebFetch and
+    /// WebSearch).
+    #[test]
+    fn glob_deny_rule_matches_multiple_tools() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Web*"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &serde_json::json!({ "url": "https://x.com" })),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("WebSearch", &serde_json::json!({ "query": "q" })),
+            PermissionResult::Deny { .. }
+        ));
+        // Non-matching tool is unaffected.
+        assert!(!matches!(
+            p.authorize("Read", &serde_json::json!({ "file_path": "/proj/a" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// A tool-wide ASK rule globs too (`kqe`, `globMatching:!0`).
+    #[test]
+    fn glob_ask_rule_matches_multiple_tools() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Web*"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &serde_json::json!({ "url": "https://x.com" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    /// The ALLOW walk keeps default opts (`nes`, no glob): a `Web*` ALLOW rule
+    /// does NOT allow WebFetch — it falls through to the Default-mode ask.
+    #[test]
+    fn glob_allow_rule_does_not_match() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Web*"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &serde_json::json!({ "url": "https://x.com" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    /// An MCP tool-part glob deny (`mcp__server__foo*`) blocks a server tool
+    /// whose tool part glob-matches.
+    #[test]
+    fn glob_deny_matches_mcp_tool_part() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["mcp__server__foo*"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("mcp__server__footool", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        // A different tool of the same server does NOT match the glob.
+        assert!(!matches!(
+            p.authorize("mcp__server__bar", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn glob_name_matches_is_anchored_and_dotall() {
+        assert!(glob_name_matches("Web*", "WebFetch"));
+        assert!(glob_name_matches("*Fetch", "WebFetch"));
+        assert!(glob_name_matches("*", "anything"));
+        assert!(!glob_name_matches("Web*", "MyWebFetch")); // anchored at start
+        assert!(!glob_name_matches("Web", "WebFetch")); // exact, no wildcard
+    }
 }

@@ -964,7 +964,7 @@ impl PermissionPolicy {
             // `toolMatchesRule`); content rules keep the phase-2 exact
             // tool-name match.
             return if rule.value.rule_content.is_none() {
-                tool_wide_name_matches(&rule.value.tool_name, tool_name)
+                tool_wide_name_matches_opts(&rule.value.tool_name, tool_name, rule_uses_glob(rule))
             } else {
                 rule.value.tool_name == tool_name
             };
@@ -973,8 +973,14 @@ impl PermissionPolicy {
             // PERM.2 — tool-wide rule → tool-name match, INCLUDING the MCP
             // server-level prefix match (claude-code `toolMatchesRule`: rule
             // `mcp__server` matches tool `mcp__server__tool`; `mcp__server__*`
-            // matches all of that server's tools).
-            return tool_wide_name_matches(&rule.value.tool_name, tool_name);
+            // matches all of that server's tools). GLOB-01: DENY/ASK rules also
+            // glob-match (`h8`/`kqe` pass `globMatching:!0`); ALLOW rules do not
+            // (`nes` default opts).
+            return tool_wide_name_matches_opts(
+                &rule.value.tool_name,
+                tool_name,
+                rule_uses_glob(rule),
+            );
         };
         let group_ok = match file_tool_kind(tool_name) {
             FileToolKind::NonFile => {
@@ -1565,7 +1571,34 @@ fn mcp_info_from_string(s: &str) -> Option<McpInfo<'_>> {
 /// runtime check uses (claude-code `filterToolsByDenyRules`, `tools.ts:262-269`).
 #[must_use]
 pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
+    // The public matcher keeps the ALLOW-walk semantics (claude-code `nes`
+    // uses default opts, `globMatching:false`): exact name or MCP server-level
+    // prefix, no glob. The DENY/ASK walks use the glob-aware variant below.
+    tool_wide_name_matches_opts(rule_tool_name, tool_name, false)
+}
+
+/// Glob-aware tool-wide name matcher — 1:1 with claude-code `URu` (`permissions.ts`).
+///
+/// `glob == true` (the DENY walk `h8` and ASK walk `kqe`, both passing
+/// `globMatching:!0`) enables:
+///   - a rule `toolName` containing `*` glob-matches the tool name via `_pi`
+///     (`*`→`.*`, anchored, dotall) — e.g. `Web*` matches `WebFetch`/`WebSearch`;
+///   - the MCP tool-part is glob-matched (`mcp__server__foo*` matches
+///     `mcp__server__footool`).
+///
+/// `glob == false` (the ALLOW walk `nes`, default opts) keeps exact-name /
+/// MCP server-level matching only. Alias/`proxyExpansion` (`sDn`/`toolAliases`)
+/// is NOT ported — no runtime tool-alias map is wired in the port, and the
+/// legacy static aliases are already normalized at parse time
+/// ([`crate::rule::normalize_legacy_tool_name`]); documented as a follow-up.
+#[must_use]
+fn tool_wide_name_matches_opts(rule_tool_name: &str, tool_name: &str, glob: bool) -> bool {
     if rule_tool_name == tool_name {
+        return true;
+    }
+    // Whole-name glob (`n&&UJe(toolName)&&bpi(toolName,i)`): applies to plain
+    // AND MCP rule names that contain `*`.
+    if glob && rule_tool_name.contains('*') && glob_name_matches(rule_tool_name, tool_name) {
         return true;
     }
     let (Some(rule_info), Some(tool_info)) = (
@@ -1574,8 +1607,64 @@ pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
     ) else {
         return false;
     };
-    (rule_info.tool_name.is_none() || rule_info.tool_name == Some("*"))
-        && rule_info.server_name == tool_info.server_name
+    if rule_info.server_name != tool_info.server_name {
+        return false;
+    }
+    match rule_info.tool_name {
+        None | Some("*") => true,
+        Some(rule_tool_part) => {
+            // MCP tool-part glob (`a.toolName!==void 0&&UJe(s.toolName)&&bpi(s.toolName,a.toolName)`).
+            glob
+                && rule_tool_part.contains('*')
+                && tool_info
+                    .tool_name
+                    .is_some_and(|tool_part| glob_name_matches(rule_tool_part, tool_part))
+        }
+    }
+}
+
+/// Whether a rule's tool-wide name match should use glob semantics — `true` for
+/// DENY and ASK rules (claude-code `h8`/`kqe` pass `globMatching:!0`), `false`
+/// for ALLOW rules (`nes` uses default opts). Keyed off the rule's behavior
+/// bucket, which is exactly the walk it participates in.
+#[must_use]
+fn rule_uses_glob(rule: &PermissionRule) -> bool {
+    matches!(
+        rule.behavior,
+        PermissionBehavior::Deny | PermissionBehavior::Ask
+    )
+}
+
+/// claude-code `_pi(pattern, value)`: anchored, dotall glob where `*`→`.*` and
+/// every other char is regex-escaped. Used for tool-name and content globbing.
+#[must_use]
+fn glob_name_matches(pattern: &str, value: &str) -> bool {
+    match cached_glob_regex(pattern) {
+        Some(re) => re.is_match(value),
+        None => false,
+    }
+}
+
+/// Compile+cache an anchored dotall `_pi` glob regex for `pattern`
+/// (`^` + segments joined by `.*` + `$`, with `(?s)` for dotall).
+fn cached_glob_regex(pattern: &str) -> Option<regex::Regex> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(pattern) {
+        return hit.clone();
+    }
+    let body: String = pattern
+        .split('*')
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(".*");
+    let compiled = regex::Regex::new(&format!("(?s)^{body}$")).ok();
+    cache
+        .lock()
+        .unwrap()
+        .insert(pattern.to_string(), compiled.clone());
+    compiled
 }
 
 /// The tool-specific permission-rule CONTENT key derived from a tool call's

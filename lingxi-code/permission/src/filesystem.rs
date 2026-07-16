@@ -385,13 +385,23 @@ fn rewrite_private_symlinks(abs: &str) -> String {
 }
 
 /// Is `path` inside (or equal to) the single working directory `working`? — port
-/// of `pathInWorkingPath` (`filesystem.ts:709-744`).
+/// of `pathInWorkingPath` (`RM`, `filesystem.ts:709-744`), invoked with
+/// `caseFold:false` (2.1.211 `EV` → the path-validation containment and the
+/// acceptEdits `alreadyInWorkingDirectory` auto-allow).
 ///
 /// 1. Lexically expand both `path` and `working` to absolute, normalized paths.
-/// 2. Apply the macOS `/private/var`→`/var` & `/private/tmp`→`/tmp` rewrites.
-/// 3. Lowercase case-fold both for case-insensitive comparison.
-/// 4. Compute the working-dir-relative path; accept iff it is the same path
+/// 2. Apply the macOS `/private/var`→`/var` & `/private/tmp`→`/tmp` rewrites
+///    (case-SENSITIVE — `RM` drops the regexes' `i` flag when `caseFold` is
+///    false, and [`rewrite_private_symlinks`] matches the prefix case-sensitively).
+/// 3. Compute the working-dir-relative path; accept iff it is the same path
 ///    (`""`), does NOT contain a `..` traversal segment, and is NOT absolute.
+///
+/// Case-SENSITIVE comparison: 2.1.211's containment (`EV`) passes
+/// `caseFold:false`, so `RM` compares `pPt(l, a)` WITHOUT lower-casing (only the
+/// RM-default `caseFold:true` path folds via `Jg`). A case-variant path
+/// (`/Proj/SRC`) is therefore treated as OUTSIDE a lowercase working dir
+/// (`/proj/src`) → asks, rather than being auto-allowed. Every current caller of
+/// this function is an `EV`-semantics containment check.
 ///
 /// Lexical only — see the module-header divergence note (no on-disk `realpath`).
 #[must_use]
@@ -399,16 +409,17 @@ pub fn path_in_working_path(path: &Path, working: &Path, roots: &FsRoots) -> boo
     let absolute_path = expand_path(&path.to_string_lossy(), roots);
     let absolute_working_path = expand_path(&working.to_string_lossy(), roots);
 
-    // macOS symlink rewrites (`/private/var`→`/var`, `/private/tmp`→`/tmp`).
+    // macOS symlink rewrites (`/private/var`→`/var`, `/private/tmp`→`/tmp`),
+    // case-sensitive (RM's non-`i` regexes under `caseFold:false`).
     let normalized_path = rewrite_private_symlinks(&absolute_path.to_string_lossy());
     let normalized_working = rewrite_private_symlinks(&absolute_working_path.to_string_lossy());
 
-    // Case-fold for case-insensitive filesystems.
-    let case_path = normalize_case_for_comparison(&normalized_path);
-    let case_working = normalize_case_for_comparison(&normalized_working);
-
-    // POSIX relative path from working dir to target.
-    let relative = posix_relative(Path::new(&case_working), Path::new(&case_path));
+    // POSIX relative path from working dir to target — case-SENSITIVE
+    // (`caseFold:false`, so no `normalize_case_for_comparison` fold).
+    let relative = posix_relative(
+        Path::new(&normalized_working),
+        Path::new(&normalized_path),
+    );
 
     // Same path.
     if relative.is_empty() {
@@ -752,11 +763,15 @@ mod tests {
     }
 
     #[test]
-    fn comparison_is_case_insensitive() {
-        // A mixed-case `.LINGXI` segment in the target still resolves under a
-        // lowercase working dir (case-folded comparison).
-        assert!(in_working("/Proj/SRC/Main.RS", "/proj/src"));
-        assert!(in_working("/proj/.LiNgXi/x", "/proj/.lingxi"));
+    fn comparison_is_case_sensitive() {
+        // PERM-PATH-06: 2.1.211's containment (`EV`) uses `caseFold:false`, so a
+        // case-variant path is treated as OUTSIDE a differently-cased working
+        // dir (no auto-allow — it asks).
+        assert!(!in_working("/Proj/SRC/Main.RS", "/proj/src"));
+        assert!(!in_working("/proj/.LiNgXi/x", "/proj/.lingxi"));
+        // Exact-case containment still holds.
+        assert!(in_working("/proj/src/Main.RS", "/proj/src"));
+        assert!(in_working("/proj/.lingxi/x", "/proj/.lingxi"));
     }
 
     #[test]

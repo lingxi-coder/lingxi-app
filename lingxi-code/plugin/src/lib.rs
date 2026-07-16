@@ -26,7 +26,13 @@ mod mcpb;
 pub mod source;
 pub mod strict_policy;
 pub mod trust;
-pub mod user_config;
+/// `${user_config.KEY}` substitution + plugin-option env helpers.
+///
+/// Re-exported from the `hooks` crate, which owns the single source of truth
+/// (the plugin-hook executor needs the same substitution/gate logic at spawn
+/// time, and `hooks` sits below `plugin` in the dependency graph). `plugin`'s
+/// MCP/LSP loader continues to consume it as `plugin::user_config::*`.
+pub use hooks::user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
 pub use blocklist::PluginBlocklist;

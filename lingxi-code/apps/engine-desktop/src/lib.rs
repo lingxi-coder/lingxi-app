@@ -2826,6 +2826,44 @@ async fn load_enabled_plugins(
     merged
 }
 
+/// Read the merged `settings.pluginConfigs` scope (`plugin → {options,
+/// mcpServers}`) from the user then project `settings.json`, project last so it
+/// wins on conflict — the persisted, non-sensitive half of a plugin's
+/// `userConfig`. This is the composition-root READ that seeds
+/// [`plugin::PluginManager::with_plugin_configs`]; without it the manager's
+/// `plugin_configs` is always empty and non-sensitive options from settings.json
+/// never reach `resolve_user_config`. Mirrors `load_enabled_plugins`'s
+/// user-then-project merge (`pluginLoader.ts` reads settings the same way).
+/// Malformed files / a missing key degrade to an empty map (no persisted
+/// config), matching the resilient read-only boot.
+///
+/// Keyed by the `pluginConfigs` object key today (the manager looks it up by
+/// `manifest.name`); the installed `name@marketplace` id is a documented
+/// follow-up (see `manager.rs` `load_plugin`).
+async fn load_plugin_configs(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> std::collections::HashMap<String, plugin::PluginUserConfig> {
+    let mut merged: std::collections::HashMap<String, plugin::PluginUserConfig> =
+        std::collections::HashMap::new();
+    let user = lingxi_home.join("settings.json");
+    let project = cwd.join(branding::DOT_DIR).join("settings.json");
+    // User first, project second → project overrides on identical plugin keys.
+    for path in [user, project] {
+        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+        else {
+            continue;
+        };
+        for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
+            merged.insert(plugin, cfg);
+        }
+    }
+    merged
+}
+
 /// Discover the set of plugins that should be active for the current session —
 /// the shared body of both the startup bootstrap (§6.5) and the
 /// `/reload-plugins` refresh ([`PluginRuntime::refresh`]). `ambient` resolves
@@ -6512,22 +6550,31 @@ pub async fn build(
         // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
         // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer yet,
         // so they are local instances here (residual, as at startup).
-        let pm = Arc::new(plugin::PluginManager::new(
-            plugins_dir.clone(),
-            Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
-            http.clone(),
-            Arc::new(PosixRuntime::new()),
-            credentials.clone(),
-            Arc::new(plugin::PluginBlocklist::new(String::new())),
-            Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
-            shared_command_registry.clone(),
-            Arc::new(RwLock::new(SkillRegistry::new())),
-            plugin_hook_registry.clone(),
-            Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
-            plugin_mcp_registry.clone(),
-            plugin_lsp_registry.clone(),
-            Arc::new(RwLock::new(ToolRegistry::new())),
-        ));
+        // Seed the persisted non-sensitive `userConfig` (settings `pluginConfigs`
+        // scope) so the loader resolves `${user_config.*}` options from disk (not
+        // just field defaults) and injects `LINGXI_PLUGIN_OPTION_*` into plugin
+        // hooks. Sensitive values are NOT here — they resolve live from
+        // `CredentialManager`.
+        let plugin_configs = load_plugin_configs(&cfg.lingxi_home, &cwd_for_plugins).await;
+        let pm = Arc::new(
+            plugin::PluginManager::new(
+                plugins_dir.clone(),
+                Arc::new(PosixFileSystem::new(cwd_for_plugins.clone())),
+                http.clone(),
+                Arc::new(PosixRuntime::new()),
+                credentials.clone(),
+                Arc::new(plugin::PluginBlocklist::new(String::new())),
+                Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+                shared_command_registry.clone(),
+                Arc::new(RwLock::new(SkillRegistry::new())),
+                plugin_hook_registry.clone(),
+                Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+                plugin_mcp_registry.clone(),
+                plugin_lsp_registry.clone(),
+                Arc::new(RwLock::new(ToolRegistry::new())),
+            )
+            .with_plugin_configs(plugin_configs),
+        );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
             // Materialise COMMANDS + HOOKS + MCP + LSP (the privilege gate runs

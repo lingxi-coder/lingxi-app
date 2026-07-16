@@ -596,8 +596,14 @@ mod tests {
         match p.authorize("Bash", &bash("rm -rf /")) {
             PermissionResult::Ask { reason, prompt, .. } => {
                 assert!(
-                    matches!(reason, PermissionDecisionReason::Other { .. }),
-                    "dangerous-removal ask must use the Other reason, got {reason:?}"
+                    matches!(
+                        reason,
+                        PermissionDecisionReason::SafetyCheck {
+                            classifier_approvable: false,
+                            ..
+                        }
+                    ),
+                    "dangerous-removal ask must use the SafetyCheck reason (REASON-01), got {reason:?}"
                 );
                 assert!(
                     prompt
@@ -621,7 +627,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("rm -rf /etc")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { .. },
+                reason: PermissionDecisionReason::SafetyCheck { .. },
                 ..
             }
         ));
@@ -636,7 +642,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("rmdir /usr")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { .. },
+                reason: PermissionDecisionReason::SafetyCheck { .. },
                 ..
             }
         ));
@@ -685,7 +691,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("echo ok && rm -rf /")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { .. },
+                reason: PermissionDecisionReason::SafetyCheck { .. },
                 ..
             }
         ));
@@ -700,7 +706,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("echo `rm -rf /`")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { .. },
+                reason: PermissionDecisionReason::SafetyCheck { .. },
                 ..
             }
         ));
@@ -715,7 +721,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("echo $(rm -rf /)")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { .. },
+                reason: PermissionDecisionReason::SafetyCheck { .. },
                 ..
             }
         ));
@@ -1561,7 +1567,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("rm -rf /")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { .. },
+                reason: PermissionDecisionReason::SafetyCheck { .. },
                 ..
             }
         ));
@@ -2458,7 +2464,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("echo $(rm -rf /)")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { .. },
+                reason: PermissionDecisionReason::SafetyCheck { .. },
                 ..
             }
         ));
@@ -2605,7 +2611,9 @@ mod tests {
         let r = p.authorize("Bash", &bash("echo `whoami`"));
         match r {
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                // REASON-01: the bash injection/too-complex battery asks are
+                // type `other` (bashMissKind), NOT safetyCheck.
+                reason: PermissionDecisionReason::Other { reason },
                 ..
             } => {
                 // With bash-ast wired, the AST verdict is authoritative: a backtick
@@ -2643,10 +2651,11 @@ mod tests {
         ] {
             match p.authorize("Bash", &bash(cmd)) {
                 PermissionResult::Ask {
-                    reason: PermissionDecisionReason::SafetyCheck { .. },
+                    // REASON-01: battery/too-complex asks are type `other`.
+                    reason: PermissionDecisionReason::Other { .. },
                     ..
                 } => {}
-                other => panic!("expected SafetyCheck ask for {cmd:?}, got {other:?}"),
+                other => panic!("expected Other ask for {cmd:?}, got {other:?}"),
             }
         }
     }
@@ -2663,10 +2672,10 @@ mod tests {
         );
         match p.authorize("Bash", &bash("find . -exec rm {} ;")) {
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                reason: PermissionDecisionReason::Other { reason },
                 ..
             } => assert!(reason.contains("find with '-exec'"), "reason was: {reason}"),
-            other => panic!("expected SafetyCheck ask despite Bash(find:*), got {other:?}"),
+            other => panic!("expected Other ask despite Bash(find:*), got {other:?}"),
         }
         // A benign find under the same rule is allowed (no safety ask).
         assert!(matches!(
@@ -2682,7 +2691,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("cat${IFS}/etc/passwd")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck { .. },
+                reason: PermissionDecisionReason::Other { .. },
                 ..
             }
         ));
@@ -2719,10 +2728,10 @@ mod tests {
         // short-circuit does not fire and the backtick subst asks via safety.
         match p.authorize("Bash", &bash("echo `whoami`")) {
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck { .. },
+                reason: PermissionDecisionReason::Other { .. },
                 ..
             } => {}
-            other => panic!("expected SafetyCheck ask despite prefix allow rule, got {other:?}"),
+            other => panic!("expected Other ask despite prefix allow rule, got {other:?}"),
         }
     }
 
@@ -2743,7 +2752,7 @@ mod tests {
             policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
                 .authorize("Bash", &bash(r#"eval "echo $(whoami)""#)),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck { .. },
+                reason: PermissionDecisionReason::Other { .. },
                 ..
             }
         ));
@@ -2766,7 +2775,8 @@ mod tests {
         );
         match p.authorize("Bash", &bash("echo $(rm -rf /)")) {
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::Other { reason },
+                // REASON-01: dangerous-removal asks are safetyCheck (survive bypass).
+                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
                 ..
             } => assert!(reason.contains("Dangerous rm operation")),
             other => panic!("expected dangerous-removal ask despite exact allow, got {other:?}"),
@@ -2831,7 +2841,7 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("zmodload zsh/system")),
             PermissionResult::Ask {
-                reason: PermissionDecisionReason::SafetyCheck { .. },
+                reason: PermissionDecisionReason::Other { .. },
                 ..
             }
         ));
@@ -3171,6 +3181,47 @@ mod tests {
         assert_eq!(split_field_pattern("nocolon"), None);
         assert_eq!(split_field_pattern(":leading"), None);
         assert_eq!(split_field_pattern("field:"), None);
+    }
+
+    // ---- REASON-01: decision-reason tags -----------------------------------
+
+    /// The dangerous-removal ask is `SafetyCheck { classifier_approvable: false }`
+    /// with a reason starting with the load-bearing `Dangerous rm operation`
+    /// prefix (the bypass carve-out keys on exactly this shape).
+    #[test]
+    fn reason01_dangerous_removal_is_safetycheck_with_prefix() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        match p.authorize("Bash", &bash("rm -rf /")) {
+            PermissionResult::Ask {
+                reason:
+                    PermissionDecisionReason::SafetyCheck {
+                        reason,
+                        classifier_approvable,
+                    },
+                ..
+            } => {
+                assert!(!classifier_approvable);
+                assert!(
+                    reason.starts_with("Dangerous rm operation"),
+                    "reason must carry the bypass-carve-out prefix, got: {reason}"
+                );
+            }
+            other => panic!("expected SafetyCheck dangerous-removal ask, got {other:?}"),
+        }
+    }
+
+    /// The bash injection battery ask is type `Other` (not safetyCheck), so a
+    /// tool-wide allow / bypass can override it.
+    #[test]
+    fn reason01_bash_injection_is_other() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        match p.authorize("Bash", &bash("echo `whoami`")) {
+            PermissionResult::Ask { reason, .. } => assert!(
+                matches!(reason, PermissionDecisionReason::Other { .. }),
+                "bash injection ask must be Other, got {reason:?}"
+            ),
+            other => panic!("expected Ask, got {other:?}"),
+        }
     }
 
     #[test]

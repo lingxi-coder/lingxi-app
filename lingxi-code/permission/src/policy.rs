@@ -2061,18 +2061,25 @@ fn ask_with_mode(mode: PermissionMode, tool_name: &str) -> PermissionResult {
 }
 
 /// Dangerous-removal ask: an `rm`/`rmdir` targeting a critical system path
-/// (claude-code `checkDangerousRemovalPaths`). Tagged with
-/// [`PermissionDecisionReason::Other`] (the TS `decisionReason.type: 'other'`),
-/// carrying the byte-locked message; offers no rule-saving suggestion (TS:
-/// "Don't provide suggestions — we don't want to encourage saving dangerous
-/// commands").
+/// (claude-code `checkDangerousRemovalPaths` → `yqe`). Tagged with
+/// [`PermissionDecisionReason::SafetyCheck`] `{ classifier_approvable: false }`
+/// (REASON-01) — the TS `yqe` sets `decisionReason:{type:"safetyCheck",reason:
+/// `Dangerous ${cmd} operation ${detail}`,classifierApprovable:!1}`. The
+/// safetyCheck tag is LOAD-BEARING: the bypass carve-out (`Are` + the
+/// "Dangerous rm/rmdir operation" reason prefix) inspects ONLY safetyCheck
+/// reasons, so this ask survives bypassPermissions while every type-`other`
+/// guard ask is overridden. `danger.reason` already carries the
+/// `Dangerous {rm,rmdir} operation …` prefix. Offers no rule-saving suggestion
+/// (TS: "Don't provide suggestions — we don't want to encourage saving
+/// dangerous commands").
 fn ask_dangerous_removal(
     tool_name: &str,
     danger: crate::dangerous_removal::DangerousRemoval,
 ) -> PermissionResult {
     PermissionResult::Ask {
-        reason: PermissionDecisionReason::Other {
+        reason: PermissionDecisionReason::SafetyCheck {
             reason: danger.reason,
+            classifier_approvable: false,
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
@@ -2135,17 +2142,17 @@ fn ask_path_constraint(
 /// [`crate::bash_security::bash_command_is_safe`] battery returned a detection
 /// (claude-code `bashCommandIsSafe` → `checkCommandAndSuggestRules` step 3
 /// returning `behavior: 'ask'`, `bashPermissions.ts:1223-1237`). Tagged
-/// [`PermissionDecisionReason::SafetyCheck`] carrying the byte-faithful validator
-/// `message`. `classifier_approvable` is `true`: the TS flow attaches a pending
-/// `BASH_CLASSIFIER` check that may auto-approve before the user responds (the
-/// classifier itself is unwired here, so this is a hint for a later batch). No
-/// rule-saving suggestion (TS: "Don't suggest saving a potentially dangerous
-/// command", `:1236`).
+/// [`PermissionDecisionReason::Other`] (REASON-01) — the TS battery asks are
+/// `decisionReason:{type:"other",reason:…,bashMissKind:…}`, NOT safetyCheck. The
+/// `other` tag is load-bearing: a tool-wide allow rule overrides these asks
+/// (`nes`, ALLOWOVER-01) and bypassPermissions suppresses them, whereas the
+/// safetyCheck-tagged dangerous-removal asks are NOT overridable. No rule-saving
+/// suggestion (TS: "Don't suggest saving a potentially dangerous command",
+/// `:1236`).
 fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
     PermissionResult::Ask {
-        reason: PermissionDecisionReason::SafetyCheck {
+        reason: PermissionDecisionReason::Other {
             reason: message.clone(),
-            classifier_approvable: true,
         },
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),

@@ -5871,6 +5871,11 @@ pub async fn build(
     // payloads — so a PreToolUse/PostToolUse/lifecycle hook sees the post-`cd`
     // directory, 1:1 with claude-code's single global `getCwd()`/`setCwdState`.
     let current_cwd_cell = std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
+    // Mirror worktree enter/exit swaps into this shared live-cwd cell so a
+    // file/Glob/Grep read *between* a `session_cwd.swap(..)` and the next Bash
+    // call (which re-points its own copy) sees the post-swap cwd, not the stale
+    // pre-swap one. Bash still owns intra-turn `cd` updates to the same cell.
+    session_cwd.link_live_cwd(current_cwd_cell.clone());
     // Clone for the Stop/SubagentStop hook snapshot provider (it locates the
     // project-root cron file via the live cwd); the original cell is moved into
     // `.with_current_cwd(...)` below.

@@ -35,6 +35,12 @@ struct CwdState {
 pub struct SessionCwd {
     state: ArcSwap<CwdState>,
     on_swap: Mutex<Option<OnSwapCallback>>,
+    /// Shared live-cwd cells (the file/shell/LSP tools' `LiveCwdCell`) kept in
+    /// sync with every [`SessionCwd::swap`]. Empty until [`link_live_cwd`] is
+    /// called, so an unlinked cell is fully inert.
+    ///
+    /// [`link_live_cwd`]: SessionCwd::link_live_cwd
+    mirror_cells: Mutex<Vec<Arc<Mutex<PathBuf>>>>,
 }
 
 impl SessionCwd {
@@ -48,6 +54,7 @@ impl SessionCwd {
                 trusted_dirs: trusted,
             }),
             on_swap: Mutex::new(None),
+            mirror_cells: Mutex::new(Vec::new()),
         })
     }
 
@@ -95,6 +102,21 @@ impl SessionCwd {
             trusted_dirs: trusted,
         }));
 
+        // Mirror the new cwd into any linked live-cwd cells so a file/Glob/Grep
+        // read *between* this swap (e.g. a worktree enter/exit) and the next
+        // Bash call observes the post-swap cwd instead of the stale pre-swap
+        // one. We clone the handle list out under the lock (same discipline as
+        // the on-swap callback below) so we never hold `mirror_cells` while
+        // taking an individual cell's lock.
+        let cells = self
+            .mirror_cells
+            .lock()
+            .expect("mirror_cells mutex poisoned")
+            .clone();
+        for cell in &cells {
+            *cell.lock().expect("live-cwd cell mutex poisoned") = cwd.clone();
+        }
+
         let cb = self.on_swap.lock().expect("on_swap mutex poisoned").clone();
         if let Some(cb) = cb {
             cb(&cwd);
@@ -105,6 +127,24 @@ impl SessionCwd {
     /// [`SessionCwd::swap`]. No-op until called; replaces any prior callback.
     pub fn set_on_swap(&self, cb: Box<dyn Fn(&Path) + Send + Sync>) {
         *self.on_swap.lock().expect("on_swap mutex poisoned") = Some(Arc::from(cb));
+    }
+
+    /// Link a shared live-cwd cell (the file/shell/LSP tools' [`LiveCwdCell`])
+    /// so every [`swap`](Self::swap) mirrors the new cwd into it immediately.
+    ///
+    /// Bash re-points its own copy of this cell at the start of each call, so
+    /// without this link a worktree enter/exit leaves the cell holding the
+    /// pre-swap cwd until the next Bash invocation — a file/Glob/Grep read in
+    /// that window would resolve relative paths against the wrong directory.
+    /// Idempotent-friendly: multiple cells can be linked; each is updated on
+    /// every swap. No-op for swaps that occur before any link.
+    ///
+    /// [`LiveCwdCell`]: crate::LiveCwdCell
+    pub fn link_live_cwd(&self, cell: Arc<Mutex<PathBuf>>) {
+        self.mirror_cells
+            .lock()
+            .expect("mirror_cells mutex poisoned")
+            .push(cell);
     }
 }
 
@@ -122,6 +162,51 @@ mod tests {
     fn new_cwd_equals_boot() {
         let sc = SessionCwd::new(boot(), vec![boot()]);
         assert_eq!(sc.cwd(), boot());
+    }
+
+    #[test]
+    fn swap_mirrors_new_cwd_into_linked_cell() {
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let cell: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(boot()));
+        sc.link_live_cwd(cell.clone());
+        // Linking alone must not perturb the cell.
+        assert_eq!(*cell.lock().unwrap(), boot());
+
+        let wt = PathBuf::from("/wt/root");
+        sc.swap(wt.clone(), vec![wt.clone()]);
+        assert_eq!(
+            *cell.lock().unwrap(),
+            wt,
+            "swap must mirror the new cwd into the linked live-cwd cell"
+        );
+    }
+
+    #[test]
+    fn swap_updates_every_linked_cell() {
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let a: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(boot()));
+        let b: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(boot()));
+        sc.link_live_cwd(a.clone());
+        sc.link_live_cwd(b.clone());
+        let wt = PathBuf::from("/wt/two");
+        sc.swap(wt.clone(), vec![wt.clone()]);
+        assert_eq!(*a.lock().unwrap(), wt);
+        assert_eq!(*b.lock().unwrap(), wt);
+    }
+
+    #[test]
+    fn swap_without_linked_cell_is_inert_and_still_fires_on_swap() {
+        // No linked cell: swap must not panic, and the on-swap callback still
+        // runs (mirroring is orthogonal to the callback).
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        sc.set_on_swap(Box::new(move |_p: &Path| {
+            f.fetch_add(1, Ordering::SeqCst);
+        }));
+        sc.swap(PathBuf::from("/x"), vec![PathBuf::from("/x")]);
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert_eq!(sc.cwd(), PathBuf::from("/x"));
     }
 
     #[test]

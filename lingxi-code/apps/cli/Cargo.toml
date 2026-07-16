@@ -80,6 +80,9 @@ permission = { path = "../../permission" }
 # engine-desktop's wiring earlier; the management subcommands re-add them as
 # direct CLI deps.
 mcp = { path = "../../mcp" }
+# (P1-08 runtime `/add-dir`) the `/add-dir` off-loop effect widens the live
+# `Arc<SessionCwd>` trusted set so file tools accept a mid-session dir at once.
+tool-api = { path = "../../tool-api" }
 plugin = { path = "../../plugin" }
 # Phase 8 (tui command registry): the `/skills` + `/memory` startup
 # snapshots — the same on-disk walks the iocraft screens used, captured once

@@ -148,6 +148,16 @@ pub struct Runtime {
     /// picking an OAuth provider (Anthropic Pro/Max, OpenAI ChatGPT) in `/connect`
     /// runs the real browser sign-in instead of the inert `Unavailable` screen.
     pub oauth_connect_driver: std::sync::Arc<dyn command_core::OAuthConnectDriver>,
+    /// (P1-08 runtime `/add-dir`) The SAME live `Arc<SessionCwd>` the file tools
+    /// gate on, projected from [`engine_desktop::DesktopRuntime::session_cwd`].
+    /// The `/add-dir` off-loop effect calls `add_trusted_dir(...)` on it so a
+    /// directory added mid-session is immediately accessible to the file tools.
+    pub session_cwd: std::sync::Arc<tool_api::SessionCwd>,
+    /// (P1-08 runtime `/add-dir`) The live MCP registry, projected from
+    /// [`engine_desktop::DesktopRuntime::mcp_registry`]. The `/add-dir` effect
+    /// calls `add_root(...)` + `notify_roots_list_changed_all()` on it so every
+    /// connected server's `roots/list` reflects the new working directory.
+    pub mcp_registry: std::sync::Arc<mcp::McpRegistry>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -883,6 +893,9 @@ pub async fn build_runtime_from_config(
         shell_expansion: rt.shell_expansion,
         connect_copilot: rt.connect_copilot,
         oauth_connect_driver: rt.oauth_connect_driver,
+        // P1-08 runtime `/add-dir` live-effect handles.
+        session_cwd: rt.session_cwd,
+        mcp_registry: rt.mcp_registry,
     })
 }
 

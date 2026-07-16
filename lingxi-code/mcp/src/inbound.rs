@@ -6,13 +6,29 @@
 //! (elicitation default cancel).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use jsonrpc::{InboundHandler, Request, Response};
 use serde_json::{json, Value};
 
 use crate::hook_dispatch::{ElicitationHookOutcome, ElicitationHookRequest, HookDispatcher};
+
+/// A LIVE, shared set of additional working directories advertised as MCP
+/// roots after the session cwd. Held behind an `Arc<RwLock<…>>` so a runtime
+/// `/add-dir` (parity 2.1.207 P1-08) can push a directory into the SAME cell
+/// the registered [`RootsListHandler`] reads — the very next `roots/list` the
+/// server issues then reflects the addition, matching claude-code's live
+/// `additionalWorkingDirectories`. Mutating it does NOT itself notify servers;
+/// the caller pairs a push with [`crate::McpRegistry::notify_roots_list_changed_all`].
+pub type SharedRoots = Arc<RwLock<Vec<PathBuf>>>;
+
+/// Build a [`SharedRoots`] cell seeded with `dirs`. An empty seed advertises a
+/// cwd-only `roots/list` until something is pushed in.
+#[must_use]
+pub fn new_shared_roots(dirs: Vec<PathBuf>) -> SharedRoots {
+    Arc::new(RwLock::new(dirs))
+}
 
 /// Handler for inbound `roots/list` requests from the MCP server.
 ///
@@ -26,19 +42,30 @@ use crate::hook_dispatch::{ElicitationHookOutcome, ElicitationHookRequest, HookD
 pub struct RootsListHandler {
     /// Absolute current working directory — always the FIRST advertised root.
     pub cwd: PathBuf,
-    /// Additional working directories advertised as roots after `cwd`
-    /// (settings `additionalDirectories` union CLI `--add-dir`). Deduplicated
-    /// against `cwd` and each other by file URL, preserving discovery order.
-    pub additional: Vec<PathBuf>,
+    /// LIVE additional working directories advertised as roots after `cwd`
+    /// (settings `additionalDirectories` union CLI `--add-dir`, plus any
+    /// runtime `/add-dir`). Read fresh on every `roots/list` so a runtime add
+    /// is reflected without a reboot. Deduplicated against `cwd` and each other
+    /// by file URL, preserving discovery order.
+    pub additional: SharedRoots,
 }
 
 impl RootsListHandler {
     /// Build the `{"roots": [...]}` result value: cwd-first, then each
-    /// additional dir, deduplicated by `file://` URL (claude-code `r1d()`).
+    /// additional dir (read LIVE off the shared cell), deduplicated by
+    /// `file://` URL (claude-code `r1d()`).
     fn roots_value(&self) -> Value {
+        // Snapshot the live additional-dirs set under a brief read lock (no
+        // await is held across it), so a concurrent `/add-dir` push never
+        // tears this response.
+        let additional = self
+            .additional
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
         let mut roots = Vec::new();
-        for dir in std::iter::once(&self.cwd).chain(self.additional.iter()) {
+        for dir in std::iter::once(&self.cwd).chain(additional.iter()) {
             let uri = format!("file://{}", dir.display());
             if seen.insert(uri.clone()) {
                 roots.push(json!({ "uri": uri }));
@@ -187,7 +214,7 @@ mod tests {
     async fn roots_list_returns_file_uri_with_absolute_cwd() {
         let handler = RootsListHandler {
             cwd: PathBuf::from("/Users/example/project"),
-            additional: Vec::new(),
+            additional: new_shared_roots(Vec::new()),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -203,7 +230,10 @@ mod tests {
         // each advertised as a `file://` root.
         let handler = RootsListHandler {
             cwd: PathBuf::from("/proj"),
-            additional: vec![PathBuf::from("/tmp/extra"), PathBuf::from("/opt/data")],
+            additional: new_shared_roots(vec![
+                PathBuf::from("/tmp/extra"),
+                PathBuf::from("/opt/data"),
+            ]),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -220,11 +250,11 @@ mod tests {
         // r1d() builds the list through a URL-keyed set.
         let handler = RootsListHandler {
             cwd: PathBuf::from("/proj"),
-            additional: vec![
+            additional: new_shared_roots(vec![
                 PathBuf::from("/proj"), // dup of cwd
                 PathBuf::from("/tmp/extra"),
                 PathBuf::from("/tmp/extra"), // dup of an extra
-            ],
+            ]),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -235,10 +265,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn roots_list_reflects_live_mutation_of_shared_cell() {
+        // The handler reads the additional-dirs set LIVE off the shared cell:
+        // a directory pushed AFTER construction (a runtime `/add-dir`) shows up
+        // on the very next `roots/list` — no rebuild, no reboot (parity P1-08).
+        let cell = new_shared_roots(Vec::new());
+        let handler = RootsListHandler {
+            cwd: PathBuf::from("/proj"),
+            additional: cell.clone(),
+        };
+
+        // Before any add: cwd-only.
+        let before = handler.handle(req("roots/list")).await.result.unwrap();
+        assert_eq!(before["roots"].as_array().unwrap().len(), 1);
+
+        // Runtime add pushes into the shared cell.
+        cell.write().unwrap().push(PathBuf::from("/extra"));
+
+        // The next roots/list reflects it immediately, cwd still first.
+        let after = handler.handle(req("roots/list")).await.result.unwrap();
+        let roots = after["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2, "cwd + the live-added dir");
+        assert_eq!(roots[0]["uri"], "file:///proj");
+        assert_eq!(roots[1]["uri"], "file:///extra");
+    }
+
+    #[tokio::test]
     async fn roots_list_uri_uses_literal_file_scheme() {
         let handler = RootsListHandler {
             cwd: PathBuf::from("/tmp/x"),
-            additional: Vec::new(),
+            additional: new_shared_roots(Vec::new()),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -256,7 +312,7 @@ mod tests {
         // protocol-incompatible. Lock the outer-envelope shape here.
         let handler = RootsListHandler {
             cwd: PathBuf::from("/x"),
-            additional: Vec::new(),
+            additional: new_shared_roots(Vec::new()),
         };
         let resp = handler.handle(req("roots/list")).await;
         let result = resp.result.expect("success result");
@@ -295,7 +351,7 @@ mod tests {
         // Per JSON-RPC 2.0: response.id MUST match request.id.
         let r1 = RootsListHandler {
             cwd: PathBuf::from("/x"),
-            additional: Vec::new(),
+            additional: new_shared_roots(Vec::new()),
         }
         .handle(Request::new("roots/list", None, Id::Number(7)))
         .await;

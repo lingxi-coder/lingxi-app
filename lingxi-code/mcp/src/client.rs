@@ -18,7 +18,7 @@ use traits::{
 };
 
 use crate::hook_dispatch::HookDispatcher;
-use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
+use crate::inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
 use crate::initialize_params::InitializeParams;
 
 /// Maximum character length for free-form text fields sourced from MCP
@@ -287,20 +287,33 @@ impl McpClient {
         connection: Arc<jsonrpc::Connection>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
-        Self::with_roots(server_name, cwd, Vec::new(), connection, dispatcher).await
+        Self::with_roots(
+            server_name,
+            cwd,
+            new_shared_roots(Vec::new()),
+            connection,
+            dispatcher,
+        )
+        .await
     }
 
-    /// Like [`Self::with_hook_dispatcher`], but also advertises `additional_roots`
-    /// alongside `cwd` on `roots/list` (the session's additional working
-    /// directories — settings `additionalDirectories` union CLI `--add-dir`).
+    /// Like [`Self::with_hook_dispatcher`], but also advertises the session's
+    /// LIVE additional working directories alongside `cwd` on `roots/list`
+    /// (settings `additionalDirectories` union CLI `--add-dir`, plus any
+    /// runtime `/add-dir`).
+    ///
+    /// `additional_roots` is a shared [`SharedRoots`] cell, NOT a snapshot: the
+    /// registered [`RootsListHandler`] reads it fresh on every `roots/list`, so
+    /// a directory pushed into the cell at runtime (paired with
+    /// [`Self::send_roots_list_changed`]) is reflected without a reconnect.
     ///
     /// Matches claude-code 2.1.207 `r1d()`, which returns `roots/list` as
     /// `[cwd, ...additionalWorkingDirectories]` deduped by file URL. Passing an
-    /// empty `additional_roots` is byte-identical to [`Self::with_hook_dispatcher`].
+    /// empty cell is byte-identical to [`Self::with_hook_dispatcher`].
     pub async fn with_roots(
         server_name: impl Into<String>,
         cwd: PathBuf,
-        additional_roots: Vec<PathBuf>,
+        additional_roots: SharedRoots,
         connection: Arc<jsonrpc::Connection>,
         dispatcher: Option<Arc<dyn HookDispatcher>>,
     ) -> Self {
@@ -1254,7 +1267,7 @@ mod constructor_tests {
         let _client = McpClient::with_roots(
             "filesystem",
             std::path::PathBuf::from("/proj"),
-            vec![std::path::PathBuf::from("/tmp/extra")],
+            crate::new_shared_roots(vec![std::path::PathBuf::from("/tmp/extra")]),
             conn,
             None,
         )
@@ -1273,6 +1286,62 @@ mod constructor_tests {
         assert!(
             text.contains(r#""roots":[{"uri":"file:///proj"},{"uri":"file:///tmp/extra"}]"#),
             "roots/list must advertise cwd + additional dir: {text}",
+        );
+    }
+
+    #[tokio::test]
+    async fn roots_list_reflects_a_runtime_add_without_reconnect() {
+        // Parity 2.1.207 P1-08: a directory pushed into the SHARED roots cell
+        // AFTER the client is built (a runtime `/add-dir`) shows up on the very
+        // next `roots/list` the server issues — the handler reads the cell live,
+        // so no reconnect / rebuild is needed.
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let roots = crate::new_shared_roots(Vec::new());
+        let _client = McpClient::with_roots(
+            "filesystem",
+            std::path::PathBuf::from("/proj"),
+            roots.clone(),
+            conn,
+            None,
+        )
+        .await;
+
+        let issue = |peer_tx: tokio::sync::mpsc::Sender<Bytes>| async move {
+            let req = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"roots/list\"}\n";
+            peer_tx
+                .send(Bytes::from_static(req))
+                .await
+                .expect("send into broker");
+        };
+
+        // First roots/list: cwd-only.
+        issue(peer_tx.clone()).await;
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("response within timeout")
+            .expect("frame was sent");
+        let text = std::str::from_utf8(&frame).expect("utf-8 frame");
+        assert!(
+            text.contains(r#""roots":[{"uri":"file:///proj"}]"#),
+            "initial roots/list is cwd-only: {text}",
+        );
+
+        // Runtime add.
+        roots
+            .write()
+            .unwrap()
+            .push(std::path::PathBuf::from("/extra"));
+
+        // Second roots/list now includes the live-added dir.
+        issue(peer_tx.clone()).await;
+        let frame2 = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("response within timeout")
+            .expect("frame was sent");
+        let text2 = std::str::from_utf8(&frame2).expect("utf-8 frame");
+        assert!(
+            text2.contains(r#""roots":[{"uri":"file:///proj"},{"uri":"file:///extra"}]"#),
+            "roots/list must reflect the runtime add without reconnect: {text2}",
         );
     }
 

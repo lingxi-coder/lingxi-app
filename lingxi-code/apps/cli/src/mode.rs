@@ -297,6 +297,10 @@ pub(crate) async fn run_ratatui(
     // persist uses). Grabbed before `tui_build` is consumed further below.
     let permission_paths = tui_build.permission_paths.clone();
     let session_allow_rules = tui_build.session_allow_rules.clone();
+    // (P1-08 runtime `/add-dir`) the live session-cwd cell + MCP registry the
+    // `/add-dir` effect widens; cloned before `tui_build.runtime` is consumed.
+    let permission_session_cwd = tui_build.runtime.session_cwd.clone();
+    let permission_mcp_registry = tui_build.runtime.mcp_registry.clone();
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
@@ -604,8 +608,19 @@ pub(crate) async fn run_ratatui(
         let allow_rules = session_allow_rules.clone();
         let tx = permission_turn_tx.clone();
         let snapshot = permission_snapshot_cb.clone();
+        let session_cwd = permission_session_cwd.clone();
+        let mcp_registry = permission_mcp_registry.clone();
         permission_handle.spawn(async move {
-            run_permission_action(action, paths, allow_rules, tx, snapshot).await;
+            run_permission_action(
+                action,
+                paths,
+                allow_rules,
+                tx,
+                snapshot,
+                session_cwd,
+                mcp_registry,
+            )
+            .await;
         });
     };
     // (`!` bash mode) `!command` is submitted synchronously from the blocking
@@ -1255,6 +1270,11 @@ async fn run_permission_action(
     snapshot: std::sync::Arc<
         std::sync::Mutex<tui::bottom_pane::permissions_editor_view::PermissionsSnapshot>,
     >,
+    // (P1-08 runtime `/add-dir` live effect) the SAME session cwd cell the file
+    // tools gate on + the live MCP registry — used only by the `AddDirectory`
+    // arm to apply the add to the running session (file access + roots/list).
+    session_cwd: std::sync::Arc<tool_api::SessionCwd>,
+    mcp_registry: std::sync::Arc<mcp::McpRegistry>,
 ) {
     use permission::{
         persist_permission_update, remove_permission_update, PermissionBehavior, PermissionRule,
@@ -1408,6 +1428,24 @@ async fn run_permission_action(
         PermissionAction::AddDirectory { path, dest } => {
             match permission::persist_workspace_directory(&path, true, dest, &paths).await {
                 Ok(written) => {
+                    // LIVE session effect (parity 2.1.207 P1-08): whether or not
+                    // the settings WRITE was new, apply the add to the RUNNING
+                    // session so file tools and MCP roots honor it without a
+                    // reboot. `path` is already absolute + normalized
+                    // (`add_dir::resolve_and_validate`), matching
+                    // `expand_trusted_dir` on an absolute path. `add_trusted_dir`
+                    // is the authoritative jzn-style change-compare: on a REAL
+                    // change (not already trusted) we also push the dir into the
+                    // live MCP roots source and fan out
+                    // `notifications/roots/list_changed` to every connected
+                    // server; an already-trusted dir is a no-op with NO
+                    // notification. This mirrors claude-code's live
+                    // `toolPermissionContext.additionalWorkingDirectories`
+                    // update → `notifyMcpRootsListChanged`.
+                    if session_cwd.add_trusted_dir(std::path::PathBuf::from(&path)) {
+                        mcp_registry.add_root(std::path::PathBuf::from(&path));
+                        mcp_registry.notify_roots_list_changed_all().await;
+                    }
                     // claude-code 2.1.205 success/already echoes, byte-exact:
                     // `Added ${path} as a working directory and saved to local
                     // settings` (persisted) / `… for this session` (session

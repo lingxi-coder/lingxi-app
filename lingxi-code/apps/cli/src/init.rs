@@ -187,6 +187,10 @@ pub struct TuiBuild {
     /// user/project/local settings) and its snapshot preload — the SAME paths
     /// the gate's `AllowAlways` persist uses.
     pub permission_paths: permission::PermissionPaths,
+    /// (companyAnnouncements) The merged `settings.companyAnnouncements` array
+    /// (`None` unless configured). The composition root selects one (memoized)
+    /// and renders it in the startup banner — CC's `LVs`/`oip()`.
+    pub company_announcements: Option<Vec<String>>,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -443,6 +447,26 @@ fn load_settings_api_key_helper(include_user: bool, include_project: bool) -> Op
         .ok()
         .and_then(|eff| eff.settings.api_key_helper)
         .filter(|d| !d.trim().is_empty())
+}
+
+/// Load the merged `settings.companyAnnouncements` (project + user + env
+/// layers) — the startup announcement strings CC shows via `LVs`/`oip()`.
+/// `None` when unset; the TUI composition root selects one (memoized) and
+/// renders it in the startup banner.
+fn load_settings_company_announcements(
+    include_user: bool,
+    include_project: bool,
+) -> Option<Vec<String>> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load_scoped(inputs, include_user, include_project)
+        .ok()
+        .and_then(|eff| eff.settings.company_announcements)
 }
 
 /// Load the merged `settings.claudeMdExcludes` (project + user + env layers) —
@@ -963,6 +987,10 @@ pub async fn build_runtime_for_tui_inner(
 
     let runtime = build_runtime_from_config(cfg, bridge).await?;
     crate::startup_trace::mark("tui_runtime_build_end");
+    // (companyAnnouncements) Read the merged array honoring `--setting-sources`;
+    // the composition root (`run_ratatui`) selects + renders it at startup.
+    let (incl_user, incl_project) = setting_source_flags(argv.setting_sources.as_deref());
+    let company_announcements = load_settings_company_announcements(incl_user, incl_project);
     Ok(TuiBuild {
         runtime,
         bridge_rx,
@@ -970,6 +998,7 @@ pub async fn build_runtime_for_tui_inner(
         permission_rx: perm_rx,
         session_allow_rules: editor_session_allow_rules,
         permission_paths,
+        company_announcements,
     })
 }
 

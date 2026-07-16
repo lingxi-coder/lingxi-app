@@ -1172,4 +1172,71 @@ mod tests {
         // Unknown → None (the caller acks + no-ops, matching the binary).
         assert_eq!(parse_settable_mode("bubble"), None);
     }
+
+    // ---- PERM-GATE-UPDATES-01: in-memory setMode apply (Xb) ----
+
+    #[test]
+    fn apply_permission_update_setmode_changes_live_mode() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        assert_eq!(gate.effective_mode(), PermissionMode::Default);
+        // A host allow carrying setMode:'plan' takes effect on the LIVE session.
+        gate.apply_permission_update(&serde_json::json!({"type": "setMode", "mode": "plan"}));
+        assert_eq!(gate.effective_mode(), PermissionMode::Plan);
+    }
+
+    #[test]
+    fn apply_permission_update_setmode_bypass_rejected_when_unavailable() {
+        // Default policy: bypass NOT available (not launched with the flag) ⇒
+        // Xb rejects the setMode with no live change.
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.apply_permission_update(
+            &serde_json::json!({"type": "setMode", "mode": "bypassPermissions"}),
+        );
+        assert_eq!(
+            gate.effective_mode(),
+            PermissionMode::Default,
+            "bypassPermissions must be rejected when not available"
+        );
+    }
+
+    #[test]
+    fn apply_permission_update_setmode_bypass_applied_when_available() {
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
+                .with_bypass_available(true),
+        );
+        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.apply_permission_update(
+            &serde_json::json!({"type": "setMode", "mode": "bypassPermissions"}),
+        );
+        assert_eq!(gate.effective_mode(), PermissionMode::BypassPermissions);
+    }
+
+    #[test]
+    fn apply_permission_update_non_setmode_is_noop_for_mode() {
+        // addRules is the documented in-memory PARTIAL — it must NOT change the
+        // live mode here (persisted by the control plane instead).
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.apply_permission_update(&serde_json::json!({
+            "type": "addRules",
+            "rules": [{"toolName": "Bash"}],
+            "behavior": "allow",
+            "destination": "session"
+        }));
+        assert_eq!(gate.effective_mode(), PermissionMode::Default);
+    }
+
+    #[test]
+    fn apply_permission_updates_folds_over_array() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.apply_permission_updates(&[
+            serde_json::json!({"type": "addRules", "rules": [], "behavior": "allow", "destination": "session"}),
+            serde_json::json!({"type": "setMode", "mode": "acceptEdits"}),
+        ]);
+        assert_eq!(gate.effective_mode(), PermissionMode::AcceptEdits);
+    }
 }

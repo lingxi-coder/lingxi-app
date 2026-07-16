@@ -228,8 +228,20 @@ impl PolicyPermissionGate {
                         ..ctx.clone()
                     };
                     let outcome = self.inner.check_with_context(name, input, &ctx2).await;
-                    if matches!(outcome, PermissionOutcome::Allow { .. }) {
+                    if let PermissionOutcome::Allow {
+                        permission_updates, ..
+                    } = &outcome
+                    {
                         self.record_auto_mode_non_deny(mode);
+                        // In-memory apply (claude-code `setToolPermissionContext(
+                        // u=>bJ(u,updates))`): when the host's allow carried
+                        // `updatedPermissions`, apply them to the LIVE session so
+                        // subsequent checks see the change — not only the next
+                        // session load. `setMode` is applied here; rule/dir arms
+                        // are the documented PARTIAL (see `apply_permission_update`).
+                        if !permission_updates.is_empty() {
+                            self.apply_permission_updates(permission_updates);
+                        }
                     }
                     outcome
                 }
@@ -395,6 +407,74 @@ impl PolicyPermissionGate {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .record_non_deny();
+        }
+    }
+
+    /// Apply a SINGLE host `updatedPermissions` entry to the LIVE session
+    /// in-memory (claude-code `Xb` — the per-update reducer folded by `bJ`).
+    ///
+    /// This is the in-memory half of `applyPermissionUpdate`: when a
+    /// `can_use_tool` (or `PermissionRequest` hook) ALLOW response carries
+    /// `updatedPermissions`, the SAME session's later checks must see the change
+    /// — not only the NEXT session load. Here we port the **`setMode`** arm
+    /// byte-faithfully (the only arm that maps cleanly onto the gate's existing
+    /// interior-mutable state, [`Self::mode_override`]):
+    ///
+    /// - `bypassPermissions` is REJECTED (no mode change) when bypass is not
+    ///   available — the disabled-by-settings killswitch OR a session not
+    ///   launched with `--dangerously-skip-permissions`
+    ///   (`!isBypassPermissionsModeAvailable`) — with the byte-exact
+    ///   `Ignoring permission update: setMode 'bypassPermissions' rejected …`
+    ///   debug log. NOTE this differs from
+    ///   [`PermissionGate::set_permission_mode`]: `Xb` applies the mode RAW with
+    ///   ONLY the bypass-availability guard (no `auto` `Nle` gate — that guards
+    ///   the interactive `setPermissionMode` handler, not this reducer).
+    /// - any other mode is applied, logged `Applying permission update: Setting
+    ///   mode to '<mode>'`. An UNKNOWN mode string is logged (matching `Xb`,
+    ///   which sets the raw string and lets `transitionPermissionMode` no-op it)
+    ///   but leaves the typed [`Self::mode_override`] unchanged.
+    ///
+    /// PARTIAL (PERM-GATE-UPDATES-01): the `addRules` / `replaceRules` /
+    /// `removeRules` / `add|removeDirectories` arms are NOT applied in-memory
+    /// here — that needs a session-rule overlay consulted by
+    /// [`crate::PermissionPolicy::authorize_with_mode`] (in `policy.rs`) plus the
+    /// `persist.rs` session-destination changes, both outside this lane. Those
+    /// updates are still PERSISTED by the control plane (`addRules` only) and
+    /// take effect on the next session load, as before.
+    pub fn apply_permission_update(&self, update: &Value) {
+        match update.get("type").and_then(Value::as_str) {
+            Some("setMode") => {
+                let Some(mode_str) = update.get("mode").and_then(Value::as_str) else {
+                    return;
+                };
+                let bypass_unavailable = self.policy.bypass_killswitch_active
+                    || !self.policy.bypass_permissions_available;
+                if mode_str == "bypassPermissions" && bypass_unavailable {
+                    tracing::debug!(
+                        "Ignoring permission update: setMode 'bypassPermissions' rejected — mode is not available (disableBypassPermissionsMode set, or session not launched in bypassPermissions mode)"
+                    );
+                    return;
+                }
+                tracing::debug!("Applying permission update: Setting mode to '{mode_str}'");
+                if let Some(parsed) = parse_settable_mode(mode_str) {
+                    *self
+                        .mode_override
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(parsed);
+                }
+            }
+            _ => {
+                // addRules/replaceRules/removeRules/add|removeDirectories:
+                // in-memory apply deferred (see the method docs). No-op here.
+            }
+        }
+    }
+
+    /// Fold [`Self::apply_permission_update`] over a host `updatedPermissions`
+    /// array (claude-code `bJ`), applying each entry to the live session.
+    pub fn apply_permission_updates(&self, updates: &[Value]) {
+        for update in updates {
+            self.apply_permission_update(update);
         }
     }
 }

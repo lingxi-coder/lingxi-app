@@ -443,8 +443,11 @@ impl EnterWorktreeTool {
             // `true` for the `path` (enter-existing) branch, `false` for create —
             // gates `ExitWorktree`'s errorCode:4 "not the owner" remove guard.
             entered_existing,
-            // No worktree-attached tmux wiring in the port yet — see
-            // `ExitWorktreeTool`'s module doc for the residual note.
+            // The interactive `EnterWorktreeTool` never attaches tmux (206's
+            // tool doesn't either); tmux sessions come only from the boot-time
+            // `--worktree --tmux` launch path (`engine-desktop`'s
+            // `apply_worktree_launch`), which populates `tmux_session_name`
+            // directly on the shared cell.
             tmux_session_name: None,
         });
     }
@@ -825,9 +828,10 @@ async fn kill_worktree_tmux_session(
 /// (never touches a worktree created manually or in a previous session).
 ///
 /// TMUX (worktree tmux launch plan, Task 5): when `session.tmux_session_name`
-/// is `Some(name)` — populated once boot's `--tmux` consumption (Task 4)
-/// exists; today `EnterWorktreeTool` always records `None`, so this branch
-/// is currently unreachable in production but is fully wired and tested —
+/// is `Some(name)` — populated by the boot-time `--worktree --tmux` launch
+/// path (`engine-desktop`'s `apply_worktree_launch`); the interactive
+/// `EnterWorktreeTool` always records `None` (206's tool never attaches tmux
+/// either) —
 /// [`Self::call`] kills the session on `remove` (via
 /// [`kill_worktree_tmux_session`], non-fatally: a kill failure only logs a
 /// `tracing::warn!` and does not block removal) and, on `keep`, leaves it
@@ -2562,8 +2566,8 @@ mod tests {
 
     #[tokio::test]
     async fn exit_inert_without_tmux_session_name_issues_no_tmux_call() {
-        // `tmux_session_name: None` (today's only reachable case in
-        // production — `EnterWorktreeTool` never populates it) must behave
+        // `tmux_session_name: None` (the common case — reached whenever the
+        // session wasn't launched with `--worktree --tmux`) must behave
         // exactly as before this task: no `tmux` invocation on either
         // `remove` or `keep`, and no `tmux_session_name` in `data`.
         for action in ["remove", "keep"] {

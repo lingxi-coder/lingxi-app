@@ -54,13 +54,13 @@ pub struct WorktreeSession {
     /// `remove` on an entered (not owned) worktree (`t.enteredExisting`,
     /// errorCode 4) — this session is not its owner.
     pub entered_existing: bool,
-    /// Name of a tmux session attached to this worktree, if any. The port has
-    /// no worktree-attached tmux wiring today — `EnterWorktreeTool` always
-    /// writes `None` here — so this field is a substrate placeholder for a
-    /// future integration; `ExitWorktreeTool`'s tmux-handling branch is gated
-    /// on `Some` and is therefore presently unreachable in production. See
-    /// the module doc on `tools::worktree::ExitWorktreeTool` for the residual
-    /// note.
+    /// Name of a tmux session attached to this worktree, if any. Populated by
+    /// the boot-time `--worktree --tmux` launch path (`engine-desktop`'s
+    /// `apply_worktree_launch`), which creates a detached `tmux new-session`
+    /// and stores its name here; the interactive `EnterWorktreeTool` always
+    /// writes `None` (206's tool never attaches tmux either). When `Some`,
+    /// `ExitWorktreeTool` kills the session on `remove` and surfaces its name
+    /// for reattach on `keep`.
     pub tmux_session_name: Option<String>,
 }
 

@@ -3362,6 +3362,86 @@ mod tests {
         ));
     }
 
+    // ---- BGOP-01: `&` background-operator allow→ask downgrade (Yqr) --------
+
+    /// A backgrounded command otherwise allowed by a rule is downgraded to a
+    /// forced SafetyCheck ask with the byte-locked reason.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bgop01_background_command_downgrades_allow_to_ask() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(sleep:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("sleep 100 &")) {
+            PermissionResult::Ask {
+                reason:
+                    PermissionDecisionReason::SafetyCheck {
+                        reason,
+                        classifier_approvable,
+                    },
+                prompt,
+                ..
+            } => {
+                assert!(!classifier_approvable);
+                assert_eq!(
+                    reason,
+                    "This command uses the `&` background operator, which defers execution past approval-time safety checks. Approve only if you trust it."
+                );
+                assert_eq!(prompt.message, reason);
+            }
+            other => panic!("expected background-operator ask, got {other:?}"),
+        }
+    }
+
+    /// A backgrounded command allowed tool-wide is also downgraded (the wrapper
+    /// runs on the final allow regardless of how it was granted).
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bgop01_toolwide_allow_backgrounded_downgraded() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls &")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
+    }
+
+    /// Logical `&&` contains `&` but is NOT a background operator (distinct AST
+    /// node kind), so the allow is preserved.
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bgop01_logical_and_not_downgraded() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo a && echo b")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    /// The sandbox auto-allow grant is EXEMPT from the downgrade (`hTt` reason).
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bgop01_sandbox_auto_allow_exempt() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+        match p.authorize("Bash", &bash("npm install &")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matched_other(&reason, "Auto-allowed with sandbox"),
+                "sandbox grant must remain allowed, got {reason:?}"
+            ),
+            other => panic!("expected sandbox Allow (exempt from bgop), got {other:?}"),
+        }
+    }
+
     #[test]
     fn stringify_primitive_semantics() {
         assert_eq!(

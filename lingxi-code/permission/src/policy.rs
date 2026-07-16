@@ -389,6 +389,16 @@ impl PermissionPolicy {
         mode: PermissionMode,
     ) -> PermissionResult {
         let result = self.authorize_inner(tool_name, input, mode);
+        // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
+        // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an
+        // ALLOW for a shell command containing `&` is downgraded to a forced ask
+        // unless the AST parses cleanly with NO background `&` operator; the
+        // sandbox-auto-allow grant is exempt. Bash-ast-gated (Yqr's `a7t` is the
+        // tree-sitter parse, which is only available under the feature).
+        #[cfg(feature = "bash-ast")]
+        let result = self
+            .background_operator_ask(tool_name, input, &result)
+            .unwrap_or(result);
         // PERM.1 — DontAsk transform (claude-code `permissions.ts:503-517`):
         // applied LAST so no early-return ask escapes it. A remaining `ask`
         // becomes `deny`, EXCEPT for read-only / `AllowByDefault` tools — in TS
@@ -1423,6 +1433,51 @@ impl PermissionPolicy {
         None
     }
 
+    /// BGOP-01: the `&` background-operator allow→ask downgrade — 1:1 with
+    /// claude-code `Yqr`. Given the FINAL permission result, returns
+    /// `Some(background_ask)` when the result is an ALLOW for a shell command
+    /// that (a) contains `&`, (b) is not the sandbox-auto-allow grant (`hTt`
+    /// reason, exempt), and (c) either fails to parse or whose AST contains a
+    /// background `&` operator (or an ERROR node) per `XAu`. `None` keeps the
+    /// original allow. Backgrounding defers execution past approval-time safety
+    /// checks, so the forced ask is a SafetyCheck with `classifier_approvable:
+    /// false`.
+    #[cfg(feature = "bash-ast")]
+    fn background_operator_ask(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        result: &PermissionResult,
+    ) -> Option<PermissionResult> {
+        if !shell_command::is_shell_tool(tool_name) {
+            return None;
+        }
+        let PermissionResult::Allow { reason, .. } = result else {
+            return None;
+        };
+        let command = shell_command::command_from_input(input)?;
+        if !command.contains('&') {
+            return None;
+        }
+        // Sandbox auto-allow (`hTt`) is exempt.
+        if matches!(
+            reason,
+            PermissionDecisionReason::Other { reason }
+                if reason == "Auto-allowed with sandbox (autoAllowBashIfSandboxed enabled)"
+        ) {
+            return None;
+        }
+        // Keep the allow only when the parse SUCCEEDS and shows NO background
+        // operator (`o && o!==NCe && !XAu(o)`); an unparseable command
+        // (`parse_raw` → `None`) is treated as "cannot confirm" → downgrade.
+        if let Some(tree) = crate::bash_tree_sitter::parse_raw(command) {
+            if !has_background_operator(tree.root_node()) {
+                return None;
+            }
+        }
+        Some(ask_background_operator(tool_name))
+    }
+
     /// Whether bypassPermissions is in effect for this call — 1:1 with
     /// claude-code U1g's `p = d==="bypassPermissions" || (d==="plan" &&
     /// isBypassPermissionsModeAvailable)`, subject to the killswitch. Threaded
@@ -2282,6 +2337,52 @@ fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// `XAu(node)` — 1:1 with claude-code's background-operator AST walk: `true`
+/// when the subtree contains an `ERROR` node, or a `&` node whose parent is NOT
+/// a `binary_expression` (a real background operator; `&&`/`||`/`|` are distinct
+/// node kinds). A `&` under a `binary_expression` is skipped (not recursed).
+#[cfg(feature = "bash-ast")]
+fn has_background_operator(node: tree_sitter::Node) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "ERROR" {
+            return true;
+        }
+        if kind == "&" {
+            if node.kind() != "binary_expression" {
+                return true;
+            }
+            continue;
+        }
+        if has_background_operator(child) {
+            return true;
+        }
+    }
+    false
+}
+
+/// BGOP-01 background-operator forced ask (claude-code `Yqr`'s downgrade). Tagged
+/// [`PermissionDecisionReason::SafetyCheck`] with `classifier_approvable: false`
+/// (`classifierApprovable:!1`), carrying the byte-locked reason/message.
+#[cfg(feature = "bash-ast")]
+fn ask_background_operator(tool_name: &str) -> PermissionResult {
+    let reason = "This command uses the `&` background operator, which defers execution past approval-time safety checks. Approve only if you trust it.";
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::SafetyCheck {
+            reason: reason.to_string(),
+            classifier_approvable: false,
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: reason.to_string(),
             options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,

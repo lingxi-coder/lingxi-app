@@ -273,10 +273,18 @@ pub struct Argv {
     // to the MAIN thread (`bde`/`mainThreadAgentDefinition`): the `agentType`
     // rides lifecycle hook payloads, the system prompt becomes the main-loop
     // prompt (`nre`, `--system-prompt` still winning), the `tools:` /
-    // `disallowedTools` frontmatter narrows the tool pool (`HJ`), and the agent
+    // `disallowedTools` frontmatter narrows the tool pool (`HJ`), the agent
     // `model` overrides the main loop (`jb(Zo(model))`) unless `--model` was
-    // given. RESIDUAL (follow-up): frontmatter `hooks`/`mcpServers` swap + resume
-    // restoration (`rVe`).
+    // given, and the frontmatter `hooks` register as `mainThreadAgentHooks`
+    // (`Rft`→`o_n`, `is_agent=false` so Stop stays Stop; gated by the `g9e`
+    // trusted-source set) BEFORE the SessionStart fire.
+    // RESIDUAL (blocked on LingXi substrate, not CC parity): frontmatter
+    // `mcpServers` swap (scope `"agent"`) — the composition-root MCP tool build
+    // Arc-seals the `ToolRegistry` before the final agent catalog is assembled,
+    // so a late `connect_all` cannot surface the servers' tools; and resume
+    // restoration (`rVe`) of the PERSISTED `agentSetting` with NO re-passed
+    // `--agent` — needs a JSONL agent-setting record (LingXi resume replays
+    // JSONL). Re-passing `--agent` on `--resume` already re-applies fully.
     #[arg(long = "agent", value_name = "agent")]
     pub agent: Option<String>,
 

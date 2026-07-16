@@ -220,6 +220,85 @@ fn posix_dirname(p: &str) -> String {
     }
 }
 
+/// POSIX `path.basename` (final path component).
+fn posix_basename(p: &str) -> String {
+    let normalized = p.trim_end_matches('/');
+    match normalized.rfind('/') {
+        None => normalized.to_string(),
+        Some(idx) => normalized[idx + 1..].to_string(),
+    }
+}
+
+/// Join `base` with an absolute-path component (`path.join(base, comp)` for an
+/// absolute `base`). Empty `base` (from `trim_end_matches('/')` of `/`) yields a
+/// leading-slash join.
+fn posix_join(base: &str, comp: &str) -> String {
+    format!("{}/{}", base.trim_end_matches('/'), comp)
+}
+
+/// Join `base` with each of `comps` in order.
+fn posix_join_all(base: &str, comps: &[String]) -> String {
+    let mut out = base.trim_end_matches('/').to_string();
+    for c in comps {
+        out.push('/');
+        out.push_str(c);
+    }
+    out
+}
+
+/// Max symlink-chase iterations — 2.1.211 `iYh = 40`.
+const MAX_SYMLINK_ITERATIONS: usize = 40;
+
+/// Partial realpath resolver — port of 2.1.211's `sYh`. Resolves the existing
+/// prefix of `path` through symlinks (following any symlinked component,
+/// including a dangling symlink as the first missing component) while KEEPING a
+/// non-existent tail. Returns the resolved path, or `None` when resolution
+/// cannot make progress (root reached unresolved, or the symlink chase exceeds
+/// [`MAX_SYMLINK_ITERATIONS`]) — the caller then FAILS CLOSED.
+///
+/// This hardens the Linux deny-within-allow loop: a deny path that IS or crosses
+/// a symlink pointing outside the allowed roots is resolved to its real location
+/// before the ro-bind, so it cannot dodge the mask (`Resolved symlinked deny
+/// path` / fail-closed in 2.1.211; absent in the 0.0.54 / CC≤207 port).
+fn partial_realpath(path: &str) -> Option<String> {
+    let mut t = path.to_string();
+    for _ in 0..MAX_SYMLINK_ITERATIONS {
+        // Full path resolves (exists, all symlinks followed) → canonical.
+        if let Ok(rp) = std::fs::canonicalize(&t) {
+            return Some(rp.to_string_lossy().into_owned());
+        }
+        // Walk up to the deepest existing ancestor, collecting the missing tail.
+        let mut n = t.clone();
+        let mut tail: Vec<String> = Vec::new();
+        let resolved_ancestor = loop {
+            let parent = posix_dirname(&n);
+            if parent == n {
+                // Reached the root without resolving anything → fail closed.
+                return None;
+            }
+            tail.insert(0, posix_basename(&n));
+            n = parent;
+            if let Ok(rp) = std::fs::canonicalize(&n) {
+                break rp.to_string_lossy().into_owned();
+            }
+        };
+        // `s` = the first missing component under the resolved ancestor.
+        let s = posix_join(&resolved_ancestor, &tail[0]);
+        match std::fs::read_link(&s) {
+            // Not a symlink → resolved ancestor + the full missing tail.
+            Err(_) => return Some(posix_join_all(&resolved_ancestor, &tail)),
+            // A symlink: resolve it against its own dir, keep the rest of the
+            // tail, and loop.
+            Ok(link_target) => {
+                let base = posix_dirname(&s);
+                let resolved = posix_resolve(&base, &link_target.to_string_lossy());
+                t = posix_join_all(&resolved, &tail[1..]);
+            }
+        }
+    }
+    None
+}
+
 /// Get mandatory deny paths using ripgrep (Linux only).
 ///
 /// Uses a SINGLE ripgrep call with multiple glob patterns for efficiency. With
@@ -447,34 +526,69 @@ pub fn generate_filesystem_args(
             cwd,
         ));
 
-        // Dedup post-normalization. (:585-590)
+        // Deny loop (2.1.211-hardened): resolve each deny path through symlinks
+        // and fail closed if resolution can't make progress, so a symlinked deny
+        // path can't dodge the ro-bind. Dedup is on the RESOLVED path (and on
+        // any mount point emitted). `seen_deny_write` is the 2.1.211 `w` set;
+        // `mount_original` is the `d` map (mount point -> original deny path),
+        // kept for the mount bookkeeping.
         let mut seen_deny_write: HashSet<String> = HashSet::new();
+        let mut mount_original: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for path_pattern in &deny_paths {
-            let normalized_path = normalize_path_for_sandbox(path_pattern);
-            if !seen_deny_write.insert(normalized_path.clone()) {
+            let i_path = normalize_path_for_sandbox(path_pattern);
+            // Skip /dev/* BEFORE resolution. (:for x of b … I.startsWith("/dev/"))
+            if i_path.starts_with("/dev/") {
                 continue;
             }
-            // Skip /dev/*. (:592-594)
-            if normalized_path.starts_with("/dev/") {
+            // Resolve the deny path through symlinks (partial realpath). On
+            // failure, FAIL CLOSED: ro-bind /dev/null at the (allowed-contained)
+            // original location and continue.
+            let Some(h_path) = partial_realpath(&i_path) else {
+                if let Some(symlink_in_path) =
+                    find_symlink_in_path(&i_path, &allowed_write_paths)
+                {
+                    if seen_deny_write.insert(symlink_in_path.clone()) {
+                        deny_write_args.push("--ro-bind".to_string());
+                        deny_write_args.push("/dev/null".to_string());
+                        deny_write_args.push(symlink_in_path.clone());
+                        mount_original.insert(symlink_in_path, i_path.clone());
+                    }
+                }
+                // "[Sandbox Linux] Deny path could not be resolved through
+                // symlinks, failing closed: {i_path}"
+                continue;
+            };
+            // (`H !== I` would log "Resolved symlinked deny path: I -> H".)
+
+            // Skip /dev/* AFTER resolution too (a symlink may resolve into /dev).
+            if h_path.starts_with("/dev/") {
                 continue;
             }
-            // Symlink-in-path within allowed write path -> mask with /dev/null. (:599-604)
-            if let Some(symlink_in_path) =
-                find_symlink_in_path(&normalized_path, &allowed_write_paths)
-            {
-                deny_write_args.push("--ro-bind".to_string());
-                deny_write_args.push("/dev/null".to_string());
-                deny_write_args.push(symlink_in_path);
+            // Dedup on the resolved path.
+            if !seen_deny_write.insert(h_path.clone()) {
                 continue;
             }
-            // Non-existent paths. (:612-655)
-            if !Path::new(&normalized_path).exists() {
+            // Symlink-in-path within an allowed write path -> mask the symlink
+            // location with /dev/null (symlink-replacement-attack guard),
+            // checked against the RESOLVED path. (:V6c(H,c))
+            if let Some(symlink_in_path) = find_symlink_in_path(&h_path, &allowed_write_paths) {
+                if seen_deny_write.insert(symlink_in_path.clone()) {
+                    deny_write_args.push("--ro-bind".to_string());
+                    deny_write_args.push("/dev/null".to_string());
+                    deny_write_args.push(symlink_in_path.clone());
+                    mount_original.insert(symlink_in_path, i_path.clone());
+                }
+                continue;
+            }
+            // Non-existent resolved paths. (:612-655, on H)
+            if !Path::new(&h_path).exists() {
                 // Fix 1 (worktree): file ancestor -> skip. (:617-620)
-                if has_file_ancestor(&normalized_path) {
+                if has_file_ancestor(&h_path) {
                     continue;
                 }
                 // Deepest existing ancestor directory. (:622-625)
-                let mut ancestor_path = posix_dirname(&normalized_path);
+                let mut ancestor_path = posix_dirname(&h_path);
                 while ancestor_path != "/" && !Path::new(&ancestor_path).exists() {
                     ancestor_path = posix_dirname(&ancestor_path);
                 }
@@ -482,18 +596,18 @@ pub fn generate_filesystem_args(
                 let ancestor_is_within_allowed_path = allowed_write_paths.iter().any(|allowed| {
                     ancestor_path.starts_with(&format!("{allowed}/"))
                         || ancestor_path == *allowed
-                        || normalized_path.starts_with(&format!("{allowed}/"))
+                        || h_path.starts_with(&format!("{allowed}/"))
                 });
                 if ancestor_is_within_allowed_path {
-                    let first_non_existent = find_first_non_existent_component(&normalized_path);
-                    // TS: `if (firstNonExistent !== normalizedPath) { emptyDir }
-                    // else { /dev/null }`. Inverted here (== first) to satisfy
-                    // clippy::if_not_else; behavior is identical.
-                    if first_non_existent == normalized_path {
+                    let first_non_existent = find_first_non_existent_component(&h_path);
+                    // TS: `if (firstNonExistent !== H) { emptyDir } else { /dev/null }`.
+                    // Inverted here (== first) to satisfy clippy::if_not_else.
+                    if first_non_existent == h_path {
                         // Leaf -> /dev/null. (:644-649)
                         deny_write_args.push("--ro-bind".to_string());
                         deny_write_args.push("/dev/null".to_string());
                         deny_write_args.push(first_non_existent.clone());
+                        mount_original.insert(first_non_existent.clone(), i_path.clone());
                         mount_points.push(PathBuf::from(first_non_existent));
                     } else {
                         // Fix 2: intermediate component -> empty dir mount. (:637-643)
@@ -501,23 +615,30 @@ pub fn generate_filesystem_args(
                         deny_write_args.push("--ro-bind".to_string());
                         deny_write_args.push(empty_dir);
                         deny_write_args.push(first_non_existent.clone());
+                        mount_original.insert(first_non_existent.clone(), i_path.clone());
                         mount_points.push(PathBuf::from(first_non_existent));
                     }
                 }
                 // else: not within allowed -> already read-only, skip. (:651-653)
                 continue;
             }
-            // Existent within allowed write path -> buffer ro-bind p p. (:658-665)
-            let is_within_allowed_path = allowed_write_paths.iter().any(|allowed| {
-                normalized_path.starts_with(&format!("{allowed}/")) || normalized_path == *allowed
-            });
+            // Existent resolved path within allowed write path -> ro-bind H H. (:658-665)
+            let is_within_allowed_path = allowed_write_paths
+                .iter()
+                .any(|allowed| h_path.starts_with(&format!("{allowed}/")) || h_path == *allowed);
             if is_within_allowed_path {
                 deny_write_args.push("--ro-bind".to_string());
-                deny_write_args.push(normalized_path.clone());
-                deny_write_args.push(normalized_path);
+                deny_write_args.push(h_path.clone());
+                deny_write_args.push(h_path.clone());
+                mount_original.insert(h_path.clone(), i_path.clone());
             }
             // else: outside allowed -> already read-only, skip.
         }
+        // `mount_original` (2.1.211 `d`) currently backs the mount bookkeeping;
+        // the 2.1.211 denyWrite flush additionally consults it for the
+        // denyRead-tmpfs re-exposure check (`S(x)`/`E`), which is a separate,
+        // not-yet-ported parity item — see the flush below.
+        let _ = &mount_original;
     } else {
         // No write restrictions: allow all writes. (:668-671)
         args.push("--bind".to_string());
@@ -768,6 +889,108 @@ mod tests {
         let target = p(&dir, "existing/nope/child/file.txt");
         let expected = p(&dir, "existing/nope");
         assert_eq!(find_first_non_existent_component(&target), expected);
+    }
+
+    // --- partial_realpath / sYh (2.1.211 symlink-resolving deny hardening) ---
+
+    #[test]
+    fn partial_realpath_resolves_existing_path() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let path = dir.path().join("sub").to_string_lossy().into_owned();
+        let expected = fs::canonicalize(dir.path().join("sub"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(partial_realpath(&path), Some(expected));
+    }
+
+    #[test]
+    fn partial_realpath_keeps_nonexistent_tail() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("exists")).unwrap();
+        let path = dir
+            .path()
+            .join("exists/no/tail")
+            .to_string_lossy()
+            .into_owned();
+        let base = fs::canonicalize(dir.path().join("exists"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(partial_realpath(&path), Some(format!("{base}/no/tail")));
+    }
+
+    #[test]
+    fn partial_realpath_follows_symlinked_component() {
+        let dir = TempDir::new().unwrap();
+        // link -> real (both exist); target link/missing keeps the missing tail
+        // but resolves link -> real.
+        fs::create_dir(dir.path().join("real")).unwrap();
+        symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let path = dir
+            .path()
+            .join("link/missing")
+            .to_string_lossy()
+            .into_owned();
+        let real = fs::canonicalize(dir.path().join("real"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(partial_realpath(&path), Some(format!("{real}/missing")));
+    }
+
+    #[test]
+    fn partial_realpath_none_on_symlink_loop() {
+        let dir = TempDir::new().unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        // a -> b, b -> a : an unresolvable loop → fail closed (None).
+        symlink(base.join("b"), base.join("a")).unwrap();
+        symlink(base.join("a"), base.join("b")).unwrap();
+        let path = base.join("a/x").to_string_lossy().into_owned();
+        assert_eq!(partial_realpath(&path), None);
+    }
+
+    #[test]
+    fn deny_within_allow_follows_symlink_to_resolved_path() {
+        // PERM-DELTA-SBX-SYMLINK-DENY-04: a deny path crossing a symlink is
+        // resolved through the symlink before the ro-bind, so it masks the REAL
+        // location (not the symlink), and does not leave the resolved file
+        // writable.
+        let allow = TempDir::new().unwrap();
+        let allow_path = canon(&allow);
+        fs::create_dir(allow.path().join("real")).unwrap();
+        fs::write(allow.path().join("real/secret"), "x").unwrap();
+        symlink(allow.path().join("real"), allow.path().join("link")).unwrap();
+        let deny = cp(&allow, "link/secret");
+        let resolved = fs::canonicalize(allow.path().join("link/secret"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cwd = empty_cwd();
+        let wc = WriteConfig {
+            allow_only: vec![allow_path.clone()],
+            deny_within_allow: vec![deny.clone()],
+        };
+        let (args, _mp) = generate_filesystem_args(
+            None,
+            Some(&wc),
+            "rg",
+            3,
+            false,
+            &cwd.path().to_string_lossy(),
+        );
+        // The RESOLVED real path is ro-bound (deny applied at the real location).
+        assert!(
+            has_triple(&args, "--ro-bind", &resolved, &resolved),
+            "resolved deny path must be ro-bound; args={args:?}"
+        );
+        // The symlink itself is NOT the mask target (old, pre-resolution behavior).
+        let link = cp(&allow, "link");
+        assert!(
+            !has_triple(&args, "--ro-bind", "/dev/null", &link),
+            "symlink location must not be the /dev/null mask after resolution; args={args:?}"
+        );
     }
 
     // --- linux_get_mandatory_deny_paths (linux-sandbox-utils.js:102-201) ---

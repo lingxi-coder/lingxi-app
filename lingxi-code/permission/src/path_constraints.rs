@@ -169,12 +169,18 @@ fn has_process_substitution(command: &str) -> bool {
     false
 }
 
-/// Does `target` carry shell-expansion / glob / history / tilde syntax that
-/// can't be safely path-validated? — union of TS `hasDangerousExpansion`
-/// (`commands.ts:830-858`) and the residue `isSimpleTarget` (`:798-817`)
-/// rejects. A target that is NOT simple is dangerous (the TS design invariant:
-/// every redirect target is EITHER simple — captured & validated — OR dangerous
-/// — flagged → ask).
+/// Does `target` carry shell-expansion / glob / history / tilde syntax that a
+/// redirect target can't be safely path-validated with? — mirrors 2.1.211's
+/// `eLe` dangerous-classification for a redirect target `g`:
+/// `/^~|[*?[]/.test(g)` (leading `~` or a `*`/`?`/`[` anywhere) and
+/// `g.startsWith("!") || g.startsWith("=")`. `$`/backtick expansions surface via
+/// parse-tree nodes in `eLe`; the port (no AST) approximates them literally.
+///
+/// NOTE: `%` is NOT dangerous here — it is Windows-gated inside `EUr` (create
+/// op), not `eLe`. `{`/`}` are NOT dangerous either — they flow to `EUr`'s
+/// create-op brace guard (see [`check_path_constraints`]). This is why a bare
+/// `file%1` redirect target passes and a braced target gets the brace message
+/// rather than the shell-expansion one.
 fn target_has_dangerous_expansion(target: &str) -> bool {
     if target.is_empty() {
         // Empty target: TS treats `''` as not-simple AND not-dangerous (handled
@@ -183,22 +189,33 @@ fn target_has_dangerous_expansion(target: &str) -> bool {
         return false;
     }
     target.contains('$')
-        || target.contains('%')
         || target.contains('`')
         || target.contains('*')
         || target.contains('?')
         || target.contains('[')
-        || target.contains('{')
         || target.starts_with('!')
         || target.starts_with('=')
         || target.starts_with('~')
 }
 
-/// One extracted output redirection: a file `target` plus whether the target
-/// carried dangerous expansion (→ ask) instead of being a simple path.
+/// `^[A-Za-z0-9./_-]+$` — the `>&` (fd-duplication-or-file) charset gate in
+/// 2.1.211's `eLe` (`if(d&&!/^[A-Za-z0-9./_-]+$/.test(g))` → shell_expansion). A
+/// `>&`-operator target with any other char is treated as dangerous.
+fn redirect_target_charset_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'_' | b'-'))
+}
+
+/// One extracted output redirection: a file `target`, whether the target carried
+/// dangerous expansion (→ shell-expansion ask), and whether it is a braced
+/// write target (→ `EUr` create-op brace-guard ask).
 struct Redirection {
     target: String,
+    /// Dangerous shell expansion (`eLe` shell_expansion) → "Shell expansion …".
     dangerous: bool,
+    /// Non-dangerous target containing `{`/`}` → `EUr` create brace guard.
+    brace: bool,
 }
 
 /// Strip ONE leading and ONE trailing `'`/`"` (TS `validatePath`'s
@@ -395,8 +412,18 @@ fn extract_redirections(sub: &str) -> Vec<Redirection> {
                         continue;
                     }
                     let target = strip_surrounding_quotes(raw).to_string();
-                    let dangerous = target_has_dangerous_expansion(&target);
-                    out.push(Redirection { target, dangerous });
+                    // `eLe`: dangerous = leading `~`/glob/`!`/`=`/`$`/backtick,
+                    // OR (for a `>&` operator) a non-`[A-Za-z0-9./_-]` charset.
+                    let dangerous = target_has_dangerous_expansion(&target)
+                        || (op == ">&" && !redirect_target_charset_ok(&target));
+                    // A non-dangerous target with `{`/`}` is a braced write
+                    // target → `EUr` create-op brace guard (not shell_expansion).
+                    let brace = !dangerous && (target.contains('{') || target.contains('}'));
+                    out.push(Redirection {
+                        target,
+                        dangerous,
+                        brace,
+                    });
                     idx += 2;
                     continue;
                 }
@@ -603,6 +630,15 @@ pub fn check_path_constraints(
         if r.target == "/dev/null" {
             continue;
         }
+        // `EUr` create-op brace guard (evaluated before containment): bash may
+        // brace-expand `{a,b}` to paths outside the working dir → ask with the
+        // byte-exact brace message (distinct from the shell-expansion ask).
+        if r.brace {
+            return Some(PathConstraintAsk {
+                message: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
+                reason: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
+            });
+        }
         let resolved = expand_redirect_target(&r.target, roots);
         if !path_in_allowed_working_path(Path::new(&resolved), &work_dirs, roots) {
             let dirs = all_working_directories(roots, additional);
@@ -693,7 +729,14 @@ pub fn write_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
     let mut out = Vec::new();
     for sub in crate::shell_command::split_command(command) {
         for r in extract_redirections(&sub) {
-            if r.dangerous || r.target == "/dev/null" || is_network_device_target(&r.target) {
+            // Dangerous (shell_expansion), braced (create-op brace guard),
+            // /dev/null, and /dev/tcp|udp network targets never reach the
+            // Edit-deny-rule walk — they ask via their own guards.
+            if r.dangerous
+                || r.brace
+                || r.target == "/dev/null"
+                || is_network_device_target(&r.target)
+            {
                 continue;
             }
             out.push(expand_redirect_target(&r.target, roots).to_string_lossy().into_owned());
@@ -866,6 +909,51 @@ mod tests {
             a.message,
             "Shell expansion syntax in paths requires manual approval"
         );
+    }
+
+    // ── redirect-target danger classification drift (PERM-PATH-07) ─────────
+
+    #[test]
+    fn percent_redirect_target_is_not_dangerous() {
+        // `%` is Windows-gated in EUr, not flagged by eLe → a `file%1` target
+        // in cwd containment-passes (the port previously over-asked on `%`).
+        assert!(check("echo x > file%1").is_none());
+        assert!(check("echo x > out%.log").is_none());
+    }
+
+    #[test]
+    fn brace_redirect_target_gets_brace_message() {
+        // A braced write target flows to EUr's create-op brace guard, NOT the
+        // shell-expansion ask.
+        let a = check("echo x > {a,b}.txt").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory"
+        );
+        assert_eq!(a.reason, a.message);
+    }
+
+    #[test]
+    fn brace_redirect_message_precedes_containment() {
+        // Even an out-of-cwd braced target gets the brace message (brace guard
+        // runs before the working-dir containment check in EUr).
+        let a = check("echo x > /etc/{a,b}").expect("should ask");
+        assert!(a
+            .message
+            .starts_with("Brace characters in write target require manual approval"));
+    }
+
+    #[test]
+    fn ampersand_fd_redirect_charset_asks() {
+        // `>&` target with a non-[A-Za-z0-9./_-] char → eLe charset gate →
+        // shell-expansion ask.
+        let a = check("echo x >& out+log").expect("should ask");
+        assert_eq!(
+            a.message,
+            "Shell expansion syntax in paths requires manual approval"
+        );
+        // A charset-clean `>&file` under cwd is a plain file redirect → no ask.
+        assert!(check("echo x >& out.log").is_none());
     }
 
     // ── process substitution → ask ─────────────────────────────────────────

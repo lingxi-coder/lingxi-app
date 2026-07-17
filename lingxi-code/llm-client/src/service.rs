@@ -620,7 +620,7 @@ impl ApiService {
         if let Some(reporter) = &self.retry_reporter {
             reporter.report(RetryInfo {
                 message: error.to_string(),
-                attempt: u32::from(state.attempt),
+                attempt: state.attempt,
                 max_retries: ctl.max_retries,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             });
@@ -1125,9 +1125,12 @@ impl ApiService {
     /// `output_config` is peeled from the extra body and the computed
     /// `output_config` is layered on top so computed keys win (claude-code
     /// `Ii={...extra.output_config}; <compute mutates Ii>`); the merged object is
-    /// emitted only when non-empty. Remaining keys follow JS object-spread
-    /// collision semantics — a colliding key keeps its position but takes the
-    /// extra value, a new key appends at the tail (`serde_json` `preserve_order`).
+    /// emitted only when non-empty. The computed top-level `speed` is likewise
+    /// re-applied after the spread so it wins over an extra-body `speed`
+    /// (claude-code spreads `...Vs` BEFORE `...ze!==void 0&&{speed:ze}`).
+    /// Remaining keys follow JS object-spread collision semantics — a colliding
+    /// key keeps its position but takes the extra value, a new key appends at the
+    /// tail (`serde_json` `preserve_order`).
     ///
     /// Runs after the beta/User-Agent header injectors so a user-supplied
     /// `speed`/`output_config` in the extra body never leaks into the computed
@@ -1149,9 +1152,19 @@ impl ApiService {
         };
         // Peel the extra body's output_config (claude-code `delete _i.output_config`).
         let extra_output_config = extra.remove("output_config");
+        // Capture the codec-computed top-level `speed` so the generic extra spread
+        // can't clobber it: claude-code spreads the extra body (`...Vs`) BEFORE the
+        // computed `...ze!==void 0&&{speed:ze}`, so a computed speed wins over an
+        // extra one. When no speed was computed (`ze` undefined) the spread is
+        // skipped and an extra-body `speed` survives.
+        let computed_speed = body.get("speed").cloned();
         // Spread the remaining keys first (claude-code `...va, ..._i`).
         for (k, v) in extra {
             body.insert(k, v);
+        }
+        // Re-apply the computed speed on top (computed wins, position preserved).
+        if let Some(speed) = computed_speed {
+            body.insert("speed".to_string(), speed);
         }
         // Then merge/emit output_config last (claude-code `...{output_config:Ii}`):
         // start from the extra body's copy, overlay the computed one (computed wins).
@@ -1831,7 +1844,7 @@ impl ApiService {
                             .await;
                             // #5: surface this drive's retry count to the cost
                             // path via `last_retry_count()`.
-                            *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
+                            *self.last_retry_count.lock().unwrap() = state.attempt;
                             return Ok(response);
                         }
                         Err(decode_err) => {
@@ -2452,7 +2465,7 @@ impl ApiService {
                     self.record_rate_limit_from_headers(&streaming.headers, &request_id);
                     // #5: surface the connect-phase retry count to the cost path
                     // via `last_retry_count()` (the value known at stream return).
-                    *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
+                    *self.last_retry_count.lock().unwrap() = state.attempt;
 
                     // Success: wrap the LlmEventStream from the codec into a BoxStream.
                     // Build the event stream from the codec decoder + raw frames.

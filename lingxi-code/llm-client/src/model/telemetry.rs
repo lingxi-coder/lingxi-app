@@ -176,7 +176,7 @@ pub async fn emit_max_tokens_overflow_adjustment(
     input_tokens: u64,
     context_limit: u64,
     adjusted_max_tokens: u32,
-    attempt: u8,
+    attempt: u32,
 ) {
     let Some(bus) = bus else { return };
     let mut m = LogEventMetadata::new();

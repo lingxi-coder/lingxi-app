@@ -327,9 +327,21 @@ pub fn reasoning_for_request(
         if !model_supports_thinking(model) {
             return None;
         }
-        if !is_thinking_env_disabled("LINGXI_DISABLE_ADAPTIVE_THINKING")
-            && model_supports_adaptive_thinking(model)
-        {
+        // Binary gate (2.1.208 closure `Xr` @223939748):
+        //   vr = ut(CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING)
+        //        && (f.includes("opus-4-6") || f.includes("sonnet-4-6"))
+        //   emit {type:"adaptive"} when  bqt(u) && !vr        (In === void 0)
+        // where `f = co(model)` is the resolved model name and `bqt` is
+        // `model_supports_adaptive_thinking`. The kill switch therefore ONLY
+        // suppresses adaptive for opus-4-6 / sonnet-4-6 — every OTHER
+        // adaptive-capable model (opus-4-8, opus-4-7, fable-5, mythos-5,
+        // sonnet-5) keeps adaptive regardless of the env. (`x7o(model)` — the
+        // per-model `thinkingTypeOverrides` map — is empty by default, so
+        // `In === void 0` always holds and the gate reduces to `bqt(u) && !vr`.)
+        let name = model.to_lowercase();
+        let vr = is_thinking_env_disabled("LINGXI_DISABLE_ADAPTIVE_THINKING")
+            && (name.contains("opus-4-6") || name.contains("sonnet-4-6"));
+        if !vr && model_supports_adaptive_thinking(model) {
             return Some(crate::ReasoningConfig::Adaptive);
         }
         let mut budget = crate::model::context_window::max_thinking_tokens_for_model(model);
@@ -442,6 +454,60 @@ mod tests {
     #[test]
     fn thinking_config_default_is_adaptive() {
         assert_eq!(ThinkingConfig::default(), ThinkingConfig::Adaptive);
+    }
+
+    #[test]
+    fn adaptive_disable_env_only_narrows_opus46_and_sonnet46() {
+        // 2.1.208 gate: vr = ut(CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING)
+        //   && (f.includes("opus-4-6")||f.includes("sonnet-4-6")); adaptive fires
+        // when bqt(u) && !vr. The kill switch must NOT suppress adaptive for any
+        // adaptive-capable model OTHER than opus-4-6 / sonnet-4-6.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _clear = EnvGuard::unset("LINGXI_DISABLE_THINKING");
+        let _g = EnvGuard::set("LINGXI_DISABLE_ADAPTIVE_THINKING", "1");
+
+        // Default model (opus-4-8) + other adaptive models keep adaptive.
+        for model in [
+            "claude-opus-4-8-20260115",
+            "claude-opus-4-7-20251201",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-sonnet-5",
+        ] {
+            assert_eq!(
+                reasoning_for_request(ThinkingConfig::Adaptive, model, Some(64_000)),
+                Some(crate::ReasoningConfig::Adaptive),
+                "{model}: DISABLE_ADAPTIVE must NOT suppress adaptive (not opus-4-6/sonnet-4-6)"
+            );
+        }
+
+        // opus-4-6 / sonnet-4-6 ARE narrowed by the env → fixed budget, not adaptive.
+        for model in ["claude-opus-4-6-20260101", "claude-sonnet-4-6-20251114"] {
+            let r = reasoning_for_request(ThinkingConfig::Adaptive, model, Some(64_000));
+            assert!(
+                matches!(r, Some(crate::ReasoningConfig::Enabled { .. })),
+                "{model}: DISABLE_ADAPTIVE must suppress adaptive → fixed budget, got {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_stays_adaptive_when_env_unset() {
+        // Same models, env NOT set → all keep adaptive (baseline).
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _clear = EnvGuard::unset("LINGXI_DISABLE_THINKING");
+        let _g = EnvGuard::unset("LINGXI_DISABLE_ADAPTIVE_THINKING");
+        for model in [
+            "claude-opus-4-8-20260115",
+            "claude-opus-4-6-20260101",
+            "claude-sonnet-4-6-20251114",
+        ] {
+            assert_eq!(
+                reasoning_for_request(ThinkingConfig::Adaptive, model, Some(64_000)),
+                Some(crate::ReasoningConfig::Adaptive),
+                "{model}: env unset → adaptive"
+            );
+        }
     }
 
     // ---- MAX_THINKING_TOKENS / --max-thinking-tokens / alwaysThinkingEnabled ----

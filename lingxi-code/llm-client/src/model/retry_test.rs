@@ -52,16 +52,16 @@ mod jittered_delay_tests {
         // (lingxi_attempt_index, expected_pre_jitter_base_ms)
         // binary attempt A = index + 1; base = min(500 * 2^(A-1), 32000).
         let expected = [
-            (0u8, 500u64), // A=1: 500 * 2^0  = 500
-            (1, 1_000),    // A=2: 500 * 2^1  = 1000
-            (2, 2_000),    // A=3: 500 * 2^2  = 2000
-            (3, 4_000),    // A=4: 500 * 2^3  = 4000
-            (4, 8_000),    // A=5: 500 * 2^4  = 8000
-            (5, 16_000),   // A=6: 500 * 2^5  = 16000
-            (6, 32_000),   // A=7: 500 * 2^6  = 32000 (== cap)
-            (7, 32_000),   // A=8: 500 * 2^7  = 64000 → capped at 32000
-            (8, 32_000),   // A=9: capped
-            (9, 32_000),   // A=10: capped
+            (0u32, 500u64), // A=1: 500 * 2^0  = 500
+            (1, 1_000),     // A=2: 500 * 2^1  = 1000
+            (2, 2_000),     // A=3: 500 * 2^2  = 2000
+            (3, 4_000),     // A=4: 500 * 2^3  = 4000
+            (4, 8_000),     // A=5: 500 * 2^4  = 8000
+            (5, 16_000),    // A=6: 500 * 2^5  = 16000
+            (6, 32_000),    // A=7: 500 * 2^6  = 32000 (== cap)
+            (7, 32_000),    // A=8: 500 * 2^7  = 64000 → capped at 32000
+            (8, 32_000),    // A=9: capped
+            (9, 32_000),    // A=10: capped
         ];
         for (attempt, want) in expected {
             assert_eq!(
@@ -109,12 +109,8 @@ mod next_step_tests {
     use std::time::Duration;
 
     /// `state.attempt` value at which the default budget is exhausted (==
-    /// [`DEFAULT_MAX_RETRIES`], narrowed to the `u8` field type). 10 fits `u8`.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "DEFAULT_MAX_RETRIES is 10 and fits u8 trivially"
-    )]
-    const EXHAUSTED_ATTEMPT: u8 = DEFAULT_MAX_RETRIES as u8;
+    /// [`DEFAULT_MAX_RETRIES`]). Same `u32` type as the `attempt` field.
+    const EXHAUSTED_ATTEMPT: u32 = DEFAULT_MAX_RETRIES;
 
     fn ctl_default() -> RetryControl {
         RetryControl::default()
@@ -971,7 +967,7 @@ mod next_step_tests {
     )]
     fn next_step_delay_schedule_matches_binary_sle() {
         // (lingxi attempt index 0..9, expected pre-jitter base = min(500*2^i, 32000))
-        let schedule: [(u8, u64); 10] = [
+        let schedule: [(u32, u64); 10] = [
             (0, 500),
             (1, 1_000),
             (2, 2_000),
@@ -1281,7 +1277,7 @@ mod backoff_scaling_tests {
     /// `scaled_base_delay_ms` with `None` matches `base_delay_ms`.
     #[test]
     fn scaled_none_matches_default() {
-        for attempt in 0u8..5 {
+        for attempt in 0u32..5 {
             assert_eq!(
                 scaled_base_delay_ms(attempt, None),
                 base_delay_ms(attempt),
@@ -1308,7 +1304,7 @@ mod backoff_scaling_tests {
     /// `backoff_ms=500` → same as default (ratio = 1).
     #[test]
     fn backoff_500_same_as_default() {
-        for attempt in 0u8..5 {
+        for attempt in 0u32..5 {
             assert_eq!(
                 scaled_base_delay_ms(attempt, Some(500)),
                 base_delay_ms(attempt),
@@ -1585,6 +1581,74 @@ mod retry_watchdog_tests {
         assert!(
             saw_terminal,
             "without watchdog the budget must eventually exhaust"
+        );
+    }
+
+    /// Regression (review RV1): under the watchdog `max_retries` defaults to
+    /// 300. A PERSISTENT non-capacity error (ProviderInternal / Transport) is
+    /// NOT exempt from the budget — only 529/429 are — so it MUST terminate once
+    /// `attempt` reaches the budget. Before the fix `state.attempt` was a `u8`
+    /// that saturated at 255 via `saturating_add`, so the terminal check
+    /// `attempt >= max_retries` (255 >= 300) never tripped and the turn retried
+    /// forever. The loop is bounded above 300 so the test can never hang.
+    #[test]
+    fn watchdog_provider_internal_honours_budget_at_300() {
+        let ctl = RetryControl {
+            max_retries: WATCHDOG_MAX_RETRIES, // 300
+            watchdog: true,
+            ..RetryControl::default()
+        };
+        let mut state = RetryState::default();
+        let mut terminal_at: Option<u32> = None;
+        for _ in 0..(WATCHDOG_MAX_RETRIES + 20) {
+            let attempt_before = state.attempt;
+            let step = next_step(&mut state, &ctl, &LlmError::ProviderInternal, 0);
+            if step == DriveStep::Terminal {
+                terminal_at = Some(attempt_before);
+                break;
+            }
+            assert!(
+                matches!(step, DriveStep::RetryAfter(_)),
+                "within budget ProviderInternal must RetryAfter, got {step:?}"
+            );
+        }
+        assert_eq!(
+            terminal_at,
+            Some(WATCHDOG_MAX_RETRIES),
+            "persistent ProviderInternal must terminate at the 300-attempt budget under the watchdog"
+        );
+    }
+
+    /// Regression (review RV1): a `routing.retry.maxAttempts` (settings) budget
+    /// above the old `u8` ceiling (255) must still terminate, not retry forever.
+    #[test]
+    fn provider_internal_honours_budget_above_255_from_settings() {
+        let ctl = RetryControl {
+            max_retries: 260,
+            watchdog: false,
+            ..RetryControl::default()
+        };
+        let mut state = RetryState::default();
+        let mut terminal_at: Option<u32> = None;
+        for _ in 0..(260 + 20) {
+            let attempt_before = state.attempt;
+            let step = next_step(
+                &mut state,
+                &ctl,
+                &LlmError::Transport {
+                    message: "connection reset".into(),
+                },
+                0,
+            );
+            if step == DriveStep::Terminal {
+                terminal_at = Some(attempt_before);
+                break;
+            }
+        }
+        assert_eq!(
+            terminal_at,
+            Some(260),
+            "Transport must terminate at a >255 settings budget, not retry forever"
         );
     }
 

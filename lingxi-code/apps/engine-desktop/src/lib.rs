@@ -767,30 +767,34 @@ fn managed_only_sandbox_overrides(
 /// IGNORED (sandbox-adapter.ts 2.1.207 @223928133:
 /// `allowAppleEvents:[...managedSources, wr("flagSettings"), userSettings]
 /// .map(z => z?.sandbox?.allowAppleEvents).find(z => z !== undefined)`).
-/// First-defined wins in order managed/policy → flag → user; CC pre-folds the
-/// file-based managed tiers into ONE object, so we merge them the same
-/// whole-`sandbox`-block last-write-wins way `managed_only_sandbox_overrides`
-/// does (drop-ins override the base) before reading the flag. The engine has no
-/// boot-time `--settings` analog (see the `sandbox_runtime_cfg` comment on
-/// `flagSettings`), so the flag slot is skipped. Returns `None` when no honored
-/// source set it — matching CC's `.find(...) === undefined ⇒ manager reads
-/// `false``. Threaded onto
+/// First-defined wins in order managed/policy → flag → user. CC pre-folds the
+/// file-based managed tiers into ONE object with a DEEP merge
+/// (`loadManagedFileSettings` → `Fie(r, next, Bpe)`: base then drop-ins sorted,
+/// later scalars override earlier but omitted fields are preserved), so
+/// `sandbox.allowAppleEvents` is resolved PER-FIELD last-defined across the
+/// tiers — a later drop-in that carries only a partial `sandbox` block (e.g.
+/// `{"sandbox":{"network":…}}`) must NOT clobber an earlier tier's value. The
+/// engine has no boot-time `--settings` analog (see the `sandbox_runtime_cfg`
+/// comment on `flagSettings`), so the flag slot is skipped. Returns `None` when
+/// no honored source set it — matching CC's `.find(...) === undefined ⇒ manager
+/// reads `false``. Threaded onto
 /// [`SandboxConvertContext::allow_apple_events_override`].
 fn apple_events_override(
     managed_raw_tiers: &[String],
     user_settings_raw: Option<&str>,
 ) -> Option<bool> {
-    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
-    // Managed/policy sources first (pre-merged, last-write-wins across tiers).
-    let mut merged_managed: Option<SandboxSettingsJson> = None;
+    use sandbox::runtime_config::SettingsJson;
+    // Managed/policy file tiers are deep-merged, so resolve `allowAppleEvents`
+    // per-field last-defined (later drop-ins win, `None` tiers don't clobber).
+    let mut merged_managed: Option<bool> = None;
     for raw in managed_raw_tiers {
         if let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) {
-            if let Some(s) = parsed.sandbox {
-                merged_managed = Some(s);
+            if let Some(v) = parsed.sandbox.and_then(|s| s.allow_apple_events) {
+                merged_managed = Some(v);
             }
         }
     }
-    if let Some(v) = merged_managed.and_then(|s| s.allow_apple_events) {
+    if let Some(v) = merged_managed {
         return Some(v);
     }
     // flagSettings has no boot-time analog in the engine (skipped) — then user.
@@ -10311,11 +10315,36 @@ mod tests {
             "managed false must win over a user true"
         );
 
-        // Multiple managed tiers: last write wins (drop-ins override the base),
-        // mirroring CC's pre-merge of the file-based managed sources.
+        // Multiple managed tiers that BOTH set the field: last write wins
+        // (drop-ins override the base), mirroring CC's deep-merge of the
+        // file-based managed sources (`Fie(r, next, Bpe)`, later scalar wins).
         assert_eq!(
             apple_events_override(&[on.clone(), off.clone()], None),
             Some(false)
+        );
+
+        // Regression (review RV5): a later managed drop-in that carries a
+        // PARTIAL `sandbox` block WITHOUT allowAppleEvents must NOT discard an
+        // earlier tier's value. CC deep-merges the file managed tiers per-field
+        // (base `{sandbox:{allowAppleEvents:true}}` + drop-in
+        // `{sandbox:{enabled:true}}` → `{sandbox:{allowAppleEvents:true,enabled:true}}`),
+        // so allowAppleEvents survives.
+        assert_eq!(
+            apple_events_override(
+                &[on.clone(), r#"{"sandbox":{"enabled":true}}"#.to_string()],
+                None,
+            ),
+            Some(true),
+            "a later partial-sandbox drop-in must not clobber an earlier tier's allowAppleEvents"
+        );
+        // Symmetric: an earlier partial block then a later tier that sets it.
+        assert_eq!(
+            apple_events_override(
+                &[r#"{"sandbox":{"enabled":true}}"#.to_string(), off.clone()],
+                None,
+            ),
+            Some(false),
+            "a later tier's allowAppleEvents still overrides once it is defined"
         );
 
         // A managed tier WITHOUT the field but user WITH it → user honored.

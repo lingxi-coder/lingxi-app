@@ -266,12 +266,15 @@ async fn cold_resume_reconstructs_post_compact_state() {
     );
 }
 
-/// P2-10 (parity 2.1.208) — the persisted compact boundary's `compactMetadata`
+/// RV6 (parity 2.1.208) — the persisted compact boundary's `compactMetadata`
 /// carries `preCompactDiscoveredTools` (the deferred tools loaded via ToolSearch
-/// before the compaction, `Age()`/`[...B].sort()`) and `messagesSummarized`
-/// (the count of messages the summary replaced).
+/// before the compaction, `Age()`/`[...B].sort()`) but NOT `messagesSummarized`:
+/// CC's full auto/manual compaction path builds the boundary with the 3-arg
+/// `U6r(trigger, preTokens, lastUuid)`, leaving `messagesSummarized` undefined
+/// (dropped by `JSON.stringify`). Only the unported message-selector
+/// (`up_to`/`from`) path sets `messagesSummarized:f.length`.
 #[tokio::test]
-async fn compact_boundary_carries_discovered_tools_and_messages_summarized() {
+async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized() {
     let dir = tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
@@ -349,14 +352,14 @@ async fn compact_boundary_carries_discovered_tools_and_messages_summarized() {
         "boundary carries the ToolSearch-loaded set, sorted"
     );
 
-    // messagesSummarized is the count of messages the summary replaced (>= 1).
-    let summarized = cm
-        .get("messagesSummarized")
-        .and_then(Value::as_u64)
-        .expect("messagesSummarized present");
+    // messagesSummarized is NOT emitted on the full compaction path: CC's 3-arg
+    // boundary constructor leaves it undefined (dropped by `JSON.stringify`), so
+    // a real 2.1.208 transcript never carries it here. Only the unported
+    // message-selector (up_to/from) path sets it.
     assert!(
-        summarized >= 1,
-        "at least one message was summarized, got {summarized}"
+        cm.get("messagesSummarized").is_none(),
+        "full compaction boundary must not carry messagesSummarized, got {:?}",
+        cm.get("messagesSummarized")
     );
 
     // The scan half of the carry round-trips: the resume loader recovers the

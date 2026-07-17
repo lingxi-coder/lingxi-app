@@ -2778,21 +2778,24 @@ impl ConversationOrchestrator {
                 .last()
                 .map(protocol::ConversationMessage::id)
         };
-        // P2-10 (parity 2.1.208): `messagesSummarized` = the count of messages
-        // the summary REPLACED (full pre-compact history minus the verbatim tail
-        // kept after it). Display-only. `userContext` stays `None` — this port
-        // threads no compaction custom-instructions snapshot into the boundary.
+        // RV6 (parity 2.1.208): the full auto/manual compaction path — the only
+        // one this port implements — builds its boundary via the 3-arg
+        // `U6r(trigger, preTokens, lastUuid)`, leaving `messagesSummarized` (and
+        // `userContext`) undefined, so `JSON.stringify` drops both fields. CC only
+        // sets `messagesSummarized:f.length` on the 5-arg message-selector
+        // (`up_to`/`from`) path (`tHu`), which LingXi has no feature for. Passing
+        // `None` here keeps the persisted boundary byte-identical to a real
+        // 2.1.208 transcript (no extra field, and no spurious "Summarized N
+        // messages" TUI line when a genuine CC client cold-resumes it).
         // `preCompactDiscoveredTools` carries the ToolSearch-loaded set so a cold
         // `--resume` re-marks them loaded (empty ⇒ field omitted on the wire).
-        let messages_summarized = messages_before
-            .saturating_sub(u32::try_from(preserved_tail.len()).unwrap_or(u32::MAX));
         let discovered_tools = self.tools.deferral().loaded_tool_names();
         let (marker, mut metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
             pre_tokens_estimate,
             None,
             None,
-            Some(messages_summarized),
+            None,
             &discovered_tools,
             &preserved_tail,
             anchor_uuid.as_ref(),

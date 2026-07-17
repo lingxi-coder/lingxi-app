@@ -192,6 +192,22 @@ impl ReadFileStateLru {
         self.map.drain().map(|(k, node)| (k, node.entry))
     }
 
+    /// Every cached path in most-recently-used → least-recently-used order
+    /// (1:1 with lru-cache's `keys()` iteration, which yields MRU first). This
+    /// is the single source of truth for the `/files` listing
+    /// (`cacheKeys(context.readFileState)`), conditional-rule matching, and the
+    /// relevant-memory dedup — all of which key off the one shared read-state
+    /// map. A re-`set` (or `get`) promotes its key, so re-reading reorders the
+    /// list exactly as claude-code's LRU does (`a,b,c,a → [a, c, b]`).
+    #[must_use]
+    pub fn keys(&self) -> Vec<PathBuf> {
+        let mut nodes: Vec<(&PathBuf, u64)> =
+            self.map.iter().map(|(k, n)| (k, n.last_used)).collect();
+        // MRU first = highest `last_used` first.
+        nodes.sort_by(|a, b| b.1.cmp(&a.1));
+        nodes.into_iter().map(|(k, _)| k.clone()).collect()
+    }
+
     /// Number of cached entries.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -467,6 +483,48 @@ mod tests {
             "lone over-budget entry must be retained"
         );
         assert_eq!(map.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn keys_are_ordered_mru_first_and_reread_promotes() {
+        // Insert a, b, c → MRU→LRU = [c, b, a]. Re-reading (`set`) `a` promotes
+        // it → [a, c, b], matching lru-cache's `keys()` (and fixing the old
+        // first-insertion `/files` ordering divergence).
+        let map = new_read_file_state_map();
+        for p in ["/a", "/b", "/c"] {
+            set(&map, PathBuf::from(p), entry("x"));
+        }
+        assert_eq!(
+            map.lock().unwrap().keys(),
+            vec![
+                PathBuf::from("/c"),
+                PathBuf::from("/b"),
+                PathBuf::from("/a")
+            ]
+        );
+        // Re-read `a` (a fresh `set`, as the Read tool performs) promotes it.
+        set(&map, PathBuf::from("/a"), entry("x"));
+        assert_eq!(
+            map.lock().unwrap().keys(),
+            vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/c"),
+                PathBuf::from("/b")
+            ]
+        );
+    }
+
+    #[test]
+    fn get_promotes_key_in_keys_order() {
+        // A bare `get` (MRU-promote) also reorders `keys()`.
+        let map = new_read_file_state_map();
+        set(&map, PathBuf::from("/a"), entry("x"));
+        set(&map, PathBuf::from("/b"), entry("x"));
+        assert!(get(&map, Path::new("/a")).is_some());
+        assert_eq!(
+            map.lock().unwrap().keys(),
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
     }
 
     #[test]

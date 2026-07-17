@@ -1000,27 +1000,15 @@ pub struct ConversationOrchestrator {
     pub(crate) orphan_forced_decisions: Mutex<
         std::collections::HashMap<protocol::ToolUseId, crate::test_support::PermissionDecision>,
     >,
-    /// Read-file-state cache backing `/files` (TS `context.readFileState`).
-    /// The dispatch loop (`turn_loop::dispatch_tool_uses`) inserts the
-    /// absolutized `file_path` of every successful
-    /// `Read`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and
-    /// [`Self::files_in_context`] returns the keys in insertion order. TS
-    /// uses an LRU `FileStateCache` keyed by `normalize(expandPath(file_path))`;
-    /// this port only needs the key set for `/files`, so it stores the
-    /// absolutized paths in a `Vec`, dedup keeping the FIRST insertion.
-    ///
-    /// FORCED divergences from the TS LRU (documented, not parity gaps):
-    /// - Ordering: TS `keys()` iterates MRU→LRU and a re-`set` promotes the
-    ///   key, so re-reading reorders the *middle* of the list (read a,b,c,a →
-    ///   TS `[a, c, b]`); this `Vec` keeps first-insertion order (`[a, b, c]`).
-    ///   The 2-file re-read case (`a,b,a`) coincides at `[a, b]`. Only the
-    ///   display order of re-read files differs — never the set itself.
-    /// - The 100-entry LRU eviction is intentionally not reproduced (MVP).
-    pub(crate) read_file_state: Arc<Mutex<Vec<std::path::PathBuf>>>,
-    /// Richer per-path read-state registry (`path → {content, mtime_ms,
-    /// offset, limit}`) — the 1:1 port of claude-code's `readFileState` map
-    /// (`FileReadTool.ts:1032`). Kept SEPARATE from the `read_file_state`
-    /// `Vec` above, which preserves the existing `/files` ordering semantics.
+    /// The ONE per-session read-state registry (`path → {content, mtime_ms,
+    /// offset, limit}`) — the 1:1 port of claude-code's single
+    /// `context.readFileState` LRU (`FileReadTool.ts:1032`). This is the sole
+    /// source of truth for every read-state consumer: `/files`
+    /// ([`Self::files_in_context`] via `keys()`), conditional-rule matching
+    /// ([`Self::conditional_rules_reminder_message`]), the relevant-memory
+    /// dedup ([`Self::relevant_memory_reminder_message`]), the Read dedup +
+    /// staleness guards inside the file tools, and the post-compact restore
+    /// ([`Self::restore_post_compact_attachments`]).
     /// The composition root creates ONE map, passes a clone into the file
     /// tools' `BuiltinToolContext`, and shares the SAME `Arc` here via
     /// [`Self::with_read_state_map`] (P1-06), so a tool's `readFileState.set`
@@ -1180,7 +1168,7 @@ pub struct ConversationOrchestrator {
     /// `relevant_memories` channel this session, so a memory surfaced once is
     /// never re-injected on a later turn. Mirrors [`Self::sent_conditional_rules`]
     /// (TS `loadedNestedMemoryPaths` / the prefetch's per-iteration consume
-    /// guard). Distinct from [`Self::read_file_state`], which the SHARED dedup
+    /// guard). Distinct from [`Self::read_state_map`], which the SHARED dedup
     /// also consults so a file already loaded as a nested/conditional attachment
     /// (P3.2) is never double-injected here.
     pub(crate) surfaced_memory_paths: Mutex<std::collections::HashSet<std::path::PathBuf>>,
@@ -1360,7 +1348,6 @@ impl ConversationOrchestrator {
             recap_runner: None,
             file_history: None,
             orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
-            read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
             last_emitted_rate_limit: Mutex::new(None),
             last_emitted_raw_utilization: Mutex::new(None),
@@ -2508,10 +2495,9 @@ impl ConversationOrchestrator {
     /// improvement (the skill content re-enters context; over-restoring an
     /// already-visible skill is the only cost).
     async fn restore_post_compact_attachments(&self) -> Vec<protocol::ConversationMessage> {
-        // Snapshot then clear the read-file-state registries (the `eOt` snapshot
-        // + `readFileState.clear()` step). Both the rich map and the `/files`
-        // Vec are cleared so the post-compact context starts from the restored
-        // set only.
+        // Snapshot then clear the ONE read-file-state registry (the `eOt`
+        // snapshot + `readFileState.clear()` step), so the post-compact context
+        // starts from the restored set only. `drain()` empties it.
         let snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
             let mut map = self
                 .read_state_map
@@ -2519,7 +2505,6 @@ impl ConversationOrchestrator {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             map.drain().collect()
         };
-        self.read_file_state.lock().await.clear();
 
         // The two arms are independent: skills restore from the process-global
         // registry even when no file was read this session, so we do NOT early-
@@ -8673,7 +8658,7 @@ As you answer the user's questions, you can use the following context:\n\
     ///    subset in [`Self::conditional_rules_cache`]. Later turns reuse the cache
     ///    — no disk re-walk — and only re-test it against the latest touched set.
     /// 2. MATCH: for each cached rule and each touched file in
-    ///    [`Self::read_file_state`] (the absolutized Read/Edit/Write/… paths),
+    ///    [`Self::read_state_map`] (the tools' live-cwd absolutized paths),
     ///    [`crate::prompt::conditional_rules::rule_matches_touched_file`] derives
     ///    the rule's base dir (Project → parent-of-`.claude`; else `cwd`),
     ///    relativizes + guards the touched path, and gitignore-tests it against
@@ -8734,8 +8719,13 @@ As you answer the user's questions, you can use the following context:\n\
             return None;
         }
 
-        // Snapshot the touched files (absolutized Read/Edit/Write/… paths).
-        let touched: Vec<std::path::PathBuf> = self.read_file_state.lock().await.clone();
+        // Snapshot the touched files from the shared read-state registry (the
+        // tools' live-cwd absolutized Read/Edit/Write/… paths).
+        let touched: Vec<std::path::PathBuf> = self
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys();
         if touched.is_empty() {
             return None;
         }
@@ -8825,7 +8815,7 @@ As you answer the user's questions, you can use the following context:\n\
     ///
     /// SHARED DEDUP: a memory is skipped when its path is in EITHER
     /// [`Self::surfaced_memory_paths`] (already surfaced a prior turn) OR
-    /// [`Self::read_file_state`] (already loaded as a nested/conditional P3.2
+    /// [`Self::read_state_map`] (already loaded as a nested/conditional P3.2
     /// attachment OR read by a file tool) — so a file can never be double-injected
     /// across the surfacing + nested channels. Surfaced paths are recorded so each
     /// memory injects ONCE (TS prefetch consume-once + `loadedNestedMemoryPaths`).
@@ -8843,9 +8833,14 @@ As you answer the user's questions, you can use the following context:\n\
         }
 
         // SHARED DEDUP — skip any memory already surfaced this session OR already
-        // loaded as a nested/conditional attachment / tool read (`read_file_state`).
-        let already_read: std::collections::HashSet<std::path::PathBuf> =
-            self.read_file_state.lock().await.iter().cloned().collect();
+        // loaded as a nested/conditional attachment / tool read (`read_state_map`).
+        let already_read: std::collections::HashSet<std::path::PathBuf> = self
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .into_iter()
+            .collect();
         let fresh: Vec<memory::surfacing::SurfacedMemory> = {
             let mut surfaced_set = self.surfaced_memory_paths.lock().await;
             let mut out = Vec::new();
@@ -12618,7 +12613,7 @@ mod agent_listing_reminder_tests {
 //
 // Mirrors the `skill_listing_reminder_tests` template: a `StaticMemoryProvider`
 // fixture supplies conditional (`paths:`-gated) `MemoryFile`s, the touched-file
-// set is seeded directly into `read_file_state`, and
+// set is seeded directly into the shared `read_state_map`, and
 // `conditional_rules_reminder_message` is asserted to inject the matching rule
 // once (with sent-tracking dedup) and skip non-matching / already-sent rules.
 #[cfg(test)]
@@ -12726,8 +12721,21 @@ mod conditional_rules_reminder_tests {
         )
     }
 
-    async fn push_touched(orch: &ConversationOrchestrator, path: &std::path::Path) {
-        orch.read_file_state.lock().await.push(path.to_path_buf());
+    fn push_touched(orch: &ConversationOrchestrator, path: &std::path::Path) {
+        // Seed the ONE shared read-state registry the way a file tool's
+        // `readFileState.set` does (content is irrelevant to rule matching,
+        // which keys off the path).
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            path.to_path_buf(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
     }
 
     #[tokio::test]
@@ -12735,7 +12743,7 @@ mod conditional_rules_reminder_tests {
         let cwd = PathBuf::from("/work/repo");
         let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
         // A touched file under `src/` matches `paths: src/**`.
-        push_touched(&orch, &cwd.join("src/x.rs")).await;
+        push_touched(&orch, &cwd.join("src/x.rs"));
 
         let msg = orch
             .conditional_rules_reminder_message()
@@ -12757,7 +12765,7 @@ mod conditional_rules_reminder_tests {
         let cwd = PathBuf::from("/work/repo");
         let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
         // `docs/y.md` does NOT match `paths: src/**`.
-        push_touched(&orch, &cwd.join("docs/y.md")).await;
+        push_touched(&orch, &cwd.join("docs/y.md"));
         assert!(
             orch.conditional_rules_reminder_message().await.is_none(),
             "a non-matching touched file must not activate the rule"
@@ -12768,7 +12776,7 @@ mod conditional_rules_reminder_tests {
     async fn rule_injected_once_then_not_reinjected() {
         let cwd = PathBuf::from("/work/repo");
         let orch = orch_with_rules(cwd.clone(), vec![project_rule(&cwd, "scoped", &["src"])]);
-        push_touched(&orch, &cwd.join("src/x.rs")).await;
+        push_touched(&orch, &cwd.join("src/x.rs"));
 
         // Turn 0: injected.
         assert!(
@@ -12805,7 +12813,7 @@ mod conditional_rules_reminder_tests {
             globs: None,
         };
         let orch = orch_with_rules(cwd.clone(), vec![unconditional]);
-        push_touched(&orch, &cwd.join("src/x.rs")).await;
+        push_touched(&orch, &cwd.join("src/x.rs"));
         assert!(orch.conditional_rules_reminder_message().await.is_none());
     }
 
@@ -12821,7 +12829,7 @@ mod conditional_rules_reminder_tests {
                 project_rule(&cwd, "docs-rule", &["docs"]),
             ],
         );
-        push_touched(&orch, &cwd.join("src/a.rs")).await;
+        push_touched(&orch, &cwd.join("src/a.rs"));
         let t0 = orch
             .conditional_rules_reminder_message()
             .await
@@ -12831,7 +12839,7 @@ mod conditional_rules_reminder_tests {
         assert!(!t0.contains("docs-rule.md"));
 
         // Now touch a docs file → docs-rule newly activates; src-rule already sent.
-        push_touched(&orch, &cwd.join("docs/readme.md")).await;
+        push_touched(&orch, &cwd.join("docs/readme.md"));
         let t1 = orch
             .conditional_rules_reminder_message()
             .await
@@ -12850,7 +12858,7 @@ mod conditional_rules_reminder_tests {
 // A `MemoryPrefetch::with_fixed_result` (seeded surfaced set) is wired via
 // `with_memory_prefetch`; `start_memory_prefetch` arms the per-turn handle and
 // the reminder is asserted to render the `relevant_memories` shape, dedup against
-// both `surfaced_memory_paths` (across turns) and `read_file_state` (the SHARED
+// both `surfaced_memory_paths` (across turns) and `read_state_map` (the SHARED
 // P3.2 nested-channel guard), and stay a strict no-op when no prefetch is wired.
 #[cfg(test)]
 mod relevant_memory_reminder_tests {
@@ -13003,18 +13011,33 @@ mod relevant_memory_reminder_tests {
         );
     }
 
+    /// Seed the ONE shared read-state registry as a file tool's
+    /// `readFileState.set` would (path is all the dedup keys off).
+    fn seed_read_state(orch: &ConversationOrchestrator, path: PathBuf) {
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            path,
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
+        );
+    }
+
     #[tokio::test]
-    async fn shared_dedup_skips_memory_already_in_read_file_state() {
+    async fn shared_dedup_skips_memory_already_in_read_state_map() {
         // A memory whose path was already loaded as a nested/conditional (P3.2)
-        // attachment / tool read (present in read_file_state) must NOT be
-        // double-injected via the surfacing channel.
-        let path = PathBuf::from("/m/a.md");
+        // attachment / tool read (present in the shared read_state_map) must NOT
+        // be double-injected via the surfacing channel.
         let orch = orch_with_seed(vec![mem("/m/a.md", "A", 0)]);
-        orch.read_file_state.lock().await.push(path.clone());
+        seed_read_state(&orch, PathBuf::from("/m/a.md"));
         orch.start_memory_prefetch().await;
         assert!(
             orch.relevant_memory_reminder_message().await.is_none(),
-            "a path already in read_file_state must not be surfaced"
+            "a path already in read_state_map must not be surfaced"
         );
     }
 
@@ -13026,10 +13049,7 @@ mod relevant_memory_reminder_tests {
             mem("/m/seen.md", "SEEN", 0),
             mem("/m/new.md", "NEW", 0),
         ]);
-        orch.read_file_state
-            .lock()
-            .await
-            .push(PathBuf::from("/m/seen.md"));
+        seed_read_state(&orch, PathBuf::from("/m/seen.md"));
         orch.start_memory_prefetch().await;
         let text = orch
             .relevant_memory_reminder_message()

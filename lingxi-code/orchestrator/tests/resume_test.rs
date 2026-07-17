@@ -224,6 +224,109 @@ async fn resume_without_a_model_field_keeps_the_default() {
 }
 
 #[tokio::test]
+async fn resume_marks_pre_compact_discovered_tools_loaded() {
+    // P2-10 (parity 2.1.208): a transcript whose compact boundary carries
+    // `preCompactDiscoveredTools` re-marks those tools loaded on the session's
+    // DeferralState at cold resume (claude's `Age()` boundary scan), so a tool
+    // the model had loaded via ToolSearch before the compaction stays
+    // NON-deferred across `--resume`.
+    use orchestrator::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+    use tool_api::registry::ToolRegistry;
+    use tool_api::{DeferralState, ToolSearchMode};
+
+    let temp = TempDir::new().unwrap();
+    let cwd_path = temp.path().join("proj");
+    tokio::fs::create_dir(&cwd_path).await.unwrap();
+    let cwd = cwd_path.to_string_lossy().into_owned();
+    let lingxi_home = temp.path().join("home");
+    let subdir = lingxi_home.join("projects").join(project_dir_name(&cwd));
+    tokio::fs::create_dir_all(&subdir).await.unwrap();
+
+    let sid = Uuid::new_v4();
+    let (b, s, a) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    // Boundary (chain-reset root) → summary → post-compact assistant tip.
+    let boundary = serde_json::to_string(&json!({
+        "type": "system", "subtype": "compact_boundary",
+        "content": "Conversation compacted", "level": "info",
+        "uuid": b.to_string(), "parentUuid": null, "logicalParentUuid": null,
+        "sessionId": sid.to_string(), "timestamp": "2026-07-13T10:00:00.000Z",
+        "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+        "compactMetadata": {
+            "trigger": "auto", "preTokens": 1234, "messagesSummarized": 2,
+            "preCompactDiscoveredTools": ["Task", "WebFetch"]
+        }
+    }))
+    .unwrap();
+    let summary = serde_json::to_string(&json!({
+        "type": "user", "uuid": s.to_string(), "parentUuid": b.to_string(),
+        "sessionId": sid.to_string(), "timestamp": "2026-07-13T10:00:01.000Z",
+        "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+        "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
+        "message": {"role": "user", "content": "Summary:\nS"}
+    }))
+    .unwrap();
+    let assistant = serde_json::to_string(&json!({
+        "type": "assistant", "uuid": a.to_string(), "parentUuid": s.to_string(),
+        "sessionId": sid.to_string(), "timestamp": "2026-07-13T10:00:02.000Z",
+        "cwd": cwd, "version": "0.6.0", "isSidechain": false, "userType": "external",
+        "message": {"role": "assistant", "content": "post-compact reply"}
+    }))
+    .unwrap();
+    tokio::fs::write(
+        subdir.join(format!("{sid}.jsonl")),
+        format!("{boundary}\n{summary}\n{assistant}\n"),
+    )
+    .await
+    .unwrap();
+
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(temp.path().to_path_buf()));
+
+    // Tool-Search-enabled registry: the two carried tools start deferred.
+    let mut registry = ToolRegistry::new();
+    registry.set_deferral(Arc::new(DeferralState::new(ToolSearchMode::Enabled, false)));
+    let tools = Arc::new(registry);
+    assert!(
+        tools.deferral().should_defer("WebFetch", true),
+        "deferred before resume"
+    );
+
+    let _orch = ConversationOrchestrator::with_resume(
+        OrchestratorConfig::default(),
+        sid,
+        lingxi_home,
+        cwd.clone(),
+        fs.clone(),
+        Arc::new(MockApiClient::new(vec![])),
+        tools.clone(),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::path::PathBuf::from(&cwd),
+        None,
+    )
+    .await
+    .expect("resume ok");
+
+    assert!(
+        tools.deferral().is_loaded("WebFetch"),
+        "WebFetch re-marked loaded at resume"
+    );
+    assert!(
+        tools.deferral().is_loaded("Task"),
+        "Task re-marked loaded at resume"
+    );
+    assert!(
+        !tools.deferral().should_defer("WebFetch", true),
+        "loaded ⇒ no longer deferred after resume"
+    );
+}
+
+#[tokio::test]
 async fn replay_propagates_loader_error() {
     let temp = TempDir::new().unwrap();
     let cwd_path = temp.path().join("proj");

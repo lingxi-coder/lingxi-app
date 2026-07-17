@@ -232,6 +232,17 @@ impl ConversationOrchestrator {
         config.resume_session_id = Some(session_id);
         let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs).await?;
 
+        // P2-10 (parity 2.1.208): re-seed the Tool-Search deferred-tool loaded-set
+        // from the transcript's compact boundaries, so a tool the model loaded via
+        // `ToolSearch` before a compaction stays non-deferred across this cold
+        // resume. Mirrors claude's resume loader `Age()` boundary scan
+        // (`for (s of i) t.add(s)`). No-op on any transcript without a Tool-Search
+        // compaction (the default-off common path yields an empty set).
+        let discovered = session::jsonl::pre_compact_discovered_tools(&replayed.messages);
+        if !discovered.is_empty() {
+            tools.deferral().mark_loaded(discovered);
+        }
+
         let mut orch = Self::new_with_streaming(
             config,
             api,

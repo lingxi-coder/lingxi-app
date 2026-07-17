@@ -252,6 +252,105 @@ async fn cold_resume_reconstructs_post_compact_state() {
     );
 }
 
+/// P2-10 (parity 2.1.208) — the persisted compact boundary's `compactMetadata`
+/// carries `preCompactDiscoveredTools` (the deferred tools loaded via ToolSearch
+/// before the compaction, `Age()`/`[...B].sort()`) and `messagesSummarized`
+/// (the count of messages the summary replaced).
+#[tokio::test]
+async fn compact_boundary_carries_discovered_tools_and_messages_summarized() {
+    let dir = tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
+
+    let responses: Vec<_> = ["ok one", "ok two", "ok three", "final reply"]
+        .iter()
+        .map(|t| {
+            mock_message_response(
+                vec![LlmContentBlock::Text {
+                    text: (*t).to_string(),
+                    cache_control: None,
+                }],
+                Some("end_turn"),
+            )
+        })
+        .collect();
+    let api = Arc::new(MockApiClient::new(responses));
+    let output = Arc::new(MockOutputStream::new());
+
+    // Simulate two deferred tools the model loaded via ToolSearch BEFORE the
+    // compaction: they seed the deferral loaded-set, the carry source for
+    // `preCompactDiscoveredTools`. `mark_loaded` populates the set regardless of
+    // the (default-off) Tool Search mode, exercising the carry in isolation.
+    let registry = tool_api::registry::ToolRegistry::new();
+    registry
+        .deferral()
+        .mark_loaded(["WebFetch".to_string(), "Task".to_string()]);
+    let registry = Arc::new(registry);
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        registry,
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_jsonl_writer(writer)
+    .with_compaction(Arc::new(CompactionOrchestrator::new(200)));
+
+    orch.run_turn("small one").await.expect("turn 1");
+    orch.run_turn("small two").await.expect("turn 2");
+    orch.run_turn("small three").await.expect("turn 3");
+    let big_prompt = format!("analyze this: {}", "x".repeat(8000));
+    orch.run_turn(&big_prompt).await.expect("turn 4");
+
+    let reader = JsonlReader::new(session_path.clone(), fs.clone());
+    let lines: Vec<JsonlMessage> = reader.read_all().await.expect("read_all");
+    let boundary = lines
+        .iter()
+        .find(|l| {
+            l.message_type == "system"
+                && l.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        })
+        .expect("a compact_boundary system line must be persisted");
+    let cm = boundary
+        .extra
+        .get("compactMetadata")
+        .expect("compactMetadata persisted");
+
+    // preCompactDiscoveredTools carries the loaded set, sorted + deduped.
+    let discovered: Vec<&str> = cm
+        .get("preCompactDiscoveredTools")
+        .and_then(Value::as_array)
+        .expect("preCompactDiscoveredTools present")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        discovered,
+        vec!["Task", "WebFetch"],
+        "boundary carries the ToolSearch-loaded set, sorted"
+    );
+
+    // messagesSummarized is the count of messages the summary replaced (>= 1).
+    let summarized = cm
+        .get("messagesSummarized")
+        .and_then(Value::as_u64)
+        .expect("messagesSummarized present");
+    assert!(
+        summarized >= 1,
+        "at least one message was summarized, got {summarized}"
+    );
+
+    // The scan half of the carry round-trips: the resume loader recovers the
+    // same discovered set from the persisted boundary.
+    let recovered = session::jsonl::pre_compact_discovered_tools(&lines);
+    assert_eq!(recovered, vec!["Task".to_string(), "WebFetch".to_string()]);
+}
+
 /// `isCompactSummary` user lines replay into resumed history as NORMAL user
 /// messages (not meta, not skipped) — the cold-resume twin of the hot
 /// in-memory summary message.

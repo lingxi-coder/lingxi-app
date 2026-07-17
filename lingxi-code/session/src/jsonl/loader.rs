@@ -722,6 +722,50 @@ pub async fn read_agent_setting(
         .map(str::to_string)
 }
 
+/// (P2-10 cc2.1.208) Scan a loaded transcript for every compact boundary's
+/// `compactMetadata.preCompactDiscoveredTools`, returning the deduped, sorted
+/// union of tool names.
+///
+/// This is the READ side of the Tool-Search deferred-tool carry: claude's resume
+/// loader re-seeds the deferred-tool loaded-set from prior compact boundaries so a
+/// tool the model loaded via `ToolSearch` before a compaction stays non-deferred
+/// after a cold `--resume`. Mirrors the boundary arm of `Age()`
+/// (`for (let s of i) t.add(s)` where `i =
+/// n.compactMetadata?.preCompactDiscoveredTools`): every `type:"system"` /
+/// `subtype:"compact_boundary"` line contributes its list to the set, across ALL
+/// boundaries in the given slice (later boundaries already include earlier ones,
+/// so the union is idempotent). Returns an empty `Vec` for any transcript without
+/// a Tool-Search compaction — the default-off common path.
+///
+/// The caller marks the result loaded on the session's `DeferralState`; see the
+/// orchestrator resume path (`ConversationOrchestrator::with_resume`).
+#[must_use]
+pub fn pre_compact_discovered_tools(messages: &[JsonlMessage]) -> Vec<String> {
+    let mut set: HashSet<String> = HashSet::new();
+    for m in messages {
+        if m.message_type != "system" {
+            continue;
+        }
+        if m.extra.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
+            continue;
+        }
+        let Some(tools) = m
+            .extra
+            .get("compactMetadata")
+            .and_then(|cm| cm.get("preCompactDiscoveredTools"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for t in tools.iter().filter_map(Value::as_str) {
+            set.insert(t.to_string());
+        }
+    }
+    let mut names: Vec<String> = set.into_iter().collect();
+    names.sort();
+    names
+}
+
 /// Interactive line-based session picker (OQ-6 stdio fallback for the Ink TUI).
 ///
 /// Renders:
@@ -1395,6 +1439,101 @@ mod tests {
         // tool_use-only / thinking-only assistant is NOT visible.
         assert!(!v(json!([{ "type": "tool_use", "name": "Read" }])));
         assert!(!v(json!([{ "type": "thinking", "thinking": "…" }])));
+    }
+
+    // --- P2-10 preCompactDiscoveredTools cold-resume scan ----------------- //
+
+    /// A minimal `compact_boundary` system line carrying `compactMetadata` with
+    /// the given `preCompactDiscoveredTools` list (`None` ⇒ field absent). The
+    /// on-disk shape matches `persist_compact_boundary_to_jsonl`.
+    fn boundary_line(uuid: &str, discovered: Option<&[&str]>) -> JsonlMessage {
+        let mut compact_metadata = serde_json::Map::new();
+        compact_metadata.insert("trigger".to_string(), json!("auto"));
+        compact_metadata.insert("preTokens".to_string(), json!(1234));
+        if let Some(tools) = discovered {
+            compact_metadata.insert("preCompactDiscoveredTools".to_string(), json!(tools));
+        }
+        let mut extra = serde_json::Map::new();
+        extra.insert("subtype".to_string(), json!("compact_boundary"));
+        extra.insert("content".to_string(), json!("Conversation compacted"));
+        extra.insert("level".to_string(), json!("info"));
+        extra.insert("compactMetadata".to_string(), Value::Object(compact_metadata));
+        JsonlMessage {
+            message_type: "system".to_string(),
+            uuid: uuid.to_string(),
+            parent_uuid: None,
+            session_id: "11111111-2222-3333-4444-555555555555".to_string(),
+            timestamp: "2026-07-13T10:00:00.000Z".to_string(),
+            cwd: "/tmp".to_string(),
+            version: "0.6.0".to_string(),
+            message: Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        }
+    }
+
+    fn user_line(uuid: &str) -> JsonlMessage {
+        JsonlMessage {
+            message_type: "user".to_string(),
+            uuid: uuid.to_string(),
+            parent_uuid: None,
+            session_id: "11111111-2222-3333-4444-555555555555".to_string(),
+            timestamp: "2026-07-13T10:00:00.000Z".to_string(),
+            cwd: "/tmp".to_string(),
+            version: "0.6.0".to_string(),
+            message: json!({"role": "user", "content": "hi"}),
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch: None,
+            entrypoint: None,
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn pre_compact_discovered_tools_scans_single_boundary_sorted() {
+        let msgs = vec![
+            user_line("u1"),
+            boundary_line("b1", Some(&["WebFetch", "Task", "Agent"])),
+            user_line("u2"),
+        ];
+        assert_eq!(
+            pre_compact_discovered_tools(&msgs),
+            vec!["Agent".to_string(), "Task".to_string(), "WebFetch".to_string()],
+        );
+    }
+
+    #[test]
+    fn pre_compact_discovered_tools_unions_and_dedups_across_boundaries() {
+        // Later boundaries include earlier ones (claude's `Age` accumulates); the
+        // union is idempotent + deduped.
+        let msgs = vec![
+            boundary_line("b1", Some(&["Task"])),
+            user_line("u1"),
+            boundary_line("b2", Some(&["Task", "WebFetch"])),
+        ];
+        assert_eq!(
+            pre_compact_discovered_tools(&msgs),
+            vec!["Task".to_string(), "WebFetch".to_string()],
+        );
+    }
+
+    #[test]
+    fn pre_compact_discovered_tools_empty_without_toolsearch_compaction() {
+        // No boundary, a boundary WITHOUT the field, and a non-system line all
+        // contribute nothing — the default-off common path returns empty.
+        assert!(pre_compact_discovered_tools(&[user_line("u1")]).is_empty());
+        assert!(pre_compact_discovered_tools(&[boundary_line("b1", None)]).is_empty());
+        assert!(pre_compact_discovered_tools(&[boundary_line("b1", Some(&[]))]).is_empty());
     }
 
     fn make_fs(root: &Path) -> Arc<dyn FileSystem> {

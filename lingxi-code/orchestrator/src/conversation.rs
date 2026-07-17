@@ -2660,13 +2660,30 @@ impl ConversationOrchestrator {
                 .last()
                 .map(protocol::ConversationMessage::id)
         };
+        // P2-10 (parity 2.1.208): carry three compactMetadata fields the boundary
+        // previously left empty (`U6r(trigger, preTokens, logicalParentUuid,
+        // userContext, messagesSummarized)`):
+        //  - `messagesSummarized` (`o`): the count of messages the summary
+        //    REPLACED = the full pre-compact history MINUS the verbatim tail kept
+        //    after it (`messages_before - preserved_tail.len()`). Display-only.
+        //  - `preCompactDiscoveredTools`: the deferred tools the model has already
+        //    loaded via `ToolSearch` this session (`Age()` / `[...B].sort()`), so a
+        //    cold `--resume` re-marks them loaded and they stay non-deferred across
+        //    the boundary. EMPTY unless Tool Search is on (default-off) → the field
+        //    is omitted and the wire is byte-identical to before.
+        //  - `userContext` (`n`): claude's compaction custom-instructions snapshot.
+        //    This port threads no such source (the `user_context` map is empty), so
+        //    it stays `None` — omitted from the wire, exactly as before. See P2-10.
+        let messages_summarized = messages_before
+            .saturating_sub(u32::try_from(preserved_tail.len()).unwrap_or(u32::MAX));
+        let discovered_tools = self.tools.deferral().loaded_names();
         let (marker, metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
             pre_tokens_estimate,
             None,
             None,
-            None,
-            &[],
+            Some(messages_summarized),
+            &discovered_tools,
             &preserved_tail,
             anchor_uuid.as_ref(),
         );

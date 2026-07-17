@@ -76,10 +76,14 @@ pub struct JobSpec {
 }
 
 /// Production entrypoint: resolve the shared config home and drive
-/// [`run_worker_core`] with the REAL `run_turn`-backed executor.
+/// [`run_worker_core`] with the REAL `run_turn`-backed executor. The executor
+/// captures `config_home` so it can DRAIN any durable offline replies queued for
+/// this job (`jobs/<short>/replies/`) and deliver them as follow-up turns on
+/// (re)spawn — the "reliable reply delivery when no live worker" path.
 pub async fn run(cli: &Cli) -> i32 {
     let config_home = crate::run::daemon_runtime_dir();
-    run_worker_core(&config_home, &cli.short, execute_job).await
+    let exec_home = config_home.clone();
+    run_worker_core(&config_home, &cli.short, move |spec| execute_job(exec_home, spec)).await
 }
 
 /// Testable worker core: the `execute` seam stands in for the real
@@ -164,7 +168,12 @@ fn worker_argv(spec: &JobSpec) -> Argv {
 /// The production executor: chdir into the job cwd, synthesize a print-shaped
 /// [`Argv`], build the runtime, run the initial turn, then keep driving the
 /// same runtime from live attach input while an attach client remains connected.
-async fn execute_job(spec: JobSpec) -> Result<(), String> {
+///
+/// Before entering the live-attach loop it also DRAINS the job's durable offline
+/// reply queue (`jobs/<short>/replies/`) into the pending-input buffer, so any
+/// follow-up reply persisted while the job had no live worker is delivered as a
+/// follow-up turn on this (re)spawn — even when no terminal is attached.
+async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(), String> {
     // Run the turn in the job's directory (tool + config resolution keys off
     // `std::env::current_dir()`, which `resolve_desktop_config` reads).
     if !spec.cwd.is_empty() {
@@ -196,10 +205,58 @@ async fn execute_job(spec: JobSpec) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut queued = VecDeque::new();
+    // Deliver replies queued while this job had no live worker (offline queue),
+    // in enqueue order, ahead of any subsequent live-attach input.
+    let mut queued: VecDeque<String> = crate::bg_reply_queue::drain_replies(&config_home, &spec.short)
+        .into_iter()
+        .map(|reply| reply.text)
+        .collect();
+
     run_attached_turn(&runtime, &spec.prompt, attach_rx.as_mut(), &mut queued).await?;
     if let (Some(hub), Some(rx)) = (attach_hub.as_ref(), attach_rx.as_mut()) {
+        // The live-attach loop drains `queued` (offline replies first) before it
+        // blocks on live input, so a connected client is not required to deliver
+        // them.
         run_attach_input_loop(&runtime, sink.as_ref(), hub, rx, queued).await?;
+    } else {
+        // No live attach transport: deliver any offline-queued replies as plain
+        // follow-up turns directly.
+        deliver_offline_replies(&runtime, sink.as_ref(), queued).await?;
+    }
+    Ok(())
+}
+
+/// Deliver offline-queued replies as follow-up turns when there is no live
+/// attach transport. Mirrors [`run_attach_input_loop`]'s per-line handling
+/// (slash-command dispatch vs. a turn) but drives purely from the drained queue.
+async fn deliver_offline_replies(
+    runtime: &crate::init::Runtime,
+    sink: &dyn OutputSink,
+    mut queued: VecDeque<String>,
+) -> Result<(), String> {
+    while let Some(input) = queued.pop_front() {
+        if input.trim().is_empty() {
+            continue;
+        }
+        if input.starts_with('/') {
+            match runtime.dispatcher.dispatch(&input).await {
+                SlashDispatchResult::Handled { display }
+                | SlashDispatchResult::Unknown { display, .. } => {
+                    sink.command_output(&input, &display).await;
+                }
+                SlashDispatchResult::RunAsTurn { prompt } => {
+                    sink.turn_start().await;
+                    run_attached_turn(runtime, &prompt, None, &mut VecDeque::new()).await?;
+                }
+                SlashDispatchResult::NotASlashCommand => {}
+            }
+            if runtime.orchestrator.current_should_exit() {
+                break;
+            }
+        } else {
+            sink.turn_start().await;
+            run_attached_turn(runtime, &input, None, &mut VecDeque::new()).await?;
+        }
     }
     Ok(())
 }

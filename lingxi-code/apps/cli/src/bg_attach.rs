@@ -16,6 +16,18 @@ pub const ATTACH_SOCK_ENV: &str = "LINGXI_BG_ATTACH_SOCK";
 /// Environment key carrying the bearer token required by the attach socket.
 pub const ATTACH_AUTH_ENV: &str = "LINGXI_BG_ATTACH_AUTH";
 
+/// Where to durably persist a follow-up reply whose LIVE delivery to a worker
+/// fails (the worker vanished mid-attach). Lets [`attach_to_socket`] fall back
+/// to the offline reply queue instead of dropping the line — the
+/// "失败投递无法持久化" (a failed delivery that cannot be persisted) harm.
+#[derive(Debug, Clone)]
+pub struct ReplyFallback {
+    /// Config home whose `jobs/<short>/replies/` queue the reply is written to.
+    pub config_home: PathBuf,
+    /// The background job short id owning the queue.
+    pub short: String,
+}
+
 /// Input/control frames received from an attached terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachInput {
@@ -397,7 +409,17 @@ mod unix {
     /// Connect to a live background worker and run a small PTY-like pump: worker
     /// output is copied to stdout, while local key events are line-edited and
     /// forwarded as input/control frames over the same socket.
-    pub fn attach_to_socket(path: &std::path::Path, auth: &str) -> io::Result<()> {
+    ///
+    /// If the worker vanishes mid-attach and a pending input line therefore fails
+    /// to deliver, that line is persisted to the durable offline reply queue
+    /// (`fallback`) instead of being dropped — so a later worker respawn still
+    /// delivers it. The same applies to a line still being edited when the socket
+    /// closes.
+    pub fn attach_to_socket(
+        path: &std::path::Path,
+        auth: &str,
+        fallback: Option<&super::ReplyFallback>,
+    ) -> io::Result<()> {
         let mut stream = UnixStream::connect(path)?;
         stream.write_all(auth.as_bytes())?;
         stream.write_all(b"\n")?;
@@ -411,7 +433,12 @@ mod unix {
         let mut prev_output = 0_u8;
         loop {
             match stream.read(&mut socket_buf) {
-                Ok(0) => return Ok(()),
+                // Worker closed the socket. If a line was mid-edit, persist it so
+                // it is not lost.
+                Ok(0) => {
+                    persist_pending_line(&line, fallback);
+                    return Ok(());
+                }
                 Ok(n) => write_terminal_output(&mut stdout, &socket_buf[..n], &mut prev_output),
                 Err(e)
                     if matches!(
@@ -453,9 +480,17 @@ mod unix {
                             let _ = stream.shutdown(Shutdown::Both);
                             return Ok(());
                         }
-                        stream.write_all(line.as_bytes())?;
-                        stream.write_all(b"\n")?;
-                        stream.flush()?;
+                        // A failed live delivery (BrokenPipe → the worker
+                        // vanished) is persisted to the offline queue instead of
+                        // aborting the attach with an error.
+                        let sent = stream
+                            .write_all(line.as_bytes())
+                            .and_then(|()| stream.write_all(b"\n"))
+                            .and_then(|()| stream.flush());
+                        if sent.is_err() {
+                            persist_pending_line(&line, fallback);
+                            return Ok(());
+                        }
                         line.clear();
                     }
                     KeyCode::Esc => {
@@ -465,6 +500,28 @@ mod unix {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Persist a non-empty pending input `line` to the durable offline reply
+    /// queue when a `fallback` target is known. Best-effort: a queue-write error
+    /// is logged, not surfaced (the attach itself is already ending).
+    fn persist_pending_line(line: &str, fallback: Option<&super::ReplyFallback>) {
+        if line.trim().is_empty() {
+            return;
+        }
+        let Some(fb) = fallback else {
+            return;
+        };
+        match crate::bg_reply_queue::enqueue_reply(&fb.config_home, &fb.short, line) {
+            Ok(_) => {
+                let mut stdout = io::stdout().lock();
+                let _ = stdout.write_all(
+                    b"\r\n[worker unavailable \xe2\x80\x94 reply queued for delivery on respawn]\r\n",
+                );
+                let _ = stdout.flush();
+            }
+            Err(e) => tracing::warn!("lingxi-cli attach: could not queue offline reply: {e}"),
         }
     }
 
@@ -587,7 +644,11 @@ mod non_unix {
         async fn error(&self, _code: &str, _message: &str) {}
     }
 
-    pub fn attach_to_socket(_path: &Path, _auth: &str) -> io::Result<()> {
+    pub fn attach_to_socket(
+        _path: &Path,
+        _auth: &str,
+        _fallback: Option<&super::ReplyFallback>,
+    ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "live background attach is only supported on Unix",

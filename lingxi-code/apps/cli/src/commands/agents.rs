@@ -519,7 +519,14 @@ fn find_live_attach_target(home: &Path, session_id: &str) -> Option<LiveAttachTa
 }
 
 fn attach_to_live_worker(target: &LiveAttachTarget) -> std::io::Result<()> {
-    crate::bg_attach::attach_to_socket(&target.socket, &target.auth)
+    // If the worker vanishes mid-attach, an undelivered follow-up line is
+    // persisted to this job's durable offline reply queue for the next respawn
+    // instead of being dropped.
+    let fallback = crate::bg_attach::ReplyFallback {
+        config_home: crate::run::lingxi_home_dir(),
+        short: target.short.clone(),
+    };
+    crate::bg_attach::attach_to_socket(&target.socket, &target.auth, Some(&fallback))
 }
 
 /// Whether any known job driving `session_id` is still executing under a LIVE

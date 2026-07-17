@@ -59,6 +59,10 @@ pub enum CompactionError {
     /// Autocompact does not apply to this state.
     #[error("not applicable")]
     NotApplicable,
+    /// A manual `/compact` needs at least one completed exchange to summarize
+    /// while preserving a valid recent tail.
+    #[error("Not enough messages to compact.")]
+    NotEnoughMessages,
     /// Internal logic error.
     #[error("internal: {0}")]
     Internal(String),
@@ -163,6 +167,21 @@ impl Autocompactor {
         &self,
         messages: Vec<ConversationMessage>,
     ) -> Result<CompactionResult, CompactionError> {
+        self.compact_with_instructions(messages, None).await
+    }
+
+    /// Compact `messages`, appending optional caller/hook instructions to the
+    /// byte-faithful compaction prompt.
+    ///
+    /// The ordinary automatic path calls [`Self::compact`] and therefore keeps
+    /// the configured base prompt. Manual `/compact <focus>` and successful
+    /// `PreCompact` hook stdout use this seam so their instructions reach the
+    /// summarizer exactly once.
+    pub async fn compact_with_instructions(
+        &self,
+        messages: Vec<ConversationMessage>,
+        custom_instructions: Option<&str>,
+    ) -> Result<CompactionResult, CompactionError> {
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
 
         // #58 suffix-preserving split (`DRn`): choose the smallest preserved
@@ -185,20 +204,17 @@ impl Autocompactor {
                 .await
                 .ok_or_else(|| CompactionError::Internal("no cache-safe params".into()))?;
 
-            // #58: when a tail is preserved, the summarizer must see ONLY the
-            // prefix `A = m.flat()` (TS `_kd(A,...)`). Restrict the replayed
-            // fork context to the summarize prefix; the cache prefix the slot
-            // captured IS `session.history`, so its leading `to_summarize`
-            // messages match the split's prefix. Drop exactly the preserved-tail
-            // count from the END (the tail is what we carry verbatim). When no
-            // tail is preserved, the full context is summarized as before.
-            if let Some(split) = &split {
-                let keep = split.to_preserve.len();
-                if keep > 0 && keep <= cache_params.fork_context_messages.len() {
-                    let new_len = cache_params.fork_context_messages.len() - keep;
-                    cache_params.fork_context_messages.truncate(new_len);
-                }
-            }
+            // #58: summarize the ACTUAL current prefix, not the last cache-slot
+            // history clone. The slot is captured immediately after an API call
+            // and therefore predates the assistant reply appended afterwards;
+            // truncating that stale clone by the preserved-tail length silently
+            // dropped the newest assistant turn. We still reuse the slot's
+            // system prompt / model metadata, but replay exactly the messages
+            // selected from this invocation's live history.
+            cache_params.fork_context_messages = split.as_ref().map_or_else(
+                || messages.clone(),
+                |split| split.to_summarize.clone(),
+            );
 
             // Strip image blocks from the replayed context before the summary
             // request — the text summarizer must not receive raw image data
@@ -222,7 +238,11 @@ impl Autocompactor {
                 let req = ForkedAgentRequest {
                     prompt_messages: vec![ConversationMessage::user(
                         protocol::MessageId::new(),
-                        self.config.compact_user_prompt.clone(),
+                        if custom_instructions.is_some_and(|s| !s.trim().is_empty()) {
+                            crate::prompt::get_compact_prompt(custom_instructions)
+                        } else {
+                            self.config.compact_user_prompt.clone()
+                        },
                     )],
                     cache_safe_params: cache_params.clone(),
                     fork_label: "compaction".into(),

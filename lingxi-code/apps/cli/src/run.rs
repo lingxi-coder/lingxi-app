@@ -1502,7 +1502,8 @@ async fn mount_resumed_tui(
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
-    let tui_build = match crate::init::build_runtime_for_tui_inner(argv, Some(session_id)).await {
+    let mut tui_build = match crate::init::build_runtime_for_tui_inner(argv, Some(session_id)).await
+    {
         Ok(b) => b,
         Err(e) => {
             eprintln!("lingxi-cli: tui init failed: {e}");
@@ -1545,6 +1546,18 @@ async fn mount_resumed_tui(
         }
         let _ = orch.set_fast_mode(state.fast_mode).await;
         let _ = orch.set_plan_mode(state.plan_mode).await;
+        // Restore the live permission mode the user was in (Shift+Tab): apply it
+        // to BOTH the freshly-built enforcing gate (so tool checks follow it) and
+        // the indicator seed (`initial_permission_mode` drives the bottom-of-
+        // composer badge). Without this the re-mount reset the mode to the
+        // CLI/config default even though the process never restarted.
+        if let Some(wire) = state.permission_mode {
+            if let Some(gate) = tui_build.runtime.enforcing_permission_gate.as_ref() {
+                let _ = gate.set_permission_mode(&wire).await;
+            }
+            tui_build.initial_permission_mode =
+                permission::permission_mode_from_cli_string(&wire);
+        }
         boot_notice = state.notice;
     }
     // RENDER seed: map the raw JSONL into TUI scrollback rows (W38 seam), then

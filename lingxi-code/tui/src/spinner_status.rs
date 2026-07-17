@@ -109,9 +109,80 @@ pub(crate) fn status_paren(elapsed_ms: u128, response_chars: u64, receiving: boo
     format!("({})", parts.join(" · "))
 }
 
+/// Pill progress-bar glyphs (claude-code `pt_={fill:"▰",empty:"▱"}`):
+/// a filled vs hollow parallelogram. (claude-code swaps to `█`/`░` only under
+/// `hasGeometricShapesInkBleedBug()`; we use the common pill set.)
+pub(crate) const COMPACT_BAR_FILL: char = '\u{25B0}';
+pub(crate) const COMPACT_BAR_EMPTY: char = '\u{25B1}';
+
+/// claude-code `nGd(e)`: the compaction progress percent as a time-based
+/// exponential estimate (there is no real per-token progress). `elapsed_ms`
+/// eases toward 100% with time-constant 90s and is capped at 95%:
+/// `min(95, round((1 - e^(-t/90)) * 100))` where `t` is elapsed seconds. Because
+/// `elapsed` is monotonic, so is the result — matching claude-code's
+/// `Math.max(prev, nGd(...))` guard without extra state. At ~4s → `4%`.
+#[must_use]
+pub(crate) fn compact_progress_percent(elapsed_ms: u128) -> u16 {
+    let t = (elapsed_ms as f64) / 1000.0;
+    let r = 1.0 - (-t / 90.0).exp();
+    (r * 100.0).round().clamp(0.0, 95.0) as u16
+}
+
+/// The compaction bar width claude-code uses: `Ge = min(40, cols - 8)`, and the
+/// bar only renders when that width is `>= 8` (`Gt_`). Returns `None` when the
+/// terminal is too narrow (claude-code hides the bar, keeping just the percent-
+/// less spinner line).
+#[must_use]
+pub(crate) fn compact_bar_width(cols: u16) -> Option<u16> {
+    let w = 40.min(cols.saturating_sub(8));
+    (w >= 8).then_some(w)
+}
+
+/// Split a `width`-cell bar at `percent`: `(filled, empty)` where
+/// `filled = round((percent/100) * width)` (claude-code `HB`'s
+/// `ut_ = Math.round(ratio * width)`), clamped to `[0, width]`.
+#[must_use]
+pub(crate) fn compact_bar_split(percent: u16, width: u16) -> (u16, u16) {
+    let ratio = (f64::from(percent) / 100.0).clamp(0.0, 1.0);
+    let filled = (ratio * f64::from(width)).round() as u16;
+    let filled = filled.min(width);
+    (filled, width - filled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_progress_percent_matches_ngd_estimate() {
+        // t=0 → 0%; the exponential is monotonic and capped at 95%.
+        assert_eq!(compact_progress_percent(0), 0);
+        // ~4s → round((1-e^(-4/90))*100) = round(4.35) = 4% (matches the
+        // captured `4%` frame from the real binary).
+        assert_eq!(compact_progress_percent(4_000), 4);
+        // 90s (one time-constant) → round((1-e^-1)*100) = round(63.2) = 63%.
+        assert_eq!(compact_progress_percent(90_000), 63);
+        // Far out — capped at 95, never 100.
+        assert_eq!(compact_progress_percent(10_000_000), 95);
+    }
+
+    #[test]
+    fn compact_bar_width_hides_when_too_narrow() {
+        // min(40, cols-8), only if >= 8: cols must be >= 16.
+        assert_eq!(compact_bar_width(15), None);
+        assert_eq!(compact_bar_width(16), Some(8));
+        assert_eq!(compact_bar_width(48), Some(40));
+        assert_eq!(compact_bar_width(200), Some(40));
+    }
+
+    #[test]
+    fn compact_bar_split_rounds_like_hb_bar() {
+        assert_eq!(compact_bar_split(0, 40), (0, 40));
+        assert_eq!(compact_bar_split(4, 40), (2, 38)); // round(1.6) = 2
+        assert_eq!(compact_bar_split(50, 40), (20, 20));
+        assert_eq!(compact_bar_split(95, 40), (38, 2));
+        assert_eq!(compact_bar_split(100, 8), (8, 0));
+    }
 
     #[test]
     fn format_duration_matches_reference() {

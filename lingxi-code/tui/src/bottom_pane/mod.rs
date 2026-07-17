@@ -90,6 +90,12 @@ pub struct BottomPaneStatus {
     /// Session-cumulative cost (`$0.0000` — `TurnEvent::CostUpdated`),
     /// appended dim at the end of the status row when known.
     pub cost: Option<String>,
+    /// `Some(percent)` while a `/compact` (forced) compaction is running: the
+    /// status row shows claude-code's `Compacting conversation…` line plus a
+    /// second row with the pill progress bar + `N%` (time-based estimate). The
+    /// interrupt/cancel hint and cost are suppressed in this mode. `None` for a
+    /// normal turn.
+    pub compact_percent: Option<u16>,
 }
 
 /// What the owner must do after the pane routed one key or paste. Local
@@ -1231,6 +1237,17 @@ impl BottomPane {
     fn status_indicator_line(&self) -> Line<'static> {
         let dim = crate::style_adapter::to_ratatui(self.theme.dim);
         let claude = crate::style_adapter::to_ratatui(self.theme.claude);
+        // While compacting (`/compact`), claude-code shows only the
+        // `Compacting conversation…` message — no interrupt/cancel hint, no
+        // cost (compaction runs off the turn loop and isn't Esc-cancellable
+        // here). The pill progress bar renders on the row below via
+        // [`Self::compact_bar_line`].
+        if self.status.compact_percent.is_some() {
+            return Line::from(vec![
+                Span::raw("  "),
+                Span::styled(self.status.text.clone(), Style::default().fg(claude)),
+            ]);
+        }
         // The spinner text carries the verb + live token counter; the interrupt
         // hint lives here in the status row (claude-code keeps it in the footer,
         // not the spinner). Esc while running interrupts (it does NOT quit).
@@ -1249,6 +1266,47 @@ impl BottomPane {
             ));
         }
         Line::from(spans)
+    }
+
+    /// The compaction progress-bar row (claude-code's pill `HB` bar): a 2-space
+    /// indent, then `filled` filled + `empty` hollow parallelograms, a space,
+    /// and a dim `N%`. Filled cells use the default text color, empty cells are
+    /// dim — matching claude-code's `fillColor` (default) / `emptyColor`
+    /// (`dimColor`). Only called when the bar fits (`width >= 8`).
+    fn compact_bar_line(&self, width: u16, percent: u16) -> Line<'static> {
+        use crate::spinner_status::{compact_bar_split, COMPACT_BAR_EMPTY, COMPACT_BAR_FILL};
+        let text = crate::style_adapter::to_ratatui(self.theme.text);
+        let dim = crate::style_adapter::to_ratatui(self.theme.dim);
+        let (filled, empty) = compact_bar_split(percent, width);
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                COMPACT_BAR_FILL.to_string().repeat(usize::from(filled)),
+                Style::default().fg(text),
+            ),
+            Span::styled(
+                COMPACT_BAR_EMPTY.to_string().repeat(usize::from(empty)),
+                Style::default().fg(dim),
+            ),
+            Span::styled(format!(" {percent}%"), Style::default().fg(dim)),
+        ])
+    }
+
+    /// Rows the status indicator occupies at `cols`: 0 when idle, 1 for a normal
+    /// turn, 2 while compacting when the progress bar fits (`compact_bar_width`),
+    /// else 1 (narrow terminal → message only, matching claude-code hiding the
+    /// bar under `Gt_`).
+    fn status_rows(&self, cols: u16) -> u16 {
+        if !self.status.running {
+            return 0;
+        }
+        if self.status.compact_percent.is_some()
+            && crate::spinner_status::compact_bar_width(cols).is_some()
+        {
+            2
+        } else {
+            1
+        }
     }
 
     /// Footer props for the current pane state (mode selection that codex
@@ -1303,7 +1361,7 @@ impl BottomPane {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(u16::from(self.status.running)),
+                Constraint::Length(self.status_rows(area.width)),
                 Constraint::Length(u16::from(self.context_pressure.is_some())),
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
                 Constraint::Min(3),
@@ -1337,7 +1395,21 @@ impl BottomPane {
             .desired_height(width);
         let preview = self.pending_input_preview.desired_height(width);
         let banner = u16::from(self.context_pressure.is_some());
-        let running = u16::from(running);
+        // The status indicator is 2 rows while compacting (spinner line + the
+        // progress bar) when the bar fits, else 1 for a normal running turn.
+        // The caller supplies a fresh `running` (the pane's own flag can be
+        // stale by a tick); `compact_percent` is read from `self.status`.
+        let status = if running {
+            if self.status.compact_percent.is_some()
+                && crate::spinner_status::compact_bar_width(width).is_some()
+            {
+                2
+            } else {
+                1
+            }
+        } else {
+            0
+        };
         let below = if let Some(popup) = &self.completion {
             popup.desired_height()
         } else {
@@ -1345,7 +1417,7 @@ impl BottomPane {
         };
         let mode_row =
             permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
-        let base = running + banner + preview + composer + mode_row + below;
+        let base = status + banner + preview + composer + mode_row + below;
         let overlay = if let Some(view) = self.view_stack.active() {
             view.desired_height(width)
         } else {
@@ -1369,7 +1441,25 @@ impl Renderable for BottomPane {
         }
         let zones = self.zones(area);
         if self.status.running {
-            Paragraph::new(self.status_indicator_line()).render(zones[0], buf);
+            let status_area = zones[0];
+            // First row: the spinner line (`Compacting conversation…` or the
+            // normal verb + counter). Pin it to the top of the status zone.
+            let line_area = Rect { height: 1, ..status_area };
+            Paragraph::new(self.status_indicator_line()).render(line_area, buf);
+            // Second row (compaction only): the pill progress bar + `N%`.
+            if let Some(percent) = self.status.compact_percent {
+                if let (Some(width), true) = (
+                    crate::spinner_status::compact_bar_width(area.width),
+                    status_area.height >= 2,
+                ) {
+                    let bar_area = Rect {
+                        y: status_area.y + 1,
+                        height: 1,
+                        ..status_area
+                    };
+                    Paragraph::new(self.compact_bar_line(width, percent)).render(bar_area, buf);
+                }
+            }
         }
         if let Some(banner) = &self.context_pressure {
             Paragraph::new(self.context_pressure_line(banner)).render(zones[1], buf);
@@ -2195,6 +2285,7 @@ mod tests {
             running: true,
             text: "Simmering… (esc to interrupt)".to_string(),
             cost: None,
+            compact_percent: None,
         });
         let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
@@ -2456,6 +2547,7 @@ mod tests {
             running: true,
             text: "Working…".to_string(),
             cost: None,
+            compact_percent: None,
         });
         assert!(matches!(
             pane.handle_key(ctrl_c),
@@ -2481,6 +2573,7 @@ mod tests {
             running: true,
             text: "✻ Working… (1s · esc to interrupt)".to_string(),
             cost: None,
+            compact_percent: None,
         });
         // Running + no local surface: Esc surfaces the interrupt intent (the
         // spinner's "esc to interrupt" hint), never Quit.
@@ -2622,6 +2715,7 @@ mod tests {
             running: true,
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: None,
+            compact_percent: None,
         });
         let area = Rect::new(0, 0, 80, pane.desired_height(80));
         let mut buf = Buffer::empty(area);
@@ -2671,6 +2765,7 @@ mod tests {
             running: false,
             text: String::new(),
             cost: Some("$0.0123".to_string()),
+            compact_percent: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
         let mut buf = Buffer::empty(area);
@@ -2686,6 +2781,7 @@ mod tests {
             running: true,
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: Some("$0.0123".to_string()),
+            compact_percent: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
         let mut buf = Buffer::empty(area);
@@ -2694,6 +2790,68 @@ mod tests {
         assert!(
             row.contains("Ctrl-C: cancel") && row.contains("·  $0.0123"),
             "{row}"
+        );
+    }
+
+    #[test]
+    fn compacting_status_renders_message_line_plus_pill_progress_bar() {
+        let mut pane = pane();
+        // A forced compaction at ~4s → 4% (claude-code `nGd`). The status zone
+        // becomes 2 rows: `Compacting conversation…` then the pill bar + `4%`.
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "· Compacting conversation\u{2026}".to_string(),
+            cost: Some("$0.0123".to_string()),
+            compact_percent: Some(4),
+        });
+        let area = Rect::new(0, 0, 90, pane.desired_height(90));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        // Row 0: the message, indented, WITHOUT the interrupt/cancel hint or
+        // the cost suffix (both suppressed during compaction).
+        let row0 = buffer_row(&buf, 0);
+        assert!(
+            row0.contains("Compacting conversation")
+                && !row0.contains("esc to interrupt")
+                && !row0.contains("$0.0123"),
+            "message row: {row0:?}"
+        );
+        // Row 1: the pill bar (filled ▰ then hollow ▱) and the `4%` label.
+        // width = min(40, 90-8) = 40; filled = round(0.04*40) = 2.
+        let row1 = buffer_row(&buf, 1);
+        assert!(
+            row1.contains('\u{25B0}') && row1.contains('\u{25B1}') && row1.contains("4%"),
+            "bar row: {row1:?}"
+        );
+        assert_eq!(
+            row1.matches('\u{25B0}').count(),
+            2,
+            "two filled cells at 4%: {row1:?}"
+        );
+    }
+
+    #[test]
+    fn compacting_status_hides_bar_on_a_narrow_terminal() {
+        let mut pane = pane();
+        pane.set_task_running(BottomPaneStatus {
+            running: true,
+            text: "· Compacting conversation\u{2026}".to_string(),
+            cost: None,
+            // cols=15 → compact_bar_width None → message-only (1 row).
+            compact_percent: Some(10),
+        });
+        let area = Rect::new(0, 0, 15, pane.desired_height(15));
+        let mut buf = Buffer::empty(area);
+        pane.render(area, &mut buf);
+        assert!(
+            buffer_row(&buf, 0).contains("Compacting"),
+            "message still shows"
+        );
+        // No bar row: row 1 carries no pill glyphs.
+        assert!(
+            !buffer_row(&buf, 1).contains('\u{25B0}'),
+            "no bar on narrow terminal: {:?}",
+            buffer_row(&buf, 1)
         );
     }
 

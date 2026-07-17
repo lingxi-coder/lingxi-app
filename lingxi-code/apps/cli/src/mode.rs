@@ -243,6 +243,12 @@ pub(crate) struct RemountState {
     pub fast_mode: bool,
     /// `/plan` mode. Applied via `set_plan_mode`.
     pub plan_mode: bool,
+    /// The live permission mode as a wire string (Shift+Tab indicator +
+    /// enforcing gate), or `None` when no enforcing gate is wired. Carried so
+    /// the re-mount restores the user's mid-session mode instead of resetting to
+    /// the CLI/config default — applied to BOTH the rebuilt gate (enforcement)
+    /// and the indicator seed on re-mount. See [`PermissionGate::permission_mode`].
+    pub permission_mode: Option<String>,
     /// One-shot system notice appended to the re-mounted transcript (the
     /// `/branch` success confirmation — claude-code renders it in the NEW
     /// branch). `None` for /resume switches and rewinds.
@@ -310,6 +316,11 @@ pub(crate) async fn run_ratatui(
     let permission_mcp_registry = tui_build.runtime.mcp_registry.clone();
     // The ENFORCING permission gate, for Shift+Tab live permission-mode cycling.
     let set_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
+    // A second clone kept in THIS scope (the `on_set_permission_mode` closure
+    // moves `set_mode_gate`): read on exit to snapshot the live permission mode
+    // into `RemountState`, so an in-process `/resume`/`/branch`/`/rewind`
+    // restores it instead of resetting to the CLI/config default.
+    let carried_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
     let set_mode_turn_tx = turn_tx.clone();
@@ -674,11 +685,18 @@ pub(crate) async fn run_ratatui(
     let on_compact = move |_args: String| {
         let orch = compact_orch.clone();
         let tx = compact_turn_tx.clone();
+        // Show claude-code's `Compacting conversation…` spinner + time-based
+        // progress bar IMMEDIATELY (before the multi-second summarization
+        // round-trip), so the pass isn't invisible-then-instant. Sent
+        // synchronously on the same channel so it lands on the next render tick.
+        let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactStarted);
         compact_handle.spawn(async move {
             let (body, is_error) = match orch.force_compact().await {
                 Ok(_summary) => ("Compacted (ctrl+o to see full summary)".to_string(), false),
                 Err(_e) => ("Error compacting conversation".to_string(), true),
             };
+            // Clear the spinner/bar first, then land the terminal line.
+            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactEnded);
             let _ =
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
@@ -993,6 +1011,7 @@ pub(crate) async fn run_ratatui(
             model: Some((status.model, status.model_profile)),
             fast_mode: summary_orch.fast_mode().await,
             plan_mode: summary_orch.plan_mode().await,
+            permission_mode: carried_mode_gate.as_ref().and_then(|g| g.permission_mode()),
             notice: None,
         })
     };

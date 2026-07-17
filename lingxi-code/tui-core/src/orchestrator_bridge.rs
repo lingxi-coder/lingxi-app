@@ -174,6 +174,20 @@ pub enum TurnEvent {
         /// `true` → render as an error (red); `false` → dim informational.
         is_error: bool,
     },
+    /// A `/compact` (or otherwise forced) compaction pass began. The CLI's
+    /// compact closure sends this SYNCHRONOUSLY before awaiting the multi-second
+    /// `force_compact()` round-trip so the TUI shows claude-code's
+    /// `Compacting conversation…` spinner + time-based progress bar immediately
+    /// (the summarization stream carries no real progress; the bar is an
+    /// exponential time estimate — see [`crate::spinner_status::compact_progress_percent`]).
+    /// NOT emitted by [`BridgeOutputStream`]; sent directly like
+    /// [`Self::SystemNotice`]. Paired with [`Self::CompactEnded`].
+    CompactStarted,
+    /// The compaction pass finished (success or failure): the TUI clears the
+    /// `Compacting conversation…` spinner/progress bar. The terminal
+    /// `Compacted (ctrl+o to see full summary)` line arrives separately as a
+    /// [`Self::SystemNotice`]. Paired with [`Self::CompactStarted`].
+    CompactEnded,
     /// Captured output of a `!`-prefixed bash-mode command (run off the model
     /// path). Rendered as a `UserBashOutput` cell — ANSI-parsed stdout then
     /// error-tinted stderr. Sent by the CLI `on_bash` closure after the

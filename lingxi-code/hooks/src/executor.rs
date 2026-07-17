@@ -1674,7 +1674,10 @@ fn build_lifecycle_envelope_body(
             };
             Some(("SessionEnd", serde_json::to_string(&payload).ok()?))
         }
-        HookEvent::PreCompact { reason } => {
+        HookEvent::PreCompact {
+            reason,
+            custom_instructions,
+        } => {
             let payload = PreCompactPayload {
                 hook_event_name: HookEventNamePreCompact,
                 session_id: b.session_id,
@@ -1687,7 +1690,7 @@ fn build_lifecycle_envelope_body(
                 // `HookEvent::PreCompact.reason` is the `manual` / `auto`
                 // trigger in the wire schema.
                 trigger: reason.clone(),
-                custom_instructions: None,
+                custom_instructions: custom_instructions.clone(),
             };
             Some(("PreCompact", serde_json::to_string(&payload).ok()?))
         }

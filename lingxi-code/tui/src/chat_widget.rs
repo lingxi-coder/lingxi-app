@@ -248,6 +248,13 @@ pub struct ChatWidget {
     current_turn: Option<CancellationToken>,
     /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
     turn_started_at: Option<std::time::Instant>,
+    /// When a `/compact` (forced) compaction pass began, or `None` when not
+    /// compacting. Drives claude-code's `Compacting conversation…` spinner +
+    /// time-based progress bar (the bar's percent eases from this instant).
+    /// Set on [`TurnEvent::CompactStarted`], cleared on
+    /// [`TurnEvent::CompactEnded`]. Compaction runs off the turn loop, so it
+    /// never overlaps a live `turn_started_at`.
+    compacting_started_at: Option<std::time::Instant>,
     /// Active API retry-backoff status (Claude Code's `SystemAPIErrorMessage`).
     /// `Some` while an API request is backing off before its next attempt; the
     /// spinner shows `"<message> · Retrying in Ns… (attempt X/Y)"` with a live
@@ -435,6 +442,7 @@ impl ChatWidget {
             theme_name: ThemeName::Dark,
             current_turn: None,
             turn_started_at: None,
+            compacting_started_at: None,
             api_retry: None,
             activity: None,
             response_chars: 0,
@@ -1036,6 +1044,18 @@ impl ChatWidget {
                 // rendered). Consecutive boundaries de-dupe to one marker —
                 // the old backend's `push_compact_boundary` contract.
                 self.push_compact_boundary(messages_before, messages_after);
+            }
+            // A forced compaction pass began: show claude-code's
+            // `Compacting conversation…` spinner + time-based progress bar
+            // (percent eases from this instant). Cleared on `CompactEnded`.
+            TurnEvent::CompactStarted => {
+                self.compacting_started_at = Some(std::time::Instant::now());
+            }
+            // Compaction finished (success or failure): clear the spinner/bar.
+            // The `Compacted …` (or error) line arrives as a separate
+            // `SystemNotice`.
+            TurnEvent::CompactEnded => {
+                self.compacting_started_at = None;
             }
             TurnEvent::RateLimit {
                 status,
@@ -3065,11 +3085,34 @@ impl ChatWidget {
     /// The pane's task-status input, recomputed from the widget's turn state
     /// (the pane holds no turn state of its own — plan Phase 5 boundary).
     fn pane_status(&self) -> BottomPaneStatus {
+        // A forced compaction (off the turn loop) takes precedence: it shows
+        // claude-code's `Compacting conversation…` spinner + time-based progress
+        // bar instead of the turn verb/counter. It never overlaps a live turn.
+        if let Some(started) = self.compacting_started_at {
+            let pct =
+                crate::spinner_status::compact_progress_percent(started.elapsed().as_millis());
+            return BottomPaneStatus {
+                running: true,
+                text: format!("{} Compacting conversation\u{2026}", self.spinner_frame()),
+                cost: self.cost.clone(),
+                compact_percent: Some(pct),
+            };
+        }
         BottomPaneStatus {
             running: self.current_turn.is_some(),
             text: self.spinner_text(),
             cost: self.cost.clone(),
+            compact_percent: None,
         }
+    }
+
+    /// The current spinner animation glyph — one of claude-code's twelve
+    /// `✻`-family frames, advanced every 120ms off the widget-lifetime clock.
+    fn spinner_frame(&self) -> &'static str {
+        const FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
+        let idx =
+            usize::try_from(self.start.elapsed().as_millis() / 120).unwrap_or(0) % FRAMES.len();
+        FRAMES[idx]
     }
 
     /// Execute the app-level intent the pane returned from a key or paste.
@@ -3286,9 +3329,7 @@ impl ChatWidget {
     /// `ToolUseStart`), then the verb sampled once for this turn from
     /// [`spinner::SPINNER_VERBS`] (Gap A).
     fn spinner_text(&self) -> String {
-        const FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
-        let idx =
-            usize::try_from(self.start.elapsed().as_millis() / 120).unwrap_or(0) % FRAMES.len();
+        let frame = self.spinner_frame();
         // While an API request is backing off, replace the verb with Claude
         // Code's `SystemAPIErrorMessage` line + a live countdown (attempt X/Y),
         // so the retry/error/backoff is visible during the otherwise-silent wait.
@@ -3300,7 +3341,7 @@ impl ChatWidget {
             let unit = if remaining == 1 { "second" } else { "seconds" };
             return format!(
                 "{} {} · Retrying in {remaining} {unit}… (attempt {}/{})",
-                FRAMES[idx], r.message, r.attempt, r.max_retries
+                frame, r.message, r.attempt, r.max_retries
             );
         }
         let verb = spinner::todo_leader_verb(self.current_todo.as_ref())
@@ -3314,7 +3355,7 @@ impl ChatWidget {
         let elapsed_ms = self.turn_started_at.map_or(0, |t| t.elapsed().as_millis());
         let receiving = self.response_chars > 0 || self.activity.is_some();
         let paren = crate::spinner_status::status_paren(elapsed_ms, self.response_chars, receiving);
-        format!("{} {verb}… {paren}", FRAMES[idx])
+        format!("{frame} {verb}… {paren}")
     }
 }
 
@@ -4286,6 +4327,37 @@ mod tests {
             panic!("/compact must return ChatOutcome::Compact");
         };
         assert_eq!(args, "");
+    }
+
+    /// `CompactStarted` flips the pane into claude-code's compacting state:
+    /// `running` with a `Compacting conversation…` message + a `compact_percent`
+    /// (so the progress bar renders). `CompactEnded` clears it back to idle.
+    #[test]
+    fn compact_started_shows_progress_then_ended_clears_it() {
+        let mut widget = widget();
+        // Idle: no compaction, not running.
+        let idle = widget.pane_status();
+        assert!(!idle.running && idle.compact_percent.is_none());
+
+        widget.apply_turn_event(TurnEvent::CompactStarted);
+        let during = widget.pane_status();
+        assert!(during.running, "compaction shows the running status row");
+        assert!(
+            during.text.contains("Compacting conversation"),
+            "message: {:?}",
+            during.text
+        );
+        assert!(
+            during.compact_percent.is_some(),
+            "a percent drives the progress bar"
+        );
+
+        widget.apply_turn_event(TurnEvent::CompactEnded);
+        let after = widget.pane_status();
+        assert!(
+            !after.running && after.compact_percent.is_none(),
+            "compaction end returns to idle"
+        );
     }
 
     /// (c) Unwired (`None`, every existing test widget), each new command is a

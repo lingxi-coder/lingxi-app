@@ -96,7 +96,7 @@ impl BuiltinHookHandler for RecordPreCompact {
         "record-pre-compact"
     }
     async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
-        if let HookEvent::PreCompact { reason } = event {
+        if let HookEvent::PreCompact { reason, .. } = event {
             self.probe.pre_fired.store(true, Ordering::SeqCst);
             self.probe.pre_count.fetch_add(1, Ordering::SeqCst);
             *self.probe.pre_trigger.lock().unwrap() = Some(reason.clone());

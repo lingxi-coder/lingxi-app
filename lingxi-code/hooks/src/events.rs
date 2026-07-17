@@ -283,6 +283,10 @@ pub enum HookEvent {
     PreCompact {
         /// Stringified reason (e.g. `"manual"`, `"threshold"`).
         reason: String,
+        /// Optional `/compact` focus text already supplied by the caller. This
+        /// is exposed to the hook as `custom_instructions` so it can refine or
+        /// augment the same summary request.
+        custom_instructions: Option<String>,
     },
     /// Compaction finished.
     PostCompact {

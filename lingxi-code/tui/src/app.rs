@@ -108,7 +108,7 @@ pub struct AppCallbacks<'cb> {
     /// `OrchestratorHandle::force_compact` asynchronously on the LIVE engine
     /// runtime (never on the render thread) and reports the summary back via a
     /// [`TurnEvent::SystemNotice`]. The `String` is the argument tail.
-    pub on_compact: Box<dyn FnMut(String) + 'cb>,
+    pub on_compact: Box<dyn FnMut(String, CancellationToken) + 'cb>,
     /// Executed on [`ChatOutcome::RenameSession`]: the caller appends the
     /// `custom-title` line via `OrchestratorHandle::rename_session` off the
     /// render thread and reports the result back via a
@@ -339,8 +339,8 @@ impl<'cb> RataApp<'cb> {
                     // `/compact`: drive `force_compact` off-loop on the live
                     // engine runtime (never block the render thread); the
                     // summary returns via `TurnEvent::SystemNotice`.
-                    ChatOutcome::Compact(args) => {
-                        (self.callbacks.on_compact)(args);
+                    ChatOutcome::Compact(args, cancel) => {
+                        (self.callbacks.on_compact)(args, cancel);
                     }
                     // `/rename`: append the custom-title JSONL line off-loop on
                     // the live engine runtime; the confirmation returns via
@@ -559,7 +559,7 @@ pub fn run_app(
     on_plugin_action: impl FnMut(PluginAction),
     on_reload_plugins: impl FnMut(),
     on_bash: impl FnMut(String),
-    on_compact: impl FnMut(String),
+    on_compact: impl FnMut(String, CancellationToken),
     on_rename: impl FnMut(String),
     on_fast_mode: impl FnMut(Option<bool>),
     on_plan_mode: impl FnMut(String),
@@ -708,7 +708,7 @@ mod tests {
                 on_plugin_action: Box::new(|_| {}),
                 on_reload_plugins: Box::new(|| {}),
                 on_bash: Box::new(|_| {}),
-                on_compact: Box::new(|_| {}),
+                on_compact: Box::new(|_, _| {}),
                 on_rename: Box::new(|_| {}),
                 on_fast_mode: Box::new(|_| {}),
                 on_plan_mode: Box::new(|_| {}),

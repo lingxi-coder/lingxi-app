@@ -807,7 +807,9 @@ impl Tool for MCPTool {
                 let kind = match &e {
                     // Both the overall (`BHs`) and idle (`GLd`) timeouts are
                     // timeout-family aborts (parity 2.1.207 P2-01 remainder).
-                    McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => "timeout",
+                    McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => {
+                        "timeout"
+                    }
                     _ => "rpc",
                 };
                 emit(

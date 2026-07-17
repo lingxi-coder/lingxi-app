@@ -91,7 +91,10 @@ mod tests {
             text_of(&line),
             "  \u{23F5}\u{23F5} bypass permissions on (shift+tab to cycle)"
         );
-        assert_eq!(indicator_height(PermissionMode::BypassPermissions, &theme), 1);
+        assert_eq!(
+            indicator_height(PermissionMode::BypassPermissions, &theme),
+            1
+        );
     }
 
     #[test]

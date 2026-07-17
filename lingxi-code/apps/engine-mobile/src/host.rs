@@ -824,8 +824,7 @@ pub async fn build_mobile_inner(
         boot_permission_policy = Some(policy.clone());
         // Grab the LIVE-model cell BEFORE coercing to `Arc<dyn PermissionGate>`;
         // filled once the orchestrator exists (below).
-        let enforcing =
-            permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
+        let enforcing = permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
         live_model_provider_cell = Some(enforcing.live_model_provider_handle());
         Arc::new(enforcing)
     };

@@ -127,10 +127,43 @@ fn narrowed_content(tool_name: &str, input: &Value) -> Option<String> {
 /// non-env token is one of these (by basename), no static prefix is derived and
 /// the suggestion falls back to the EXACT full command.
 const INTERPRETER_BLOCKLIST: &[&str] = &[
-    "sh", "bash", "zsh", "fish", "csh", "tcsh", "ksh", "dash", "cmd", "powershell", "pwsh", "env",
-    "xargs", "command", "builtin", "noglob", "nice", "stdbuf", "nohup", "timeout", "time", "watch",
-    "ionice", "chrt", "setsid", "taskset", "strace", "ltrace", "script", "flock", "unshare",
-    "nsenter", "sudo", "doas", "pkexec", "su", "runuser",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "csh",
+    "tcsh",
+    "ksh",
+    "dash",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "env",
+    "xargs",
+    "command",
+    "builtin",
+    "noglob",
+    "nice",
+    "stdbuf",
+    "nohup",
+    "timeout",
+    "time",
+    "watch",
+    "ionice",
+    "chrt",
+    "setsid",
+    "taskset",
+    "strace",
+    "ltrace",
+    "script",
+    "flock",
+    "unshare",
+    "nsenter",
+    "sudo",
+    "doas",
+    "pkexec",
+    "su",
+    "runuser",
 ];
 
 /// The 2.1.211 `KQt` safe leading-env-assignment allowlist `Jqr`: a leading
@@ -387,7 +420,10 @@ mod tests {
     #[test]
     fn bash_single_token_and_interpreter_and_path_fall_back_to_exact() {
         // Single token (< 2 non-env tokens) → EXACT bare command (`ls`), NOT `ls *`.
-        assert_eq!(content("Bash", json!({ "command": "ls" })), Some("ls".into()));
+        assert_eq!(
+            content("Bash", json!({ "command": "ls" })),
+            Some("ls".into())
+        );
         // Interpreter first token (`Bro`) → exact.
         assert_eq!(
             content("Bash", json!({ "command": "bash script.sh" })),
@@ -399,7 +435,10 @@ mod tests {
             Some("cat /etc/hosts".into())
         );
         // Flag-only command (`-v`) → exact `-v` (still not tool-wide).
-        assert_eq!(content("Bash", json!({ "command": "-v" })), Some("-v".into()));
+        assert_eq!(
+            content("Bash", json!({ "command": "-v" })),
+            Some("-v".into())
+        );
     }
 
     #[test]

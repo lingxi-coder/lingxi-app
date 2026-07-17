@@ -1147,8 +1147,7 @@ mod tests {
         assert_eq!(
             job.detail.as_deref(),
             Some(
-                format!("working directory no longer exists or is not accessible: {gone}")
-                    .as_str()
+                format!("working directory no longer exists or is not accessible: {gone}").as_str()
             )
         );
         // No live-worker roster record was created for the doomed job.

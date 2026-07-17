@@ -402,6 +402,32 @@ async fn parity_force_compact_50_messages() {
         .clone()
         .expect("expected_marker_prefix");
 
+    // Manual `/compact` (force_compact) HARD-FAILS without a wired
+    // side-query summarizer (an explicit command must never fake success),
+    // so the parity driver wires a stub client returning a canned
+    // `<summary>` — the history collapse and boundary marker are real.
+    struct StubCompactClient;
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for StubCompactClient {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            Ok(sidequery::SideQueryResponse {
+                text: Some("<summary>parity stub summary</summary>".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+    let cache_slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let forked_runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(StubCompactClient), "test-compact-model".into()),
+    );
+
     let orch = Arc::new(
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -413,25 +439,39 @@ async fn parity_force_compact_50_messages() {
             Arc::new(StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         )
-        // Tiny threshold (100 tokens ≈ 400 text chars) so the autocompact
-        // layer reliably fires under the M3 stub Autocompactor regardless of
-        // per-message body length — the history collapse is real even though
-        // the summary body is the [stub-summary …] placeholder (M7 wires a
-        // real ForkedAgentRunner). estimate_tokens_for_range is
-        // text_content().len()/4 per message, so 50 short messages clear 100
-        // tokens with margin.
-        .with_compaction(Arc::new(CompactionOrchestrator::new(100))),
+        // Tiny threshold (100 tokens ≈ 400 text chars) so the compaction
+        // layer reliably fires regardless of per-message body length —
+        // estimate_tokens_for_range is text_content().len()/4 per message,
+        // so 50 short messages clear 100 tokens with margin.
+        .with_cache_safe_slot(cache_slot.clone())
+        .with_compaction(Arc::new(CompactionOrchestrator::with_autocompactor(
+            // The SAME slot the orchestrator seeds (`save_cache_safe_params`)
+            // — the forked summarizer reads its request params from it.
+            compaction::Autocompactor::with_forked_runner(forked_runner, cache_slot),
+            100,
+        ))),
     );
 
-    // Seed `seed` user messages.
+    // Seed `seed` alternating user/assistant messages so manual compaction has
+    // at least two complete API rounds, matching the live transcript shape.
     {
         let session = orch.session();
         let mut hist = session.lock().await;
         for i in 0..seed {
-            hist.history.push(ConversationMessage::user(
-                MessageId::new(),
-                format!("turn-{i} padding to push token count past the autocompact threshold"),
-            ));
+            if i % 2 == 0 {
+                hist.history.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!("turn-{i} padding to push token count past the autocompact threshold"),
+                ));
+            } else {
+                hist.history.push(ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![protocol::ContentBlock::Text {
+                        text: format!("reply-{i}"),
+                    }],
+                    stop_reason: Some("end_turn".into()),
+                });
+            }
         }
     }
 

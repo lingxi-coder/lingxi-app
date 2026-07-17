@@ -592,8 +592,10 @@ fn managed_model_policy_source(
 /// (policy failed to parse) or `Inactive` source yields `(None, empty)`, leaving
 /// the consumer unrestricted — the boot default-model constraint owns the
 /// fail-closed behavior for the parse-failure case.
-pub async fn managed_model_allowlist(
-) -> (Option<Vec<String>>, std::collections::BTreeMap<String, String>) {
+pub async fn managed_model_allowlist() -> (
+    Option<Vec<String>>,
+    std::collections::BTreeMap<String, String>,
+) {
     use llm_client::model::allowlist::{self, ModelEnforcement};
     let managed_tiers = crate::settings_watch::managed_settings_raw_tiers().await;
     let source = managed_model_policy_source(&managed_tiers);
@@ -6090,16 +6092,15 @@ pub async fn build(
     // spawns (no `FileChanged` hooks). The clone the firer holds shares the same
     // cell as `file_changed_watcher_rebinder`, so the later `set` reaches it.
     let file_changed_watcher_rebinder = file_changed_watch::DeferredWatcherRebinder::new();
-    let cwd_changed_firer: hooks::OptionalCwdChangedFirer =
-        Some(Arc::new(
-            orchestrator::OrchestratorCwdChangedFirer::new(
-                hooks.clone(),
-                cwd.clone(),
-                main_transcript_path.clone(),
-                current_cwd_cell.clone(),
-            )
-            .with_watcher_rebinder(Arc::new(file_changed_watcher_rebinder.clone())),
-        ));
+    let cwd_changed_firer: hooks::OptionalCwdChangedFirer = Some(Arc::new(
+        orchestrator::OrchestratorCwdChangedFirer::new(
+            hooks.clone(),
+            cwd.clone(),
+            main_transcript_path.clone(),
+            current_cwd_cell.clone(),
+        )
+        .with_watcher_rebinder(Arc::new(file_changed_watcher_rebinder.clone())),
+    ));
     // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
     // `DesktopRuntime` so the bridge composition root fills it once the
     // per-connection queue + spawner exist (`boot::assemble`).
@@ -8060,7 +8061,11 @@ mod tests {
             .await
             .expect("a tmux failure must not fail boot");
 
-        assert_eq!(runner.create_calls(), 1, "tmux new-session was attempted once");
+        assert_eq!(
+            runner.create_calls(),
+            1,
+            "tmux new-session was attempted once"
+        );
         let session = ctx
             .worktree_session
             .lock()
@@ -8155,9 +8160,10 @@ mod tests {
         let runner = Arc::new(RecordingProcessRunner::with_exits(127, 0));
         ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
 
-        let err = super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
-            .await
-            .expect_err("native --tmux with tmux absent must hard-fail boot");
+        let err =
+            super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
+                .await
+                .expect_err("native --tmux with tmux absent must hard-fail boot");
         assert!(
             matches!(err, super::BuildError::TmuxNotInstalled(ref hint)
                 if hint == platform_posix::worktree_tmux::tmux_install_hint()),
@@ -8165,8 +8171,16 @@ mod tests {
         );
         // Pre-flight fired and short-circuited: probe ran, NO create, NO worktree.
         assert_eq!(runner.probe_calls(), 1, "the `tmux -V` probe ran");
-        assert_eq!(runner.create_calls(), 0, "no new-session after a failed probe");
-        assert_eq!(mock.created().len(), 0, "no worktree created on pre-flight failure");
+        assert_eq!(
+            runner.create_calls(),
+            0,
+            "no new-session after a failed probe"
+        );
+        assert_eq!(
+            mock.created().len(),
+            0,
+            "no worktree created on pre-flight failure"
+        );
         assert!(
             ctx.worktree_session.lock().unwrap().is_none(),
             "no session recorded"
@@ -8195,16 +8209,24 @@ mod tests {
         let runner = Arc::new(RecordingProcessRunner::with_exits(127, 1));
         ctx.process = runner.clone() as Arc<dyn traits::ProcessRunner>;
 
-        super::apply_worktree_launch(&Some("feat".to_string()), &Some("classic".to_string()), &ctx)
-            .await
-            .expect("classic --tmux skips the install pre-flight and does not hard-fail");
+        super::apply_worktree_launch(
+            &Some("feat".to_string()),
+            &Some("classic".to_string()),
+            &ctx,
+        )
+        .await
+        .expect("classic --tmux skips the install pre-flight and does not hard-fail");
 
         assert_eq!(
             runner.probe_calls(),
             0,
             "classic mode must NOT run the native `tmux -V` pre-flight"
         );
-        assert_eq!(runner.create_calls(), 1, "classic still attempts the create");
+        assert_eq!(
+            runner.create_calls(),
+            1,
+            "classic still attempts the create"
+        );
         assert_eq!(mock.created().len(), 1, "the worktree was still created");
         let session = ctx
             .worktree_session
@@ -8388,7 +8410,10 @@ mod tests {
         assert!(rt.mcp_registry.add_root(extra2.clone()));
         assert!(!rt.mcp_registry.add_root(extra2.clone()), "jzn dedupe");
         assert!(rt.session_cwd.trusted_dirs().contains(&extra2));
-        assert!(rt.mcp_registry.additional_roots_snapshot().contains(&extra2));
+        assert!(rt
+            .mcp_registry
+            .additional_roots_snapshot()
+            .contains(&extra2));
     }
 
     /// The production-built `McpRegistry` must carry the OAuth seam

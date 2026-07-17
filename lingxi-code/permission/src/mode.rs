@@ -153,7 +153,10 @@ mod tests {
         assert_eq!(PermissionMode::Bubble.title(), "Manual");
         assert_eq!(PermissionMode::Plan.title(), "Plan");
         assert_eq!(PermissionMode::AcceptEdits.title(), "Accept edits");
-        assert_eq!(PermissionMode::BypassPermissions.title(), "Bypass Permissions");
+        assert_eq!(
+            PermissionMode::BypassPermissions.title(),
+            "Bypass Permissions"
+        );
         assert_eq!(PermissionMode::DontAsk.title(), "Don't Ask");
         assert_eq!(PermissionMode::Auto.title(), "Auto");
     }

@@ -924,7 +924,10 @@ fn apply_user_config_to_hooks(
         let new_args = user_config::substitute_args(args, ctx);
         let mut new_env = env.clone();
         for (key, value) in ctx {
-            new_env.insert(user_config::option_env_var(key), user_config::value_to_env_string(value));
+            new_env.insert(
+                user_config::option_env_var(key),
+                user_config::value_to_env_string(value),
+            );
         }
         let mut hook = hook.clone();
         hook.executor = HookExecutor::Command {
@@ -1086,8 +1089,14 @@ mod user_config_tests {
         assert_eq!(args, &["--key".to_string(), "sk-live".to_string()]);
         // Both userConfig fields exposed as LINGXI_PLUGIN_OPTION_<KEY> (uppercased,
         // sanitized) with String(value) semantics.
-        assert_eq!(env.get("LINGXI_PLUGIN_OPTION_API_KEY").map(String::as_str), Some("sk-live"));
-        assert_eq!(env.get("LINGXI_PLUGIN_OPTION_PORT").map(String::as_str), Some("8080"));
+        assert_eq!(
+            env.get("LINGXI_PLUGIN_OPTION_API_KEY").map(String::as_str),
+            Some("sk-live")
+        );
+        assert_eq!(
+            env.get("LINGXI_PLUGIN_OPTION_PORT").map(String::as_str),
+            Some("8080")
+        );
     }
 
     /// A shell-form Command hook (bare command, no args) that references
@@ -1124,7 +1133,11 @@ mod user_config_tests {
     /// no-userConfig case): no env injection, no substitution, no rejection.
     #[test]
     fn empty_ctx_is_noop() {
-        let hooks = vec![command_hook("danger", "./run.sh ${user_config.API_KEY}", &[])];
+        let hooks = vec![command_hook(
+            "danger",
+            "./run.sh ${user_config.API_KEY}",
+            &[],
+        )];
         let out = apply_user_config_to_hooks("weather", &hooks, &Map::new());
         assert_eq!(out.len(), 1);
         let HookExecutor::Command { command, env, .. } = &out[0].executor else {
@@ -1142,7 +1155,9 @@ mod user_config_tests {
     /// test).
     #[test]
     fn mcp_stdio_command_reference_is_detected() {
-        assert!(user_config::references_user_config("mysrv ${user_config.API_KEY}"));
+        assert!(user_config::references_user_config(
+            "mysrv ${user_config.API_KEY}"
+        ));
         assert!(!user_config::references_user_config("mysrv --flag"));
     }
 }

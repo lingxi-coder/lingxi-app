@@ -35,6 +35,8 @@ pub struct CompactionResult {
     pub true_post_compact_token_count: u64,
     /// Token/cost usage incurred by the summarization call, if any.
     pub compaction_usage: Option<Usage>,
+    /// Actual model inherited by the summary side-query.
+    pub summary_model: String,
     /// Resulting messages (typically a single summary system message).
     pub summary_messages: Vec<ConversationMessage>,
     /// #58: the verbatim tail of recent messages preserved across the
@@ -174,23 +176,73 @@ impl Autocompactor {
     /// byte-faithful compaction prompt.
     ///
     /// The ordinary automatic path calls [`Self::compact`] and therefore keeps
-    /// the configured base prompt. Manual `/compact <focus>` and successful
-    /// `PreCompact` hook stdout use this seam so their instructions reach the
-    /// summarizer exactly once.
+    /// the configured base prompt. Successful `PreCompact` hook stdout uses
+    /// this seam so its instructions reach the summarizer exactly once
+    /// (manual `/compact <focus>` routes through
+    /// [`Self::compact_manual_with_instructions`] instead).
     pub async fn compact_with_instructions(
         &self,
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&str>,
     ) -> Result<CompactionResult, CompactionError> {
+        self.compact_impl(messages, custom_instructions, false)
+            .await
+    }
+
+    /// Run the explicit `/compact` manual path.
+    ///
+    /// VERIFIED against the 2.1.211 binary (`edy → Juy → mXi → Nto`): the
+    /// manual compactor is the SAME group compactor as the reactive path —
+    /// it starts with `s = 1` (the LAST API-round group preserved verbatim,
+    /// `messagesToPreserve: m.flat()`), and errors `too_few_groups` when the
+    /// summarize prefix contains no assistant message. (The full-history
+    /// `messagesToKeep: []` path — `Pto` — is only ever called with
+    /// `isAutoCompact: !0`.) Where the manual path DOES differ from auto:
+    /// - no wired summarizer is a hard error (an explicit command must never
+    ///   fake success), and
+    /// - no valid preserved-tail split is `Not enough messages to compact.`
+    ///   (auto falls back to full replacement instead).
+    pub async fn compact_manual_with_instructions(
+        &self,
+        messages: Vec<ConversationMessage>,
+        custom_instructions: Option<&str>,
+    ) -> Result<CompactionResult, CompactionError> {
+        self.compact_impl(messages, custom_instructions, true).await
+    }
+
+    async fn compact_impl(
+        &self,
+        messages: Vec<ConversationMessage>,
+        custom_instructions: Option<&str>,
+        manual: bool,
+    ) -> Result<CompactionResult, CompactionError> {
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
 
-        // #58 suffix-preserving split (`DRn`): choose the smallest preserved
-        // tail (largest summarize set) whose summarize prefix still contains an
-        // assistant message. `None` ⇒ the conversation is too short / has no
-        // valid prefix ⇒ full-replacement (identical to pre-#58 behaviour, empty
-        // preserved tail). The tail is usage-zeroed (`k4e`) and carried out so
-        // `apply_post_compact` can splice it after the summary.
+        if manual
+            && !self
+                .forked_runner
+                .as_ref()
+                .is_some_and(|runner| runner.has_side_query_client())
+        {
+            return Err(CompactionError::Internal(
+                "no forked summarizer wired".into(),
+            ));
+        }
+
+        // #58 suffix-preserving split (`DRn`/`Nto` with `s = 1`): choose the
+        // smallest preserved tail (largest summarize set) whose summarize
+        // prefix still contains an assistant message. Applies to BOTH the auto
+        // and manual paths (binary-verified: manual `/compact` routes through
+        // the same group compactor). `None` ⇒ no valid prefix: the manual path
+        // errors with the byte-exact `dQt` string (`Nto`'s `too_few_groups`
+        // bail), while auto falls back to full-replacement (pre-#58
+        // behaviour, empty preserved tail). The tail is usage-zeroed (`k4e`)
+        // and carried out so `apply_post_compact` can splice it after the
+        // summary.
         let split = crate::partial::select_preserved_tail(&messages);
+        if manual && split.is_none() {
+            return Err(CompactionError::NotEnoughMessages);
+        }
         let preserved_tail: Vec<ConversationMessage> = split
             .as_ref()
             .map(|s| crate::partial::zero_preserved_tail_usage(s.to_preserve.clone()))
@@ -203,6 +255,16 @@ impl Autocompactor {
                 .get_last()
                 .await
                 .ok_or_else(|| CompactionError::Internal("no cache-safe params".into()))?;
+            let summary_model = if cache_params
+                .tool_use_options
+                .main_loop_model
+                .trim()
+                .is_empty()
+            {
+                self.config.summary_model.clone()
+            } else {
+                cache_params.tool_use_options.main_loop_model.clone()
+            };
 
             // #58: summarize the ACTUAL current prefix, not the last cache-slot
             // history clone. The slot is captured immediately after an API call
@@ -211,10 +273,9 @@ impl Autocompactor {
             // dropped the newest assistant turn. We still reuse the slot's
             // system prompt / model metadata, but replay exactly the messages
             // selected from this invocation's live history.
-            cache_params.fork_context_messages = split.as_ref().map_or_else(
-                || messages.clone(),
-                |split| split.to_summarize.clone(),
-            );
+            cache_params.fork_context_messages = split
+                .as_ref()
+                .map_or_else(|| messages.clone(), |split| split.to_summarize.clone());
 
             // Strip image blocks from the replayed context before the summary
             // request — the text summarizer must not receive raw image data
@@ -284,6 +345,23 @@ impl Autocompactor {
                 cache_params.fork_context_messages = truncated;
             };
 
+            // Claude rejects a summary response with no text instead of
+            // wrapping an empty string in the continuation template. Treat it
+            // as a hard failure so `/compact` cannot report a second form of
+            // fake success when a provider returns an empty assistant message.
+            // The string differs per path (binary-verified): manual `/compact`
+            // surfaces `Error during compaction: <detail>` (Juy's catch over
+            // pIg's `summarization produced empty response` detail), while the
+            // auto path (`Pto`) throws the unprefixed `Failed to generate…`.
+            if result.final_text.is_empty() {
+                return Err(CompactionError::Internal(if manual {
+                    "Error during compaction: summarization produced empty response".into()
+                } else {
+                    "Failed to generate conversation summary - response did not contain valid text content"
+                        .into()
+                }));
+            }
+
             // Strip <analysis>, rewrite <summary> → Summary:, then wrap in the
             // continuation message — the TS `compact.ts` summary-request path.
             // #58: `recent_messages_preserved` adds the "Recent messages are
@@ -291,7 +369,10 @@ impl Autocompactor {
             let summary_text = crate::prompt::get_compact_user_summary_message(
                 &result.final_text,
                 /* suppress_follow_up_questions */ true,
-                /* transcript_path */ None,
+                cache_params
+                    .transcript_path
+                    .as_deref()
+                    .and_then(std::path::Path::to_str),
                 recent_messages_preserved,
             );
 
@@ -300,6 +381,7 @@ impl Autocompactor {
                 post_compact_token_count: (summary_text.len() as u64) / 4,
                 true_post_compact_token_count: result.usage.tokens.input,
                 compaction_usage: Some(result.usage),
+                summary_model,
                 // Divergence: TS uses a user message with isCompactSummary;
                 // protocol lacks the flag, so we emit a plain User message.
                 summary_messages: vec![ConversationMessage::user(
@@ -312,6 +394,9 @@ impl Autocompactor {
             });
         }
 
+        // An explicit user command must never claim success without a model
+        // summary. Keep the deterministic fallback only for the legacy
+        // automatic-test path; every full/manual compact requires real wiring.
         // Fallback: no runner is wired, so no model summary is possible.
         // Emit a deterministic, clearly-labelled continuation message built
         // through the SAME format_compact_summary / continuation pipeline so
@@ -335,6 +420,7 @@ impl Autocompactor {
             post_compact_token_count: (summary_text.len() as u64) / 4,
             true_post_compact_token_count: (summary_text.len() as u64) / 4,
             compaction_usage: Some(Usage::default()),
+            summary_model: self.config.summary_model.clone(),
             summary_messages: vec![ConversationMessage::user(
                 protocol::MessageId::new(),
                 summary_text,
@@ -408,6 +494,7 @@ mod tests {
             system_context: HashMap::new(),
             tool_use_options: tool_use_options(),
             fork_context_messages: prefix,
+            transcript_path: None,
             generation: 0,
         }
     }
@@ -563,7 +650,7 @@ mod tests {
         let (compactor, client) = wired("<summary>ok</summary>", vec![user_msg("PREFIX-A")]).await;
 
         compactor
-            .compact(vec![user_msg("hello")])
+            .compact(vec![user_msg("CURRENT-HISTORY")])
             .await
             .expect("wired compact succeeds");
 
@@ -576,11 +663,104 @@ mod tests {
             .map(ConversationMessage::text_content)
             .collect();
         assert_eq!(texts.len(), 2, "prefix + compact prompt");
-        assert_eq!(texts[0], "PREFIX-A");
+        assert_eq!(
+            texts[0], "CURRENT-HISTORY",
+            "the summary must replay the live history, not the stale slot clone"
+        );
         assert_eq!(texts[1], crate::prompt::get_compact_prompt(None));
         // Parent system prompt replayed verbatim for the cache hit.
         assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
         // Usage from the forked call is carried through.
+    }
+
+    #[tokio::test]
+    async fn compact_appends_manual_focus_to_prompt() {
+        let (compactor, client) = wired("<summary>ok</summary>", vec![]).await;
+
+        compactor
+            .compact_with_instructions(vec![user_msg("current")], Some("Focus on the Rust changes"))
+            .await
+            .expect("wired compact succeeds");
+
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        let prompt = sent.messages.last().expect("prompt message").text_content();
+        assert_eq!(
+            prompt,
+            crate::prompt::get_compact_prompt(Some("Focus on the Rust changes"))
+        );
+    }
+
+    /// Binary-verified (`Juy → mXi → Nto`, `s = 1`): the MANUAL path summarizes
+    /// the group prefix and preserves the last API-round group verbatim —
+    /// `[q1],[a1,q2],[a2]` → summarize `[q1,a1,q2]`, preserve `[a2]` — with the
+    /// "Recent messages are preserved verbatim." sentence in the continuation.
+    #[tokio::test]
+    async fn manual_compact_summarizes_prefix_and_preserves_last_group() {
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("first reply"),
+            user_msg("q2"),
+            assistant_text("second reply"),
+        ];
+        let (compactor, client) = wired("<summary>ok</summary>", history.clone()).await;
+
+        let result = compactor
+            .compact_manual_with_instructions(history.clone(), None)
+            .await
+            .expect("manual compact succeeds");
+
+        assert_eq!(
+            result.messages_to_preserve.len(),
+            1,
+            "the last assistant-led group is preserved verbatim"
+        );
+        assert_eq!(result.messages_to_preserve[0].text_content(), "second reply");
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        let replayed: Vec<String> = sent.messages[..sent.messages.len() - 1]
+            .iter()
+            .map(ConversationMessage::text_content)
+            .collect();
+        let expected: Vec<String> = history[..3]
+            .iter()
+            .map(ConversationMessage::text_content)
+            .collect();
+        assert_eq!(
+            replayed, expected,
+            "the summarizer sees only the summarize prefix, never the preserved tail"
+        );
+        assert!(result.summary_messages[0]
+            .text_content()
+            .contains("Recent messages are preserved verbatim."));
+    }
+
+    #[tokio::test]
+    async fn manual_compact_without_a_real_client_never_returns_fake_success() {
+        let err = Autocompactor::new()
+            .compact_manual_with_instructions(vec![user_msg("q"), assistant_text("answer")], None)
+            .await
+            .expect_err("manual compact requires a real summarizer");
+        assert!(err.to_string().contains("no forked summarizer wired"));
+    }
+
+    /// Manual empty-response failure surfaces `Error during compaction:
+    /// summarization produced empty response` (CC `Juy` catch over `pIg`'s
+    /// detail) — NOT the auto path's `Failed to generate…` string.
+    #[tokio::test]
+    async fn manual_compact_rejects_an_empty_model_response() {
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("first reply"),
+            user_msg("q2"),
+            assistant_text("second reply"),
+        ];
+        let (compactor, _client) = wired("", history.clone()).await;
+        let err = compactor
+            .compact_manual_with_instructions(history, None)
+            .await
+            .expect_err("an empty model response is not a compact summary");
+        assert!(err
+            .to_string()
+            .contains("Error during compaction: summarization produced empty response"));
     }
 
     #[tokio::test]
@@ -688,12 +868,12 @@ mod tests {
                 "Prompt is too long".into(),
                 "<summary>RETRIED-OK</summary>".into(),
             ],
-            prefix,
+            prefix.clone(),
         )
         .await;
 
         let result = compactor
-            .compact(vec![user_msg("trigger")])
+            .compact(prefix)
             .await
             .expect("PTL retry then success");
 
@@ -725,10 +905,11 @@ mod tests {
             assistant_tool(id_b, "Bash"),
             tool_result_msg(),
         ];
-        let (compactor, client) = wired_seq(vec!["Prompt is too long".into(); 6], prefix).await;
+        let (compactor, client) =
+            wired_seq(vec!["Prompt is too long".into(); 6], prefix.clone()).await;
 
         let err = compactor
-            .compact(vec![user_msg("trigger")])
+            .compact(prefix)
             .await
             .expect_err("PTL exhaustion must error");
         assert!(

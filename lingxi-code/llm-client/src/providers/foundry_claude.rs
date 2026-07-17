@@ -110,8 +110,7 @@ mod tests {
         let provider_req = codec.encode_request(&req).expect("encode must succeed");
 
         assert_eq!(
-            provider_req.url,
-            "https://my-res.services.ai.azure.com/anthropic/v1/messages",
+            provider_req.url, "https://my-res.services.ai.azure.com/anthropic/v1/messages",
             "Foundry messages URL must be {{base}}/v1/messages"
         );
     }
@@ -126,7 +125,10 @@ mod tests {
         let provider_req = codec.encode_request(&req).expect("encode must succeed");
 
         assert_eq!(
-            provider_req.headers.get("anthropic-version").map(String::as_str),
+            provider_req
+                .headers
+                .get("anthropic-version")
+                .map(String::as_str),
             Some("2023-06-01"),
             "Foundry sends the standard anthropic-version header"
         );

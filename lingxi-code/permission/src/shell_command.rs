@@ -493,9 +493,11 @@ fn rule_matches_candidate(
 /// with doubled internal whitespace (`Bash(rm -rf:*)` vs `rm  -rf /`). NOT applied
 /// to exact-rule comparisons (CC keeps `f.command === m` byte-exact).
 fn collapse_ws(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.as_bytes().windows(2).any(|w| {
-        matches!(w[0], b' ' | b'\t') && matches!(w[1], b' ' | b'\t')
-    }) && !s.contains('\t')
+    if !s
+        .as_bytes()
+        .windows(2)
+        .any(|w| matches!(w[0], b' ' | b'\t') && matches!(w[1], b' ' | b'\t'))
+        && !s.contains('\t')
     {
         return std::borrow::Cow::Borrowed(s);
     }

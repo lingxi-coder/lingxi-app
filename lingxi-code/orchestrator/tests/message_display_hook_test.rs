@@ -266,7 +266,10 @@ async fn message_display_fires_at_begin_and_on_completed_message() {
     );
     assert_eq!(done.index, 0, "completed-pass index is 0");
     assert!(done.is_final, "completed-pass final is true");
-    assert_eq!(done.delta, "hi", "completed pass carries the full joined text");
+    assert_eq!(
+        done.delta, "hi",
+        "completed pass carries the full joined text"
+    );
 }
 
 /// (2) No `MessageDisplay` hook registered ⇒ firing is a strict no-op (and the

@@ -186,7 +186,14 @@ pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<Stri
     }
     let joined = skills
         .iter()
-        .map(|s| format!("### Skill: {}\nPath: {}\n{}", s.name, s.path.display(), s.content))
+        .map(|s| {
+            format!(
+                "### Skill: {}\nPath: {}\n{}",
+                s.name,
+                s.path.display(),
+                s.content
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!("{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n{joined}"))
@@ -832,7 +839,11 @@ mod tests {
         let candidates = vec![skill("s", "/s", "shared body", 5)];
         let already = [AttachedSkillContent::Body("shared body".into())];
         let restored = restore_post_compact_skills(candidates, &already);
-        assert_eq!(restored.len(), 1, "body match restores; only attachment skips");
+        assert_eq!(
+            restored.len(),
+            1,
+            "body match restores; only attachment skips"
+        );
         assert_eq!(restored[0].content, "shared body");
     }
 

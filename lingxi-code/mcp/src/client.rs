@@ -1214,7 +1214,9 @@ pub fn mcp_tool_idle_timeout_for(
     resolve_idle_timeout_gld(
         config_timeout_ms,
         transport_kind,
-        std::env::var("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT").ok().as_deref(),
+        std::env::var("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")
+            .ok()
+            .as_deref(),
         std::env::var("MCP_TOOL_TIMEOUT").ok().as_deref(),
     )
 }
@@ -1254,10 +1256,9 @@ fn resolve_idle_timeout_gld(
         .unwrap_or(0);
     // `Math.min(Math.max(r, n, 1000), BHs(e))`. The BHs ceiling is always
     // `<= WLd` (i32::MAX ms), so the `u128 -> u64` narrowing never truncates.
-    let ceiling = u64::try_from(
-        resolve_tool_timeout_bhs(config_timeout_ms, tool_timeout_env).as_millis(),
-    )
-    .unwrap_or(MCP_TOOL_TIMEOUT_MAX_MS);
+    let ceiling =
+        u64::try_from(resolve_tool_timeout_bhs(config_timeout_ms, tool_timeout_env).as_millis())
+            .unwrap_or(MCP_TOOL_TIMEOUT_MAX_MS);
     let floor = r.max(n).max(MCP_TOOL_TIMEOUT_MIN_MS);
     std::time::Duration::from_millis(floor.min(ceiling))
 }
@@ -1311,7 +1312,11 @@ fn resolve_http_fetch_timeout_jhs(
 ) -> std::time::Duration {
     let n = config_timeout_ms
         .filter(|&ms| ms >= MCP_TOOL_TIMEOUT_MIN_MS)
-        .or_else(|| env_value.and_then(parse_int_base10_prefix).filter(|&ms| ms > 0));
+        .or_else(|| {
+            env_value
+                .and_then(parse_int_base10_prefix)
+                .filter(|&ms| ms > 0)
+        });
     let ms = match n {
         Some(v) => v.clamp(MCP_HTTP_FETCH_TIMEOUT_FLOOR_MS, MCP_TOOL_TIMEOUT_MAX_MS),
         None => MCP_HTTP_FETCH_TIMEOUT_FLOOR_MS,
@@ -2308,7 +2313,10 @@ mod timeout_tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(31)).await;
         tokio::task::yield_now().await;
-        assert!(!wd.is_finished(), "watchdog must not abort inside its window");
+        assert!(
+            !wd.is_finished(),
+            "watchdog must not abort inside its window"
+        );
 
         // Liveness (a progress note) resets the timer; another sub-window tick
         // still must not fire.

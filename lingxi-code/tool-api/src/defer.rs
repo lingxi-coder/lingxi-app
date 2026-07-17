@@ -176,15 +176,10 @@ impl DeferralState {
             .contains(name)
     }
 
-    /// The names of every tool loaded (pulled into context via `ToolSearch`)
-    /// this session, **sorted**. Carried into a compact boundary's
-    /// `compactMetadata.preCompactDiscoveredTools` (claude-code `Age()` /
-    /// `[...B].sort()`, `compact.ts:608`) so a cold `--resume` re-marks them
-    /// loaded and they stay non-deferred across the boundary. Empty when nothing
-    /// has been loaded — the default for a non-tool-search session — so the
-    /// boundary metadata omits the field (byte-identical to before).
+    /// Snapshot deferred-tool names already loaded in this session, sorted for
+    /// compact-boundary persistence (`preCompactDiscoveredTools`).
     #[must_use]
-    pub fn loaded_names(&self) -> Vec<String> {
+    pub fn loaded_tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .loaded
             .read()
@@ -295,18 +290,14 @@ mod tests {
     }
 
     #[test]
-    fn loaded_names_returns_sorted_loaded_set() {
-        // P2-10: the carry source for `preCompactDiscoveredTools`. Empty until
-        // a tool is loaded, then the sorted (dedup-by-set) loaded names.
+    fn loaded_tool_names_are_sorted_and_deduplicated() {
         let d = DeferralState::new(ToolSearchMode::Enabled, false);
-        assert!(d.loaded_names().is_empty(), "empty until a tool is loaded");
-        d.mark_loaded(["WebFetch".to_string(), "Task".to_string()]);
-        d.mark_loaded(["Task".to_string()]); // dup — set collapses it
-        assert_eq!(
-            d.loaded_names(),
-            vec!["Task".to_string(), "WebFetch".to_string()],
-            "sorted, deduped"
+        assert!(
+            d.loaded_tool_names().is_empty(),
+            "empty until a tool is loaded"
         );
+        d.mark_loaded(["Zed", "Read", "Zed"]);
+        assert_eq!(d.loaded_tool_names(), vec!["Read", "Zed"]);
     }
 
     #[test]

@@ -159,6 +159,12 @@ impl ForkedAgentRunner {
         self
     }
 
+    /// Whether this runner can issue a real single-turn model request.
+    #[must_use]
+    pub fn has_side_query_client(&self) -> bool {
+        self.side_query.is_some()
+    }
+
     /// Inherit the SESSION thinking configuration on this runner's forked
     /// calls (cc 2.1.198): the composition root passes the same session
     /// `ThinkingConfig` the main-loop `ApiService` holds, so a compaction
@@ -216,7 +222,15 @@ impl ForkedAgentRunner {
         messages.extend(req.prompt_messages.iter().cloned());
 
         let request = SideQueryRequest {
-            model: model.clone(),
+            // Inherit the live parent's model from the cache-safe snapshot.
+            // The runner's construction-time model is only a fallback for old
+            // callers that leave `main_loop_model` empty; otherwise `/model`
+            // switches must affect subsequent compaction/recap side queries.
+            model: if cp.tool_use_options.main_loop_model.trim().is_empty() {
+                model.clone()
+            } else {
+                cp.tool_use_options.main_loop_model.clone()
+            },
             // Replay the parent's already-rendered system prompt verbatim;
             // `user_context` / `system_context` were inputs the parent used to
             // render it and must NOT be re-applied here (double-rendering would
@@ -337,6 +351,7 @@ mod tests {
                 system_context: std::collections::HashMap::new(),
                 tool_use_options: tool_use_options(),
                 fork_context_messages: prefix,
+                transcript_path: None,
                 generation: 7,
             },
             fork_label: "test-fork".into(),
@@ -393,7 +408,10 @@ mod tests {
             .clone()
             .expect("client called once");
 
-        assert_eq!(sent.model, "claude-opus-4-6");
+        assert_eq!(
+            sent.model, "test",
+            "the side query must inherit the live parent model"
+        );
         assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
         assert_eq!(sent.max_tokens, 512); // honored override
         assert_eq!(sent.max_retries, 0);

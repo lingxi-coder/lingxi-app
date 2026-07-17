@@ -2515,7 +2515,11 @@ mod tests {
             PermissionMode::Default,
         );
         match p.authorize("Bash", &bash("echo x > secrets/keys.txt")) {
-            PermissionResult::Deny { explanation, reason, .. } => {
+            PermissionResult::Deny {
+                explanation,
+                reason,
+                ..
+            } => {
                 assert_eq!(
                     explanation.as_deref(),
                     Some("Output redirection to '/proj/secrets/keys.txt' was blocked by a deny rule.")
@@ -2536,9 +2540,10 @@ mod tests {
         // `cat secrets/keys.txt` (a READ) is out of this slice's scope (Read-deny
         // command-path walk is a follow-up) — it must NOT be denied by this guard.
         match p.authorize("Bash", &bash("cat secrets/keys.txt")) {
-            PermissionResult::Deny { explanation: Some(e), .. }
-                if e.contains("blocked by a deny rule") =>
-            {
+            PermissionResult::Deny {
+                explanation: Some(e),
+                ..
+            } if e.contains("blocked by a deny rule") => {
                 panic!("read path must not hit the output-redirect deny guard")
             }
             _ => {}
@@ -3192,7 +3197,10 @@ mod tests {
             PermissionMode::Default,
         );
         assert!(matches!(
-            p.authorize("WebSearch", &serde_json::json!({ "query": "top secret plans" })),
+            p.authorize(
+                "WebSearch",
+                &serde_json::json!({ "query": "top secret plans" })
+            ),
             PermissionResult::Deny { .. }
         ));
         // Non-matching query → no deny.
@@ -3319,15 +3327,18 @@ mod tests {
     /// re-enables the guard.
     #[test]
     fn bypass01_suppresses_guard_ask_except_dangerous_rm() {
-        let mut p =
-            policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::BypassPermissions);
+        let mut p = policy_with_roots(
+            r#"{ "permissions": {} }"#,
+            PermissionMode::BypassPermissions,
+        );
         // `cat /etc/passwd` (outside cwd) is a path-containment ask in normal
         // modes; bypass allows it (mode reason).
         match p.authorize("Bash", &bash("cat /etc/passwd")) {
             PermissionResult::Allow {
-                reason: PermissionDecisionReason::PermissionMode {
-                    mode: PermissionMode::BypassPermissions,
-                },
+                reason:
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::BypassPermissions,
+                    },
                 ..
             } => {}
             other => panic!("bypass must allow the path guard ask, got {other:?}"),
@@ -3560,8 +3571,15 @@ mod tests {
             PermissionMode::Default,
         );
         match p.authorize("Bash", &bash("cat secret.env")) {
-            PermissionResult::Deny { reason, explanation, .. } => {
-                assert!(matches!(reason, PermissionDecisionReason::MatchedRule { .. }));
+            PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            } => {
+                assert!(matches!(
+                    reason,
+                    PermissionDecisionReason::MatchedRule { .. }
+                ));
                 assert!(
                     explanation
                         .as_deref()

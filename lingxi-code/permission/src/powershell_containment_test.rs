@@ -815,7 +815,10 @@ fn xgg_nested_remove_recurse_cwd_no_extra_ask() {
         false,
     ) {
         PsContainmentResult::Ask { message, .. } => {
-            assert!(message.contains("would delete the working directory"), "{message}");
+            assert!(
+                message.contains("would delete the working directory"),
+                "{message}"
+            );
         }
         other => panic!("expected main-pipeline recurse ask, got {other:?}"),
     }

@@ -960,14 +960,16 @@ async fn foundry_claude_api_key_uses_x_api_key_header_and_messages_url() {
         "Foundry API key must be sent as x-api-key"
     );
     assert!(
-        !prepared.provider_request.headers.contains_key("Authorization"),
+        !prepared
+            .provider_request
+            .headers
+            .contains_key("Authorization"),
         "Foundry API-key auth must NOT set Authorization"
     );
 
     // Routed through the Foundry codec: {base}/v1/messages.
     assert_eq!(
-        prepared.provider_request.url,
-        "https://my-res.services.ai.azure.com/anthropic/v1/messages",
+        prepared.provider_request.url, "https://my-res.services.ai.azure.com/anthropic/v1/messages",
         "Foundry request must target {{base}}/v1/messages"
     );
     // Standard anthropic-version header (not the Vertex in-body version).

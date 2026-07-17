@@ -397,12 +397,15 @@ pub fn parse_precheck(command: &str) -> Option<ParseResult> {
 /// (`LINGXI_PWSH_PARSE_TIMEOUT_MS`, then `CLAUDE_CODE_PWSH_PARSE_TIMEOUT_MS`) when
 /// it parses to a positive integer, else [`PWSH_PARSE_DEFAULT_TIMEOUT_MS`].
 fn pwsh_parse_timeout() -> std::time::Duration {
-    let ms = ["LINGXI_PWSH_PARSE_TIMEOUT_MS", "CLAUDE_CODE_PWSH_PARSE_TIMEOUT_MS"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok())
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|&t| t > 0)
-        .unwrap_or(PWSH_PARSE_DEFAULT_TIMEOUT_MS);
+    let ms = [
+        "LINGXI_PWSH_PARSE_TIMEOUT_MS",
+        "CLAUDE_CODE_PWSH_PARSE_TIMEOUT_MS",
+    ]
+    .iter()
+    .find_map(|k| std::env::var(k).ok())
+    .and_then(|v| v.trim().parse::<u64>().ok())
+    .filter(|&t| t > 0)
+    .unwrap_or(PWSH_PARSE_DEFAULT_TIMEOUT_MS);
     std::time::Duration::from_millis(ms)
 }
 

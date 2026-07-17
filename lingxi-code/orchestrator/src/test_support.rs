@@ -664,6 +664,9 @@ pub struct MockOrchestratorHandle {
     compact_summary: StdMutex<Option<CompactionSummary>>,
     /// If `Some`, `force_compact` returns `ActionFailed(_)`.
     compact_error: StdMutex<Option<String>>,
+    /// The `custom_instructions` most recently passed to
+    /// `force_compact_with_instructions` (`/compact <focus>` forwarding proof).
+    compact_instructions: StdMutex<Option<String>>,
     /// Bumped each `switch_model` call. Records the most-recent value too.
     switch_model_calls: AtomicUsize,
     switch_model_last: StdMutex<Option<String>>,
@@ -717,6 +720,7 @@ impl MockOrchestratorHandle {
             clear_calls: AtomicUsize::new(0),
             clear_error: StdMutex::new(None),
             compact_summary: StdMutex::new(None),
+            compact_instructions: StdMutex::new(None),
             compact_error: StdMutex::new(None),
             switch_model_calls: AtomicUsize::new(0),
             switch_model_last: StdMutex::new(None),
@@ -758,6 +762,11 @@ impl MockOrchestratorHandle {
     /// Make the next `force_compact` call return `ActionFailed(reason)`.
     pub fn set_compact_error(&self, reason: String) {
         *self.compact_error.lock().unwrap() = Some(reason);
+    }
+    /// The `custom_instructions` most recently forwarded to
+    /// `force_compact_with_instructions`, or `None` if it was never called.
+    pub fn last_compact_instructions(&self) -> Option<String> {
+        self.compact_instructions.lock().unwrap().clone()
     }
 
     /// True if `request_exit` was called.
@@ -876,6 +885,18 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             .unwrap()
             .clone()
             .unwrap_or_default())
+    }
+
+    /// Records the instructions so tests can assert `/compact <focus>` args
+    /// actually reach the handle (the trait default silently swallows them —
+    /// without this override a regression back to plain `force_compact()`
+    /// would pass every suite).
+    async fn force_compact_with_instructions(
+        &self,
+        custom_instructions: &str,
+    ) -> Result<CompactionSummary, HandleError> {
+        *self.compact_instructions.lock().unwrap() = Some(custom_instructions.to_string());
+        self.force_compact().await
     }
 
     async fn snapshot_cost(&self) -> traits::CostSnapshot {

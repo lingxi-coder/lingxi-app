@@ -1278,7 +1278,8 @@ mod tests {
     #[test]
     fn apply_permission_update_setmode_changes_live_mode() {
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         assert_eq!(gate.effective_mode(), PermissionMode::Default);
         // A host allow carrying setMode:'plan' takes effect on the LIVE session.
         gate.apply_permission_update(&serde_json::json!({"type": "setMode", "mode": "plan"}));
@@ -1290,7 +1291,8 @@ mod tests {
         // Default policy: bypass NOT available (not launched with the flag) ⇒
         // Xb rejects the setMode with no live change.
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         gate.apply_permission_update(
             &serde_json::json!({"type": "setMode", "mode": "bypassPermissions"}),
         );
@@ -1307,7 +1309,8 @@ mod tests {
             PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
                 .with_bypass_available(true),
         );
-        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         gate.apply_permission_update(
             &serde_json::json!({"type": "setMode", "mode": "bypassPermissions"}),
         );
@@ -1319,7 +1322,8 @@ mod tests {
         // addRules is the documented in-memory PARTIAL — it must NOT change the
         // live mode here (persisted by the control plane instead).
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         gate.apply_permission_update(&serde_json::json!({
             "type": "addRules",
             "rules": [{"toolName": "Bash"}],
@@ -1332,7 +1336,8 @@ mod tests {
     #[test]
     fn apply_permission_updates_folds_over_array() {
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let gate = PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         gate.apply_permission_updates(&[
             serde_json::json!({"type": "addRules", "rules": [], "behavior": "allow", "destination": "session"}),
             serde_json::json!({"type": "setMode", "mode": "acceptEdits"}),

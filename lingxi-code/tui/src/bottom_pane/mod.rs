@@ -23,9 +23,9 @@ pub mod connect_picker_view;
 pub mod dialog_view;
 pub mod footer;
 pub mod model_picker_view;
-pub mod permission_mode_indicator;
 mod paste_burst;
 pub mod pending_input_preview;
+pub mod permission_mode_indicator;
 pub mod permission_view;
 pub mod permissions_editor_view;
 pub mod plugins_view;
@@ -1444,7 +1444,10 @@ impl Renderable for BottomPane {
             let status_area = zones[0];
             // First row: the spinner line (`Compacting conversation…` or the
             // normal verb + counter). Pin it to the top of the status zone.
-            let line_area = Rect { height: 1, ..status_area };
+            let line_area = Rect {
+                height: 1,
+                ..status_area
+            };
             Paragraph::new(self.status_indicator_line()).render(line_area, buf);
             // Second row (compaction only): the pill progress bar + `N%`.
             if let Some(percent) = self.status.compact_percent {
@@ -1529,7 +1532,9 @@ impl Renderable for BottomPane {
         {
             return Some(pos);
         }
-        ComposerView::new(&self.composer).with_attached_images(&self.attached_image_labels).cursor_pos(self.zones(area)[3])
+        ComposerView::new(&self.composer)
+            .with_attached_images(&self.attached_image_labels)
+            .cursor_pos(self.zones(area)[3])
     }
 
     fn cursor_style(&self, area: Rect) -> SetCursorStyle {
@@ -1541,7 +1546,9 @@ impl Renderable for BottomPane {
                 return view.cursor_style(area);
             }
         }
-        ComposerView::new(&self.composer).with_attached_images(&self.attached_image_labels).cursor_style(self.zones(area)[3])
+        ComposerView::new(&self.composer)
+            .with_attached_images(&self.attached_image_labels)
+            .cursor_style(self.zones(area)[3])
     }
 }
 

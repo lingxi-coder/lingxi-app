@@ -289,21 +289,24 @@ mod tests {
 
     #[test]
     fn dangerously_skip_wins_and_yields_bypass() {
-        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, false, &no_settings());
+        let (mode, notice) =
+            initial_permission_mode_from_cli(None, true, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::BypassPermissions);
         assert!(notice.is_none());
     }
 
     #[test]
     fn cli_flag_used_when_no_skip() {
-        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), false, None, false, &no_settings());
+        let (mode, _) =
+            initial_permission_mode_from_cli(Some("plan"), false, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::Plan);
     }
 
     #[test]
     fn skip_outranks_cli_flag() {
         // ordered_modes pushes bypass first, then the cli mode; first valid wins.
-        let (mode, _) = initial_permission_mode_from_cli(Some("plan"), true, None, false, &no_settings());
+        let (mode, _) =
+            initial_permission_mode_from_cli(Some("plan"), true, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::BypassPermissions);
     }
 
@@ -364,7 +367,8 @@ mod tests {
 
     #[test]
     fn no_inputs_is_default_no_notice() {
-        let (mode, notice) = initial_permission_mode_from_cli(None, false, None, false, &no_settings());
+        let (mode, notice) =
+            initial_permission_mode_from_cli(None, false, None, false, &no_settings());
         assert_eq!(mode, PermissionMode::Default);
         assert!(notice.is_none());
     }
@@ -375,7 +379,8 @@ mod tests {
     fn env_scrub_forces_default_and_suppresses_requested_bypass() {
         // A hardened/scrubbed subprocess must NOT inherit --dangerously-skip
         // bypass. Even with the bypass killswitch OFF, env-scrub wins.
-        let (mode, notice) = initial_permission_mode_from_cli(None, true, None, true, &no_settings());
+        let (mode, notice) =
+            initial_permission_mode_from_cli(None, true, None, true, &no_settings());
         assert_eq!(mode, PermissionMode::Default);
         assert_eq!(notice.as_deref(), Some(ENV_SCRUB_FORCED_TO_DEFAULT_MSG));
     }
@@ -391,8 +396,7 @@ mod tests {
             skip_dangerous_mode_permission_prompt: false,
             bypass_permissions_mode_accepted: false,
         };
-        let (mode, notice) =
-            initial_permission_mode_from_cli(Some("plan"), false, None, true, &s);
+        let (mode, notice) = initial_permission_mode_from_cli(Some("plan"), false, None, true, &s);
         assert_eq!(mode, PermissionMode::Default);
         // CLI mode `plan` is non-default → notice fires.
         assert_eq!(notice.as_deref(), Some(ENV_SCRUB_FORCED_TO_DEFAULT_MSG));
@@ -401,7 +405,8 @@ mod tests {
     #[test]
     fn env_scrub_no_notice_when_no_non_default_requested() {
         // Nothing non-default requested (no skip, no CLI mode) → silent force.
-        let (mode, notice) = initial_permission_mode_from_cli(None, false, None, true, &no_settings());
+        let (mode, notice) =
+            initial_permission_mode_from_cli(None, false, None, true, &no_settings());
         assert_eq!(mode, PermissionMode::Default);
         assert!(notice.is_none());
     }
@@ -565,9 +570,9 @@ mod tests {
                 bypass_disabled: false,
                 auto_mode_disabled: false,
                 auto_default_from_trusted: false,
-            is_bg_session: false,
-            skip_dangerous_mode_permission_prompt: false,
-            bypass_permissions_mode_accepted: false,
+                is_bg_session: false,
+                skip_dangerous_mode_permission_prompt: false,
+                bypass_permissions_mode_accepted: false,
             };
             let (mode, _) = initial_permission_mode_from_cli(None, false, None, false, &s);
             assert_eq!(mode, m);

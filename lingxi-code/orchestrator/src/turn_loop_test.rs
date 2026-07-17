@@ -1230,15 +1230,59 @@ mod read_file_state_tests {
 
     // ----- #59 post-compact file/skill attachment restoration -----
 
+    /// Stub summarizer for the forced-compaction path: manual `/compact`
+    /// (`force_compact`) now HARD-FAILS without a wired side-query client
+    /// (an explicit command must never fake success), so these tests wire a
+    /// canned `<summary>` responder — same shape as `force_compact_real.rs`.
+    struct StubCompactClient;
+
+    #[async_trait]
+    impl sidequery::SideQueryClient for StubCompactClient {
+        async fn query(
+            &self,
+            _request: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            Ok(sidequery::SideQueryResponse {
+                text: Some("<summary>stub summary</summary>".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    /// A compaction orchestrator with the stub summarizer wired, plus the
+    /// cache-safe slot the forked summarizer reads its request params from.
+    fn wired_compaction(
+        threshold: u64,
+    ) -> (
+        Arc<compaction::CompactionOrchestrator>,
+        Arc<sidequery::CacheSafeParamsSlot>,
+    ) {
+        let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+        let runner = Arc::new(
+            sidequery::ForkedAgentRunner::new()
+                .with_side_query_client(Arc::new(StubCompactClient), "test-compact-model".into()),
+        );
+        (
+            Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+                compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+                threshold,
+            )),
+            slot,
+        )
+    }
+
     #[tokio::test]
     async fn force_compact_restores_recent_files_and_clears_read_state() {
-        use compaction::CompactionOrchestrator;
         use protocol::{ConversationMessage, MessageId};
         use traits::OrchestratorHandle;
 
         // Compaction with a tiny threshold so a small seeded history compacts.
+        let (compactor, slot) = wired_compaction(10);
         let mut orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
-        orch = orch.with_compaction(Arc::new(CompactionOrchestrator::new(10)));
+        orch = orch.with_compaction(compactor).with_cache_safe_slot(slot);
         let orch = Arc::new(orch);
 
         // Seed enough history to trip the compactor.
@@ -1246,12 +1290,22 @@ mod read_file_state_tests {
             let session = orch.session();
             let mut s = session.lock().await;
             for i in 0..20 {
-                s.history.push(ConversationMessage::user(
-                    MessageId::new(),
-                    format!(
-                        "turn-{i} padded body text to push the token estimate over the threshold"
-                    ),
-                ));
+                if i % 2 == 0 {
+                    s.history.push(ConversationMessage::user(
+                        MessageId::new(),
+                        format!(
+                            "turn-{i} padded body text to push the token estimate over the threshold"
+                        ),
+                    ));
+                } else {
+                    s.history.push(ConversationMessage::Assistant {
+                        id: MessageId::new(),
+                        content: vec![protocol::ContentBlock::Text {
+                            text: format!("reply-{i}"),
+                        }],
+                        stop_reason: Some("end_turn".into()),
+                    });
+                }
             }
         }
 
@@ -1377,14 +1431,15 @@ mod read_file_state_tests {
         // orchestrator, a tool's read feeds the post-compact file restore. Before
         // P1-06 the orchestrator held a THIRD, unshared map, so this restore was
         // always empty in production.
-        use compaction::CompactionOrchestrator;
         use protocol::{ConversationMessage, MessageId};
         use traits::OrchestratorHandle;
 
         // The composition-root-owned map (also handed to `BuiltinToolContext`).
         let shared = tool_api::read_file_state::new_read_file_state_map();
+        let (compactor, slot) = wired_compaction(10);
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![])
-            .with_compaction(Arc::new(CompactionOrchestrator::new(10)))
+            .with_compaction(compactor)
+            .with_cache_safe_slot(slot)
             .with_read_state_map(shared.clone());
         let orch = Arc::new(orch);
 
@@ -1392,12 +1447,22 @@ mod read_file_state_tests {
             let session = orch.session();
             let mut s = session.lock().await;
             for i in 0..20 {
-                s.history.push(ConversationMessage::user(
-                    MessageId::new(),
-                    format!(
-                        "turn-{i} padded body text to push the token estimate over the threshold"
-                    ),
-                ));
+                if i % 2 == 0 {
+                    s.history.push(ConversationMessage::user(
+                        MessageId::new(),
+                        format!(
+                            "turn-{i} padded body text to push the token estimate over the threshold"
+                        ),
+                    ));
+                } else {
+                    s.history.push(ConversationMessage::Assistant {
+                        id: MessageId::new(),
+                        content: vec![protocol::ContentBlock::Text {
+                            text: format!("reply-{i}"),
+                        }],
+                        stop_reason: Some("end_turn".into()),
+                    });
+                }
             }
         }
 

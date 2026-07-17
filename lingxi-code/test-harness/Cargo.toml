@@ -45,6 +45,10 @@ http-body-util = "0.1"
 [dev-dependencies]
 proptest.workspace = true
 platform-posix-minimal = { path = "../platforms/posix-minimal" }
+# Used by parity_force_compact_50_messages: manual `/compact` hard-fails
+# without a wired side-query summarizer, so the parity driver wires a stub
+# `SideQueryClient` through `ForkedAgentRunner`. Dev-only.
+sidequery = { path = "../sidequery" }
 # Used by the M2-07 Phase B parity drivers to exercise production
 # `convert_settings_to_runtime_config` (sandbox config conversion fixture).
 sandbox = { path = "../sandbox" }

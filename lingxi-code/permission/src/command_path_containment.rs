@@ -1860,11 +1860,7 @@ mod tests {
     fn git_diff_no_index_takes_all_positionals() {
         // `git diff --no-index A B C` — all three positionals validated (no 2-cap).
         assert_eq!(
-            extract_paths(
-                "git",
-                &svec(&["diff", "--no-index", "A", "B", "C"]),
-                None
-            ),
+            extract_paths("git", &svec(&["diff", "--no-index", "A", "B", "C"]), None),
             vec!["A".to_string(), "B".to_string(), "C".to_string()]
         );
     }
@@ -1895,9 +1891,7 @@ mod tests {
         // A leading `..` escaping cwd gets the generic containment message, NOT
         // the traversal one (SUr does not fire).
         let b = check_command_path_containment("cat ../secret", &roots(), &[]).expect("ask");
-        assert!(!b
-            .message
-            .contains("traversal after a directory segment"));
+        assert!(!b.message.contains("traversal after a directory segment"));
     }
 
     fn svec(v: &[&str]) -> Vec<String> {

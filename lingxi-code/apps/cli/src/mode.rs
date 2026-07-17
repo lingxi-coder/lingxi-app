@@ -678,22 +678,28 @@ pub(crate) async fn run_ratatui(
     // potentially multi-second LLM summarization round-trip whose reqwest/
     // websocket sockets are registered on THIS runtime. It is spawned onto the
     // captured handle — never `block_on`'d on the render thread — so it runs on
-    // the correct reactor, never freezes input, and is sequenced off the render
-    // loop (avoiding the whole-history-swap race with an in-flight turn). The
+    // the correct reactor and never freezes input. `ChatWidget` prevents a live
+    // turn or second submission from overlapping this whole-history swap. The
     // summary (or failure) lands in the transcript via `TurnEvent::SystemNotice`
     // on the shared `turn_tx`, mirroring `command_core::compact`'s display text.
-    let on_compact = move |_args: String| {
+    let on_compact = move |args: String, cancel: CancellationToken| {
         let orch = compact_orch.clone();
         let tx = compact_turn_tx.clone();
-        // Show claude-code's `Compacting conversation…` spinner + time-based
-        // progress bar IMMEDIATELY (before the multi-second summarization
-        // round-trip), so the pass isn't invisible-then-instant. Sent
-        // synchronously on the same channel so it lands on the next render tick.
-        let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactStarted);
         compact_handle.spawn(async move {
-            let (body, is_error) = match orch.force_compact().await {
+            let custom = (!args.trim().is_empty()).then_some(args.as_str());
+            let (body, is_error) = match orch
+                .force_compact_with_instructions_and_cancel(custom, cancel)
+                .await
+            {
                 Ok(_summary) => ("Compacted (ctrl+o to see full summary)".to_string(), false),
-                Err(_e) => ("Error compacting conversation".to_string(), true),
+                // The per-class CC 2.1.211 failure display (hook reason
+                // verbatim, exact cancel sentinel → `Compaction canceled.`,
+                // `Error during compaction: …` passthrough) — shared with the
+                // headless `/compact` handler.
+                Err(e) => (
+                    command_core::compact::compact_failure_display(&e.to_string()),
+                    true,
+                ),
             };
             // Clear the spinner/bar first, then land the terminal line.
             let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactEnded);
@@ -2567,9 +2573,7 @@ mod tests {
         // num_startups == 1 → deterministic FIRST non-empty entry.
         let sa = startup_announcement_with(&memo, Some(&a), 1, Some("Acme")).unwrap();
         match announcement_message(sa) {
-            tui::RenderedMessage::SystemText {
-                body, is_error, ..
-            } => {
+            tui::RenderedMessage::SystemText { body, is_error, .. } => {
                 assert_eq!(body, "Message from Acme:\nheads up");
                 assert!(!is_error, "startup announcement is not an error line");
             }
@@ -2600,7 +2604,10 @@ mod tests {
             r#"{"numStartups":7,"oauthAccount":{"organizationName":"Acme","id":"x"}}"#,
         )
         .unwrap();
-        assert_eq!(read_startup_config_from(&map), (7, Some("Acme".to_string())));
+        assert_eq!(
+            read_startup_config_from(&map),
+            (7, Some("Acme".to_string()))
+        );
 
         // Missing numStartups → 0; missing oauthAccount → no org.
         let empty = serde_json::Map::new();

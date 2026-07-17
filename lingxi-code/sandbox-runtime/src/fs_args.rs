@@ -545,9 +545,7 @@ pub fn generate_filesystem_args(
             // failure, FAIL CLOSED: ro-bind /dev/null at the (allowed-contained)
             // original location and continue.
             let Some(h_path) = partial_realpath(&i_path) else {
-                if let Some(symlink_in_path) =
-                    find_symlink_in_path(&i_path, &allowed_write_paths)
-                {
+                if let Some(symlink_in_path) = find_symlink_in_path(&i_path, &allowed_write_paths) {
                     if seen_deny_write.insert(symlink_in_path.clone()) {
                         deny_write_args.push("--ro-bind".to_string());
                         deny_write_args.push("/dev/null".to_string());

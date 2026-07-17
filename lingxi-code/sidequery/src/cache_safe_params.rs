@@ -12,6 +12,7 @@
 
 use protocol::ConversationMessage;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -34,6 +35,9 @@ pub struct CacheSafeParams {
     pub tool_use_options: tool_api::ToolUseOptions,
     /// Conversation prefix forks must replay verbatim.
     pub fork_context_messages: Vec<ConversationMessage>,
+    /// Main-session transcript used by compact continuation messages to point
+    /// the resumed model at the complete pre-compact record.
+    pub transcript_path: Option<PathBuf>,
     /// Slot-assigned generation tag. Producers should treat this as
     /// read-only — [`CacheSafeParamsSlot::save`] overwrites it on insert.
     pub generation: u64,

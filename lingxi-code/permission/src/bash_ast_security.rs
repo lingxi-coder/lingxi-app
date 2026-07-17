@@ -600,7 +600,10 @@ lazy_re!(brace_expansion_re, r"\{[^{}\s]*(,|\.\.)[^{}\s]*\}");
 // and `command`-style `-pvV` combinations).
 lazy_re!(xeg_wrapper_flag_re, r"^-[-pvV]*$");
 // Leading `VAR[sub]?+?=` assignment word (JS `\w` → ASCII `[A-Za-z0-9_]`).
-lazy_re!(xeg_assign_word_re, r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=");
+lazy_re!(
+    xeg_assign_word_re,
+    r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?="
+);
 // mapfile/readarray value-consuming short flag: `/^-[dnOsuCc]$/`.
 lazy_re!(xeg_mapfile_flag_re, r"^-[dnOsuCc]$");
 // pushd/popd `-n` flag (no directory change): `/^-[a-zA-Z]*n[a-zA-Z]*$/`.
@@ -730,7 +733,10 @@ lazy_re!(awk_inet_re, r#""/inet[46]?/"#);
 // awk program-supplying flags (read program from file / load extensions /
 // supply program fragments): `/^-[bcCghIkMnNOPrsStV]*[fEileDW]/` and
 // `/^--(?:fil|e|i|lo|s|de)/`.
-lazy_re!(awk_program_flag_short_re, r"^-[bcCghIkMnNOPrsStV]*[fEileDW]");
+lazy_re!(
+    awk_program_flag_short_re,
+    r"^-[bcCghIkMnNOPrsStV]*[fEileDW]"
+);
 lazy_re!(awk_program_flag_long_re, r"^--(?:fil|e|i|lo|s|de)");
 // xargs-awk value-consuming flags (TS `rtg`): `-F`/`-v`/`-W <value>` and
 // `--fie`/`--a`/`--as` skip their following value when scanning for a program.
@@ -1246,13 +1252,11 @@ fn pur(node: Node, src: &[u8], scope: &mut HashMap<String, String>) {
             .and_then(|n| children(n).into_iter().next())
             .filter(|c| c.kind() == "word")
             .map(|c| unescape_word(node_text(c, src)));
-        let skip_env_assigns = cname
-            .as_deref()
-            .is_some_and(|u| {
-                !XEG_SPECIAL_BUILTINS.contains(&u)
-                    && !XEG_WRAPPERS.contains(&u)
-                    && !XEG_ASSIGN_BUILTINS.contains(&u)
-            });
+        let skip_env_assigns = cname.as_deref().is_some_and(|u| {
+            !XEG_SPECIAL_BUILTINS.contains(&u)
+                && !XEG_WRAPPERS.contains(&u)
+                && !XEG_ASSIGN_BUILTINS.contains(&u)
+        });
         for p in children(node) {
             if p.kind() == "variable_assignment" && skip_env_assigns {
                 continue;
@@ -1268,7 +1272,10 @@ fn pur(node: Node, src: &[u8], scope: &mut HashMap<String, String>) {
                 "string" | "raw_string" | "word" | "number" | "concatenation" | "variable_name"
             ) {
                 let text = node_text(r, src);
-                let cleaned: String = text.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
+                let cleaned: String = text
+                    .chars()
+                    .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+                    .collect();
                 if let Some(caps) = pur_decl_assign_re().captures(&cleaned) {
                     scope.insert(caps[1].to_string(), VAR_PLACEHOLDER.to_string());
                 } else if let Some(eq) = cleaned.find('=') {
@@ -1563,7 +1570,8 @@ pub(crate) fn collect_commands(
         if let Some(existing) = var_scope.get(&loop_var) {
             if !contains_any_placeholder(existing) {
                 let truncated: String = existing.chars().take(40).collect();
-                let quoted = serde_json::to_string(&truncated).unwrap_or_else(|_| "\"\"".to_string());
+                let quoted =
+                    serde_json::to_string(&truncated).unwrap_or_else(|_| "\"\"".to_string());
                 return Some(ParseForSecurityResult::TooComplex {
                     reason: format!(
                         "for-loop variable '{loop_var}' would overwrite tracked literal {quoted}; post-loop value cannot be statically determined"
@@ -2336,8 +2344,12 @@ fn xeg(
     }
 
     // Itt battery on every written name; track survivors as placeholders.
-    let label =
-        c.unwrap_or_else(|| env_vars.first().map(|e| e.0.as_str()).unwrap_or("undefined"));
+    let label = c.unwrap_or_else(|| {
+        env_vars
+            .first()
+            .map(|e| e.0.as_str())
+            .unwrap_or("undefined")
+    });
     for u in &written {
         if itt(u) {
             deny!(format!(
@@ -2648,8 +2660,9 @@ pub(crate) fn walk_string(
                 if let Some(d) = kids.get(idx + 1) {
                     if d.kind() == "string_content" {
                         let dt = node_text(*d, src);
-                        let is_special =
-                            children(child).iter().any(|f| f.kind() == "special_variable_name");
+                        let is_special = children(child)
+                            .iter()
+                            .any(|f| f.kind() == "special_variable_name");
                         if dt.starts_with('[')
                             || zsh_colon_mod_re().is_match(dt)
                             || (is_special && zsh_name_subscript_re().is_match(dt))
@@ -2685,7 +2698,9 @@ pub(crate) fn walk_string(
     // Guard A: a string mixing a dynamic part with ≤1 char of literal residue
     // (`"x$(cmd)"`) cannot be safely path/rule-matched → reject.
     if saw_dynamic {
-        let residue = result.replace(CMDSUB_PLACEHOLDER, "").replace(VAR_PLACEHOLDER, "");
+        let residue = result
+            .replace(CMDSUB_PLACEHOLDER, "")
+            .replace(VAR_PLACEHOLDER, "");
         if residue.chars().count() <= 1 {
             return Err(too_complex(node));
         }
@@ -5542,8 +5557,10 @@ EOF
         // `unset PATH` / `unset BASH_ENV` must be too-complex (byte-exact reason).
         assert_eq!(
             pfs("unset PATH"),
-            Err("'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
-                .to_string())
+            Err(
+                "'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
+                    .to_string()
+            )
         );
         assert_eq!(
             pfs("unset BASH_ENV"),
@@ -5554,8 +5571,10 @@ EOF
         );
         assert_eq!(
             pfs("unset IFS"),
-            Err("'unset' targets shell variable IFS (exec-influencing / integer-attr / IFS / PS4)"
-                .to_string())
+            Err(
+                "'unset' targets shell variable IFS (exec-influencing / integer-attr / IFS / PS4)"
+                    .to_string()
+            )
         );
         // -f (function unset) suppresses the var battery even for a dangerous name.
         let cs = pfs("unset -f PATH").expect("unset -f is a function unset");
@@ -5595,8 +5614,10 @@ EOF
         // → xeg's wrapped-unset battery denies.
         assert_eq!(
             pfs("command unset PATH"),
-            Err("'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
-                .to_string())
+            Err(
+                "'unset' targets shell variable PATH (exec-influencing / integer-attr / IFS / PS4)"
+                    .to_string()
+            )
         );
         // Non-identifier wrapped-unset operand.
         assert!(pfs("command unset 'a b'").is_err());
@@ -5619,7 +5640,9 @@ EOF
             let cmd = format!("for {name} in a b; do echo hi; done");
             assert_eq!(
                 pfs(&cmd),
-                Err(format!("{name} as loop variable bypasses assignment validation")),
+                Err(format!(
+                    "{name} as loop variable bypasses assignment validation"
+                )),
                 "loop var {name} must be rejected"
             );
         }
@@ -5688,8 +5711,10 @@ EOF
         let scope_cmd = r#"echo "$HOME[0]""#;
         assert_eq!(
             cmd_argvs(scope_cmd),
-            Err("zsh \"$name[expr]\" / \"$name:mod\" inside double-quotes — recursive eval"
-                .to_string())
+            Err(
+                "zsh \"$name[expr]\" / \"$name:mod\" inside double-quotes — recursive eval"
+                    .to_string()
+            )
         );
     }
 

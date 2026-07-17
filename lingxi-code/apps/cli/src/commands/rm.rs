@@ -206,7 +206,12 @@ pub fn perform_delete(
 
     // Parity-name telemetry (routed through the tracing event sink, like
     // daemon.rs's tengu_bg_* emissions).
-    tracing::info!(event = "tengu_bg_agent_action", action = "delete", source, short);
+    tracing::info!(
+        event = "tengu_bg_agent_action",
+        action = "delete",
+        source,
+        short
+    );
 
     kept
 }
@@ -289,7 +294,11 @@ pub async fn run(cli: &Cli) -> i32 {
     // worker must be stopped first, and if we cannot confirm the stop we refuse
     // rather than orphan a running process.
     if !stop_worker(&job) {
-        tracing::info!(event = "cli_bg_rm", short = short.as_str(), outcome = "kill_unconfirmed");
+        tracing::info!(
+            event = "cli_bg_rm",
+            short = short.as_str(),
+            outcome = "kill_unconfirmed"
+        );
         eprintln!("{}", couldnt_confirm_message(&short));
         return crate::exit_codes::RUNTIME_ERROR;
     }
@@ -391,7 +400,10 @@ mod tests {
         // The binary `keptReason` map {dirty, branch_mismatch, live_lock,
         // remove_failed}.
         assert_eq!(KeptReason::Dirty.text(), "has uncommitted changes");
-        assert_eq!(KeptReason::BranchMismatch.text(), "is on a different branch");
+        assert_eq!(
+            KeptReason::BranchMismatch.text(),
+            "is on a different branch"
+        );
         assert_eq!(
             KeptReason::LiveLock.text(),
             "is locked \u{2014} in use by another live session, or locked by hand"

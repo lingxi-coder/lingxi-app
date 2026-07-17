@@ -1555,8 +1555,7 @@ async fn mount_resumed_tui(
             if let Some(gate) = tui_build.runtime.enforcing_permission_gate.as_ref() {
                 let _ = gate.set_permission_mode(&wire).await;
             }
-            tui_build.initial_permission_mode =
-                permission::permission_mode_from_cli_string(&wire);
+            tui_build.initial_permission_mode = permission::permission_mode_from_cli_string(&wire);
         }
         boot_notice = state.notice;
     }

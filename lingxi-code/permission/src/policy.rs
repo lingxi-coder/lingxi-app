@@ -208,8 +208,7 @@ impl PermissionPolicy {
                     .chain(s.nested_commands.iter().map(|c| c.name.as_str()))
             })
             .collect();
-        let compound_cd =
-            all_names.len() > 1 && all_names.iter().any(|n| ps_element_is_cd_like(n));
+        let compound_cd = all_names.len() > 1 && all_names.iter().any(|n| ps_element_is_cd_like(n));
         match crate::powershell_containment::validate_ps_statements(
             &parse.statements,
             &ctx,
@@ -1974,8 +1973,7 @@ fn tool_wide_name_matches_opts(rule_tool_name: &str, tool_name: &str, glob: bool
         None | Some("*") => true,
         Some(rule_tool_part) => {
             // MCP tool-part glob (`a.toolName!==void 0&&UJe(s.toolName)&&bpi(s.toolName,a.toolName)`).
-            glob
-                && rule_tool_part.contains('*')
+            glob && rule_tool_part.contains('*')
                 && tool_info
                     .tool_name
                     .is_some_and(|tool_part| glob_name_matches(rule_tool_part, tool_part))
@@ -2038,7 +2036,9 @@ fn stringify_primitive(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            None
+        }
     }
 }
 

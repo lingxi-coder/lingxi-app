@@ -90,7 +90,9 @@ mod tests {
     fn result_message_interpolates_path_at_both_sites() {
         let got = result_message("/home/me/project");
         assert_eq!(got.matches("/home/me/project").count(), 2);
-        assert!(got.starts_with("The session's working directory has changed to /home/me/project (via /cd)."));
+        assert!(got.starts_with(
+            "The session's working directory has changed to /home/me/project (via /cd)."
+        ));
         assert!(got.ends_with("relative paths now resolve from /home/me/project."));
         // The em-dash is U+2014, not a hyphen.
         assert!(got.contains("previous directory \u{2014} that information"));

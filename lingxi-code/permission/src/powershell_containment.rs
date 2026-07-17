@@ -1936,7 +1936,8 @@ pub fn validate_ps_statement(
         if !RGG.contains(normalize_cmdlet(&l.name).as_str()) {
             non_readonly_seen = true;
         }
-        if let Some(deny) = run_ps_command(l, ctx, &dirs, pipeline_source, prev, false, false, &mut ask)
+        if let Some(deny) =
+            run_ps_command(l, ctx, &dirs, pipeline_source, prev, false, false, &mut ask)
         {
             return deny;
         }
@@ -1951,9 +1952,16 @@ pub fn validate_ps_statement(
     // it ends each command with the control-flow ask when the main pipeline held an
     // expression source (`stmt_has_expression`).
     for l in &stmt.nested_commands {
-        if let Some(deny) =
-            run_ps_command(l, ctx, &dirs, false, false, true, stmt_has_expression, &mut ask)
-        {
+        if let Some(deny) = run_ps_command(
+            l,
+            ctx,
+            &dirs,
+            false,
+            false,
+            true,
+            stmt_has_expression,
+            &mut ask,
+        ) {
             return deny;
         }
     }

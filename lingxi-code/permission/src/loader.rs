@@ -283,9 +283,15 @@ mod tests {
     #[test]
     fn auto_mode_grantable_only_from_trusted_tiers() {
         // MODE-SETTINGS-AUTO-TRUST-01: policy/user/flag may grant auto.
-        assert!(auto_mode_grantable_by_source(PermissionRuleSource::UserSettings));
-        assert!(auto_mode_grantable_by_source(PermissionRuleSource::PolicySettings));
-        assert!(auto_mode_grantable_by_source(PermissionRuleSource::FlagSettings));
+        assert!(auto_mode_grantable_by_source(
+            PermissionRuleSource::UserSettings
+        ));
+        assert!(auto_mode_grantable_by_source(
+            PermissionRuleSource::PolicySettings
+        ));
+        assert!(auto_mode_grantable_by_source(
+            PermissionRuleSource::FlagSettings
+        ));
         // Repo-controllable tiers may NOT.
         assert!(!auto_mode_grantable_by_source(
             PermissionRuleSource::ProjectSettings
@@ -295,8 +301,12 @@ mod tests {
         ));
         // Runtime tiers never carry a settings defaultMode.
         assert!(!auto_mode_grantable_by_source(PermissionRuleSource::CliArg));
-        assert!(!auto_mode_grantable_by_source(PermissionRuleSource::Command));
-        assert!(!auto_mode_grantable_by_source(PermissionRuleSource::Session));
+        assert!(!auto_mode_grantable_by_source(
+            PermissionRuleSource::Command
+        ));
+        assert!(!auto_mode_grantable_by_source(
+            PermissionRuleSource::Session
+        ));
     }
 
     #[test]
@@ -309,7 +319,9 @@ mod tests {
             r#"{"skipDangerousModePermissionPrompt": false}"#
         ));
         // Absent / empty / malformed → false (fail-closed = bg gate may trip).
-        assert!(!skip_dangerous_mode_permission_prompt_from_settings_json("{}"));
+        assert!(!skip_dangerous_mode_permission_prompt_from_settings_json(
+            "{}"
+        ));
         assert!(!skip_dangerous_mode_permission_prompt_from_settings_json(
             "not json"
         ));

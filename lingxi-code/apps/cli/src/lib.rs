@@ -950,7 +950,9 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
             // guards). Only the user tier is loaded here; local/flag/policy are
             // not read at this surface (their omission is over-ask-safe).
             if source != permission::PermissionRuleSource::ProjectSettings
-                && permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(&raw)
+                && permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(
+                    &raw,
+                )
             {
                 skip_dangerous_mode_permission_prompt = true;
             }
@@ -964,7 +966,10 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
     let is_bg_session = std::env::var("LINGXI_SESSION_KIND").ok().as_deref() == Some("bg");
     let bypass_permissions_mode_accepted = migrations::global_config::global_config_path()
         .and_then(|p| migrations::global_config::read_map(&p).ok())
-        .and_then(|m| m.get("bypassPermissionsModeAccepted").and_then(|v| v.as_bool()))
+        .and_then(|m| {
+            m.get("bypassPermissionsModeAccepted")
+                .and_then(|v| v.as_bool())
+        })
         .unwrap_or(false);
     permission::CliModeSettings {
         default_mode,

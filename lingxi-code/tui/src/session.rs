@@ -454,8 +454,14 @@ mod tests {
         let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
         // Opus (permitted) + the current Sonnet (carve-out) survive; Haiku is barred.
         assert!(ids.contains(&"claude-opus-4-8"), "permitted model shown");
-        assert!(ids.contains(&"claude-sonnet-5"), "current kept even though barred");
-        assert!(!ids.contains(&"claude-haiku-4-5"), "barred non-current model dropped");
+        assert!(
+            ids.contains(&"claude-sonnet-5"),
+            "current kept even though barred"
+        );
+        assert!(
+            !ids.contains(&"claude-haiku-4-5"),
+            "barred non-current model dropped"
+        );
     }
 
     #[test]
@@ -487,6 +493,10 @@ mod tests {
         let allow: Vec<String> = Vec::new();
         let shown = connected_model_rows_restricted(&all, &avail, Some(&allow), None);
         let ids: Vec<&str> = shown.iter().map(|m| m.request_model.as_str()).collect();
-        assert_eq!(ids, vec!["claude-opus-4-8"], "only the current model survives");
+        assert_eq!(
+            ids,
+            vec!["claude-opus-4-8"],
+            "only the current model survives"
+        );
     }
 }

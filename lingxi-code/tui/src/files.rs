@@ -33,7 +33,11 @@ pub fn file_completions(fragment: &str) -> Vec<CompletionItem> {
         return recursive_file_completions(name_prefix);
     }
     // Explicit directory prefix: list that directory only (existing behaviour).
-    let base = Path::new(if dir_prefix.is_empty() { "." } else { dir_prefix });
+    let base = Path::new(if dir_prefix.is_empty() {
+        "."
+    } else {
+        dir_prefix
+    });
     let Ok(read) = std::fs::read_dir(base) else {
         return Vec::new();
     };
@@ -222,8 +226,15 @@ mod tests {
         let root = tmp.path();
         let mut found = Vec::new();
         walk_dir(&root, &root, "data", 0, &mut found).expect("walk");
-        assert_eq!(found.len(), 1, "should only find real/data.txt, got: {found:?}");
-        assert!(!found.iter().any(|p| p.contains("target")), "skipped dir content: {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "should only find real/data.txt, got: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|p| p.contains("target")),
+            "skipped dir content: {found:?}"
+        );
     }
 
     #[test]
@@ -237,6 +248,9 @@ mod tests {
         std::env::set_current_dir(&tmp).expect("set_cwd");
         let items = file_completions("c");
         std::env::set_current_dir(&prev).expect("restore cwd");
-        assert!(items.iter().any(|i| i.insert == "a/b/c.rs"), "got: {items:?}");
+        assert!(
+            items.iter().any(|i| i.insert == "a/b/c.rs"),
+            "got: {items:?}"
+        );
     }
 }

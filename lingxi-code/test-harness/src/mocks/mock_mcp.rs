@@ -198,7 +198,10 @@ fn responding_connection(
             // then ignore them — only id-bearing requests get a response.
             let Some(id) = req.get("id").cloned() else {
                 if let Some(method) = req.get("method").and_then(Value::as_str) {
-                    observed_notifications.lock().unwrap().push(method.to_string());
+                    observed_notifications
+                        .lock()
+                        .unwrap()
+                        .push(method.to_string());
                 }
                 continue;
             };

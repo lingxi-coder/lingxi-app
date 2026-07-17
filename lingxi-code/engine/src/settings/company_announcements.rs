@@ -183,7 +183,12 @@ pub fn startup_announcement(
     num_startups: u64,
     organization_name: Option<&str>,
 ) -> Option<StartupAnnouncement> {
-    startup_announcement_with(&PROCESS_MEMO, announcements, num_startups, organization_name)
+    startup_announcement_with(
+        &PROCESS_MEMO,
+        announcements,
+        num_startups,
+        organization_name,
+    )
 }
 
 /// Dependency-free entropy for the uniform-random branch. Not cryptographic;

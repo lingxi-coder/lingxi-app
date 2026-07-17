@@ -275,7 +275,8 @@ fn get_runtime_main_loop_model_restricted(
     if model_setting == Some("haiku") && plan {
         let upgrade = get_default_sonnet_model();
         if restriction_bars(restriction, &upgrade) {
-            if let Some((allow, ovr, catalog)) = restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+            if let Some((allow, ovr, catalog)) =
+                restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
             {
                 if let Some(newest) =
                     allowlist::newest_permitted_in_family("sonnet", catalog, Some(allow), Some(ovr))
@@ -1752,7 +1753,10 @@ mod tests {
             &mut |m| warns.push(m.to_string()),
         );
         assert_eq!(out, "claude-opus-4-6");
-        assert_eq!(warns, vec![allowlist::warnings::PLAN_OPUSPLAN_NEWEST.to_string()]);
+        assert_eq!(
+            warns,
+            vec![allowlist::warnings::PLAN_OPUSPLAN_NEWEST.to_string()]
+        );
     }
 
     #[test]
@@ -1778,7 +1782,10 @@ mod tests {
         );
         // Resting model = opusplan resolved normally = the Sonnet default.
         assert_eq!(out, "claude-sonnet-5");
-        assert_eq!(warns, vec![allowlist::warnings::PLAN_OPUSPLAN_RESTING.to_string()]);
+        assert_eq!(
+            warns,
+            vec![allowlist::warnings::PLAN_OPUSPLAN_RESTING.to_string()]
+        );
     }
 
     #[test]
@@ -1804,7 +1811,10 @@ mod tests {
             &mut |m| warns.push(m.to_string()),
         );
         assert_eq!(out, "claude-sonnet-4-5-20250929");
-        assert_eq!(warns, vec![allowlist::warnings::PLAN_HAIKU_NEWEST.to_string()]);
+        assert_eq!(
+            warns,
+            vec![allowlist::warnings::PLAN_HAIKU_NEWEST.to_string()]
+        );
     }
 
     #[test]
@@ -1829,7 +1839,10 @@ mod tests {
             &mut |m| warns.push(m.to_string()),
         );
         assert_eq!(out, "claude-haiku-4-5");
-        assert_eq!(warns, vec![allowlist::warnings::PLAN_HAIKU_RESTING.to_string()]);
+        assert_eq!(
+            warns,
+            vec![allowlist::warnings::PLAN_HAIKU_RESTING.to_string()]
+        );
     }
 
     #[test]

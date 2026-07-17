@@ -710,7 +710,10 @@ pub async fn read_agent_setting(
     fs: Arc<dyn FileSystem>,
     session_id: &str,
 ) -> Option<String> {
-    if !tokio::fs::try_exists(transcript_path).await.unwrap_or(false) {
+    if !tokio::fs::try_exists(transcript_path)
+        .await
+        .unwrap_or(false)
+    {
         return None;
     }
     let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);

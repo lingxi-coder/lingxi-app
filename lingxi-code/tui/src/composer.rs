@@ -760,8 +760,7 @@ impl<'a> ComposerView<'a> {
         if self.attached_images.is_empty() {
             return 0;
         }
-        let dim = ratatui::style::Style::default()
-            .fg(ratatui::style::Color::Rgb(0x88, 0x88, 0x88));
+        let dim = ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(0x88, 0x88, 0x88));
         let style = crate::style::user_message_style();
         for (i, label) in self.attached_images.iter().enumerate() {
             let y = area.y + u16::try_from(i).unwrap_or(0);
@@ -1412,10 +1411,19 @@ mod tests {
         let mut buf = Buffer::empty(area);
         view.render(area, &mut buf);
         // Row 0 & 1: attachment indicators with 📎
-        let row0 = buffer_row(&buf, 0); assert!(row0.contains("📎") && row0.contains("photo.png"), "row0: {row0:?}");
-        let row1 = buffer_row(&buf, 1); assert!(row1.contains("📎") && row1.contains("screenshot.jpg"), "row1: {row1:?}");
+        let row0 = buffer_row(&buf, 0);
+        assert!(
+            row0.contains("📎") && row0.contains("photo.png"),
+            "row0: {row0:?}"
+        );
+        let row1 = buffer_row(&buf, 1);
+        assert!(
+            row1.contains("📎") && row1.contains("screenshot.jpg"),
+            "row1: {row1:?}"
+        );
         // Row 2: padding, row 3: prompt + text
-        let row3 = buffer_row(&buf, 3); assert!(row3.contains("› hi"), "row3: {row3:?}");
+        let row3 = buffer_row(&buf, 3);
+        assert!(row3.contains("› hi"), "row3: {row3:?}");
         // Height includes attachment rows
         assert_eq!(view.desired_height(80), 5); // 1 content + 2 pad + 2 attach
     }

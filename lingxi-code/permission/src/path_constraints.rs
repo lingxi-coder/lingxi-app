@@ -598,7 +598,8 @@ pub fn check_path_constraints(
         return Some(PathConstraintAsk {
             message: "Redirect involving /dev/tcp or /dev/udp opens a network connection"
                 .to_string(),
-            reason: "Redirect involving /dev/tcp or /dev/udp opens a network connection".to_string(),
+            reason: "Redirect involving /dev/tcp or /dev/udp opens a network connection"
+                .to_string(),
         });
     }
 
@@ -741,7 +742,11 @@ pub fn write_redirect_targets(command: &str, roots: &FsRoots) -> Vec<String> {
             {
                 continue;
             }
-            out.push(expand_redirect_target(&r.target, roots).to_string_lossy().into_owned());
+            out.push(
+                expand_redirect_target(&r.target, roots)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
     out
@@ -839,8 +844,7 @@ mod tests {
         ] {
             let a = check(cmd).unwrap_or_else(|| panic!("{cmd} should ask"));
             assert_eq!(
-                a.message,
-                "Redirect involving /dev/tcp or /dev/udp opens a network connection",
+                a.message, "Redirect involving /dev/tcp or /dev/udp opens a network connection",
                 "cmd={cmd}"
             );
             assert_eq!(a.reason, a.message);
@@ -1030,7 +1034,10 @@ mod tests {
                  a target path that cannot be statically validated.",
                 "cmd={cmd}"
             );
-            assert_eq!(a.reason, "cd with two or more directory arguments", "cmd={cmd}");
+            assert_eq!(
+                a.reason, "cd with two or more directory arguments",
+                "cmd={cmd}"
+            );
         }
     }
 
@@ -1093,9 +1100,9 @@ mod tests {
         );
         // Mixed /dev/null + real target → still asks (some target != /dev/null).
         let a = check("cd sub && echo x > /dev/null > out.txt").expect("should ask");
-        assert!(a.message.starts_with(
-            "Commands that change directories and write via output redirection"
-        ));
+        assert!(a
+            .message
+            .starts_with("Commands that change directories and write via output redirection"));
     }
 
     // ── command fully inside cwd → no constraint (rides allow rule) ─────────

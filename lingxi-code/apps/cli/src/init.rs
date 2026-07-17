@@ -161,8 +161,7 @@ pub struct Runtime {
     /// The ENFORCING permission gate (`engine_desktop::DesktopRuntime::
     /// enforcing_permission_gate`), threaded to the TUI so Shift+Tab drives live
     /// permission-mode cycling via `set_permission_mode`.
-    pub enforcing_permission_gate:
-        Option<std::sync::Arc<dyn permission::gate::PermissionGate>>,
+    pub enforcing_permission_gate: Option<std::sync::Arc<dyn permission::gate::PermissionGate>>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)

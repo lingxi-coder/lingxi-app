@@ -21,7 +21,6 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use unicode_normalization::UnicodeNormalization;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -30,6 +29,7 @@ use telemetry::tengu::tool::{
     WORKTREE_ENTERED_EXISTING, WORKTREE_KEPT, WORKTREE_REMOVED,
 };
 use traits::worktree::{WorktreeChangeSummary, WorktreeError, WorktreeHandle};
+use unicode_normalization::UnicodeNormalization;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -401,7 +401,9 @@ static DISPLAY_QUOTE_RE: Lazy<Regex> = Lazy::new(|| {
 #[must_use]
 fn sanitize_display(s: &str) -> String {
     let step1 = DISPLAY_CTRL_RE.replace_all(s, "\u{FFFD}");
-    DISPLAY_QUOTE_RE.replace_all(&step1, "\u{FFFD}").into_owned()
+    DISPLAY_QUOTE_RE
+        .replace_all(&step1, "\u{FFFD}")
+        .into_owned()
 }
 
 /// Lexically normalize a path (collapse `.`/`..`/duplicate separators) WITHOUT
@@ -481,11 +483,11 @@ struct EnterTargetInfo {
 fn resolve_enter_target(cwd: &Path, resolved: &Path) -> EnterTargetInfo {
     let target_real = std::fs::canonicalize(resolved).ok();
     let managed = match (target_real.as_ref(), find_repo_root(cwd)) {
-        (Some(real), Some(repo_root)) => std::fs::canonicalize(
-            repo_root.join(WORKTREE_PATH_SEGMENT),
-        )
-        .ok()
-        .is_some_and(|root_real| real.starts_with(&root_real) && *real != root_real),
+        (Some(real), Some(repo_root)) => {
+            std::fs::canonicalize(repo_root.join(WORKTREE_PATH_SEGMENT))
+                .ok()
+                .is_some_and(|root_real| real.starts_with(&root_real) && *real != root_real)
+        }
         _ => false,
     };
     EnterTargetInfo {
@@ -1157,7 +1159,10 @@ impl ExitWorktreeTool {
     /// Test constructor with an explicit directory-existence stub, for
     /// exercising 206 `xCd`'s missing-original-cwd fallback branches.
     #[cfg(test)]
-    fn new_with_dir_exists(ctx: BuiltinToolContext, dir_exists: fn(&std::path::Path) -> bool) -> Self {
+    fn new_with_dir_exists(
+        ctx: BuiltinToolContext,
+        dir_exists: fn(&std::path::Path) -> bool,
+    ) -> Self {
         Self { ctx, dir_exists }
     }
 
@@ -1185,10 +1190,9 @@ impl ExitWorktreeTool {
     fn restore_cwd(&self, original_cwd: &Path, worktree_path: &Path) -> CwdRestore {
         let exists = self.dir_exists;
         if exists(original_cwd) {
-            self.ctx.session_cwd.swap(
-                original_cwd.to_path_buf(),
-                vec![original_cwd.to_path_buf()],
-            );
+            self.ctx
+                .session_cwd
+                .swap(original_cwd.to_path_buf(), vec![original_cwd.to_path_buf()]);
             return CwdRestore {
                 restored_cwd: original_cwd.to_path_buf(),
                 original_cwd_missing: false,
@@ -2450,7 +2454,10 @@ mod tests {
         });
         let r = tool.restore_cwd(&original, &wt);
         assert!(r.original_cwd_missing);
-        assert!(r.fell_back_to_worktree, "landed on the worktree (first fallback)");
+        assert!(
+            r.fell_back_to_worktree,
+            "landed on the worktree (first fallback)"
+        );
         assert_eq!(r.restored_cwd, wt);
         assert_eq!(tool.ctx.cwd(), wt);
     }
@@ -2465,9 +2472,8 @@ mod tests {
         let (bctx, _sink) = make_bctx(mock);
         let original = PathBuf::from("/tmp/repo-r3-gone");
         let wt = PathBuf::from("/tmp/repo-r3-gone/.lingxi/worktrees/feat");
-        let tool = ExitWorktreeTool::new_with_dir_exists(bctx, |p| {
-            p == std::env::temp_dir().as_path()
-        });
+        let tool =
+            ExitWorktreeTool::new_with_dir_exists(bctx, |p| p == std::env::temp_dir().as_path());
         let r = tool.restore_cwd(&original, &wt);
         assert!(r.original_cwd_missing);
         assert!(!r.fell_back_to_worktree, "did NOT land on the worktree");
@@ -2518,9 +2524,8 @@ mod tests {
         let worktree_path = PathBuf::from("/tmp/repo-rm-gone/.lingxi/worktrees/feat");
         populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
         // Only the temp dir exists — original + worktree both gone.
-        let tool = ExitWorktreeTool::new_with_dir_exists(bctx, |p| {
-            p == std::env::temp_dir().as_path()
-        });
+        let tool =
+            ExitWorktreeTool::new_with_dir_exists(bctx, |p| p == std::env::temp_dir().as_path());
         let res = tool
             .call(
                 json!({ "action": "remove", "discard_changes": true }),
@@ -3353,13 +3358,19 @@ mod tests {
     /// U+FFFD; a plain U+0020 space is preserved.
     #[test]
     fn sanitize_display_matches_dxs_aiy() {
-        assert_eq!(sanitize_display("/repo/clean-path_1.2"), "/repo/clean-path_1.2");
+        assert_eq!(
+            sanitize_display("/repo/clean-path_1.2"),
+            "/repo/clean-path_1.2"
+        );
         assert_eq!(sanitize_display("a\u{200B}b"), "a\u{FFFD}b"); // Cf zero-width space
         assert_eq!(sanitize_display("a\u{202E}b"), "a\u{FFFD}b"); // Cf RTL override
         assert_eq!(sanitize_display("a\u{00A0}b"), "a\u{FFFD}b"); // Zs no-break space
         assert_eq!(sanitize_display("a\u{2800}b"), "a\u{FFFD}b"); // braille blank
         assert_eq!(sanitize_display("a b"), "a b"); // U+0020 kept
-        assert_eq!(sanitize_display("a\u{201C}b\u{201D}c"), "a\u{FFFD}b\u{FFFD}c"); // fancy quotes
+        assert_eq!(
+            sanitize_display("a\u{201C}b\u{201D}c"),
+            "a\u{FFFD}b\u{FFFD}c"
+        ); // fancy quotes
         assert_eq!(sanitize_display("say \"hi\""), "say \u{FFFD}hi\u{FFFD}"); // ASCII dquote
     }
 
@@ -3370,8 +3381,17 @@ mod tests {
     fn lexical_resolve_matches_node_semantics() {
         let cwd = Path::new("/repo/sub");
         assert_eq!(lexical_resolve(cwd, "../foo"), PathBuf::from("/repo/foo"));
-        assert_eq!(lexical_resolve(cwd, "./x/./y"), PathBuf::from("/repo/sub/x/y"));
-        assert_eq!(lexical_resolve(cwd, "/abs/./path/.."), PathBuf::from("/abs"));
-        assert_eq!(lexical_resolve(cwd, "a/b/../c"), PathBuf::from("/repo/sub/a/c"));
+        assert_eq!(
+            lexical_resolve(cwd, "./x/./y"),
+            PathBuf::from("/repo/sub/x/y")
+        );
+        assert_eq!(
+            lexical_resolve(cwd, "/abs/./path/.."),
+            PathBuf::from("/abs")
+        );
+        assert_eq!(
+            lexical_resolve(cwd, "a/b/../c"),
+            PathBuf::from("/repo/sub/a/c")
+        );
     }
 }

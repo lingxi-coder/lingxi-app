@@ -416,10 +416,7 @@ pub fn path_in_working_path(path: &Path, working: &Path, roots: &FsRoots) -> boo
 
     // POSIX relative path from working dir to target — case-SENSITIVE
     // (`caseFold:false`, so no `normalize_case_for_comparison` fold).
-    let relative = posix_relative(
-        Path::new(&normalized_working),
-        Path::new(&normalized_path),
-    );
+    let relative = posix_relative(Path::new(&normalized_working), Path::new(&normalized_path));
 
     // Same path.
     if relative.is_empty() {

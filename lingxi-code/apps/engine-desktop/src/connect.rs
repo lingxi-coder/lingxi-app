@@ -597,7 +597,10 @@ mod oauth_connect_tests {
             d.login("anthropic").await.unwrap(),
             "Connected Anthropic (me@example.com)."
         );
-        assert!(!auth.was_logged_out(), "a permitted login is not rolled back");
+        assert!(
+            !auth.was_logged_out(),
+            "a permitted login is not rolled back"
+        );
     }
 
     #[tokio::test]

@@ -583,8 +583,7 @@ impl PoolSubagentSpawner {
                 parent_model,
                 self.session_provider_first_party,
             );
-            def.model =
-                AgentModel::Explicit(self.resolve_model_pref(&def.model, parent_model));
+            def.model = AgentModel::Explicit(self.resolve_model_pref(&def.model, parent_model));
         }
         def
     }

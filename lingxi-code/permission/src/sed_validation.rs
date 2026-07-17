@@ -99,9 +99,10 @@ pub const SED_MAX_COMMAND_LEN: usize = 10_000;
 pub fn sed_command_untokenizable(command: &str) -> bool {
     use std::sync::LazyLock;
     // M3i control-char class (hand-tested; no regex needed).
-    if command.bytes().any(|b| {
-        matches!(b, 0x00..=0x08 | 0x0B..=0x1F | 0x7F)
-    }) {
+    if command
+        .bytes()
+        .any(|b| matches!(b, 0x00..=0x08 | 0x0B..=0x1F | 0x7F))
+    {
         return true;
     }
     // F3i: backslash-space/tab, or a backslash line-continuation.
@@ -115,10 +116,7 @@ pub fn sed_command_untokenizable(command: &str) -> bool {
         LazyLock::new(|| regex::Regex::new(r"(?:^|[\s;&|])=[a-zA-Z_]").unwrap());
     // U3i: a `<n-m>` brace-range.
     static U3I: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"<\d*-\d*>").unwrap());
-    F3I.is_match(command)
-        || RZN.is_match(command)
-        || NZN.is_match(command)
-        || U3I.is_match(command)
+    F3I.is_match(command) || RZN.is_match(command) || NZN.is_match(command) || U3I.is_match(command)
 }
 
 /// 2.1.211 `mQi` over-length / tokenize-mismatch pre-check (the first `mQi`
@@ -1532,11 +1530,11 @@ mod tests {
     fn untokenizable_sed_asks_with_over_length_reason() {
         // $4r cases: control char, backslash-space, `~[`, unquoted `=x`, `<n-m>`.
         for cmd in [
-            "sed 's/a/b/'\u{0007}",  // M3i: BEL control char
-            "sed \\ 's/a/b/'",       // F3i: backslash-space
-            "sed 's/~[x]/y/' f",     // rzn: ~[
-            "sed =foo 's/a/b/'",     // nzn: `=` after whitespace then letter
-            "sed 's/a/b/' <1-5>",    // U3i: <n-m> brace-range
+            "sed 's/a/b/'\u{0007}", // M3i: BEL control char
+            "sed \\ 's/a/b/'",      // F3i: backslash-space
+            "sed 's/~[x]/y/' f",    // rzn: ~[
+            "sed =foo 's/a/b/'",    // nzn: `=` after whitespace then letter
+            "sed 's/a/b/' <1-5>",   // U3i: <n-m> brace-range
         ] {
             let v = verdict(cmd);
             assert_eq!(

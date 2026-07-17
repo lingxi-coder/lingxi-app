@@ -258,7 +258,11 @@ fn word_diff_spans(
     } else {
         remove_word_bg(theme)
     };
-    let text_fg = if !is_add { Some(remove_text_fg(theme)) } else { None };
+    let text_fg = if !is_add {
+        Some(remove_text_fg(theme))
+    } else {
+        None
+    };
     let mut spans = Vec::new();
     for ch in wd.iter_all_changes() {
         let show = matches!(ch.tag(), ChangeTag::Equal)
@@ -624,9 +628,18 @@ mod tests {
         assert_eq!(remove_bg(ThemeName::Dark), StyleColor::Rgb(61, 20, 27)); // diffRemoved*0.5
         assert_eq!(add_word_bg(ThemeName::Dark), StyleColor::Rgb(28, 83, 48)); // diffAddedWord*0.5
         assert_eq!(remove_word_bg(ThemeName::Dark), StyleColor::Rgb(89, 44, 53)); // diffRemovedWord*0.5
-        assert_eq!(add_decoration(ThemeName::Dark), StyleColor::Rgb(80, 200, 80));
-        assert_eq!(remove_decoration(ThemeName::Dark), StyleColor::Rgb(220, 90, 90));
-        assert_eq!(remove_text_fg(ThemeName::Dark), StyleColor::Rgb(248, 248, 242));
+        assert_eq!(
+            add_decoration(ThemeName::Dark),
+            StyleColor::Rgb(80, 200, 80)
+        );
+        assert_eq!(
+            remove_decoration(ThemeName::Dark),
+            StyleColor::Rgb(220, 90, 90)
+        );
+        assert_eq!(
+            remove_text_fg(ThemeName::Dark),
+            StyleColor::Rgb(248, 248, 242)
+        );
     }
 
     #[test]

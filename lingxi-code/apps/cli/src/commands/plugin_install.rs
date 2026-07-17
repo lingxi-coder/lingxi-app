@@ -323,7 +323,10 @@ fn persist_plugin_options(
     plugin_configs.insert(plugin_key.to_string(), Value::Object(entry));
     update_settings(
         &path,
-        vec![("pluginConfigs".to_string(), Some(Value::Object(plugin_configs)))],
+        vec![(
+            "pluginConfigs".to_string(),
+            Some(Value::Object(plugin_configs)),
+        )],
     )
 }
 
@@ -350,9 +353,14 @@ fn clear_plugin_config(scope: Scope, home: &Path, cwd: &Path, plugin_key: &str) 
     }
     if let Err(e) = update_settings(
         &path,
-        vec![("pluginConfigs".to_string(), Some(Value::Object(plugin_configs)))],
+        vec![(
+            "pluginConfigs".to_string(),
+            Some(Value::Object(plugin_configs)),
+        )],
     ) {
-        tracing::warn!("deletePluginOptions: failed to clear settings.pluginConfigs[{plugin_key}]: {e}");
+        tracing::warn!(
+            "deletePluginOptions: failed to clear settings.pluginConfigs[{plugin_key}]: {e}"
+        );
     }
 }
 

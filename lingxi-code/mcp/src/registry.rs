@@ -309,8 +309,7 @@ impl McpRegistry {
     /// [`McpClient::send_roots_list_changed`]). Returns the number of clients
     /// notified. Parity 2.1.207 P1-08.
     pub async fn notify_roots_list_changed_all(&self) -> usize {
-        let clients: Vec<Arc<McpClient>> =
-            self.clients.read().await.values().cloned().collect();
+        let clients: Vec<Arc<McpClient>> = self.clients.read().await.values().cloned().collect();
         for client in &clients {
             client.send_roots_list_changed();
         }
@@ -2077,7 +2076,10 @@ mod tests {
                 text.contains(r#""method":"notifications/roots/list_changed""#),
                 "each client must receive the roots/list_changed notification: {text}",
             );
-            assert!(!text.contains(r#""id""#), "a notification carries no id: {text}");
+            assert!(
+                !text.contains(r#""id""#),
+                "a notification carries no id: {text}"
+            );
             // Exactly ONE frame per client — no second notification queued.
             assert!(
                 peer.try_recv().is_err(),

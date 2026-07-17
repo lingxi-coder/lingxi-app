@@ -612,7 +612,11 @@ mod tests {
 
     #[test]
     fn newest_permitted_respects_a_narrower_allowlist() {
-        let catalog = cat(&["claude-opus-4-1-20250805", "claude-opus-4-6", "claude-opus-4-8"]);
+        let catalog = cat(&[
+            "claude-opus-4-1-20250805",
+            "claude-opus-4-6",
+            "claude-opus-4-8",
+        ]);
         // Only 4-6 is permitted → newest permitted opus is 4-6 (NOT the newer 4-8).
         let allow = cat(&["opus-4-6"]);
         assert_eq!(
@@ -626,7 +630,10 @@ mod tests {
         let catalog = cat(&["claude-opus-4-8", "claude-sonnet-4-5-20250929"]);
         // Allowlist permits only sonnet → no permitted opus.
         let allow = cat(&["sonnet"]);
-        assert_eq!(newest_permitted_in_family("opus", &catalog, Some(&allow), None), None);
+        assert_eq!(
+            newest_permitted_in_family("opus", &catalog, Some(&allow), None),
+            None
+        );
     }
 
     #[test]
@@ -634,8 +641,14 @@ mod tests {
         let catalog = cat(&["claude-opus-4-8"]);
         let allow = cat(&["opus"]);
         // "opusplan" / "best" / a full id are not bare family aliases → None.
-        assert_eq!(newest_permitted_in_family("opusplan", &catalog, Some(&allow), None), None);
-        assert_eq!(newest_permitted_in_family("claude-opus-4-8", &catalog, Some(&allow), None), None);
+        assert_eq!(
+            newest_permitted_in_family("opusplan", &catalog, Some(&allow), None),
+            None
+        );
+        assert_eq!(
+            newest_permitted_in_family("claude-opus-4-8", &catalog, Some(&allow), None),
+            None
+        );
     }
 
     #[test]

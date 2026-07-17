@@ -2617,8 +2617,9 @@ fn partial_text_then_err(
 
 /// The exact `cutoffNote` for a server-error-class termination: the
 /// `AgentApiErrorTerminationError` message + the byte-locked incomplete-output
-/// notice (`\u{2014}` = em dash), joined by a single newline.
-const EXPECTED_SERVER_ERROR_CUTOFF: &str = "Agent terminated early due to an API error: API Error: Server error mid-response. The response above may be incomplete.\nEverything below is PARTIAL output recovered from the agent before it was cut off. The agent did NOT finish its task \u{2014} treat these results as incomplete.";
+/// notice (`\u{2014}` = em dash), joined by a blank line (two newlines), matching
+/// CC 2.1.207/2.1.208 `wTy` (`cutoffNote:`+"${e.message}\n\n"+"Everything below…").
+const EXPECTED_SERVER_ERROR_CUTOFF: &str = "Agent terminated early due to an API error: API Error: Server error mid-response. The response above may be incomplete.\n\nEverything below is PARTIAL output recovered from the agent before it was cut off. The agent did NOT finish its task \u{2014} treat these results as incomplete.";
 
 /// A second round-trip cut off by `RateLimited` mid-stream — after a completed
 /// first turn AND with a block salvaged from the failing turn — recovers as a

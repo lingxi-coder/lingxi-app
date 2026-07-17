@@ -462,10 +462,11 @@ fn build_recovered_result(
 /// Assemble the CC 2.1.207 `cutoffNote` (`wTy`): the
 /// `AgentApiErrorTerminationError` message (`Agent terminated early due to an
 /// API error: {api_error_text}`) followed by the byte-locked incomplete-output
-/// notice, joined by a single newline.
+/// notice, joined by a blank line (two newlines) — the binary builds
+/// `cutoffNote:` + "${e.message}\n\n" + "Everything below…".
 fn build_cutoff_note(api_error_text: &str) -> String {
     format!(
-        "Agent terminated early due to an API error: {api_error_text}\n\
+        "Agent terminated early due to an API error: {api_error_text}\n\n\
 Everything below is PARTIAL output recovered from the agent before it was cut off. The agent did NOT finish its task \u{2014} treat these results as incomplete."
     )
 }

@@ -1142,6 +1142,7 @@ mod command_arm_tests {
             HookEventType::PreCompact,
             HookEvent::PreCompact {
                 reason: "manual".into(),
+                custom_instructions: None,
             },
         )
         .await;
@@ -1525,6 +1526,7 @@ mod command_arm_tests {
             (
                 HookEvent::PreCompact {
                     reason: "manual".into(),
+                    custom_instructions: None,
                 },
                 "PreCompact",
             ),

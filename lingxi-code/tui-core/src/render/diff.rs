@@ -52,21 +52,37 @@ pub struct DiffRow {
     pub line_no: usize,
 }
 
-/// Green background for added lines — claude-code's SYNTAX-HIGHLIGHTED diff
-/// color scheme (the `scopes`-carrying renderer LingXi mirrors, NOT the plain
-/// `theme.diffAdded` token): dark-theme truecolor `addLine = rgb(2,40,0)`. A
-/// deep, low-luminance green so the syntect fg layered on top stays readable.
-/// Locked to the dark-theme value like the gutter decorations.
-#[must_use]
-pub fn add_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(2, 40, 0)
+/// (EXPERIMENT) Diff backgrounds are rendered at this alpha over the dark
+/// terminal background. Terminals have NO real background alpha, so this blends
+/// the opaque diff color toward black: `result = color * DIFF_BG_ALPHA`.
+/// Numerator/denominator kept as integers for a `const fn` blend.
+const DIFF_BG_ALPHA_NUM: u16 = 1;
+const DIFF_BG_ALPHA_DEN: u16 = 2; // 0.5
+
+/// Blend an opaque `rgb` diff background toward the dark terminal background
+/// (black) at [`DIFF_BG_ALPHA_NUM`]/[`DIFF_BG_ALPHA_DEN`] — a stand-in for a
+/// translucent background the terminal cannot render natively.
+const fn alpha_over_black(r: u8, g: u8, b: u8) -> StyleColor {
+    StyleColor::Rgb(
+        (r as u16 * DIFF_BG_ALPHA_NUM / DIFF_BG_ALPHA_DEN) as u8,
+        (g as u16 * DIFF_BG_ALPHA_NUM / DIFF_BG_ALPHA_DEN) as u8,
+        (b as u16 * DIFF_BG_ALPHA_NUM / DIFF_BG_ALPHA_DEN) as u8,
+    )
 }
 
-/// Red background for removed lines — claude-code syntax-diff `deleteLine`
-/// (`rgb(61,1,0)`, dark-theme truecolor value).
+/// Green background for added lines — claude-code's dark-theme `diffAdded`
+/// (`rgb(34,92,43)`) rendered at [`DIFF_BG_ALPHA_NUM`]/[`DIFF_BG_ALPHA_DEN`]
+/// alpha over the terminal background (EXPERIMENT — softer, translucent look).
+#[must_use]
+pub fn add_bg(_theme: ThemeName) -> StyleColor {
+    alpha_over_black(34, 92, 43)
+}
+
+/// Red background for removed lines — claude-code `diffRemoved` (`rgb(122,41,54)`)
+/// at the same alpha over the terminal background.
 #[must_use]
 pub fn remove_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(61, 1, 0)
+    alpha_over_black(122, 41, 54)
 }
 
 /// (diff-02) Green decoration color for the Add gutter (sigil + line number)
@@ -98,17 +114,17 @@ pub fn remove_text_fg(_theme: ThemeName) -> StyleColor {
 const CHANGE_THRESHOLD: f64 = 0.4;
 
 /// Brighter emphasis background for the changed *words* of a paired add line —
-/// claude-code syntax-diff `addWord` (`rgb(4,71,0)`, dark-theme truecolor).
+/// claude-code `diffAddedWord` (`rgb(56,166,96)`) at the diff-bg alpha.
 #[must_use]
 pub fn add_word_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(4, 71, 0)
+    alpha_over_black(56, 166, 96)
 }
 
 /// Brighter emphasis background for the changed *words* of a paired remove
-/// line — claude-code syntax-diff `deleteWord` (`rgb(92,2,0)`, dark-theme).
+/// line — claude-code `diffRemovedWord` (`rgb(179,89,107)`) at the diff-bg alpha.
 #[must_use]
 pub fn remove_word_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(92, 2, 0)
+    alpha_over_black(179, 89, 107)
 }
 
 /// Classify a single `similar` line change into a [`DiffRow`] — the ONE source
@@ -601,17 +617,16 @@ mod tests {
     }
 
     #[test]
-    fn diff_colors_match_claude_code_syntax_diff_dark() {
-        // Byte-exact claude-code 2.1.211 dark-theme SYNTAX-HIGHLIGHTED diff scheme
-        // (the `scopes`-carrying renderer LingXi mirrors, not the plain
-        // `theme.diff*` tokens).
-        assert_eq!(add_bg(ThemeName::Dark), StyleColor::Rgb(2, 40, 0)); // addLine
-        assert_eq!(remove_bg(ThemeName::Dark), StyleColor::Rgb(61, 1, 0)); // deleteLine
-        assert_eq!(add_word_bg(ThemeName::Dark), StyleColor::Rgb(4, 71, 0)); // addWord
-        assert_eq!(remove_word_bg(ThemeName::Dark), StyleColor::Rgb(92, 2, 0)); // deleteWord
-        assert_eq!(add_decoration(ThemeName::Dark), StyleColor::Rgb(80, 200, 80)); // addDecoration
-        assert_eq!(remove_decoration(ThemeName::Dark), StyleColor::Rgb(220, 90, 90)); // deleteDecoration
-        assert_eq!(remove_text_fg(ThemeName::Dark), StyleColor::Rgb(248, 248, 242)); // foreground
+    fn diff_backgrounds_are_half_alpha_of_claude_code_tokens() {
+        // EXPERIMENT: diff line/word backgrounds render at 0.5 alpha over black
+        // (claude-code diff token * 0.5). Decorations + fg stay opaque.
+        assert_eq!(add_bg(ThemeName::Dark), StyleColor::Rgb(17, 46, 21)); // diffAdded*0.5
+        assert_eq!(remove_bg(ThemeName::Dark), StyleColor::Rgb(61, 20, 27)); // diffRemoved*0.5
+        assert_eq!(add_word_bg(ThemeName::Dark), StyleColor::Rgb(28, 83, 48)); // diffAddedWord*0.5
+        assert_eq!(remove_word_bg(ThemeName::Dark), StyleColor::Rgb(89, 44, 53)); // diffRemovedWord*0.5
+        assert_eq!(add_decoration(ThemeName::Dark), StyleColor::Rgb(80, 200, 80));
+        assert_eq!(remove_decoration(ThemeName::Dark), StyleColor::Rgb(220, 90, 90));
+        assert_eq!(remove_text_fg(ThemeName::Dark), StyleColor::Rgb(248, 248, 242));
     }
 
     #[test]

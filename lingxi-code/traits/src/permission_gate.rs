@@ -417,4 +417,16 @@ pub trait PermissionGate: Send + Sync {
         let _ = mode;
         Ok(())
     }
+
+    /// The LIVE effective permission mode as a wire string
+    /// (`default`/`plan`/`acceptEdits`/`bypassPermissions`/`dontAsk`/`auto`), or
+    /// `None` for a gate with no mode layer (the interactive / no-op / adapter
+    /// transports). Read when snapshotting session state across the in-process
+    /// `/resume`, `/branch`, and `/rewind` re-mount so the user's mid-session
+    /// Shift+Tab mode is carried into the rebuilt runtime instead of resetting to
+    /// the CLI/config default. Only [`PolicyPermissionGate`] overrides this;
+    /// additive DEFAULTED (frozen-trait safe), returning `None`.
+    fn permission_mode(&self) -> Option<String> {
+        None
+    }
 }

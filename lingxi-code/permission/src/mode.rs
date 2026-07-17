@@ -60,6 +60,23 @@ impl PermissionMode {
             Self::Auto => "Auto",
         }
     }
+
+    /// The wire string form (claude-code `PermissionMode.ts`) — the inverse of
+    /// [`crate::permission_mode_from_cli_string`]. `Bubble` (internal-only, no
+    /// wire form) maps to `default`. Used to snapshot the live mode across the
+    /// in-process `/resume` re-mount and for the engine `set_permission_mode`
+    /// control request.
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Default | Self::Bubble => "default",
+            Self::Plan => "plan",
+            Self::AcceptEdits => "acceptEdits",
+            Self::BypassPermissions => "bypassPermissions",
+            Self::DontAsk => "dontAsk",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 /// The next mode in the Shift+Tab UI cycle (claude-code `fJn`, binary v2.1.183

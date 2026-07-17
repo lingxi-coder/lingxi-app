@@ -1002,6 +1002,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn permission_mode_getter_reflects_boot_mode_and_live_override() {
+        // Boot mode is reported as its wire string (the `/resume` snapshot source).
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::AcceptEdits, Vec::new())
+                .with_bypass_available(true),
+        );
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner);
+        assert_eq!(gate.permission_mode().as_deref(), Some("acceptEdits"));
+
+        // A live Shift+Tab switch is reflected too, so the re-mount carries it.
+        gate.set_permission_mode("bypassPermissions").await.unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("bypassPermissions"));
+
+        // An unknown mode is a no-op — the getter keeps the prior mode.
+        gate.set_permission_mode("gibberish").await.unwrap();
+        assert_eq!(gate.permission_mode().as_deref(), Some("bypassPermissions"));
+    }
+
+    #[tokio::test]
     async fn set_permission_mode_accepts_unknown_mode_as_noop() {
         // The binary accepts any mode string and no-ops an unknown one (no error
         // frame). A mutating tool with no rule is an Ask → delegates to the inner

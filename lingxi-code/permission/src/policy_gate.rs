@@ -745,6 +745,13 @@ impl PermissionGate for PolicyPermissionGate {
             .unwrap_or_else(|e| e.into_inner()) = Some(parsed);
         Ok(())
     }
+
+    /// The LIVE effective mode as a wire string — the override when set, else the
+    /// boot mode ([`Self::effective_mode`]). Lets the in-process `/resume`
+    /// re-mount snapshot and restore the user's mid-session Shift+Tab mode.
+    fn permission_mode(&self) -> Option<String> {
+        Some(self.effective_mode().wire_str().to_string())
+    }
 }
 
 /// Parse a `set_permission_mode` wire string into a [`PermissionMode`].

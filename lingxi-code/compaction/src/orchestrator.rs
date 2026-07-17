@@ -22,6 +22,7 @@ use crate::thresholds::{
     rapid_refill_count, AutoCompactTrackingState, CompactionLayer,
     MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, MAX_CONSECUTIVE_RAPID_REFILLS,
 };
+use cost::Usage;
 use protocol::ConversationMessage;
 use std::time::SystemTime;
 
@@ -76,6 +77,12 @@ pub struct IterationCompactionResult {
     /// autocompact layer fired AND a tail was preserved — so the snip/micro-only
     /// and under-threshold paths leave it empty (history shape unchanged).
     pub messages_to_preserve: Vec<ConversationMessage>,
+    /// Usage incurred by the summary side-query. `None` when no LLM
+    /// compaction ran (snip/micro/under-threshold paths).
+    pub compaction_usage: Option<Usage>,
+    /// Model configured for the summary side-query, paired with
+    /// [`Self::compaction_usage`] for cost attribution.
+    pub compaction_model: Option<String>,
 }
 
 /// Owns one instance of each layer + the autocompact threshold.
@@ -156,6 +163,45 @@ impl CompactionOrchestrator {
             .await
     }
 
+    /// Run a user-requested `/compact` pass unconditionally.
+    ///
+    /// Manual compaction is deliberately separate from the automatic
+    /// threshold/circuit-breaker pipeline: Claude Code invokes the summarizer
+    /// whenever the history has a valid prefix/tail split, even when the
+    /// context is far below the automatic threshold. Too-short histories return
+    /// the byte-exact user-facing error instead of a successful zero-delta pass.
+    pub async fn process_forced(
+        &self,
+        messages: Vec<ConversationMessage>,
+        custom_instructions: Option<&str>,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        if crate::partial::select_preserved_tail(&messages).is_none() {
+            return Err(CompactionError::NotEnoughMessages);
+        }
+
+        let result = self
+            .auto
+            .compact_with_instructions(messages, custom_instructions)
+            .await?;
+        let total_tokens_freed = result
+            .pre_compact_token_count
+            .saturating_sub(result.post_compact_token_count);
+
+        Ok(IterationCompactionResult {
+            messages: result.summary_messages,
+            layers_applied: vec![CompactionLayer::Autocompact],
+            total_tokens_freed,
+            cache_hit: false,
+            consecutive_failures: 0,
+            was_compacted: true,
+            rapid_refill_breaker_tripped: false,
+            consecutive_rapid_refills: 0,
+            messages_to_preserve: result.messages_to_preserve,
+            compaction_usage: result.compaction_usage,
+            compaction_model: Some(self.auto.config.summary_model.clone()),
+        })
+    }
+
     /// Run one full orchestrator pass, threading `tracking` for the autocompact
     /// circuit breaker.
     ///
@@ -184,9 +230,29 @@ impl CompactionOrchestrator {
     /// incremented.
     pub async fn process_iteration_tracked(
         &self,
+        messages: Vec<ConversationMessage>,
+        snip_tokens_freed_already: u64,
+        tracking: &mut AutoCompactTrackingState,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        self.process_iteration_tracked_with_instructions(
+            messages,
+            snip_tokens_freed_already,
+            tracking,
+            None,
+        )
+        .await
+    }
+
+    /// Automatic compaction pass with optional instructions contributed by a
+    /// successful `PreCompact` hook. Existing automatic callers use
+    /// [`Self::process_iteration_tracked`]; lifecycle-aware callers use this
+    /// seam after executing hooks.
+    pub async fn process_iteration_tracked_with_instructions(
+        &self,
         mut messages: Vec<ConversationMessage>,
         snip_tokens_freed_already: u64,
         tracking: &mut AutoCompactTrackingState,
+        custom_instructions: Option<&str>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         let mut layers = Vec::new();
         let mut freed = snip_tokens_freed_already;
@@ -261,6 +327,8 @@ impl CompactionOrchestrator {
 
         // --- Layer 3: autocompact (threshold + circuit-breaker gated) ----- //
         let mut was_compacted = false;
+        let mut compaction_usage = None;
+        let mut compaction_model = None;
         // #58: the preserved tail the autocompact layer carries out, if any.
         // Empty unless autocompact fires AND `DRn` selected a preservable tail.
         let mut messages_to_preserve: Vec<ConversationMessage> = Vec::new();
@@ -298,8 +366,14 @@ impl CompactionOrchestrator {
             // populate `tengu_auto_compact_rapid_refill_breaker`.
             rapid_refill_breaker_tripped = true;
         } else if over_threshold && !breaker_tripped {
-            match self.auto.compact(messages.clone()).await {
+            match self
+                .auto
+                .compact_with_instructions(messages.clone(), custom_instructions)
+                .await
+            {
                 Ok(result) => {
+                    compaction_usage = result.compaction_usage;
+                    compaction_model = Some(self.auto.config.summary_model.clone());
                     messages.clone_from(&result.summary_messages);
                     // #58: carry the preserved tail out separately (NOT folded
                     // into `messages`, which is the leading summary set).
@@ -340,6 +414,8 @@ impl CompactionOrchestrator {
             rapid_refill_breaker_tripped,
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
             messages_to_preserve,
+            compaction_usage,
+            compaction_model,
         })
     }
 }

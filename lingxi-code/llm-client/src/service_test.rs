@@ -1229,6 +1229,34 @@ mod tests {
         clear_thinking_env();
     }
 
+    #[tokio::test]
+    async fn extra_body_speed_computed_wins() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_thinking_env();
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        // The encoder emits a computed top-level `speed` from request.speed
+        // (fast mode). claude-code spreads the extra body (`...Vs`) BEFORE the
+        // computed `...{speed:ze}`, so the computed speed wins over any extra one.
+        let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+        request.speed = Some("fast".to_string());
+
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"speed":"slow"}"#);
+        let body = body_after_inject(&adapter, &request).await;
+        assert_eq!(
+            body["speed"],
+            serde_json::json!("fast"),
+            "computed speed wins over the extra body's speed"
+        );
+
+        std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+        clear_thinking_env();
+    }
+
     #[test]
     fn extra_body_anthropic_beta_append_dedupe() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

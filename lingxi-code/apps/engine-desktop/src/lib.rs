@@ -5110,7 +5110,24 @@ pub async fn build(
     // server's `roots/list`) and the runtime `/add-dir` effect: pushing into it
     // via `mcp_registry.add_root(...)` is seen by every connected server on its
     // next `roots/list` without a reconnect (parity 2.1.207 P1-08).
-    let mcp_additional_roots = mcp::new_shared_roots(boot_additional_working_dirs.clone());
+    //
+    // Seed with the EXPANDED absolute paths (same `expand_trusted_dir` the
+    // file-tool `trusted_dirs` set uses below), NOT the raw settings/`--add-dir`
+    // entries. `RootsListHandler::roots_value` forwards each dir verbatim into
+    // `format!("file://{dir}")`, so a raw `~/shared` / relative `data` would
+    // emit a malformed `file://~/shared` (authority `~`, non-resolvable) instead
+    // of claude-code's `pathToFileURL(resolved)` = `file:///home/user/shared`.
+    // Expanding here also keeps the MCP-roots cell and the trusted-dir set in
+    // lock-step, so a later runtime `/add-dir <same abs path>` dedupes
+    // identically in both surfaces (review RV3).
+    let mcp_roots_seed: Vec<std::path::PathBuf> = {
+        let home = dirs::home_dir();
+        boot_additional_working_dirs
+            .iter()
+            .map(|raw| expand_trusted_dir(raw, &cwd, home.as_deref()))
+            .collect()
+    };
+    let mcp_additional_roots = mcp::new_shared_roots(mcp_roots_seed);
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
             posix.clone() as Arc<dyn McpTransport>,
@@ -8414,6 +8431,50 @@ mod tests {
             .mcp_registry
             .additional_roots_snapshot()
             .contains(&extra2));
+    }
+
+    /// RV3: a RAW (relative / `~`-prefixed) `--add-dir` / settings
+    /// `additionalDirectories` entry must be EXPANDED to an absolute path before
+    /// it seeds the live MCP `roots/list` cell — matching the file-tool
+    /// `trusted_dirs` set, which already expands. Otherwise a raw `data` would
+    /// reach `format!("file://{}")` as `file://data` (authority `data`, empty
+    /// path) instead of claude-code's resolvable `file:///<cwd>/data`, and the
+    /// two sets would permanently desync (a runtime `/add-dir <abs>` dedupes
+    /// against the already-expanded trusted set → the stale raw roots entry is
+    /// never corrected). Pins that BOTH surfaces hold the SAME absolute path.
+    #[tokio::test]
+    async fn build_expands_relative_add_dir_before_seeding_mcp_roots() {
+        let (tmp, mut cfg) = test_config(true);
+        // A RAW *relative* `--add-dir` entry (no host resolution at boot). The
+        // real dir exists under cwd so the expansion target is concrete.
+        std::fs::create_dir_all(tmp.path().join("data")).expect("mkdir data");
+        cfg.add_dir = vec![std::path::PathBuf::from("data")];
+        let expected = cfg.cwd.join("data"); // expand_trusted_dir(relative) = cwd.join
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        // File-tool trusted set already expanded (unchanged baseline).
+        assert!(
+            rt.session_cwd.trusted_dirs().contains(&expected),
+            "trusted_dirs must hold the EXPANDED path: {:?}",
+            rt.session_cwd.trusted_dirs(),
+        );
+        // The MCP roots seed must ALSO be expanded, not the raw `data` — this is
+        // the RV3 regression: the snapshot must contain the absolute path and
+        // must NOT contain the raw relative entry.
+        let snapshot = rt.mcp_registry.additional_roots_snapshot();
+        assert!(
+            snapshot.contains(&expected),
+            "MCP roots cell must be seeded with the EXPANDED path: {snapshot:?}",
+        );
+        assert!(
+            !snapshot.contains(&std::path::PathBuf::from("data")),
+            "MCP roots cell must NOT carry the raw relative entry: {snapshot:?}",
+        );
     }
 
     /// The production-built `McpRegistry` must carry the OAuth seam

@@ -128,6 +128,15 @@ pub(crate) fn thinking_lines(
     verbose: bool,
     theme: &Theme,
 ) -> Vec<StyledLine> {
+    // Empty/whitespace thinking carries nothing to reveal — claude-code renders
+    // the `∴ Thinking` block ONLY for actual reasoning text
+    // (`AssistantThinkingMessage.tsx`). Without this guard a provider that opens
+    // a thinking block with no content would leave a bodyless
+    // `∴ Thinking (ctrl+o to expand)` line that expands to nothing. (Redacted
+    // thinking — signature-only — is a separate `✻ Thinking…` marker.)
+    if thinking.trim().is_empty() {
+        return Vec::new();
+    }
     let header = |text: &str| StyledLine {
         spans: vec![StyledSpan::styled(
             text.to_string(),
@@ -628,6 +637,33 @@ mod tests {
             expanded.iter().any(|l| l.contains("step one")),
             "body present: {expanded:?}"
         );
+    }
+
+    #[test]
+    fn empty_thinking_renders_nothing_collapsed_or_verbose() {
+        // A thinking block with no reasoning text must render zero lines (no
+        // bodyless "∴ Thinking (ctrl+o to expand)" that expands to nothing) —
+        // matches claude-code, which shows thinking only when there is text.
+        for body in ["", "   ", "\n\t \n"] {
+            let cell = ThinkingCell::new(body.to_string());
+            assert!(
+                cell.display_lines(80, &Theme::dark(), RenderMode::default())
+                    .is_empty(),
+                "collapsed empty thinking must be blank for {body:?}"
+            );
+            assert!(
+                cell.display_lines(
+                    80,
+                    &Theme::dark(),
+                    RenderMode {
+                        raw: false,
+                        verbose: true,
+                    },
+                )
+                .is_empty(),
+                "verbose empty thinking must be blank for {body:?}"
+            );
+        }
     }
 
     #[test]

@@ -859,7 +859,12 @@ impl ChatWidget {
                         }
                     })
                     .unwrap_or(false);
-                if !appended {
+                // Only OPEN a new thinking cell for real reasoning text. An empty
+                // thinking chunk (some providers open a thinking block with no
+                // content) must not flush the active reply or leave a bodyless
+                // `∴ Thinking (ctrl+o to expand)` cell — claude-code shows
+                // thinking only when there is text.
+                if !appended && !delta.trim().is_empty() {
                     self.flush_or_discard_active();
                     self.transcript
                         .set_active(Box::new(ThinkingCell::new(delta)));

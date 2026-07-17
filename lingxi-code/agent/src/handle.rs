@@ -1085,6 +1085,19 @@ pub trait StreamingSubagentSpawner: Send + Sync {
     /// it to history, and runs the next turn-set. Errors when the agent id is
     /// unknown / its runner has terminated.
     async fn resume(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError>;
+
+    /// Tear down a persistent subagent's INNER pool runner and free its slot.
+    ///
+    /// The persistent runner "comes to rest" between turn-sets and parks on its
+    /// event channel; nothing on the one-shot [`Self::spawn_persistent`] return
+    /// path (only `(agent_id, rx)`) frees the pool slot, so a stopped/failed
+    /// agent would keep its `max_concurrent` slot forever — exhausting the pool
+    /// after repeated stop/fail. The task-layer handler calls this on `kill()`
+    /// and at any terminal state to deliver a cooperative `UserExit` and then
+    /// `deallocate` the slot (which cancels the runner task). Idempotent: a
+    /// missing / already-gone slot is a graceful no-op. Mirrors the
+    /// `in_process_teammate` kill path.
+    async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError>;
 }
 
 #[async_trait]
@@ -1114,6 +1127,21 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
                     content: message,
                 },
             )
+            .await
+            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))
+    }
+
+    async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError> {
+        // Cooperative exit first: a parked runner wakes on `UserExit` and emits
+        // a clean `Killed` before the hard cancel. A send failure means the slot
+        // is already gone (runner dropped its receiver) — non-fatal, proceed to
+        // `deallocate`, which is itself idempotent (missing slot ⇒ Ok).
+        let _ = self
+            .pool
+            .send_event(agent_id, engine::Event::UserExit)
+            .await;
+        self.pool
+            .deallocate(agent_id)
             .await
             .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))
     }

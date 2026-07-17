@@ -515,9 +515,13 @@ mod unix {
         };
         match crate::bg_reply_queue::enqueue_reply(&fb.config_home, &fb.short, line) {
             Ok(_) => {
+                // Honest wording: a vanished worker is failed closed and never
+                // respawns, so the daemon does NOT re-run this reply — it drains
+                // the queue when it reaps the job and records it as undelivered.
+                // Do not promise "delivery on respawn" the policy can't keep.
                 let mut stdout = io::stdout().lock();
                 let _ = stdout.write_all(
-                    b"\r\n[worker unavailable \xe2\x80\x94 reply queued for delivery on respawn]\r\n",
+                    b"\r\n[worker unavailable \xe2\x80\x94 reply saved to the job's offline queue]\r\n",
                 );
                 let _ = stdout.flush();
             }

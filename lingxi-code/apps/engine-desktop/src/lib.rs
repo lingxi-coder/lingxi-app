@@ -767,30 +767,34 @@ fn managed_only_sandbox_overrides(
 /// IGNORED (sandbox-adapter.ts 2.1.207 @223928133:
 /// `allowAppleEvents:[...managedSources, wr("flagSettings"), userSettings]
 /// .map(z => z?.sandbox?.allowAppleEvents).find(z => z !== undefined)`).
-/// First-defined wins in order managed/policy → flag → user; CC pre-folds the
-/// file-based managed tiers into ONE object, so we merge them the same
-/// whole-`sandbox`-block last-write-wins way `managed_only_sandbox_overrides`
-/// does (drop-ins override the base) before reading the flag. The engine has no
-/// boot-time `--settings` analog (see the `sandbox_runtime_cfg` comment on
-/// `flagSettings`), so the flag slot is skipped. Returns `None` when no honored
-/// source set it — matching CC's `.find(...) === undefined ⇒ manager reads
-/// `false``. Threaded onto
+/// First-defined wins in order managed/policy → flag → user. CC pre-folds the
+/// file-based managed tiers into ONE object with a DEEP merge
+/// (`loadManagedFileSettings` → `Fie(r, next, Bpe)`: base then drop-ins sorted,
+/// later scalars override earlier but omitted fields are preserved), so
+/// `sandbox.allowAppleEvents` is resolved PER-FIELD last-defined across the
+/// tiers — a later drop-in that carries only a partial `sandbox` block (e.g.
+/// `{"sandbox":{"network":…}}`) must NOT clobber an earlier tier's value. The
+/// engine has no boot-time `--settings` analog (see the `sandbox_runtime_cfg`
+/// comment on `flagSettings`), so the flag slot is skipped. Returns `None` when
+/// no honored source set it — matching CC's `.find(...) === undefined ⇒ manager
+/// reads `false``. Threaded onto
 /// [`SandboxConvertContext::allow_apple_events_override`].
 fn apple_events_override(
     managed_raw_tiers: &[String],
     user_settings_raw: Option<&str>,
 ) -> Option<bool> {
-    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
-    // Managed/policy sources first (pre-merged, last-write-wins across tiers).
-    let mut merged_managed: Option<SandboxSettingsJson> = None;
+    use sandbox::runtime_config::SettingsJson;
+    // Managed/policy file tiers are deep-merged, so resolve `allowAppleEvents`
+    // per-field last-defined (later drop-ins win, `None` tiers don't clobber).
+    let mut merged_managed: Option<bool> = None;
     for raw in managed_raw_tiers {
         if let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) {
-            if let Some(s) = parsed.sandbox {
-                merged_managed = Some(s);
+            if let Some(v) = parsed.sandbox.and_then(|s| s.allow_apple_events) {
+                merged_managed = Some(v);
             }
         }
     }
-    if let Some(v) = merged_managed.and_then(|s| s.allow_apple_events) {
+    if let Some(v) = merged_managed {
         return Some(v);
     }
     // flagSettings has no boot-time analog in the engine (skipped) — then user.
@@ -5110,7 +5114,24 @@ pub async fn build(
     // server's `roots/list`) and the runtime `/add-dir` effect: pushing into it
     // via `mcp_registry.add_root(...)` is seen by every connected server on its
     // next `roots/list` without a reconnect (parity 2.1.207 P1-08).
-    let mcp_additional_roots = mcp::new_shared_roots(boot_additional_working_dirs.clone());
+    //
+    // Seed with the EXPANDED absolute paths (same `expand_trusted_dir` the
+    // file-tool `trusted_dirs` set uses below), NOT the raw settings/`--add-dir`
+    // entries. `RootsListHandler::roots_value` forwards each dir verbatim into
+    // `format!("file://{dir}")`, so a raw `~/shared` / relative `data` would
+    // emit a malformed `file://~/shared` (authority `~`, non-resolvable) instead
+    // of claude-code's `pathToFileURL(resolved)` = `file:///home/user/shared`.
+    // Expanding here also keeps the MCP-roots cell and the trusted-dir set in
+    // lock-step, so a later runtime `/add-dir <same abs path>` dedupes
+    // identically in both surfaces (review RV3).
+    let mcp_roots_seed: Vec<std::path::PathBuf> = {
+        let home = dirs::home_dir();
+        boot_additional_working_dirs
+            .iter()
+            .map(|raw| expand_trusted_dir(raw, &cwd, home.as_deref()))
+            .collect()
+    };
+    let mcp_additional_roots = mcp::new_shared_roots(mcp_roots_seed);
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
             posix.clone() as Arc<dyn McpTransport>,
@@ -8416,6 +8437,50 @@ mod tests {
             .contains(&extra2));
     }
 
+    /// RV3: a RAW (relative / `~`-prefixed) `--add-dir` / settings
+    /// `additionalDirectories` entry must be EXPANDED to an absolute path before
+    /// it seeds the live MCP `roots/list` cell — matching the file-tool
+    /// `trusted_dirs` set, which already expands. Otherwise a raw `data` would
+    /// reach `format!("file://{}")` as `file://data` (authority `data`, empty
+    /// path) instead of claude-code's resolvable `file:///<cwd>/data`, and the
+    /// two sets would permanently desync (a runtime `/add-dir <abs>` dedupes
+    /// against the already-expanded trusted set → the stale raw roots entry is
+    /// never corrected). Pins that BOTH surfaces hold the SAME absolute path.
+    #[tokio::test]
+    async fn build_expands_relative_add_dir_before_seeding_mcp_roots() {
+        let (tmp, mut cfg) = test_config(true);
+        // A RAW *relative* `--add-dir` entry (no host resolution at boot). The
+        // real dir exists under cwd so the expansion target is concrete.
+        std::fs::create_dir_all(tmp.path().join("data")).expect("mkdir data");
+        cfg.add_dir = vec![std::path::PathBuf::from("data")];
+        let expected = cfg.cwd.join("data"); // expand_trusted_dir(relative) = cwd.join
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        // File-tool trusted set already expanded (unchanged baseline).
+        assert!(
+            rt.session_cwd.trusted_dirs().contains(&expected),
+            "trusted_dirs must hold the EXPANDED path: {:?}",
+            rt.session_cwd.trusted_dirs(),
+        );
+        // The MCP roots seed must ALSO be expanded, not the raw `data` — this is
+        // the RV3 regression: the snapshot must contain the absolute path and
+        // must NOT contain the raw relative entry.
+        let snapshot = rt.mcp_registry.additional_roots_snapshot();
+        assert!(
+            snapshot.contains(&expected),
+            "MCP roots cell must be seeded with the EXPANDED path: {snapshot:?}",
+        );
+        assert!(
+            !snapshot.contains(&std::path::PathBuf::from("data")),
+            "MCP roots cell must NOT carry the raw relative entry: {snapshot:?}",
+        );
+    }
+
     /// The production-built `McpRegistry` must carry the OAuth seam
     /// ([`mcp::registry::OAuthDeps`]). Without `.with_oauth(..)` in `build()`,
     /// OAuth-configured remote MCP servers can't authenticate (they silently
@@ -10250,11 +10315,36 @@ mod tests {
             "managed false must win over a user true"
         );
 
-        // Multiple managed tiers: last write wins (drop-ins override the base),
-        // mirroring CC's pre-merge of the file-based managed sources.
+        // Multiple managed tiers that BOTH set the field: last write wins
+        // (drop-ins override the base), mirroring CC's deep-merge of the
+        // file-based managed sources (`Fie(r, next, Bpe)`, later scalar wins).
         assert_eq!(
             apple_events_override(&[on.clone(), off.clone()], None),
             Some(false)
+        );
+
+        // Regression (review RV5): a later managed drop-in that carries a
+        // PARTIAL `sandbox` block WITHOUT allowAppleEvents must NOT discard an
+        // earlier tier's value. CC deep-merges the file managed tiers per-field
+        // (base `{sandbox:{allowAppleEvents:true}}` + drop-in
+        // `{sandbox:{enabled:true}}` → `{sandbox:{allowAppleEvents:true,enabled:true}}`),
+        // so allowAppleEvents survives.
+        assert_eq!(
+            apple_events_override(
+                &[on.clone(), r#"{"sandbox":{"enabled":true}}"#.to_string()],
+                None,
+            ),
+            Some(true),
+            "a later partial-sandbox drop-in must not clobber an earlier tier's allowAppleEvents"
+        );
+        // Symmetric: an earlier partial block then a later tier that sets it.
+        assert_eq!(
+            apple_events_override(
+                &[r#"{"sandbox":{"enabled":true}}"#.to_string(), off.clone()],
+                None,
+            ),
+            Some(false),
+            "a later tier's allowAppleEvents still overrides once it is defined"
         );
 
         // A managed tier WITHOUT the field but user WITH it → user honored.

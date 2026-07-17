@@ -151,6 +151,41 @@ impl SessionCwd {
         true
     }
 
+    /// Move the session cwd to `target` while PRESERVING the additional
+    /// working directories (settings `additionalDirectories` + runtime
+    /// `/add-dir` grants). The new trusted set is `[target, ...additional]`,
+    /// where `additional` is the prior trusted set with the OLD cwd removed
+    /// (and `target` de-duplicated).
+    ///
+    /// This backs the `/cd` command (parity 2.1.208): claude-code's `/cd` move
+    /// fn (`sMs` → `process.chdir(e); kN(Ct())`) updates only the cwd and never
+    /// touches `toolPermissionContext.additionalWorkingDirectories`, and its
+    /// file-tool allow-set is `EJ = new Set([ln()/*cwd*/, ...additionalWorkingDirectories])`.
+    /// So after a `/cd` the trusted set is `{new cwd} ∪ additional` — the old
+    /// cwd is no longer trusted (it was `ln()`, now replaced), but every
+    /// `/add-dir`/settings directory stays readable/writable. A plain
+    /// [`Self::swap`] with `vec![target]` would instead drop those dirs.
+    ///
+    /// Like [`Self::swap`] (and unlike [`Self::add_trusted_dir`]) this DOES
+    /// fire the on-swap callback and mirror the live-cwd cells, because the cwd
+    /// changed.
+    pub fn change_cwd(&self, target: PathBuf) {
+        let cur = self.state.load();
+        let old_cwd = cur.cwd.clone();
+        // Additional working dirs = current trusted set minus the OLD cwd
+        // (which `/cd` moves away from), with `target` de-duplicated so it
+        // appears exactly once at the front.
+        let mut trusted = Vec::with_capacity(cur.trusted_dirs.len() + 1);
+        trusted.push(target.clone());
+        for d in &cur.trusted_dirs {
+            if *d != old_cwd && *d != target {
+                trusted.push(d.clone());
+            }
+        }
+        drop(cur);
+        self.swap(target, trusted);
+    }
+
     /// Register a callback invoked (with the new cwd) at the end of every
     /// [`SessionCwd::swap`]. No-op until called; replaces any prior callback.
     pub fn set_on_swap(&self, cb: Box<dyn Fn(&Path) + Send + Sync>) {
@@ -338,6 +373,69 @@ mod tests {
             boot(),
             "add_trusted_dir must not perturb the linked live-cwd cell"
         );
+    }
+
+    #[test]
+    fn change_cwd_preserves_additional_working_dirs() {
+        // REGRESSION (review RV4): `/cd` must move the cwd while KEEPING the
+        // additional working directories (settings dirs + runtime `/add-dir`
+        // grants). Boot in `proj`, `/add-dir shared`, then `/cd other`: the
+        // new trusted set is `[other, shared]` — `shared` survives, the old
+        // cwd `proj` is dropped. A plain `swap(other, vec![other])` (the
+        // pre-fix behavior) would drop `shared`, breaking a later Read/Write
+        // under it.
+        let proj = PathBuf::from("/home/me/project");
+        let shared = PathBuf::from("/data/shared");
+        let other = PathBuf::from("/home/me/other");
+        let sc = SessionCwd::new(proj.clone(), vec![proj.clone()]);
+        assert!(sc.add_trusted_dir(shared.clone()));
+        assert_eq!(sc.trusted_dirs(), vec![proj.clone(), shared.clone()]);
+
+        sc.change_cwd(other.clone());
+        assert_eq!(sc.cwd(), other, "cwd moved to the /cd target");
+        assert_eq!(
+            sc.trusted_dirs(),
+            vec![other.clone(), shared.clone()],
+            "additional working dir survives /cd; old cwd is dropped"
+        );
+    }
+
+    #[test]
+    fn change_cwd_dedupes_target_already_trusted() {
+        // If the /cd target was already an additional working dir, it must
+        // appear exactly once (at the front), and the old cwd is still dropped.
+        let proj = PathBuf::from("/home/me/project");
+        let other = PathBuf::from("/home/me/other");
+        let sc = SessionCwd::new(proj.clone(), vec![proj.clone()]);
+        assert!(sc.add_trusted_dir(other.clone()));
+        assert_eq!(sc.trusted_dirs(), vec![proj.clone(), other.clone()]);
+
+        sc.change_cwd(other.clone());
+        assert_eq!(sc.cwd(), other);
+        assert_eq!(
+            sc.trusted_dirs(),
+            vec![other.clone()],
+            "target de-duplicated; old cwd dropped"
+        );
+    }
+
+    #[test]
+    fn change_cwd_fires_on_swap_and_mirrors_live_cell() {
+        // The cwd changed, so (like swap) the on-swap callback fires with the
+        // new cwd and any linked live-cwd cell is updated.
+        let sc = SessionCwd::new(boot(), vec![boot()]);
+        let cell: Arc<Mutex<PathBuf>> = Arc::new(Mutex::new(boot()));
+        sc.link_live_cwd(cell.clone());
+        let seen: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let seen_clone = Arc::clone(&seen);
+        sc.set_on_swap(Box::new(move |p: &Path| {
+            *seen_clone.lock().unwrap() = Some(p.to_path_buf());
+        }));
+
+        let target = PathBuf::from("/home/me/other");
+        sc.change_cwd(target.clone());
+        assert_eq!(*seen.lock().unwrap(), Some(target.clone()));
+        assert_eq!(*cell.lock().unwrap(), target);
     }
 
     #[test]

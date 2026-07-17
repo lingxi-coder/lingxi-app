@@ -113,7 +113,7 @@ pub enum ChatOutcome {
     /// wrong reactor, and race the turn loop's history swap) and reports the
     /// summary back through `TurnEvent::SystemNotice`. The `String` is the
     /// (currently unused) argument tail.
-    Compact(String),
+    Compact(String, CancellationToken),
     /// `/fast [on|off]` asked the caller to set (`Some(true|false)`) or toggle
     /// (`None`, a bare `/fast`) the session's fast-mode flag. The caller flips
     /// it off-loop via `OrchestratorHandle::set_fast_mode` and reports the
@@ -246,6 +246,8 @@ pub struct ChatWidget {
     theme_name: ThemeName,
     /// Cancellation token for the in-flight turn, if any.
     current_turn: Option<CancellationToken>,
+    /// Cancellation token for an in-flight manual compaction pass.
+    current_compaction: Option<CancellationToken>,
     /// When the in-flight turn began, for the spinner's elapsed-seconds counter.
     turn_started_at: Option<std::time::Instant>,
     /// When a `/compact` (forced) compaction pass began, or `None` when not
@@ -441,6 +443,7 @@ impl ChatWidget {
             theme_setting: ThemeSetting::Named(ThemeName::Dark),
             theme_name: ThemeName::Dark,
             current_turn: None,
+            current_compaction: None,
             turn_started_at: None,
             compacting_started_at: None,
             api_retry: None,
@@ -509,7 +512,11 @@ impl ChatWidget {
     /// mode (claude-code `initialPermissionModeFromCLI`), and whether bypass is
     /// an available Shift+Tab cycle target (`--dangerously-skip-permissions` /
     /// `--allow-dangerously-skip-permissions`). Called once at TUI startup.
-    pub fn set_permission_mode(&mut self, mode: permission::PermissionMode, bypass_available: bool) {
+    pub fn set_permission_mode(
+        &mut self,
+        mode: permission::PermissionMode,
+        bypass_available: bool,
+    ) {
         self.bottom_pane.set_permission_mode(mode);
         self.bottom_pane.set_bypass_available(bypass_available);
     }
@@ -518,7 +525,7 @@ impl ChatWidget {
     /// (claude-code `PermissionMode.ts` string form).
     fn permission_mode_wire(mode: permission::PermissionMode) -> &'static str {
         use permission::PermissionMode::{
-            AcceptEdits, Auto, BypassPermissions, Bubble, Default, DontAsk, Plan,
+            AcceptEdits, Auto, Bubble, BypassPermissions, Default, DontAsk, Plan,
         };
         match mode {
             Default | Bubble => "default",
@@ -653,6 +660,20 @@ impl ChatWidget {
         {
             self.open_next_queued_permission();
             return ChatOutcome::PasteImage;
+        }
+        // Manual compaction replaces the whole live history atomically. Keep
+        // accepting edits while it runs, but do not submit a new prompt until
+        // the compact task has emitted `CompactEnded`; otherwise the turn can
+        // append to the old history between the compactor snapshot and swap.
+        // Modified Enter remains available for inserting a newline.
+        if self.current_compaction.is_some()
+            && !self.bottom_pane.has_active_view()
+            && key.kind == crossterm::event::KeyEventKind::Press
+            && key.code == crossterm::event::KeyCode::Enter
+            && key.modifiers.is_empty()
+        {
+            self.open_next_queued_permission();
+            return ChatOutcome::Continue;
         }
         let outcome = self.bottom_pane.handle_key(key);
         let outcome = self.on_pane_outcome(outcome);
@@ -960,6 +981,14 @@ impl ChatWidget {
                 self.turn_started_at = None;
                 self.api_retry = None;
                 self.activity = None;
+                // A FAILED auto/reactive compaction emits `CompactStarted` but
+                // neither `CompactionCompleted` nor `CompactEnded` — the turn
+                // boundary is the backstop that stops the `Compacting
+                // conversation…` bar from sticking forever. Manual `/compact`
+                // runs off-turn, so no TurnEnded interleaves with it.
+                if self.current_compaction.is_none() {
+                    self.compacting_started_at = None;
+                }
                 // (Gap B) `current_todo` is per-turn — clear it so the next
                 // turn's spinner doesn't keep showing the previous turn's
                 // `activeForm` until a fresh `TodoWrite` arrives.
@@ -1044,6 +1073,12 @@ impl ChatWidget {
                 // rendered). Consecutive boundaries de-dupe to one marker —
                 // the old backend's `push_compact_boundary` contract.
                 self.push_compact_boundary(messages_before, messages_after);
+                // An AUTO/reactive compaction (mid-turn) has no `CompactEnded`
+                // sender (that's the manual `/compact` task's job), so a
+                // successful pass clears the `Compacting conversation…`
+                // spinner/bar here. `current_compaction` is left alone — only
+                // the manual flow sets it, and its `CompactEnded` clears it.
+                self.compacting_started_at = None;
             }
             // A forced compaction pass began: show claude-code's
             // `Compacting conversation…` spinner + time-based progress bar
@@ -1056,6 +1091,7 @@ impl ChatWidget {
             // `SystemNotice`.
             TurnEvent::CompactEnded => {
                 self.compacting_started_at = None;
+                self.current_compaction = None;
             }
             TurnEvent::RateLimit {
                 status,
@@ -1297,6 +1333,9 @@ impl ChatWidget {
     /// torn down, not returned to.
     pub fn cancel_active_turn(&mut self) {
         if let Some(token) = self.current_turn.take() {
+            token.cancel();
+        }
+        if let Some(token) = self.current_compaction.take() {
             token.cancel();
         }
     }
@@ -3014,7 +3053,24 @@ impl ChatWidget {
         if self.orchestrator.is_none() {
             return self.show_system_text("/compact is unavailable (no engine handle wired)", true);
         }
-        ChatOutcome::Compact(args.to_string())
+        // Divergence(safety): these two guard strings are NOT in the CC 2.1.211
+        // corpus — CC queues mid-turn input and replays it after the turn, so
+        // it never needs them. Until this port grows mid-turn command queueing,
+        // rejecting the overlap outright is the safe behavior: a /compact
+        // racing a live turn (or a second /compact racing the first) would
+        // contend on the whole-history swap.
+        if self.current_compaction.is_some() {
+            return self.show_system_text("Compaction already in progress", true);
+        }
+        if self.current_turn.is_some() {
+            return self.show_system_text(
+                "Cannot compact while a request is in progress. Press Esc to interrupt it first.",
+                true,
+            );
+        }
+        let token = CancellationToken::new();
+        self.current_compaction = Some(token.clone());
+        ChatOutcome::Compact(args.to_string(), token)
     }
 
     /// The active streaming cell's rendered lines at `width` (empty when
@@ -3121,6 +3177,20 @@ impl ChatWidget {
             BottomPaneOutcome::Consumed => ChatOutcome::Continue,
             BottomPaneOutcome::Quit => ChatOutcome::Quit,
             BottomPaneOutcome::Interrupt => {
+                if let Some(token) = self.current_compaction.as_ref() {
+                    // Cancel the compact task and hide the progress bar, but
+                    // KEEP `current_compaction` (the submit block + re-/compact
+                    // guard) until the task acknowledges with `CompactEnded`.
+                    // Clearing it here would lift the Enter block while the
+                    // cancelled `force_compact` can still be past its last
+                    // cancel checkpoint — a submitted prompt would then race
+                    // the whole-history swap. It also closes the stale-
+                    // `CompactEnded` generation race: a second `/compact`
+                    // cannot start until the first task's `CompactEnded` lands.
+                    token.cancel();
+                    self.compacting_started_at = None;
+                    return ChatOutcome::Continue;
+                }
                 if let Some(token) = self.current_turn.take() {
                     token.cancel();
                 }
@@ -3290,7 +3360,9 @@ impl ChatWidget {
         // display-only — without this the model never receives the image.
         self.pending_images.push(std::path::PathBuf::from(path));
         // Update the composer attachment indicators.
-        let labels: Vec<String> = self.pending_images.iter()
+        let labels: Vec<String> = self
+            .pending_images
+            .iter()
             .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
             .collect();
         self.bottom_pane.set_attached_image_labels(labels);
@@ -4323,10 +4395,93 @@ mod tests {
     fn compact_command_returns_compact_outcome_off_loop() {
         let (mut widget, _mock) = widget_with_orchestrator();
         let outcome = widget.cmd_compact("");
-        let ChatOutcome::Compact(args) = outcome else {
+        let ChatOutcome::Compact(args, token) = outcome else {
             panic!("/compact must return ChatOutcome::Compact");
         };
         assert_eq!(args, "");
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn compact_command_token_is_cancelled_by_interrupt() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        let ChatOutcome::Compact(_, token) = widget.cmd_compact("focus") else {
+            panic!("/compact must return a cancellation token");
+        };
+
+        assert!(matches!(
+            widget.on_pane_outcome(BottomPaneOutcome::Interrupt),
+            ChatOutcome::Continue
+        ));
+        assert!(token.is_cancelled(), "Esc/Ctrl-C must cancel compaction");
+        // The submit block STAYS until the compact task acknowledges with
+        // `CompactEnded` — clearing on Esc would let a new prompt race the
+        // cancelled task's history swap (its last cancel checkpoint may
+        // already be behind it).
+        assert!(
+            widget.current_compaction.is_some(),
+            "current_compaction held until CompactEnded acknowledges"
+        );
+        assert!(
+            widget.pane_status().compact_percent.is_none(),
+            "the progress bar hides immediately on Esc"
+        );
+        assert!(
+            widget.transcript.is_empty(),
+            "compaction cancellation uses its own notice, not a fake turn interrupt"
+        );
+        // The task's acknowledgement releases the block.
+        widget.apply_turn_event(TurnEvent::CompactEnded);
+        assert!(widget.current_compaction.is_none());
+    }
+
+    #[test]
+    fn compact_rejects_overlapping_compaction_and_live_turn() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(
+            widget.cmd_compact("first"),
+            ChatOutcome::Compact(_, _)
+        ));
+        assert!(matches!(
+            widget.cmd_compact("second"),
+            ChatOutcome::Continue
+        ));
+        let duplicate = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert_eq!(duplicate.body(), "Compaction already in progress");
+        assert!(duplicate.is_error());
+
+        widget.apply_turn_event(TurnEvent::CompactEnded);
+        assert!(matches!(
+            widget.submit_prompt("running".into()),
+            ChatOutcome::Submit(_, _, _)
+        ));
+        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Continue));
+        let overlap = cell::<crate::history_cell::system::SystemTextCell>(&widget, 2);
+        assert!(overlap
+            .body()
+            .starts_with("Cannot compact while a request is in progress."));
+        assert!(overlap.is_error());
+    }
+
+    #[test]
+    fn enter_during_compaction_keeps_composer_buffer_unsubmitted() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
+
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Char('x'))),
+            ChatOutcome::Continue
+        ));
+        assert!(matches!(
+            widget.handle_key(press(KeyCode::Enter)),
+            ChatOutcome::Continue
+        ));
+        assert_eq!(
+            widget.bottom_pane().composer().text(),
+            "x",
+            "plain Enter must not start a turn against the pre-compact history"
+        );
+        assert!(widget.current_turn.is_none());
     }
 
     /// `CompactStarted` flips the pane into claude-code's compacting state:
@@ -4358,6 +4513,56 @@ mod tests {
             !after.running && after.compact_percent.is_none(),
             "compaction end returns to idle"
         );
+    }
+
+    /// An AUTO/reactive compaction (mid-turn) has no `CompactEnded` sender:
+    /// its bar clears on `CompactionCompleted` (success) or the `TurnEnded`
+    /// boundary (failure backstop) — otherwise `Compacting conversation…`
+    /// would stick forever after an auto-compact.
+    #[test]
+    fn auto_compaction_indicator_clears_on_completed_and_on_turn_end() {
+        // Success path: CompactStarted → CompactionCompleted clears the bar.
+        let mut w1 = widget();
+        w1.apply_turn_event(TurnEvent::CompactStarted);
+        assert!(w1.pane_status().compact_percent.is_some());
+        w1.apply_turn_event(TurnEvent::CompactionCompleted {
+            messages_before: 40,
+            messages_after: 8,
+            bytes_saved: 1024,
+        });
+        assert!(
+            w1.pane_status().compact_percent.is_none(),
+            "successful auto-compact clears the progress bar"
+        );
+
+        // Failure path: CompactStarted mid-turn, no completion — the turn
+        // boundary clears it.
+        let mut w2 = widget();
+        w2.apply_turn_event(TurnEvent::TurnStarted);
+        w2.apply_turn_event(TurnEvent::CompactStarted);
+        assert!(w2.pane_status().compact_percent.is_some());
+        w2.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        assert!(
+            w2.pane_status().compact_percent.is_none(),
+            "turn boundary is the failed-auto-compact backstop"
+        );
+    }
+
+    /// A MANUAL `/compact` (current_compaction set) must survive a stray
+    /// `TurnEnded` — its own `CompactEnded` clears the bar.
+    #[test]
+    fn manual_compaction_indicator_survives_turn_end() {
+        let (mut widget, _mock) = widget_with_orchestrator();
+        assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
+        widget.apply_turn_event(TurnEvent::CompactStarted);
+        assert!(widget.pane_status().compact_percent.is_some());
+        widget.apply_turn_event(TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
+        assert!(
+            widget.pane_status().compact_percent.is_some(),
+            "manual compaction bar is cleared by CompactEnded, not TurnEnded"
+        );
+        widget.apply_turn_event(TurnEvent::CompactEnded);
+        assert!(widget.pane_status().compact_percent.is_none());
     }
 
     /// (c) Unwired (`None`, every existing test widget), each new command is a

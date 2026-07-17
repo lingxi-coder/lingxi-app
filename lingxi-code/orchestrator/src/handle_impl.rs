@@ -10,11 +10,10 @@
 //!
 //! - `clear_session` wipes [`engine::SessionState::history`] and mints
 //!   a fresh `SessionId`.
-//! - `force_compact` is a thin shim — for M5-10 it reports the current
-//!   history length as both `messages_before` and `messages_after` (no-op)
-//!   since the orchestrator's compaction subsystem is not yet plumbed into
-//!   the production type. M5-11/M5-12 will wire a real
-//!   `CompactionOrchestrator`.
+//! - `force_compact` drives the production `CompactionOrchestrator`, including
+//!   the summarizer request, compact boundary, post-compact attachments and
+//!   lifecycle hooks. An unwired compactor is an error rather than a fake
+//!   zero-delta success.
 //! - `request_exit` flips an `AtomicBool` on the orchestrator. The REPL
 //!   (M5-13) reads this between turns and breaks out of the loop.
 //! - `open_memory_editor` ensures `<config>/claude/LINGXI.md` exists, then
@@ -47,6 +46,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let mut s = self.session.lock().await;
         s.history.clear();
         s.session_id = protocol::SessionId::new();
+        self.compaction_cumulative_dropped_tokens
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         // Reset the JSONL parent-uuid chain (M5-07) since we minted a new
         // session id; downstream appends should not chain to the prior
         // session's last entry.
@@ -83,6 +84,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
+        // The protocol projection does not retain compactMetadata, so do not
+        // leak the prior live session's cumulative counter into the resumed
+        // transcript. A future typed boundary variant can seed this from the
+        // latest persisted boundary instead of starting the live counter at 0.
+        self.compaction_cumulative_dropped_tokens
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         // Seed the parent-uuid chain so any future append chains off the
         // resumed tail (matching the M5-07 writer's chain semantics).
         *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;
@@ -95,6 +102,30 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // `force_compact_with_cancel` directly to provide a Ctrl-C token.
         self.force_compact_with_cancel(tokio_util::sync::CancellationToken::new())
             .await
+    }
+
+    async fn force_compact_with_instructions(
+        &self,
+        custom_instructions: &str,
+    ) -> Result<CompactionSummary, HandleError> {
+        self.force_compact_with_instructions_and_cancel(
+            Some(custom_instructions).filter(|s| !s.trim().is_empty()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    async fn force_compact_with_instructions_and_cancel(
+        &self,
+        custom_instructions: Option<&str>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<CompactionSummary, HandleError> {
+        ConversationOrchestrator::force_compact_with_instructions_and_cancel(
+            self,
+            custom_instructions,
+            cancel,
+        )
+        .await
     }
 
     /// `/fork` — spawn a DETACHED background agent that inherits the

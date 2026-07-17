@@ -176,6 +176,21 @@ impl DeferralState {
             .contains(name)
     }
 
+    /// Snapshot deferred-tool names already loaded in this session, sorted for
+    /// compact-boundary persistence (`preCompactDiscoveredTools`).
+    #[must_use]
+    pub fn loaded_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .loaded
+            .read()
+            .expect("deferral loaded-set poisoned")
+            .iter()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
     /// The claude-code deferral predicate applied to a concrete tool for THIS
     /// turn's wire.
     #[must_use]
@@ -272,6 +287,13 @@ mod tests {
         d.mark_loaded(["Task".to_string()]);
         assert!(d.is_loaded("Task"));
         assert!(!d.should_defer("Task", true));
+    }
+
+    #[test]
+    fn loaded_tool_names_are_sorted_and_deduplicated() {
+        let d = DeferralState::new(ToolSearchMode::Enabled, false);
+        d.mark_loaded(["Zed", "Read", "Zed"]);
+        assert_eq!(d.loaded_tool_names(), vec!["Read", "Zed"]);
     }
 
     #[test]

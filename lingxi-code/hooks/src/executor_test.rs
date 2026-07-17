@@ -1153,6 +1153,19 @@ mod command_arm_tests {
     }
 
     #[tokio::test]
+    async fn pre_compact_event_serializes_custom_instructions() {
+        let stdin = dispatch_and_capture(
+            HookEventType::PreCompact,
+            HookEvent::PreCompact {
+                reason: "manual".into(),
+                custom_instructions: Some("focus on tests".into()),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""custom_instructions":"focus on tests""#));
+    }
+
+    #[tokio::test]
     async fn post_compact_event_serializes_summary() {
         let stdin = dispatch_and_capture(
             HookEventType::PostCompact,

@@ -672,6 +672,26 @@ const INTERRUPT_MESSAGE: &str = "[Request interrupted by user]";
 /// `messages.ts:208` `INTERRUPT_MESSAGE_FOR_TOOL_USE`.
 const INTERRUPT_MESSAGE_FOR_TOOL_USE: &str = "[Request interrupted by user for tool use]";
 
+/// Folded outcome of the `PreCompact` lifecycle hooks.
+pub(crate) struct PreCompactHookOutcome {
+    /// Blocking reason, when a hook rejected compaction.
+    pub(crate) blocked_by: Option<String>,
+    /// Successful hook stdout appended to the summary prompt.
+    pub(crate) additional_instructions: Option<String>,
+}
+
+fn merge_compact_instructions(primary: Option<&str>, additional: Option<&str>) -> Option<String> {
+    let parts: Vec<&str> = [primary, additional]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Claude `mio`: caller focus and successful PreCompact stdout are separate
+    // instruction paragraphs, joined by a blank line.
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 /// The orchestrator. Owns the session, dispatches tools, drives the loop.
 ///
 /// Construction is via `new(...)` (batched-only) or `new_with_streaming(...)`
@@ -911,6 +931,11 @@ pub struct ConversationOrchestrator {
     /// fires inside `async` turn drivers; uncontended in practice (only the
     /// in-flight turn touches it). Default = zero consecutive failures.
     pub(crate) compaction_tracking: Mutex<compaction::AutoCompactTrackingState>,
+    /// Running `compactMetadata.cumulativeDroppedTokens` value for this live
+    /// session. Claude derives it from prior compact-boundary metadata; the
+    /// protocol history intentionally projects that metadata out, so the
+    /// orchestrator keeps the equivalent scalar directly.
+    pub(crate) compaction_cumulative_dropped_tokens: std::sync::atomic::AtomicU64,
     /// The last API response's total *input* token count
     /// (`input_tokens + cache_read_input_tokens + cache_creation_input_tokens`),
     /// recorded by both turn drivers after every successful call. This is the
@@ -1349,6 +1374,7 @@ impl ConversationOrchestrator {
             main_thread_agent: tokio::sync::RwLock::new(None),
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
+            compaction_cumulative_dropped_tokens: std::sync::atomic::AtomicU64::new(0),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
             output_token_pool: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             turn_start_output_baseline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2171,10 +2197,15 @@ impl ConversationOrchestrator {
         let Some(slot) = self.cache_safe_slot.as_ref() else {
             return;
         };
-        let fork_context_messages = {
+        let (fork_context_messages, session_id) = {
             let s = self.session.lock().await;
-            s.history.clone()
+            (s.history.clone(), s.session_id)
         };
+        let transcript_path = self
+            .jsonl_writer
+            .as_ref()
+            .map(|writer| writer.path().to_path_buf())
+            .unwrap_or_else(|| self.computed_transcript_path(&session_id));
         slot.save(sidequery::CacheSafeParams {
             system_prompt: system.unwrap_or("").into(),
             user_context: std::collections::HashMap::new(),
@@ -2191,6 +2222,7 @@ impl ConversationOrchestrator {
                 append_system_prompt: None,
             },
             fork_context_messages,
+            transcript_path: (!transcript_path.as_os_str().is_empty()).then_some(transcript_path),
             // Overwritten by the slot on save; the value here is irrelevant.
             generation: 0,
         })
@@ -2326,39 +2358,42 @@ impl ConversationOrchestrator {
     ///    `OutputEvent::CompactionCompleted`, return a
     ///    `CompactionSummary` with real numbers.
     ///
-    /// When no compactor is wired (`compaction == None`), falls back
-    /// to the M5-10 no-op shape — returns the current history length
-    /// as both `messages_before` and `messages_after`.
+    /// When no compactor is wired (`compaction == None`), returns an explicit
+    /// error. Manual compaction must never report success without a real model
+    /// summary and history transition.
     ///
     /// (M6-08)
     pub async fn force_compact_with_cancel(
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<traits::CompactionSummary, traits::HandleError> {
+        self.force_compact_with_instructions_and_cancel(None, cancel)
+            .await
+    }
+
+    /// Manual `/compact` with optional focus text and cooperative cancellation.
+    pub async fn force_compact_with_instructions_and_cancel(
+        &self,
+        custom_instructions: Option<&str>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<traits::CompactionSummary, traits::HandleError> {
         let Some(compactor) = self.compaction.clone() else {
-            // No compactor wired — fall back to the M5-10 no-op shape so
-            // pre-M6-08 callers do not break.
-            let s = self.session.lock().await;
-            let count = u32::try_from(s.history.len()).unwrap_or(u32::MAX);
-            return Ok(traits::CompactionSummary {
-                messages_before: count,
-                messages_after: count,
-                bytes_saved: 0,
-            });
+            return Err(traits::HandleError::ActionFailed(
+                "compaction unavailable".into(),
+            ));
         };
 
         // Snapshot history (clone — we don't hold the lock across the
         // network call inside `process_iteration`).
-        let history_before = {
+        let (history_before, model) = {
             let s = self.session.lock().await;
-            s.history.clone()
+            (s.history.clone(), s.model.clone())
         };
         let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = history_before.iter().map(protocol::text_byte_size).sum();
         // Capture the token estimate before `history_before` is consumed by
         // `process_iteration` — used for the boundary `preTokens`.
-        let pre_tokens_estimate =
-            compaction::grouping::estimate_tokens_for_range(&history_before);
+        let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&history_before);
 
         // Fast-path: if already cancelled, exit without invoking the
         // compactor. tokio::select! random-polls between ready arms,
@@ -2371,13 +2406,36 @@ impl ConversationOrchestrator {
             ));
         }
 
+        // Binary-verified guard ordering: only an EMPTY history short-circuits
+        // before hooks (`if(n.length===0) throw Error("No messages to
+        // compact")`, thrown by /compact's caller before `Juy`). A short-but-
+        // non-empty conversation still fires PreCompact hooks and flashes the
+        // compacting status — it fails LATER inside the group compactor
+        // (`Nto`'s `too_few_groups` → `Not enough messages to compact.`),
+        // which the port surfaces via `process_forced`'s
+        // `CompactionError::NotEnoughMessages` mapping below.
+        if history_before.is_empty() {
+            return Err(traits::HandleError::ActionFailed(
+                "No messages to compact".into(),
+            ));
+        }
+
+        // Claude starts manual-compaction timing before PreCompact hooks and
+        // freezes durationMs after attachment/SessionStart restoration.
+        let compact_started = std::time::Instant::now();
+
+        // Once a real pass begins, emit status before PreCompact hooks so slow
+        // hooks are visible too (`Juy` emits `sdk_status: compacting` first).
+        self.output.emit_compaction_started().await;
+
         // hooks compaction lifecycle: PreCompact fires before the summary pass.
         // This is the explicit `/compact` entry point, so the trigger is
         // `manual` (TS `isAutoCompact ? 'auto' : 'manual'`). TS `VJn`: a
         // blocking PreCompact hook ABORTS the compaction, throwing
         // `"Compaction blocked by PreCompact hook: <blockedBy>"`. We surface the
         // same message as the `/compact` failure result.
-        if let Some(detail) = self.fire_pre_compact("manual").await {
+        let pre_compact = self.fire_pre_compact("manual", custom_instructions).await;
+        if let Some(detail) = pre_compact.blocked_by {
             let msg = if detail.is_empty() {
                 "Compaction blocked by PreCompact hook".to_string()
             } else {
@@ -2387,11 +2445,29 @@ impl ConversationOrchestrator {
             return Err(traits::HandleError::ActionFailed(msg));
         }
 
+        let merged_instructions = merge_compact_instructions(
+            custom_instructions,
+            pre_compact.additional_instructions.as_deref(),
+        );
+
+        // A resumed session may not have made a live API call yet, leaving the
+        // shared cache-safe slot empty. Seed it from the current system prompt
+        // and live history so manual compaction works immediately after resume.
+        // Autocompactor replaces the slot's potentially stale message clone with
+        // `history_before`'s selected prefix before issuing the request.
+        let system_prompt = self.effective_system_prompt().await;
+        self.save_cache_safe_params(Some(&system_prompt), &model)
+            .await;
+
         // Run the 5-layer compactor, racing against the cancel token.
         // process_iteration takes no CancellationToken; drop-on-cancel
         // leaves history untouched because we have not written back.
         // `biased` so the cancel arm wins a tie — preferred when both
         // arms are immediately ready.
+        // The API-duration clock starts HERE (summarizer round-trip only) —
+        // separate from `compact_started` (pre-hooks), which feeds the
+        // boundary's durationMs.
+        let api_started = std::time::Instant::now();
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => {
@@ -2399,7 +2475,7 @@ impl ConversationOrchestrator {
                     "compaction cancelled".into(),
                 ));
             }
-            r = compactor.process_iteration(history_before, 0) => r
+            r = compactor.process_forced(history_before, merged_instructions.as_deref()) => r
                 .map_err(|e| match e {
                     // TS throws `Error(GJn)` when the summarizer's PTL-retry loop
                     // exhausts (nothing safe left to drop) — the port models that
@@ -2410,11 +2486,33 @@ impl ConversationOrchestrator {
                             compaction::ptl_retry::COMPACTION_CONVERSATION_TOO_LONG.to_string(),
                         )
                     }
+                    compaction::autocompact::CompactionError::NotEnoughMessages => {
+                        traits::HandleError::ActionFailed(
+                            "Not enough messages to compact.".to_string(),
+                        )
+                    }
                     other => {
                         traits::HandleError::ActionFailed(format!("compaction failed: {other}"))
                     }
                 })?,
         };
+        // CC re-checks `signal.aborted` between compaction phases: an Esc that
+        // lands while the summarizer response was already resolving must still
+        // abort BEFORE the post-compact transition (file re-reads, SessionStart
+        // hooks, history swap) — otherwise the cancelled task swaps history out
+        // from under a prompt the user has since submitted.
+        if cancel.is_cancelled() {
+            return Err(traits::HandleError::ActionFailed(
+                "compaction cancelled".into(),
+            ));
+        }
+        // API duration = the summarizer round-trip only. `compact_started`
+        // (above, pre-hooks) feeds the boundary's user-visible durationMs;
+        // feeding it here would fold PreCompact hook wall-time into
+        // /cost's total_api_duration_ms.
+        let compact_duration = api_started.elapsed();
+        self.record_compaction_usage(&result, compact_duration)
+            .await;
 
         // hooks compaction lifecycle: capture the summary + freed-token count
         // BEFORE `apply_post_compact` consumes the result, so PostCompact can
@@ -2427,15 +2525,24 @@ impl ConversationOrchestrator {
         // proactive trigger (Batch 4) and the reactive 413 fallback (Batch 5).
         // `bytes_before` / `pre_tokens_estimate` were computed from the same
         // `history_before` snapshot (consumed by `process_iteration` above).
-        let summary_out = self
+        let Some(summary_out) = self
             .apply_post_compact(
                 result,
                 compaction::CompactTrigger::Manual,
                 pre_tokens_estimate,
                 messages_before,
                 bytes_before,
+                compact_started,
+                Some(&cancel),
             )
-            .await;
+            .await
+        else {
+            // Esc landed during the post-compact tail (file re-reads /
+            // SessionStart hooks): the swap was skipped, history is untouched.
+            return Err(traits::HandleError::ActionFailed(
+                "compaction cancelled".into(),
+            ));
+        };
 
         // PostCompact fires AFTER the compaction transition has been applied
         // (TS `compact.ts:723`). Manual `/compact` ⇒ `manual` trigger.
@@ -2638,6 +2745,10 @@ impl ConversationOrchestrator {
             .await;
     }
 
+    /// `cancel`: the manual `/compact` path threads its Esc token so an abort
+    /// that lands during this tail (file re-reads, SessionStart hooks) still
+    /// skips the history swap — `None` (auto/reactive callers, which have no
+    /// user-cancellable surface) never returns `None`.
     pub(crate) async fn apply_post_compact(
         &self,
         result: compaction::IterationCompactionResult,
@@ -2645,7 +2756,14 @@ impl ConversationOrchestrator {
         pre_tokens_estimate: u64,
         messages_before: u32,
         bytes_before: u64,
-    ) -> traits::CompactionSummary {
+        compact_started: std::time::Instant,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Option<traits::CompactionSummary> {
+        // Modern automatic/reactive compaction (`kio`) stamps boundary
+        // duration before attachment restoration. Manual full compaction
+        // (`hio`) stamps it afterwards. Preserve that observable distinction.
+        let auto_duration_ms = (trigger == compaction::CompactTrigger::Auto)
+            .then(|| u64::try_from(compact_started.elapsed().as_millis()).unwrap_or(u64::MAX));
         // #58: the usage-zeroed verbatim tail the autocompact layer preserved
         // (`messagesToPreserve` → `messagesToKeep`). Empty on the
         // full-replacement path (short conversation / snip-micro-only /
@@ -2675,13 +2793,14 @@ impl ConversationOrchestrator {
                 .last()
                 .map(protocol::ConversationMessage::id)
         };
-        let (marker, metadata) = compaction::create_compact_boundary_with_preserved_tail(
+        let discovered_tools = self.tools.deferral().loaded_tool_names();
+        let (marker, mut metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
             pre_tokens_estimate,
             None,
             None,
             None,
-            &[],
+            &discovered_tools,
             &preserved_tail,
             anchor_uuid.as_ref(),
         );
@@ -2695,6 +2814,17 @@ impl ConversationOrchestrator {
         // `[boundaryMarker, ...summaryMessages, ...attachments, ...]`.
         let restored_attachments = self.restore_post_compact_attachments().await;
 
+        // Claude Code 2.1.212 `gio(...)` builds the post-compact attachment
+        // set before `executePostCompactHooks`: reload instruction files with
+        // `load_reason:"compact"`, then run `SessionStart(source:"compact")`
+        // and append its model-facing hook results after the restored files /
+        // skills. Run the module-state cleanup first so the reload observes a
+        // fresh post-compact state rather than the pre-compact caches.
+        compaction::run_post_compact_cleanup(None);
+        self.fire_instructions_loaded_with_reason(hooks::events::InstructionsLoadReason::Compact)
+            .await;
+        let session_start_messages = self.collect_session_start_messages("compact").await;
+
         // COMPACT.1 / #58: the boundary marker leads the post-compact history,
         // matching TS `buildPostCompactMessages` / `Iqn` order
         // `[boundaryMarker, ...summaryMessages, ...messagesToKeep, ...attachments,
@@ -2703,7 +2833,11 @@ impl ConversationOrchestrator {
         // attachments. Empty `preserved_tail` ⇒ the order is identical to before
         // (`[marker, ...summary, ...attachments]`).
         let mut history_after = Vec::with_capacity(
-            result.messages.len() + 1 + preserved_tail.len() + restored_attachments.len(),
+            result.messages.len()
+                + 1
+                + preserved_tail.len()
+                + restored_attachments.len()
+                + session_start_messages.len(),
         );
         let tail_preserved = !preserved_tail.is_empty();
         history_after.push(marker.clone());
@@ -2713,6 +2847,33 @@ impl ConversationOrchestrator {
         // Restored file attachments ride after the summary + kept tail (the
         // `attachments` slot in `buildPostCompactMessages`).
         history_after.extend(restored_attachments.iter().cloned());
+        // `SessionStart(source:"compact")` hook results are the final
+        // `hookResults` slot in Claude's `buildPostCompactMessages` order.
+        history_after.extend(session_start_messages.iter().cloned());
+
+        // Claude mutates the boundary metadata only after the complete
+        // post-compact message set has been assembled. This includes the
+        // boundary, summary, preserved tail, restored attachments, and
+        // SessionStart hook results.
+        let post_tokens = compaction::grouping::estimate_tokens_for_range(&history_after);
+        metadata.post_tokens = Some(post_tokens);
+        metadata.duration_ms = Some(auto_duration_ms.unwrap_or_else(|| {
+            u64::try_from(compact_started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        }));
+        let dropped_this_pass = pre_tokens_estimate.saturating_sub(post_tokens);
+        // LAST cancel checkpoint (CC re-checks `signal.aborted` between
+        // phases): everything above is side-effect-free w.r.t. session state,
+        // so an Esc that landed during the attachment re-reads / SessionStart
+        // hooks aborts here — before the cumulative counter, the history swap,
+        // the JSONL persist, and the CompactionCompleted emit.
+        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return None;
+        }
+        let previous_dropped = self
+            .compaction_cumulative_dropped_tokens
+            .fetch_add(dropped_this_pass, std::sync::atomic::Ordering::Relaxed);
+        metadata.cumulative_dropped_tokens =
+            Some(previous_dropped.saturating_add(dropped_this_pass));
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
@@ -2723,11 +2884,6 @@ impl ConversationOrchestrator {
             let mut s = self.session.lock().await;
             s.history = history_after;
         }
-
-        // CSM.4: post-compact module-state reset (TS `resetPostCompactState`).
-        // This is a main-thread compact (no subagent `query_source`), so the
-        // main-thread resets fire.
-        compaction::run_post_compact_cleanup(None);
 
         // P1-05: persist the full compaction transition (claude 2.1.207
         // `insertMessageChain` + the compact flow), so a cold `--resume`
@@ -2764,17 +2920,20 @@ impl ConversationOrchestrator {
         for m in &restored_attachments {
             self.persist_message_to_jsonl(m).await;
         }
+        for m in &session_start_messages {
+            self.persist_message_to_jsonl(m).await;
+        }
 
         // Best-effort emit so the TUI hears about it.
         self.output
             .emit_compaction_completed(messages_before, messages_after, bytes_saved)
             .await;
 
-        traits::CompactionSummary {
+        Some(traits::CompactionSummary {
             messages_before,
             messages_after,
             bytes_saved,
-        }
+        })
     }
 
     /// Proactive pre-call compaction trigger (In-Loop Compaction Batch 4).
@@ -2832,6 +2991,38 @@ impl ConversationOrchestrator {
             usage.billable_tokens.output,
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+
+    /// Record the real LLM usage incurred by a successful summary side-query.
+    /// Compaction is an API call and contributes to Claude Code's session cost
+    /// and API-duration totals even though it is not a normal conversation turn.
+    pub(crate) async fn record_compaction_usage(
+        &self,
+        result: &compaction::IterationCompactionResult,
+        duration: std::time::Duration,
+    ) {
+        let (Some(tracker), Some(usage), Some(model)) = (
+            self.cost_tracker.as_ref(),
+            result.compaction_usage,
+            result.compaction_model.as_deref(),
+        ) else {
+            return;
+        };
+        let model_ref = crate::cost_wiring::model_ref_from_string(model, None);
+        tracker
+            .record_api_response_v2(
+                model_ref,
+                usage,
+                duration,
+                0,
+                usage.tokens.cache_read,
+                usage.tokens.cache_write,
+                false,
+                self.analytics_bus.as_ref(),
+            )
+            .await;
+        self.api_calls_recorded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The shared output-token pool backing a launched workflow's
@@ -3092,7 +3283,9 @@ impl ConversationOrchestrator {
         // The proactive trigger is always the `auto` arm. TS precomputed arm: a
         // blocking PreCompact hook logs `Precomputed compact blocked by
         // PreCompact hook: <blockedBy>` and skips compaction (history untouched).
-        if let Some(detail) = self.fire_pre_compact("auto").await {
+        let compact_started = std::time::Instant::now();
+        let pre_compact = self.fire_pre_compact("auto", None).await;
+        if let Some(detail) = pre_compact.blocked_by {
             tracing::warn!("Precomputed compact blocked by PreCompact hook: {detail}");
             return;
         }
@@ -3104,8 +3297,16 @@ impl ConversationOrchestrator {
         // Run the orchestrator pass under the per-conversation tracking lock so
         // the circuit-breaker state is read + written atomically for this turn.
         let mut tracking = self.compaction_tracking.lock().await;
+        // API duration = the summarizer pass only; `compact_started` (above,
+        // pre-hooks) is the boundary durationMs clock.
+        let api_started = std::time::Instant::now();
         let result = match compactor
-            .process_iteration_tracked(snapshot, 0, &mut tracking)
+            .process_iteration_tracked_with_instructions(
+                snapshot,
+                0,
+                &mut tracking,
+                pre_compact.additional_instructions.as_deref(),
+            )
             .await
         {
             Ok(r) => r,
@@ -3120,6 +3321,7 @@ impl ConversationOrchestrator {
                 return;
             }
         };
+        let compact_duration = api_started.elapsed();
 
         // #54 rapid-refill (thrashing) breaker (proactive trip): when the
         // breaker tripped, the orchestrator SKIPPED the summarizer (history
@@ -3158,6 +3360,8 @@ impl ConversationOrchestrator {
         // Drop the tracking guard before the apply so the history-swap lock and
         // the tracking lock are never both held (avoid lock-ordering surprises).
         drop(tracking);
+        self.record_compaction_usage(&result, compact_duration)
+            .await;
 
         // hooks compaction lifecycle: capture the summary + freed-token count
         // from the compaction result BEFORE `apply_post_compact` consumes it,
@@ -3167,12 +3371,16 @@ impl ConversationOrchestrator {
         let summary = Self::compaction_summary_text(&result);
         let tokens_freed = result.total_tokens_freed;
 
+        // `cancel: None` — the proactive trigger has no user-cancellable
+        // surface, so the apply is infallible.
         self.apply_post_compact(
             result,
             compaction::CompactTrigger::Auto,
             estimate,
             messages_before,
             bytes_before,
+            compact_started,
+            None,
         )
         .await;
 
@@ -5051,44 +5259,45 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// `manual` for an explicit `/compact`. Strict no-op when no `PreCompact`
     /// hook is registered.
     ///
-    /// Returns `Some(blockedBy)` when a PreCompact hook BLOCKED the compaction
-    /// (TS `executePreCompactHooks` = `xhe`: `blockedBy` is set when any hook
-    /// result has `blocked`), and `None` when compaction should proceed. A block
-    /// ABORTS the pass in every path (TS `VJn` throws
+    /// Returns both a possible blocking reason and the successful hooks' stdout.
+    /// A block ABORTS the pass in every path (TS `VJn` throws
     /// `"Compaction blocked by PreCompact hook: <blockedBy>"` on the manual
     /// route; the proactive / reactive routes log and skip). The returned
     /// string is the port's aggregate `reason` (the closest equivalent of TS's
     /// `[cmd]: output` join); callers own the surfacing so the log wording
     /// matches each route (manual / `Precomputed` / `Reactive`).
     ///
-    /// DEFERRED (documented divergence, not a parity gap): TS
-    /// `executePreCompactHooks` also returns `newCustomInstructions` which the
-    /// caller merges into the summary prompt (`compact.ts:420`). This port does
-    /// NOT thread that back into the summarizer: the `HookEvent::PreCompact` wire
-    /// builder hard-codes `custom_instructions: None` (`hooks/executor.rs:755`)
-    /// and the compaction seam (`process_iteration` / `process_iteration_tracked`)
-    /// accepts no custom-instruction argument, so there is no clean seam to feed
-    /// the aggregate's instructions into the summary request. Honoring the block
-    /// is the byte-faithful behaviour; consuming the returned instructions is
-    /// left for a future batch that widens the seam.
-    pub(crate) async fn fire_pre_compact(&self, trigger: &str) -> Option<String> {
+    /// `custom_instructions` is the caller's current `/compact <focus>` text and
+    /// is exposed in the hook payload. Exit-code-0 stdout is returned in hook
+    /// order and appended to the same summary prompt.
+    pub(crate) async fn fire_pre_compact(
+        &self,
+        trigger: &str,
+        custom_instructions: Option<&str>,
+    ) -> PreCompactHookOutcome {
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
             .hooks
             .execute(
                 HookEvent::PreCompact {
                     reason: trigger.to_string(),
+                    custom_instructions: custom_instructions.map(str::to_owned),
                 },
                 ctx,
             )
             .await;
-        // TS `xhe`: a PreCompact hook that BLOCKS aborts compaction. Surface the
-        // block detail (`blockedBy`) so the caller can log/throw per its route;
-        // `None` = no block → proceed. `reason` is the port's block detail.
-        if matches!(agg.decision, Some(hooks::response::HookDecision::Block)) {
-            Some(agg.reason.clone().unwrap_or_default())
-        } else {
-            None
+        let blocked_by = matches!(agg.decision, Some(hooks::response::HookDecision::Block))
+            .then(|| agg.reason.clone().unwrap_or_default());
+        let stdout: Vec<&str> = agg
+            .all_results
+            .iter()
+            .filter(|(_, result)| result.outcome == hooks::response::HookOutcome::Success)
+            .map(|(_, result)| result.stdout.trim())
+            .filter(|text| !text.is_empty())
+            .collect();
+        PreCompactHookOutcome {
+            blocked_by,
+            additional_instructions: (!stdout.is_empty()).then(|| stdout.join("\n")),
         }
     }
 
@@ -5162,7 +5371,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// when no `SessionStart` hook is registered. The hook executor reads
     /// `session_id` / `cwd` from the lifecycle [`HookContext`]; the variant's
     /// `session_id` field is filled from the live session for symmetry.
-    pub async fn fire_session_start(&self, source: &str) {
+    async fn collect_session_start_messages(&self, source: &str) -> Vec<ConversationMessage> {
         let session_id = { self.session.lock().await.session_id };
         let ctx = self.lifecycle_hook_ctx(false).await;
         let agg = self
@@ -5199,15 +5408,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         // Strict no-op when no hook emitted `additionalContext` — the aggregate
         // is otherwise discarded exactly as before, so a failing / silent
         // `SessionStart` hook never affects boot.
-        if !agg.additional_contexts.is_empty() {
-            let body = agg.additional_contexts.join("\n");
-            let msg = ConversationMessage::user_meta(
-                MessageId::new(),
-                format!(
-                    "<system-reminder>\nSessionStart hook additional context: {body}\n</system-reminder>"
-                ),
-            );
-            self.session.lock().await.history.push(msg);
+        if agg.additional_contexts.is_empty() {
+            return Vec::new();
+        }
+        let body = agg.additional_contexts.join("\n");
+        vec![ConversationMessage::user_meta(
+            MessageId::new(),
+            format!(
+                "<system-reminder>\nSessionStart hook additional context: {body}\n</system-reminder>"
+            ),
+        )]
+    }
+
+    /// Fire SessionStart and append its model-facing additional context.
+    pub async fn fire_session_start(&self, source: &str) {
+        let messages = self.collect_session_start_messages(source).await;
+        if !messages.is_empty() {
+            self.session.lock().await.history.extend(messages);
         }
     }
 
@@ -5244,6 +5461,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// is discarded so a failing `InstructionsLoaded` hook never breaks boot, and
     /// it is a strict no-op when no `InstructionsLoaded` hook is registered.
     pub async fn fire_instructions_loaded(&self) {
+        self.fire_instructions_loaded_with_reason(
+            hooks::events::InstructionsLoadReason::SessionStart,
+        )
+        .await;
+    }
+
+    async fn fire_instructions_loaded_with_reason(
+        &self,
+        load_reason: hooks::events::InstructionsLoadReason,
+    ) {
         let cwd = self.cwd.clone();
         let memory_files = self.memory.load(&cwd).await;
         if memory_files.is_empty() {
@@ -5286,8 +5513,10 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     HookEvent::InstructionsLoaded {
                         file_path: file.path,
                         memory_type,
-                        // Top-level eager session-start load (no `@include` parent).
-                        load_reason: hooks::events::InstructionsLoadReason::SessionStart,
+                        // Top-level eager load (no `@include` parent). Session
+                        // boot uses `session_start`; post-compact reload uses
+                        // `compact`, matching Claude's memory-cache reload cause.
+                        load_reason,
                         // Always `None` here — conditional (`globs.is_some()`)
                         // rules were skipped above; only unconditional files reach
                         // this fire.
@@ -9284,6 +9513,15 @@ mod turn_recovery_tests {
         message_stop, mock_message_response, noop_hook_executor, text_delta, MockApiClient,
         MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
+
+    #[test]
+    fn compact_focus_and_hook_instructions_are_separate_paragraphs() {
+        assert_eq!(
+            merge_compact_instructions(Some("focus on Rust"), Some("preserve test output"))
+                .as_deref(),
+            Some("focus on Rust\n\npreserve test output")
+        );
+    }
     use crate::OrchestratorConfig;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::HookEventType;
@@ -9499,6 +9737,24 @@ mod turn_recovery_tests {
         }
     }
 
+    struct InstructingPreCompactHandler;
+    #[async_trait]
+    impl BuiltinHookHandler for InstructingPreCompactHandler {
+        fn id(&self) -> &str {
+            "instruct-precompact"
+        }
+
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: "preserve the test evidence".into(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: None,
+            }
+        }
+    }
+
     /// `SessionStart` hook that emits `hookSpecificOutput.additionalContext`
     /// (`Some`) or nothing (`None`) — exercises the SESSIONSTART.CTX consumption.
     struct SessionStartCtxHandler {
@@ -9595,6 +9851,18 @@ mod turn_recovery_tests {
         Arc::new(exec)
     }
 
+    async fn exec_instructing_pre_compact() -> Arc<HookExecutorImpl> {
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry.write().await.register(builtin_hook(
+            "instruct-precompact",
+            HookEventType::PreCompact,
+        ));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(InstructingPreCompactHandler));
+        Arc::new(exec)
+    }
+
     fn compact_orch(hooks: Arc<HookExecutorImpl>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -9614,19 +9882,31 @@ mod turn_recovery_tests {
     #[tokio::test]
     async fn pre_compact_block_returns_detail_else_none() {
         let blocked = compact_orch(exec_blocking_pre_compact().await)
-            .fire_pre_compact("manual")
+            .fire_pre_compact("manual", None)
             .await;
         assert_eq!(
-            blocked.as_deref(),
+            blocked.blocked_by.as_deref(),
             Some("[guard] compaction not allowed"),
             "a blocking PreCompact hook must surface its blockedBy detail"
         );
 
         // No PreCompact hook registered → None → compaction proceeds unchanged.
         let proceed = compact_orch(noop_hook_executor())
-            .fire_pre_compact("auto")
+            .fire_pre_compact("auto", None)
             .await;
-        assert_eq!(proceed, None, "no block → compaction proceeds");
+        assert_eq!(proceed.blocked_by, None, "no block → compaction proceeds");
+    }
+
+    #[tokio::test]
+    async fn pre_compact_success_stdout_becomes_summary_instructions() {
+        let outcome = compact_orch(exec_instructing_pre_compact().await)
+            .fire_pre_compact("manual", Some("focus on Rust"))
+            .await;
+        assert_eq!(outcome.blocked_by, None);
+        assert_eq!(
+            outcome.additional_instructions.as_deref(),
+            Some("preserve the test evidence")
+        );
     }
 
     /// A Stop hook that blocks EXACTLY ONCE, then passes. Used by tests that need

@@ -5111,6 +5111,7 @@ dependencies = [
  "serde_json",
  "session",
  "sha2",
+ "sidequery",
  "telemetry",
  "tempfile",
  "tokio",

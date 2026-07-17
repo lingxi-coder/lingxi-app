@@ -116,6 +116,18 @@ pub struct CompactBoundaryMetadata {
     /// Token count of the conversation just before compaction
     /// (`preTokens`). TS passes `preCompactTokenCount ?? 0`.
     pub pre_tokens: u64,
+    /// Token count of the rebuilt post-compact conversation (`postTokens`).
+    /// Filled after the summary, preserved tail, attachments, and hook results
+    /// have been assembled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
+    /// Cumulative tokens discarded across compactions in the live session
+    /// (`cumulativeDroppedTokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cumulative_dropped_tokens: Option<u64>,
+    /// Wall time spent producing the compact result (`durationMs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// User-context string snapshot at compaction time (`userContext`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_context: Option<String>,
@@ -171,6 +183,9 @@ pub fn create_compact_boundary(
     let metadata = CompactBoundaryMetadata {
         trigger,
         pre_tokens,
+        post_tokens: None,
+        cumulative_dropped_tokens: None,
+        duration_ms: None,
         user_context,
         messages_summarized,
         pre_compact_discovered_tools: tools,
@@ -574,6 +589,9 @@ mod tests {
         );
         // empty / None fields are omitted from the wire shape
         assert!(!obj.contains_key("userContext"));
+        assert!(!obj.contains_key("postTokens"));
+        assert!(!obj.contains_key("cumulativeDroppedTokens"));
+        assert!(!obj.contains_key("durationMs"));
         assert!(!obj.contains_key("messagesSummarized"));
         assert!(!obj.contains_key("preCompactDiscoveredTools"));
         assert!(!obj.contains_key("preservedSegment"));
@@ -588,7 +606,7 @@ mod tests {
         // (`{headUuid,anchorUuid,tailUuid}` / `{anchorUuid,uuids,allUuids}`).
         let anchor = MessageId::new();
         let kept = vec![user("kept-a"), user("kept-b")];
-        let (_m, meta) = create_compact_boundary_with_preserved_tail(
+        let (_m, mut meta) = create_compact_boundary_with_preserved_tail(
             CompactTrigger::Auto,
             1000,
             None,
@@ -598,6 +616,9 @@ mod tests {
             &kept,
             Some(&anchor),
         );
+        meta.post_tokens = Some(250);
+        meta.cumulative_dropped_tokens = Some(750);
+        meta.duration_ms = Some(1234);
         let v = serde_json::to_value(&meta).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
@@ -605,6 +626,9 @@ mod tests {
             vec![
                 "trigger",
                 "preTokens",
+                "postTokens",
+                "cumulativeDroppedTokens",
+                "durationMs",
                 "userContext",
                 "messagesSummarized",
                 "preCompactDiscoveredTools",

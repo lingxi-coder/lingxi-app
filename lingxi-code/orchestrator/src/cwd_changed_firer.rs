@@ -229,7 +229,10 @@ mod tests {
             PathBuf::from("/work/.t.jsonl"),
             Arc::new(Mutex::new(PathBuf::from("/work"))),
         );
-        assert!(firer.watcher_rebinder.is_none(), "default firer has no rebinder");
+        assert!(
+            firer.watcher_rebinder.is_none(),
+            "default firer has no rebinder"
+        );
         firer
             .fire(CwdChangedFire {
                 old: PathBuf::from("/work"),

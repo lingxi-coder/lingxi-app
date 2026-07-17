@@ -1274,18 +1274,32 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // hook: <blockedBy>` and aborts recovery — with no compaction the prompt
         // is still over the limit, so we surface the prompt-too-long outcome
         // (the same value this fn falls through to).
-        if let Some(detail) = orch.fire_pre_compact("auto").await {
+        let compact_started = std::time::Instant::now();
+        let pre_compact = orch.fire_pre_compact("auto", None).await;
+        if let Some(detail) = pre_compact.blocked_by {
             tracing::warn!("Reactive compact blocked by PreCompact hook: {detail}");
             return Ok(PtlCallOutcome::PromptTooLong);
         }
         orch.output.emit_compaction_started().await;
+        // API duration = the summarizer pass only; `compact_started` (above,
+        // pre-hooks) is the boundary durationMs clock. Folding hook wall-time
+        // into `record_compaction_usage` would inflate /cost's API duration.
+        let api_started = std::time::Instant::now();
         let compact_result = {
             let mut tracking = orch.compaction_tracking.lock().await;
             compactor
-                .process_iteration_tracked(snapshot, 0, &mut tracking)
+                .process_iteration_tracked_with_instructions(
+                    snapshot,
+                    0,
+                    &mut tracking,
+                    pre_compact.additional_instructions.as_deref(),
+                )
                 .await
         };
         if let Ok(result) = compact_result {
+            let compact_duration = api_started.elapsed();
+            orch.record_compaction_usage(&result, compact_duration)
+                .await;
             // #54 reactive rapid-refill (thrashing) breaker: if the reactive
             // compact tripped the breaker, re-compacting cannot help (a single
             // file/tool output is too large). Emit telemetry + surface the
@@ -1310,12 +1324,16 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 let tokens_freed = result.total_tokens_freed;
                 // Apply the post-compact transition (history swap + boundary
                 // marker + CompactionCompleted) via the shared helper.
+                // `cancel: None` — the reactive PTL fallback has no
+                // user-cancellable surface, so the apply is infallible.
                 orch.apply_post_compact(
                     result,
                     compaction::CompactTrigger::Auto,
                     pre_tokens_estimate,
                     messages_before,
                     bytes_before,
+                    compact_started,
+                    None,
                 )
                 .await;
                 // PostCompact fires AFTER the transition is applied.

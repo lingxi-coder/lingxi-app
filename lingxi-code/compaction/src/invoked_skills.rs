@@ -157,7 +157,12 @@ mod tests {
     fn register_sets_key_and_filter_by_agent() {
         let _g = guard();
         register("deploy", Path::new("/skills/deploy"), "deploy body", None);
-        register("build", Path::new("/skills/build"), "build body", Some("agent:x"));
+        register(
+            "build",
+            Path::new("/skills/build"),
+            "build body",
+            Some("agent:x"),
+        );
 
         // Main-thread filter (None) sees only the `:deploy` row.
         let main = filter_for_agent(None);

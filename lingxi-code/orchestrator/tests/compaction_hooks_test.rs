@@ -15,17 +15,20 @@
 //! 1. A registered `PreCompact` hook fires with `reason == "auto"` when the
 //!    proactive trigger compacts.
 //! 2. A registered `PostCompact` hook fires after, carrying a summary.
-//! 3. A `PreCompact` hook that FAILS (and one that returns `Block`) does NOT
-//!    break the compaction or the turn — best-effort, like `PostToolUse`.
+//! 3. A `PreCompact` hook that returns `Block` prevents the compact pass while
+//!    the surrounding turn continues.
+//! 4. Successful compaction reloads instructions with reason `compact`, then
+//!    fires `SessionStart(source=compact)`, then `PostCompact`.
 use llm_client::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
-use hooks::events::{HookEvent, HookEventType};
+use hooks::events::{HookEvent, HookEventType, InstructionsLoadReason};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
+use orchestrator::prompt::MemoryFile;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -66,6 +69,24 @@ impl RuntimeSpawner for UnusedRuntime {
     }
 }
 
+struct CompactSummaryClient;
+
+#[async_trait]
+impl sidequery::SideQueryClient for CompactSummaryClient {
+    async fn query(
+        &self,
+        _request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        Ok(sidequery::SideQueryResponse {
+            text: Some("<summary>hook lifecycle summary</summary>".into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+        })
+    }
+}
+
 // ---- recording builtin handlers ----
 
 /// Shared probe the test reads after the turn.
@@ -80,6 +101,7 @@ struct Probe {
     post_summary: Mutex<Option<String>>,
     /// The `trigger` (`manual`/`auto`) carried by the last `PostCompact` event.
     post_trigger: Mutex<Option<String>>,
+    lifecycle_order: Mutex<Vec<String>>,
 }
 
 /// `PreCompact` hook that records the trigger. `fail` makes it return a non-zero
@@ -100,6 +122,11 @@ impl BuiltinHookHandler for RecordPreCompact {
             self.probe.pre_fired.store(true, Ordering::SeqCst);
             self.probe.pre_count.fetch_add(1, Ordering::SeqCst);
             *self.probe.pre_trigger.lock().unwrap() = Some(reason.clone());
+            self.probe
+                .lifecycle_order
+                .lock()
+                .unwrap()
+                .push("pre".into());
         }
         HookResult {
             outcome: if self.fail {
@@ -144,6 +171,11 @@ impl BuiltinHookHandler for RecordPostCompact {
             self.probe.post_fired.store(true, Ordering::SeqCst);
             *self.probe.post_summary.lock().unwrap() = Some(summary.clone());
             *self.probe.post_trigger.lock().unwrap() = Some(trigger.clone());
+            self.probe
+                .lifecycle_order
+                .lock()
+                .unwrap()
+                .push("post".into());
         }
         HookResult {
             outcome: HookOutcome::Success,
@@ -151,6 +183,52 @@ impl BuiltinHookHandler for RecordPostCompact {
             stderr: String::new(),
             exit_code: None,
             response: None,
+        }
+    }
+}
+
+/// Records the two post-summary setup events Claude runs before PostCompact.
+/// SessionStart contributes model-facing context so the test also proves that
+/// its hook result survives in the compacted history.
+struct RecordCompactSetup {
+    probe: Arc<Probe>,
+}
+
+#[async_trait]
+impl BuiltinHookHandler for RecordCompactSetup {
+    fn id(&self) -> &str {
+        "record-compact-setup"
+    }
+
+    async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        let response = match event {
+            HookEvent::InstructionsLoaded { load_reason, .. } => {
+                self.probe
+                    .lifecycle_order
+                    .lock()
+                    .unwrap()
+                    .push(format!("instructions:{load_reason:?}"));
+                None
+            }
+            HookEvent::SessionStart { source, .. } => {
+                self.probe
+                    .lifecycle_order
+                    .lock()
+                    .unwrap()
+                    .push(format!("session_start:{source}"));
+                (source == "compact").then(|| HookResponse {
+                    additional_context: Some("post-compact hook context".into()),
+                    ..Default::default()
+                })
+            }
+            _ => None,
+        };
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            response,
         }
     }
 }
@@ -228,10 +306,20 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
     let session = orch.session();
     let mut s = session.lock().await;
     for i in 0..n {
-        s.history.push(ConversationMessage::user(
-            MessageId::new(),
-            format!("turn-{i} body padded with filler text to push token count up beyond autocompact threshold"),
-        ));
+        if i % 2 == 0 {
+            s.history.push(ConversationMessage::user(
+                MessageId::new(),
+                format!("turn-{i} body padded with filler text to push token count up beyond autocompact threshold"),
+            ));
+        } else {
+            s.history.push(ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: format!("reply-{i} with enough detail for compaction"),
+                }],
+                stop_reason: Some("end_turn".into()),
+            });
+        }
     }
 }
 
@@ -301,10 +389,9 @@ async fn pre_and_post_compact_hooks_fire_on_proactive_autocompact() {
 }
 
 #[tokio::test]
-async fn failing_or_blocking_pre_compact_hook_does_not_break_compaction() {
-    // A PreCompact hook that both FAILS (non-zero exit) and returns Block must
-    // not abort compaction or the turn — the fire is best-effort, mirroring how
-    // PostToolUse hooks are best-effort in the turn loop.
+async fn blocking_pre_compact_hook_skips_compaction_but_not_the_turn() {
+    // Claude's `blockedBy` result stops the compaction attempt, but proactive
+    // compaction is best-effort so the original model turn still proceeds.
     let probe = Arc::new(Probe::default());
     let hooks = hook_executor_with(vec![(
         Arc::new(RecordPreCompact {
@@ -319,7 +406,7 @@ async fn failing_or_blocking_pre_compact_hook_does_not_break_compaction() {
     let (orch, output) = make_orch(hooks, 100);
     seed_history(&orch, 60).await;
 
-    // Turn must still succeed despite the failing/blocking PreCompact hook.
+    // Turn must still succeed despite the blocked PreCompact pass.
     orch.run_turn("hello").await.expect("turn must not fail");
 
     // The hook fired ...
@@ -327,12 +414,94 @@ async fn failing_or_blocking_pre_compact_hook_does_not_break_compaction() {
         probe.pre_fired.load(Ordering::SeqCst),
         "the (failing) PreCompact hook must still fire"
     );
-    // ... and compaction STILL happened (the Block did not short-circuit it).
+    // ... but the compact transition itself must not happen.
     let events = output.snapshot().await;
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. })),
-        "a failing/blocking PreCompact hook must NOT abort compaction"
+            .all(|e| !matches!(e, OutputEvent::CompactionCompleted { .. })),
+        "a blocking PreCompact hook must abort compaction"
     );
+}
+
+#[tokio::test]
+async fn manual_compact_runs_reload_session_start_then_post_compact() {
+    let probe = Arc::new(Probe::default());
+    let setup = Arc::new(RecordCompactSetup {
+        probe: probe.clone(),
+    });
+    let hooks = hook_executor_with(vec![
+        (
+            Arc::new(RecordPreCompact {
+                probe: probe.clone(),
+                fail: false,
+                block: false,
+            }) as Arc<dyn BuiltinHookHandler>,
+            builtin_hook("record-pre-compact", HookEventType::PreCompact),
+        ),
+        (
+            setup.clone() as Arc<dyn BuiltinHookHandler>,
+            builtin_hook("record-compact-setup", HookEventType::InstructionsLoaded),
+        ),
+        (
+            setup as Arc<dyn BuiltinHookHandler>,
+            builtin_hook("record-compact-setup", HookEventType::SessionStart),
+        ),
+        (
+            Arc::new(RecordPostCompact {
+                probe: probe.clone(),
+            }) as Arc<dyn BuiltinHookHandler>,
+            builtin_hook("record-post-compact", HookEventType::PostCompact),
+        ),
+    ])
+    .await;
+
+    let cwd = std::env::temp_dir();
+    let memory = MemoryFile {
+        path: cwd.join("LINGXI.md"),
+        body: "compact test instructions".into(),
+        is_local_override: false,
+        tier: memory::lingxi_md::LingxiMdTier::Project,
+        globs: None,
+    };
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(CompactSummaryClient), "test-model".into()),
+    );
+    let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        u64::MAX,
+    ));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::with_files(vec![memory])),
+        cwd,
+    )
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor);
+    seed_history(&orch, 6).await;
+
+    traits::OrchestratorHandle::force_compact(&orch)
+        .await
+        .expect("manual compaction");
+
+    assert_eq!(
+        *probe.lifecycle_order.lock().unwrap(),
+        vec![
+            "pre".to_string(),
+            format!("instructions:{:?}", InstructionsLoadReason::Compact),
+            "session_start:compact".to_string(),
+            "post".to_string(),
+        ]
+    );
+    let history = orch.session().lock().await.history.clone();
+    assert!(history.iter().any(|message| message
+        .text_content()
+        .contains("SessionStart hook additional context: post-compact hook context")));
 }

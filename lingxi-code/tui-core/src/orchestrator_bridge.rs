@@ -320,6 +320,15 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
+    /// A compaction pass (manual `/compact` or auto/reactive) began in the
+    /// orchestrator: forward as [`TurnEvent::CompactStarted`] so the TUI shows
+    /// claude-code's `Compacting conversation…` spinner + time-based progress
+    /// bar. Without this override the trait's default no-op swallows the
+    /// signal and the pass is invisible-then-instant.
+    async fn emit_compaction_started(&self) {
+        let _ = self.tx.send(TurnEvent::CompactStarted);
+    }
+
     async fn emit_compaction_completed(
         &self,
         messages_before: u32,
@@ -431,6 +440,18 @@ mod tests {
         bridge.emit_text("hello").await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::TextDelta(ref s) if s == "hello"));
+    }
+
+    #[tokio::test]
+    async fn emit_compaction_started_translates_to_compact_started() {
+        // The orchestrator emits this before every compaction pass (manual
+        // AND auto); the bridge must forward it or the TUI's `Compacting
+        // conversation…` progress UI never appears.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        traits::OutputStream::emit_compaction_started(&bridge).await;
+        let ev = rx.recv().await.unwrap();
+        assert!(matches!(ev, TurnEvent::CompactStarted));
     }
 
     #[tokio::test]

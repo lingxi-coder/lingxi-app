@@ -139,11 +139,9 @@ impl CompactionOrchestrator {
     ///
     /// Thin wrapper over [`Self::process_iteration_tracked`] that starts from a
     /// default [`AutoCompactTrackingState`] (zero consecutive failures), so the
-    /// circuit breaker never short-circuits on this path. Used by the manual
-    /// `/compact` entry point (`force_compact_with_cancel`), whose behavior is
-    /// unchanged by Batch 3: snip runs first but targets the autocompact
-    /// threshold, so a history that is over the threshold still escalates to
-    /// autocompact exactly as before.
+    /// circuit breaker never short-circuits on this path. This is the automatic
+    /// compatibility wrapper; explicit `/compact` uses [`Self::process_forced`]
+    /// so it bypasses the automatic token threshold and summarizes full history.
     ///
     /// `snip_tokens_freed_already` lets the caller report snip work done outside
     /// this entry point; it is folded into the freed total and the
@@ -168,20 +166,22 @@ impl CompactionOrchestrator {
     /// Manual compaction is deliberately separate from the automatic
     /// threshold/circuit-breaker pipeline: Claude Code invokes the summarizer
     /// whenever the history has a valid prefix/tail split, even when the
-    /// context is far below the automatic threshold. Too-short histories return
-    /// the byte-exact user-facing error instead of a successful zero-delta pass.
+    /// context is far below the automatic threshold. It summarizes the complete
+    /// history (`messagesToKeep: []`); suffix preservation is reserved for
+    /// automatic/reactive compaction. Too-short histories return the byte-exact
+    /// user-facing error instead of a successful zero-delta pass.
     pub async fn process_forced(
         &self,
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&str>,
     ) -> Result<IterationCompactionResult, CompactionError> {
-        if crate::partial::select_preserved_tail(&messages).is_none() {
+        if crate::grouping::group_messages_by_api_round(&messages).len() < 2 {
             return Err(CompactionError::NotEnoughMessages);
         }
 
         let result = self
             .auto
-            .compact_with_instructions(messages, custom_instructions)
+            .compact_manual_with_instructions(messages, custom_instructions)
             .await?;
         let total_tokens_freed = result
             .pre_compact_token_count
@@ -198,7 +198,7 @@ impl CompactionOrchestrator {
             consecutive_rapid_refills: 0,
             messages_to_preserve: result.messages_to_preserve,
             compaction_usage: result.compaction_usage,
-            compaction_model: Some(self.auto.config.summary_model.clone()),
+            compaction_model: Some(result.summary_model),
         })
     }
 
@@ -373,7 +373,7 @@ impl CompactionOrchestrator {
             {
                 Ok(result) => {
                     compaction_usage = result.compaction_usage;
-                    compaction_model = Some(self.auto.config.summary_model.clone());
+                    compaction_model = Some(result.summary_model.clone());
                     messages.clone_from(&result.summary_messages);
                     // #58: carry the preserved tail out separately (NOT folded
                     // into `messages`, which is the leading summary set).
@@ -439,8 +439,66 @@ fn history_snip_enabled() -> bool {
 mod tests {
     use super::*;
     use crate::autocompact::CompactionResult;
+    use async_trait::async_trait;
     use protocol::{ContentBlock, MessageId, ToolUseId};
     use serde_json::json;
+    use sidequery::{
+        CacheSafeParams, CacheSafeParamsSlot, ForkedAgentRunner, SideQueryClient, SideQueryError,
+        SideQueryRequest, SideQueryResponse,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseOptions;
+
+    struct SummaryClient;
+
+    #[async_trait]
+    impl SideQueryClient for SummaryClient {
+        async fn query(
+            &self,
+            _request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            Ok(SideQueryResponse {
+                text: Some("<summary>test summary</summary>".into()),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    async fn forced_orchestrator(threshold: u64) -> CompactionOrchestrator {
+        let slot = Arc::new(CacheSafeParamsSlot::new());
+        slot.save(CacheSafeParams {
+            system_prompt: Arc::from("test system"),
+            user_context: HashMap::new(),
+            system_context: HashMap::new(),
+            tool_use_options: ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "test-model".into(),
+                model_profile: None,
+                max_budget_nano_usd: None,
+                mcp_clients: Vec::new(),
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            fork_context_messages: Vec::new(),
+            transcript_path: None,
+            generation: 0,
+        })
+        .await;
+        let runner = Arc::new(
+            ForkedAgentRunner::new()
+                .with_side_query_client(Arc::new(SummaryClient), "test-model".into()),
+        );
+        CompactionOrchestrator::with_autocompactor(
+            Autocompactor::with_forked_runner(runner, slot),
+            threshold,
+        )
+    }
 
     fn long_user(i: usize) -> ConversationMessage {
         // ~80 chars → ~20 tokens each, so a handful clears any small threshold.
@@ -450,6 +508,100 @@ mod tests {
                 "turn-{i} padding text to push the token estimate over a small threshold value"
             ),
         )
+    }
+
+    fn assistant(text: &str) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+            stop_reason: Some("end_turn".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn forced_compact_ignores_automatic_threshold() {
+        let orch = forced_orchestrator(u64::MAX).await;
+        let messages = vec![
+            long_user(0),
+            assistant("first reply"),
+            long_user(1),
+            assistant("second reply"),
+        ];
+
+        let result = orch
+            .process_forced(messages, None)
+            .await
+            .expect("manual compact must run below the auto threshold");
+
+        assert!(result.was_compacted);
+        assert_eq!(result.layers_applied, vec![CompactionLayer::Autocompact]);
+    }
+
+    #[tokio::test]
+    async fn forced_compact_rejects_history_without_a_completed_reply() {
+        let orch = forced_orchestrator(0).await;
+        let err = orch
+            .process_forced(vec![long_user(0)], None)
+            .await
+            .expect_err("a lone user message is not enough");
+        assert!(matches!(err, CompactionError::NotEnoughMessages));
+        assert_eq!(err.to_string(), "Not enough messages to compact.");
+    }
+
+    /// Binary-verified (`Nto` with `s = 1`): manual `/compact` on a single
+    /// complete exchange `[user, assistant]` groups as `[u],[a]` (assistant-led
+    /// `uQt` split, o = 2), then bails `too_few_groups` because the summarize
+    /// prefix (`[u]`) has no assistant message — CC surfaces
+    /// `Not enough messages to compact.`. (An earlier revision asserted the
+    /// full-history `messagesToKeep: []` path here; that is `Pto`, which the
+    /// binary only ever calls with `isAutoCompact: !0` — never manual.)
+    #[tokio::test]
+    async fn forced_compact_rejects_one_complete_exchange() {
+        let orch = forced_orchestrator(u64::MAX).await;
+        let err = orch
+            .process_forced(vec![long_user(0), assistant("only reply")], None)
+            .await
+            .expect_err("one exchange: summarize prefix has no assistant → too_few_groups");
+        assert!(matches!(err, CompactionError::NotEnoughMessages));
+        assert_eq!(err.to_string(), "Not enough messages to compact.");
+    }
+
+    /// Binary-verified: the manual path preserves the LAST API-round group
+    /// verbatim (`Nto`: `messagesToPreserve: m.flat()` with `s = 1`), exactly
+    /// like the reactive path — it is NOT the full-history `messagesToKeep: []`
+    /// shape. `[u0,a0,u1,a1]` groups as `[u0],[a0,u1],[a1]`; the preserved tail
+    /// is the final `[a1]` group.
+    #[tokio::test]
+    async fn forced_compact_preserves_the_last_api_round_group() {
+        let orch = forced_orchestrator(u64::MAX).await;
+        let result = orch
+            .process_forced(
+                vec![
+                    long_user(0),
+                    assistant("first reply"),
+                    long_user(1),
+                    assistant("second reply"),
+                ],
+                None,
+            )
+            .await
+            .expect("two rounds compact");
+
+        assert!(result.was_compacted);
+        assert_eq!(
+            result.messages_to_preserve.len(),
+            1,
+            "the last assistant-led group rides verbatim after the summary"
+        );
+        match &result.messages_to_preserve[0] {
+            ConversationMessage::Assistant { content, .. } => {
+                assert!(matches!(
+                    &content[0],
+                    ContentBlock::Text { text } if text == "second reply"
+                ));
+            }
+            other => panic!("preserved tail must be the final assistant reply, got {other:?}"),
+        }
     }
 
     /// An `Autocompactor` whose `compact` always returns `Err`, to exercise the

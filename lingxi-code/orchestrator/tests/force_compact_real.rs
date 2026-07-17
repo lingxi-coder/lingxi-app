@@ -20,6 +20,48 @@ use protocol::{ConversationMessage, MessageId};
 use std::sync::Arc;
 use traits::OrchestratorHandle;
 
+struct CaptureCompactClient {
+    seen: std::sync::Mutex<Option<sidequery::SideQueryRequest>>,
+}
+
+#[async_trait::async_trait]
+impl sidequery::SideQueryClient for CaptureCompactClient {
+    async fn query(
+        &self,
+        request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        *self.seen.lock().unwrap() = Some(request);
+        Ok(sidequery::SideQueryResponse {
+            text: Some("<summary>captured</summary>".into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+        })
+    }
+}
+
+fn wired_compaction() -> (
+    Arc<CompactionOrchestrator>,
+    Arc<sidequery::CacheSafeParamsSlot>,
+) {
+    let client = Arc::new(CaptureCompactClient {
+        seen: std::sync::Mutex::new(None),
+    });
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(client, "test-compact-model".into()),
+    );
+    (
+        Arc::new(CompactionOrchestrator::with_autocompactor(
+            compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+            1_000,
+        )),
+        slot,
+    )
+}
+
 fn make_orch() -> Arc<ConversationOrchestrator> {
     let api = Arc::new(MockApiClient::new(vec![]));
     let tools = Arc::new(tool_api::registry::ToolRegistry::new());
@@ -27,6 +69,7 @@ fn make_orch() -> Arc<ConversationOrchestrator> {
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
     let memory = Arc::new(StaticMemoryProvider::empty());
+    let (compactor, slot) = wired_compaction();
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api,
@@ -37,7 +80,8 @@ fn make_orch() -> Arc<ConversationOrchestrator> {
         memory,
         std::env::temp_dir(),
     )
-    .with_compaction(Arc::new(CompactionOrchestrator::new(1_000)));
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor);
     Arc::new(orch)
 }
 
@@ -45,10 +89,20 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
     let session = orch.session();
     let mut s = session.lock().await;
     for i in 0..n {
-        s.history.push(ConversationMessage::user(
-            MessageId::new(),
-            format!("turn-{i} body padded with filler text to push token count up beyond autocompact threshold"),
-        ));
+        if i % 2 == 0 {
+            s.history.push(ConversationMessage::user(
+                MessageId::new(),
+                format!("turn-{i} body padded with filler text to push token count up beyond autocompact threshold"),
+            ));
+        } else {
+            s.history.push(ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: format!("reply-{i} padded with enough detail for compaction"),
+                }],
+                stop_reason: Some("end_turn".into()),
+            });
+        }
     }
 }
 
@@ -68,6 +122,25 @@ async fn with_compaction_builder_stores_compactor() {
 }
 
 #[tokio::test]
+async fn unwired_manual_compact_is_an_error_not_fake_success() {
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let err = orch
+        .force_compact()
+        .await
+        .expect_err("missing compactor must not report a zero-delta success");
+    assert!(err.to_string().contains("compaction unavailable"));
+}
+
+#[tokio::test]
 async fn compacts_50_message_history() {
     let orch = make_orch();
     seed_history(&orch, 50).await;
@@ -80,6 +153,98 @@ async fn compacts_50_message_history() {
         "messages_after={} must be <50 to count as compacted",
         summary.messages_after
     );
+}
+
+#[tokio::test]
+async fn manual_compact_seeds_empty_resume_slot_and_forwards_focus() {
+    let config_home = tempfile::tempdir().expect("temp config home");
+    let client = Arc::new(CaptureCompactClient {
+        seen: std::sync::Mutex::new(None),
+    });
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "startup-model".into()),
+    );
+    let compactor = Arc::new(CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
+        u64::MAX,
+    ));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_config_home(config_home.path().to_path_buf())
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor);
+    seed_history(&orch, 4).await;
+
+    orch.force_compact_with_instructions_and_cancel(
+        Some("focus on the Rust fixes"),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("manual compact should work before any live API turn");
+
+    let request = client.seen.lock().unwrap().clone().expect("LLM was called");
+    assert_eq!(request.model, OrchestratorConfig::default().model);
+    let texts: Vec<String> = request
+        .messages
+        .iter()
+        .map(ConversationMessage::text_content)
+        .collect();
+    assert!(texts.iter().any(|text| text.contains("reply-1")));
+    assert!(texts.iter().any(|text| text.contains("turn-2")));
+    // Binary-verified (`Juy → mXi → Nto`, `s = 1`): the manual path preserves
+    // the LAST API-round group verbatim — `[turn-0],[reply-1,turn-2],[reply-3]`
+    // → the newest reply is the preserved tail and must NOT reach the
+    // summarizer. (An earlier revision asserted the full-history
+    // `messagesToKeep: []` shape here; that is the auto-only `Pto` path.)
+    assert!(
+        !texts.iter().any(|text| text.contains("reply-3")),
+        "the preserved tail (newest reply) never reaches the summarizer"
+    );
+    assert!(texts
+        .last()
+        .is_some_and(|text| text.contains("Additional Instructions:\nfocus on the Rust fixes")));
+
+    let summary_text = {
+        let session = orch.session();
+        let state = session.lock().await;
+        state
+            .history
+            .iter()
+            .map(ConversationMessage::text_content)
+            .find(|text| text.contains("Summary:\ncaptured"))
+            .expect("compact summary in post-compact history")
+    };
+    assert!(
+        summary_text.contains("read the full transcript at:"),
+        "the continuation must retain Claude Code's transcript recovery pointer"
+    );
+    assert!(
+        summary_text.contains(config_home.path().to_string_lossy().as_ref()),
+        "the recovery pointer must use this session's configured transcript root"
+    );
+
+    // The preserved tail rides verbatim in the post-compact history.
+    {
+        let session = orch.session();
+        let state = session.lock().await;
+        assert!(
+            state
+                .history
+                .iter()
+                .any(|m| m.text_content().contains("reply-3")),
+            "the newest reply is preserved verbatim after the summary"
+        );
+    }
 }
 
 #[tokio::test]
@@ -188,11 +353,21 @@ async fn failure_leaves_history_unchanged() {
     {
         let session = orch.session();
         let mut s = session.lock().await;
-        for i in 0..5 {
-            s.history.push(ConversationMessage::user(
-                MessageId::new(),
-                format!("m{i} body padded with filler text to ensure token estimate > 1"),
-            ));
+        for i in 0..6 {
+            if i % 2 == 0 {
+                s.history.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!("m{i} body padded with filler text to ensure token estimate > 1"),
+                ));
+            } else {
+                s.history.push(ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![protocol::ContentBlock::Text {
+                        text: format!("reply-{i}"),
+                    }],
+                    stop_reason: Some("end_turn".into()),
+                });
+            }
         }
     }
     let len_before = {
@@ -221,9 +396,16 @@ async fn five_consecutive_force_compact_calls_do_not_explode() {
     let orch = make_orch();
     seed_history(&orch, 30).await;
 
-    for i in 0..5 {
-        let r = orch.force_compact().await;
-        assert!(r.is_ok(), "iter {i} failed: {:?}", r.err());
+    orch.force_compact().await.expect("first compact succeeds");
+    for i in 1..5 {
+        let err = orch
+            .force_compact()
+            .await
+            .expect_err("already-compacted short history must reject");
+        assert!(
+            err.to_string().contains("Not enough messages to compact."),
+            "iter {i}: {err}"
+        );
     }
 
     // No assertion on final length — the stub autocompact collapses to
@@ -304,6 +486,7 @@ async fn compaction_safety_gate() {
         provider_metadata: serde_json::Value::Null,
     };
     let api = Arc::new(MockApiClient::new(vec![response]));
+    let (compactor, slot) = wired_compaction();
     let orch = Arc::new(
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
@@ -315,7 +498,8 @@ async fn compaction_safety_gate() {
             Arc::new(StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         )
-        .with_compaction(Arc::new(CompactionOrchestrator::new(1_000))),
+        .with_cache_safe_slot(slot)
+        .with_compaction(compactor),
     );
 
     seed_history(&orch, 50).await;

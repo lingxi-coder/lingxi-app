@@ -829,6 +829,34 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Force a compaction pass and return the summary.
     async fn force_compact(&self) -> Result<CompactionSummary, HandleError>;
 
+    /// Force compaction while adding optional focus text to the summary prompt.
+    /// The default delegates to [`Self::force_compact`] so external handles
+    /// remain source-compatible; the live orchestrator overrides it.
+    async fn force_compact_with_instructions(
+        &self,
+        _custom_instructions: &str,
+    ) -> Result<CompactionSummary, HandleError> {
+        self.force_compact().await
+    }
+
+    /// Force compaction with optional focus text and cooperative cancellation.
+    ///
+    /// The default preserves compatibility for lightweight/test handles that
+    /// do not expose a cancellable compaction operation. The production
+    /// orchestrator overrides this method so the interactive CLI can abort an
+    /// in-flight summarization request with Escape.
+    async fn force_compact_with_instructions_and_cancel(
+        &self,
+        custom_instructions: Option<&str>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<CompactionSummary, HandleError> {
+        if cancel.is_cancelled() {
+            return Err(HandleError::ActionFailed("compaction cancelled".into()));
+        }
+        self.force_compact_with_instructions(custom_instructions.unwrap_or_default())
+            .await
+    }
+
     /// Snapshot the cumulative cost.
     async fn snapshot_cost(&self) -> CostSnapshot;
 
@@ -1406,9 +1434,6 @@ pub trait OutputStream: Send + Sync {
     /// Emit the end-of-turn marker with the cost snapshot.
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot);
 
-    /// Emit a compaction-completed event. Default no-op for adapters
-    /// that don't care (e.g. NDJSON sink may flush a one-line marker).
-    /// (M6-08)
     /// Emit when compaction has STARTED (before the summarizer call). The
     /// consumer (TUI / CLI / bridge) should display a progress indicator
     /// (spinner / "Compacting…") until `emit_compaction_completed`
@@ -1419,6 +1444,8 @@ pub trait OutputStream: Send + Sync {
     /// during the compaction wait.
     async fn emit_compaction_started(&self) {}
 
+    /// Emit a compaction-completed event and its before/after size delta.
+    /// Default no-op for adapters that do not render compaction state.
     async fn emit_compaction_completed(
         &self,
         _messages_before: u32,

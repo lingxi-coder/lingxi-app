@@ -413,6 +413,7 @@ mod tests {
                 append_system_prompt: None,
             },
             fork_context_messages: vec![],
+            transcript_path: None,
             generation: 1,
         };
 

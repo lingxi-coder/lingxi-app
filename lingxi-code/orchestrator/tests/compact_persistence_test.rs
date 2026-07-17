@@ -158,6 +158,20 @@ async fn cold_resume_reconstructs_post_compact_state() {
         .get("compactMetadata")
         .expect("compactMetadata persisted");
     assert_eq!(cm.get("trigger").and_then(Value::as_str), Some("auto"));
+    assert!(
+        cm.get("postTokens").and_then(Value::as_u64).is_some(),
+        "successful compaction records the rebuilt context size"
+    );
+    assert!(
+        cm.get("durationMs").and_then(Value::as_u64).is_some(),
+        "successful compaction records its wall duration"
+    );
+    assert!(
+        cm.get("cumulativeDroppedTokens")
+            .and_then(Value::as_u64)
+            .is_some(),
+        "successful compaction records cumulative dropped tokens"
+    );
 
     // The summary user line chains off the boundary and carries the flags.
     let summary = &lines[boundary_idx + 1];

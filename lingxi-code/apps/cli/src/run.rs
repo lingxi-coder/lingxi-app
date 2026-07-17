@@ -252,6 +252,36 @@ pub async fn run_stream_json_print(
 /// Phase 1 implements: `initialize` (full payload) and `interrupt` (cancel signal).
 /// All other subtypes return the byte-exact fallthrough error.
 #[allow(clippy::too_many_arguments)]
+/// Resolution of a `set_model` control request's `model` field against the
+/// session default, byte-faithful to claude-code 2.1.208's engine handler:
+/// `if(fr!=null&&typeof fr!=="string"){…reject…} let or=model??"default",
+/// Jr=or.trim().toLowerCase()==="default",vr=Jr?SE():or`.
+enum SetModelTarget {
+    /// Apply this model: the raw requested string, or the session default when
+    /// the request was absent / explicit `null` / case-insensitive `"default"`.
+    Apply(String),
+    /// The `model` field was present but neither a string nor null — reject.
+    Reject,
+}
+
+fn resolve_set_model_target(field: Option<&Value>, default_model: &str) -> SetModelTarget {
+    // CC: `fr != null` — in JS `!= null` covers both `null` and `undefined`, so
+    // an explicit JSON `null` is treated as absent (→ default), not a type
+    // error. `model ?? "default"` collapses absent/null to `"default"`.
+    let requested = match field {
+        Some(Value::String(m)) => m.as_str(),
+        None | Some(Value::Null) => "default",
+        Some(_) => return SetModelTarget::Reject,
+    };
+    // CC: `or.trim().toLowerCase() === "default"` — trimmed, case-insensitive.
+    if requested.trim().to_lowercase() == "default" {
+        SetModelTarget::Apply(default_model.to_string())
+    } else {
+        // CC: `vr = Jr ? SE() : or` — the RAW requested string (untrimmed).
+        SetModelTarget::Apply(requested.to_string())
+    }
+}
+
 async fn dispatch_control_request(
     subtype: &str,
     request_id: &str,
@@ -290,21 +320,16 @@ async fn dispatch_control_request(
             // default model and APPLIES it — so a client can revert a prior
             // `set_model` override (claude-code re-resolves via
             // getDefaultMainLoopModel() and calls setMainLoopModelOverride).
-            let requested = match field("model") {
-                Some(Value::String(model)) => model.as_str(),
-                Some(_) => {
-                    writer.reply_error(request_id, "Invalid model: expected string");
+            let default_model = orchestrator.default_model();
+            let target = match resolve_set_model_target(field("model"), default_model.as_str()) {
+                SetModelTarget::Apply(t) => t,
+                SetModelTarget::Reject => {
+                    // CC 2.1.208: `set_model: model must be a string`.
+                    writer.reply_error(request_id, "set_model: model must be a string");
                     return;
                 }
-                None => "default",
             };
-            let default_model = orchestrator.default_model();
-            let target = if requested == "default" {
-                default_model.as_str()
-            } else {
-                requested
-            };
-            match orchestrator.switch_model(target, None).await {
+            match orchestrator.switch_model(&target, None).await {
                 Ok(()) => writer.reply_success(request_id, None),
                 Err(e) => writer.reply_error(request_id, &e.to_string()),
             }
@@ -2202,6 +2227,56 @@ mod tests {
         let dir = lingxi_home.join("projects").join(project_dir_name(cwd));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // P2-04: `set_model` control-request resolution is byte-faithful to CC
+    // 2.1.208's engine handler across null/absent/case/whitespace/type inputs.
+    fn apply(field: Option<serde_json::Value>) -> Option<String> {
+        match resolve_set_model_target(field.as_ref(), "session-default") {
+            SetModelTarget::Apply(t) => Some(t),
+            SetModelTarget::Reject => None,
+        }
+    }
+
+    #[test]
+    fn set_model_absent_or_null_applies_session_default() {
+        // CC `model ?? "default"`: both absent and explicit JSON null collapse
+        // to the session default — never a type error.
+        assert_eq!(apply(None).as_deref(), Some("session-default"));
+        assert_eq!(
+            apply(Some(serde_json::Value::Null)).as_deref(),
+            Some("session-default")
+        );
+    }
+
+    #[test]
+    fn set_model_default_is_case_insensitive_and_trimmed() {
+        // CC `or.trim().toLowerCase() === "default"`.
+        for s in ["default", "DEFAULT", "Default", "  default  ", "\tdefault\n"] {
+            assert_eq!(
+                apply(Some(serde_json::Value::String(s.into()))).as_deref(),
+                Some("session-default"),
+                "{s:?} must resolve to the session default"
+            );
+        }
+    }
+
+    #[test]
+    fn set_model_named_model_passes_raw_string() {
+        // CC `vr = Jr ? SE() : or` — the raw requested string, untrimmed.
+        assert_eq!(
+            apply(Some(serde_json::json!("claude-opus-4"))).as_deref(),
+            Some("claude-opus-4")
+        );
+    }
+
+    #[test]
+    fn set_model_non_string_non_null_is_rejected() {
+        // CC `if(fr!=null && typeof fr!=="string")` → reject.
+        assert!(apply(Some(serde_json::json!(42))).is_none());
+        assert!(apply(Some(serde_json::json!(true))).is_none());
+        assert!(apply(Some(serde_json::json!({"a": 1}))).is_none());
+        assert!(apply(Some(serde_json::json!(["x"]))).is_none());
     }
 
     #[tokio::test]

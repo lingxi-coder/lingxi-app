@@ -2227,6 +2227,138 @@ mod async_path_tests {
         );
     }
 
+    // ---- P2-09: runtime `{"async":true}` marker fold-back --------------------
+
+    /// A `ProcessRunner` whose `run_hook_with_async_detection` BACKGROUNDS the
+    /// hook (mirroring the posix runner when it sees the `{"async":true}` marker
+    /// on the child's first stdout line): it hands back a
+    /// [`traits::HookRunOutcome::Backgrounded`] with an eventual-output handle
+    /// pre-loaded with `eventual`. Its plain `run` is never taken on this path.
+    struct MarkerBackgroundingRunner {
+        eventual: StdMutex<Option<ProcessOutput>>,
+        async_timeout: Duration,
+    }
+    impl MarkerBackgroundingRunner {
+        fn new(eventual: ProcessOutput, async_timeout: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                eventual: StdMutex::new(Some(eventual)),
+                async_timeout,
+            })
+        }
+    }
+    #[async_trait]
+    impl ProcessRunner for MarkerBackgroundingRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn run_hook_with_async_detection(
+            &self,
+            _cmd: &SandboxedCommand,
+            _default_async_timeout: Duration,
+        ) -> Result<traits::HookRunOutcome, ProcessError> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            // Deliver the eventual (post-marker) output immediately, as a real
+            // detached drain would once the child finished.
+            let _ = tx.send(self.eventual.lock().unwrap().take().expect("one call"));
+            Ok(traits::HookRunOutcome::Backgrounded {
+                async_timeout: self.async_timeout,
+                output: Some(rx),
+            })
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// A Command hook that prints the runtime `{"async":true}` marker contributes
+    /// NO synchronous decision (it never blocks the turn), and its eventual
+    /// post-marker output folds back on the async registry's completion channel —
+    /// mapped through the command-hook contract — so the orchestrator can re-inject
+    /// it as an `async_hook_response` on a later turn (claude-code
+    /// `registerPendingAsyncHook`). P2-09.
+    #[tokio::test]
+    async fn runtime_marker_folds_eventual_output_back() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+
+        // Eventual (post-marker) output: JSON `additionalContext` the fold-back
+        // parses through `map_command_output`.
+        let eventual = out(
+            "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"async done\"}}",
+            "",
+            0,
+        );
+        let runner = MarkerBackgroundingRunner::new(eventual, Duration::from_secs(30));
+
+        // A BLOCKING hook drives the SYNCHRONOUS Command arm (where the marker is
+        // detected). Even so, an async-marker hook must not gate the turn.
+        let hook = command_hook(true);
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox))
+        .with_async_registry(async_reg.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        // No synchronous decision, no stdout leak — the marker path is a no-op turn.
+        assert_eq!(
+            agg.decision, None,
+            "an async-marker hook contributes no synchronous decision"
+        );
+
+        // The eventual output folds back on completion_tx, keyed by hook id and
+        // mapped through the command-hook contract.
+        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("fold-back must publish before the timeout")
+            .expect("completion channel stays open");
+        assert_eq!(got_id, hook_id);
+        assert!(matches!(got.outcome, HookOutcome::Success));
+        assert_eq!(
+            got.response
+                .as_ref()
+                .and_then(|r| r.additional_context.as_deref()),
+            Some("async done"),
+            "the eventual additionalContext must survive the fold-back mapping"
+        );
+    }
+
+    /// When no async registry is wired, the runtime-marker path degrades to a
+    /// no-op synchronous decision (the hook still ran in the runner, but there is
+    /// nowhere to fold its eventual output back) — never a Block, never a panic.
+    #[tokio::test]
+    async fn runtime_marker_without_registry_is_a_noop() {
+        let runner =
+            MarkerBackgroundingRunner::new(out("ignored", "", 0), Duration::from_secs(30));
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook(true));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox));
+        // No `.with_async_registry(...)`.
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(agg.decision, None, "marker path never blocks the turn");
+    }
+
     // ---- #45b: no first-Block short-circuit + sticky Block; #41 runner gate -
 
     /// A `ProcessRunner` that returns a different pre-canned [`ProcessOutput`]

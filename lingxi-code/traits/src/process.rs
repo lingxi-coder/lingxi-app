@@ -68,17 +68,29 @@ pub trait ProcessRunner: Send + Sync {
 }
 
 /// Outcome of [`ProcessRunner::run_hook_with_async_detection`].
-#[derive(Debug, Clone)]
+///
+/// Not `Clone` — the `Backgrounded` variant carries a single-consumer
+/// [`tokio::sync::oneshot::Receiver`] for the hook's eventual output.
+#[derive(Debug)]
 pub enum HookRunOutcome {
     /// The hook ran to completion; carries its buffered output.
     Completed(ProcessOutput),
     /// The hook's first stdout line was `{"async": true, …}`; it has been
-    /// backgrounded (detached, bounded by its async timeout). Platform runners
-    /// may retain eventual stdout/stderr in `output_path`; the file can still be
-    /// growing when this outcome is returned.
+    /// backgrounded (detached, bounded by `async_timeout`). The eventual drained
+    /// output is delivered once through `output` when the detached process
+    /// finishes (or is killed at `async_timeout`), so the caller can fold it
+    /// back as an `async_hook_response` (claude-code `registerPendingAsyncHook`).
     Backgrounded {
-        /// Path of the eventual stdout/stderr capture, when retained.
-        output_path: Option<String>,
+        /// Effective background timeout: the marker's `asyncTimeout` when
+        /// present (and `> 0`), else the caller's `default_async_timeout`
+        /// (claude-code `asyncTimeout || 15000`). The fold-back registration
+        /// bounds itself by this same value.
+        async_timeout: std::time::Duration,
+        /// Delivers the hook's eventual drained [`ProcessOutput`] exactly once
+        /// when the detached process finishes or is killed at `async_timeout`.
+        /// `None` when the runner cannot retain the output (e.g. the default,
+        /// non-streaming trait impl, which never backgrounds at all).
+        output: Option<tokio::sync::oneshot::Receiver<ProcessOutput>>,
     },
 }
 

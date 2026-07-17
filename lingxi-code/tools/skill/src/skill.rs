@@ -661,6 +661,17 @@ ALREADY been loaded - follow the instructions directly instead of calling this t
                 format!("Base directory for this skill: {skill_dir}\n\n{expanded_prompt}");
         }
 
+        // P2-12 / `zSr(e.name,u,d,r.agentId??null)`: record this invocation in
+        // the process-global invoked-skill registry so its content can be
+        // re-injected after a compaction (`rRg`) — the model regains the full
+        // skill instructions across the compact boundary even though the
+        // boundary summary drops the verbatim body. The content is the expanded
+        // prompt the model receives (the binary's `d`); the path is the skill's
+        // base dir (`u`). `agentId` is `None`: every LingXi orchestrator runs as
+        // the main thread, so the key is `":{command_name}"`.
+        let skill_path = desc.skill_root.clone().unwrap_or_default();
+        compaction::invoked_skills::register(&command_name, &skill_path, &expanded_prompt, None);
+
         let new_messages = vec![protocol::ConversationMessage::user(
             protocol::MessageId::new(),
             expanded_prompt,

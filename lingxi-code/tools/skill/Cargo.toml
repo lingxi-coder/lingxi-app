@@ -15,6 +15,12 @@ telemetry = { path = "../../telemetry" }
 # `$ARGUMENTS` / `$N` / `$name` placeholders. command-api depends only on
 # protocol + traits, so this adds no cycle.
 command-api = { path = "../../command-api" }
+# P2-12 / `zSr`: record model-invoked skills in the process-global
+# invoked-skill registry (`compaction::invoked_skills`) so their content can be
+# re-injected after a compaction (`rRg`). `compaction` does not depend on
+# `tool-skill`, so this adds no cycle; every app that builds `tool-skill`
+# already builds `compaction`.
+compaction = { path = "../../compaction" }
 # SKILLEXEC.6: the embedded `!command` runner mirrors `BashTool::call`'s
 # `should_use_sandbox` + `wrap_with_sandbox` decision. `sandbox` is already in
 # the lock via `tool-shell`, so this adds only an internal edge (no new external

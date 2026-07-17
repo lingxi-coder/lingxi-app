@@ -26,7 +26,7 @@ use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSou
 use hooks::events::{HookEvent, HookEventType};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
-use hooks::response::{HookOutcome, HookResult};
+use hooks::response::{HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -84,10 +84,29 @@ struct Fired {
 
 type FiredLog = Arc<Mutex<Vec<Fired>>>;
 
-/// Records the payload of every `MessageDisplay` event it sees.
+/// Records the payload of every `MessageDisplay` event it sees, and optionally
+/// returns a `displayContent` override (or reports failure) so the
+/// completed-message pass can be exercised.
 struct RecordingHandler {
     log: FiredLog,
+    /// When `Some`, returned as `hookSpecificOutput.displayContent` — the
+    /// completed-message pass substitutes it for the on-screen text.
+    display: Option<String>,
+    /// When `true`, the hook reports `HookOutcome::Error` and no response, so
+    /// the completed pass falls back to the original text.
+    fail: bool,
 }
+
+impl RecordingHandler {
+    fn observer(log: FiredLog) -> Self {
+        Self {
+            log,
+            display: None,
+            fail: false,
+        }
+    }
+}
+
 #[async_trait]
 impl BuiltinHookHandler for RecordingHandler {
     fn id(&self) -> &str {
@@ -110,12 +129,25 @@ impl BuiltinHookHandler for RecordingHandler {
                 delta: delta.clone(),
             });
         }
+        if self.fail {
+            return HookResult {
+                outcome: HookOutcome::Error,
+                stdout: String::new(),
+                stderr: "boom".into(),
+                exit_code: Some(1),
+                response: None,
+            };
+        }
+        let response = self.display.clone().map(|d| HookResponse {
+            display_content: Some(d),
+            ..Default::default()
+        });
         HookResult {
             outcome: HookOutcome::Success,
             stdout: String::new(),
             stderr: String::new(),
             exit_code: None,
-            response: None,
+            response,
         }
     }
 }
@@ -152,35 +184,45 @@ fn single_text_turn() -> Vec<llm_client::LlmEvent> {
 fn orch_with(
     hooks: Arc<HookExecutorImpl>,
     api: Arc<MockStreamingApiClient>,
-) -> ConversationOrchestrator {
-    ConversationOrchestrator::new_with_streaming(
+) -> (ConversationOrchestrator, Arc<MockOutputStream>) {
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         api,
         Arc::new(ToolRegistry::new()),
         hooks,
         Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
+        output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    )
+    );
+    (orch, output)
 }
 
-/// (1) A registered `MessageDisplay` hook fires exactly once at the assistant
-/// message's stream begin with the byte-faithful at-begin payload.
-#[tokio::test]
-async fn message_display_fires_once_at_assistant_stream_begin() {
-    let log: FiredLog = Arc::new(Mutex::new(Vec::new()));
+/// Build an executor whose single `MessageDisplay` handler is `handler`.
+async fn exec_with(handler: RecordingHandler) -> Arc<HookExecutorImpl> {
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
     registry.write().await.register(builtin_hook(
         "record-message-display",
         HookEventType::MessageDisplay,
     ));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
-    exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
+    exec.register_builtin(Arc::new(handler));
+    Arc::new(exec)
+}
+
+/// (1) A registered `MessageDisplay` hook fires TWICE per assistant message:
+/// once at the stream BEGIN (`final:false`, empty delta) and once for the
+/// COMPLETED-message pass (`final:true`, the full joined text) — the twin of
+/// claude-code's `begin(d)` init plus the `Qff` completed-message fire.
+#[tokio::test]
+async fn message_display_fires_at_begin_and_on_completed_message() {
+    let log: FiredLog = Arc::new(Mutex::new(Vec::new()));
+    let exec = exec_with(RecordingHandler::observer(log.clone())).await;
 
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![single_text_turn()]));
-    let orch = orch_with(Arc::new(exec), api);
+    let (orch, _out) = orch_with(exec, api);
 
     let outcome = orch
         .run_turn_streaming("say hi")
@@ -194,37 +236,51 @@ async fn message_display_fires_once_at_assistant_stream_begin() {
     let seen = log.lock().unwrap().clone();
     assert_eq!(
         seen.len(),
-        1,
-        "MessageDisplay must fire exactly once per assistant message: {seen:?}"
+        2,
+        "MessageDisplay must fire at begin AND on the completed message: {seen:?}"
     );
-    let f = &seen[0];
+
+    // The at-begin fire.
+    let begin = &seen[0];
     assert!(
-        !f.turn_id.is_empty() && uuid::Uuid::parse_str(&f.turn_id).is_ok(),
+        !begin.turn_id.is_empty() && uuid::Uuid::parse_str(&begin.turn_id).is_ok(),
         "turn_id must be a fresh UUID, got {:?}",
-        f.turn_id
+        begin.turn_id
     );
     assert!(
-        uuid::Uuid::parse_str(&f.message_id).is_ok(),
-        "message_id must be the assistant message's BARE uuid (no `msg:` prefix), got {:?}",
-        f.message_id
+        uuid::Uuid::parse_str(&begin.message_id).is_ok(),
+        "message_id must be a bare uuid, got {:?}",
+        begin.message_id
     );
-    assert_eq!(f.index, 0, "at-begin index is 0");
-    assert!(!f.is_final, "at-begin final is false");
-    assert_eq!(f.delta, "", "no delta text has streamed yet at begin");
+    assert_eq!(begin.index, 0, "at-begin index is 0");
+    assert!(!begin.is_final, "at-begin final is false");
+    assert_eq!(begin.delta, "", "no delta text has streamed yet at begin");
+
+    // The completed-message pass carries the full joined assistant text.
+    let done = &seen[1];
+    assert_eq!(done.turn_id, begin.turn_id, "same per-turn id");
+    assert!(
+        uuid::Uuid::parse_str(&done.message_id).is_ok(),
+        "completed-pass message_id is a fresh uuid, got {:?}",
+        done.message_id
+    );
+    assert_eq!(done.index, 0, "completed-pass index is 0");
+    assert!(done.is_final, "completed-pass final is true");
+    assert_eq!(done.delta, "hi", "completed pass carries the full joined text");
 }
 
-/// (2) No `MessageDisplay` hook registered ⇒ firing is a strict no-op and the
-/// turn still completes.
+/// (2) No `MessageDisplay` hook registered ⇒ firing is a strict no-op (and the
+/// live text streams normally).
 #[tokio::test]
 async fn message_display_noop_without_a_registered_hook() {
     let log: FiredLog = Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
     // No MessageDisplay hook registered.
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
-    exec.register_builtin(Arc::new(RecordingHandler { log: log.clone() }));
+    exec.register_builtin(Arc::new(RecordingHandler::observer(log.clone())));
 
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![single_text_turn()]));
-    let orch = orch_with(Arc::new(exec), api);
+    let (orch, out) = orch_with(Arc::new(exec), api);
 
     orch.run_turn_streaming("say hi")
         .await
@@ -233,5 +289,78 @@ async fn message_display_noop_without_a_registered_hook() {
     assert!(
         log.lock().unwrap().is_empty(),
         "no MessageDisplay hook registered ⇒ firing must be a strict no-op"
+    );
+    // Live streaming is unchanged: the token is emitted as a raw delta.
+    assert_eq!(
+        out.text_events().await,
+        vec!["hi".to_string()],
+        "no display hook ⇒ live per-token text emission is byte-identical"
+    );
+}
+
+/// (3) A `MessageDisplay` hook returning `displayContent` substitutes the
+/// ON-SCREEN text for the completed message: the live per-token deltas are
+/// suppressed and the hook's value is rendered instead, while the hook still
+/// SEES the original joined text as the completed-pass delta (proving the
+/// stored/source text is unchanged — "Display-only").
+#[tokio::test]
+async fn message_display_display_content_substitutes_on_screen_text() {
+    let log: FiredLog = Arc::new(Mutex::new(Vec::new()));
+    let exec = exec_with(RecordingHandler {
+        log: log.clone(),
+        display: Some("[redacted]".into()),
+        fail: false,
+    })
+    .await;
+
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![single_text_turn()]));
+    let (orch, out) = orch_with(exec, api);
+
+    orch.run_turn_streaming("say hi")
+        .await
+        .expect("turn must succeed");
+
+    // Only the substituted text reaches the screen — the raw "hi" delta was
+    // suppressed because a display hook is active.
+    assert_eq!(
+        out.text_events().await,
+        vec!["[redacted]".to_string()],
+        "displayContent replaces the on-screen text; the raw delta is suppressed"
+    );
+
+    // The hook still observed the ORIGINAL text on the completed-message pass,
+    // confirming the stored/source content is untouched.
+    let seen = log.lock().unwrap().clone();
+    let done = seen.last().expect("completed pass fired");
+    assert!(done.is_final, "last fire is the completed-message pass");
+    assert_eq!(
+        done.delta, "hi",
+        "the hook receives the ORIGINAL joined text, not the override"
+    );
+}
+
+/// (4) A FAILING `MessageDisplay` hook falls back to the original text: no
+/// override is applied and the original joined text is rendered on-screen.
+#[tokio::test]
+async fn message_display_failing_hook_falls_back_to_original_text() {
+    let log: FiredLog = Arc::new(Mutex::new(Vec::new()));
+    let exec = exec_with(RecordingHandler {
+        log: log.clone(),
+        display: None,
+        fail: true,
+    })
+    .await;
+
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![single_text_turn()]));
+    let (orch, out) = orch_with(exec, api);
+
+    orch.run_turn_streaming("say hi")
+        .await
+        .expect("turn must succeed");
+
+    assert_eq!(
+        out.text_events().await,
+        vec!["hi".to_string()],
+        "a failing display hook falls back to the original joined text"
     );
 }

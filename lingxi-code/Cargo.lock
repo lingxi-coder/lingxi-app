@@ -969,6 +969,7 @@ dependencies = [
  "engine",
  "hooks",
  "llm-client",
+ "once_cell",
  "protocol",
  "regex",
  "serde",
@@ -5695,6 +5696,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "command-api",
+ "compaction",
  "engine",
  "once_cell",
  "permission",

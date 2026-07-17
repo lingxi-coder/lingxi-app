@@ -273,10 +273,22 @@ pub struct Argv {
     // to the MAIN thread (`bde`/`mainThreadAgentDefinition`): the `agentType`
     // rides lifecycle hook payloads, the system prompt becomes the main-loop
     // prompt (`nre`, `--system-prompt` still winning), the `tools:` /
-    // `disallowedTools` frontmatter narrows the tool pool (`HJ`), and the agent
+    // `disallowedTools` frontmatter narrows the tool pool (`HJ`), the agent
     // `model` overrides the main loop (`jb(Zo(model))`) unless `--model` was
-    // given. RESIDUAL (follow-up): frontmatter `hooks`/`mcpServers` swap + resume
-    // restoration (`rVe`).
+    // given, and the frontmatter `hooks` register as `mainThreadAgentHooks`
+    // (`Rft`→`o_n`, `is_agent=false` so Stop stays Stop; gated by the `g9e`
+    // trusted-source set) BEFORE the SessionStart fire. The applied `agentType`
+    // is PERSISTED as an `agent-setting` transcript record, so a later `--resume`
+    // with NO `--agent` re-adopts it via `rVe` (prompt + tools + model + hooks
+    // re-applied; a byte-exact `Resumed session had agent "X" but it is no longer
+    // available. Using default behavior.` warning + default fallback on a miss).
+    // A re-passed `--agent` on `--resume` wins (`rVe`'s `if(t)return`).
+    // RESIDUAL (blocked on LingXi substrate, not CC parity): frontmatter
+    // `mcpServers` swap (scope `"agent"`) — the composition-root MCP tool build
+    // Arc-seals the `Arc<ToolRegistry>` before the final agent catalog is
+    // assembled, so a late `connect_all` cannot surface the servers' tools to the
+    // model (the same limitation plugin MCP servers already have; no
+    // runtime-mutable tool registry exists).
     #[arg(long = "agent", value_name = "agent")]
     pub agent: Option<String>,
 

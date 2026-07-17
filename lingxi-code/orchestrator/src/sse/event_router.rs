@@ -78,6 +78,14 @@ pub async fn dispatch_event(
     event: LlmEvent,
     acc: &mut BlockAccumulator,
     output: &Arc<dyn OutputStream>,
+    // P2-04 (MessageDisplay `displayContent`): when a `MessageDisplay` hook is
+    // registered, live per-token `text_delta` emission is SUPPRESSED here so the
+    // completed-message pass can render the (possibly hook-substituted) full text
+    // exactly once — mirroring claude-code, whose live path flows through the
+    // display flush rather than raw deltas (`Qff`, BIN off 229876575). The text
+    // is still accumulated into the block; only the on-screen echo is withheld.
+    // `false` ⇒ byte-identical live streaming (the no-hook common case).
+    suppress_live_text: bool,
 ) -> Result<RouterAction, StreamingError> {
     match event {
         LlmEvent::MessageStart { response } => {
@@ -207,7 +215,12 @@ pub async fn dispatch_event(
                     // Stream the token to the output sink RIGHT NOW.
                     // This is the key M5-04 behavior: tokens are
                     // surfaced as they arrive, not buffered per-block.
-                    output.emit_text(&text).await;
+                    // P2-04: withheld when a `MessageDisplay` hook is active — the
+                    // completed-message pass renders the full (possibly
+                    // substituted) text once (see the `suppress_live_text` doc).
+                    if !suppress_live_text {
+                        output.emit_text(&text).await;
+                    }
                 }
                 ContentDelta::InputJsonDelta { partial_json } => {
                     acc.append_json(index, &partial_json)?;
@@ -442,6 +455,7 @@ mod tests {
             },
             &mut acc,
             &out,
+            false,
         )
         .await
         .expect("start");
@@ -453,6 +467,7 @@ mod tests {
             },
             &mut acc,
             &out,
+            false,
         )
         .await
         .expect("delta");
@@ -476,6 +491,7 @@ mod tests {
             },
             &mut acc,
             &out,
+            false,
         )
         .await
         .expect("ok");
@@ -492,7 +508,7 @@ mod tests {
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
-        let action = dispatch_event(LlmEvent::MessageStop, &mut acc, &out)
+        let action = dispatch_event(LlmEvent::MessageStop, &mut acc, &out, false)
             .await
             .expect("ok");
         assert!(matches!(action, RouterAction::EndOfStream));
@@ -520,6 +536,7 @@ mod tests {
             },
             &mut acc,
             &out,
+            false,
         )
         .await
         .expect("ok");

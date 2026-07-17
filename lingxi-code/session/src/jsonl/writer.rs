@@ -147,7 +147,40 @@ impl JsonlWriter {
             "customTitle": custom_title,
             "sessionId": session_id,
         });
-        let line = serde_json::to_string(&value)?;
+        self.append_side_record(&value).await
+    }
+
+    /// Append an `agent-setting` metadata line for `session_id` — the persisted
+    /// main-thread `--agent` selection (`agentSetting` = the agent's `agentType`)
+    /// so a later `--resume` (with no `--agent`) can re-adopt it. 1:1 with
+    /// claude-code's session persist `appendEntryToFile(path, {type:
+    /// 'agent-setting', agentSetting: currentSessionAgentSetting, sessionId})`
+    /// (`sessionStorage.ts`; read back by the `agentSettings.set(N.sessionId,
+    /// N.agentSetting)` routing and fed to `rVe` on resume).
+    ///
+    /// `session_id` MUST be the BARE session uuid (the `<uuid>.jsonl` file stem),
+    /// NOT the `sess:`-prefixed display form — the loader keys the
+    /// `agent_settings` map by that stem, so a prefixed id would never match on
+    /// read. Same lock / dir-mode / file-mode contract as [`Self::append`].
+    pub async fn append_agent_setting(
+        &self,
+        session_id: &str,
+        agent_setting: &str,
+    ) -> Result<(), WriterError> {
+        let value = serde_json::json!({
+            "type": "agent-setting",
+            "agentSetting": agent_setting,
+            "sessionId": session_id,
+        });
+        self.append_side_record(&value).await
+    }
+
+    /// Shared body for the metadata side-record appenders ([`Self::append_custom_title`],
+    /// [`Self::append_agent_setting`]): serialize one JSON object + `\n` and append
+    /// it under the same lock / dir-mode (0o700) / file-mode (0o600) contract as
+    /// [`Self::append`].
+    async fn append_side_record(&self, value: &serde_json::Value) -> Result<(), WriterError> {
+        let line = serde_json::to_string(value)?;
         let _g = self.lock.lock().await;
         let path_str = self.path.to_str().expect("session paths are UTF-8");
         if let Some(parent) = self.path.parent() {
@@ -207,6 +240,52 @@ mod tests {
         assert_eq!(value["type"], "custom-title");
         assert_eq!(value["customTitle"], "My Title");
         assert_eq!(value["sessionId"], session_id);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// (P2-02 cc2.1.207) The `--agent` persist path emits an `agent-setting` line
+    /// whose `sessionId` is the BARE uuid (the `<uuid>.jsonl` stem the loader keys
+    /// `agent_settings` by) and whose `agentSetting` is the applied `agentType`
+    /// verbatim — the record `route_lines` reads back into `agent_settings` and
+    /// `rVe` re-adopts on resume. Byte-shape matches claude's persist
+    /// `{type:"agent-setting",agentSetting,sessionId}`.
+    #[tokio::test]
+    async fn append_agent_setting_writes_parseable_line() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-agent-{}-{}",
+            std::process::id(),
+            "xyz"
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let session_id = "22222222-3333-4444-5555-666666666666";
+        let session_path = tmp.join(format!("{session_id}.jsonl"));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(session_path.clone(), fs);
+
+        writer
+            .append_agent_setting(session_id, "reviewer")
+            .await
+            .expect("append agent setting");
+
+        let raw = std::fs::read_to_string(&session_path).expect("read back");
+        let value: serde_json::Value =
+            serde_json::from_str(raw.trim()).expect("line parses as json");
+        assert_eq!(value["type"], "agent-setting");
+        assert_eq!(value["agentSetting"], "reviewer");
+        assert_eq!(value["sessionId"], session_id);
+
+        // The loader routes it back into the `agent_settings` side-map keyed by
+        // `sessionId` (the resume read side `rVe` consumes).
+        let loaded = crate::jsonl::reader::route_lines(&raw);
+        assert_eq!(
+            loaded
+                .agent_settings
+                .get(session_id)
+                .and_then(serde_json::Value::as_str),
+            Some("reviewer"),
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -193,6 +193,16 @@ impl WorktreeChangeSummary {
 /// removal is best-effort (idempotent per the
 /// [`WorktreeManager::remove_worktree`] contract).
 ///
+/// A git error while inspecting the worktree — `git status`/`rev-list` exiting
+/// non-zero (lock contention, corrupt index), or a manager `Err` — is treated
+/// as KEEP, not remove. Claude's `ZVt` reports such a failure as
+/// `{ dirty: true, gitError: true }` (2.1.208 binary) so its consumer keeps the
+/// worktree rather than delete work it could not verify; the port's
+/// [`WorktreeManager::worktree_change_summary`] collapses every such
+/// "state could not be reliably determined" case to `Ok(None)`, and its own
+/// contract mandates callers treat `None` as *unknown, assume unsafe*
+/// (fail-closed). Only a positively-clean `Ok(Some(clean))` summary is removed.
+///
 /// Shared by the SYNC AgentTool finalizer and the ASYNC (`run_in_background`)
 /// lifecycle owner — claude 2.1.207 hands the same `getWorktreeResult` closure
 /// to the detached background task, so both paths must judge identically.
@@ -200,13 +210,14 @@ pub async fn agent_worktree_result(
     manager: &dyn WorktreeManager,
     handle: &WorktreeHandle,
 ) -> Option<(String, String)> {
-    let dirty = manager
-        .worktree_change_summary(handle)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|s| s.is_dirty());
-    if dirty {
+    let keep = match manager.worktree_change_summary(handle).await {
+        Ok(Some(summary)) => summary.is_dirty(),
+        // Unknown state (git-status/rev-list non-zero exit, no baseline) or a
+        // manager error ⇒ fail-closed KEEP, mirroring claude `ZVt`'s
+        // `gitError ⇒ dirty:true` branch.
+        Ok(None) | Err(_) => true,
+    };
+    if keep {
         Some((
             handle.path.to_string_lossy().into_owned(),
             handle.branch_name.clone(),
@@ -364,9 +375,11 @@ mod m2_01_tests {
 
     /// Minimal in-crate manager for `agent_worktree_result`: scripted change
     /// summary + a removal recorder (the tool-api `MockWorktreeManager` lives
-    /// downstream and cannot be used here without a dep cycle).
+    /// downstream and cannot be used here without a dep cycle). `summary` is
+    /// the full `worktree_change_summary` result so tests can script the
+    /// unknown (`Ok(None)`) and git-error (`Err`) branches, not just a value.
     struct JudgmentMock {
-        summary: Option<WorktreeChangeSummary>,
+        summary: Result<Option<WorktreeChangeSummary>, WorktreeError>,
         removed: std::sync::Mutex<Vec<WorktreeHandle>>,
     }
     #[async_trait]
@@ -396,7 +409,7 @@ mod m2_01_tests {
             &self,
             _handle: &WorktreeHandle,
         ) -> Result<Option<WorktreeChangeSummary>, WorktreeError> {
-            Ok(self.summary)
+            self.summary.clone()
         }
     }
 
@@ -423,7 +436,7 @@ mod m2_01_tests {
             },
         ] {
             let mock = JudgmentMock {
-                summary: Some(summary),
+                summary: Ok(Some(summary)),
                 removed: std::sync::Mutex::new(Vec::new()),
             };
             let kept = agent_worktree_result(&mock, &judgment_handle()).await;
@@ -442,28 +455,52 @@ mod m2_01_tests {
         }
     }
 
-    /// Clean (and unknown-state) ⇒ REMOVE + `None` — the auto-clean branch.
+    /// A positively-clean summary ⇒ REMOVE + `None` — the auto-clean branch
+    /// (claude `ZVt` returns `{dirty:false, commitsAhead:0}` and the consumer
+    /// removes).
     #[tokio::test]
     async fn agent_worktree_result_removes_clean_worktree() {
-        for summary in [
-            Some(WorktreeChangeSummary {
+        let mock = JudgmentMock {
+            summary: Ok(Some(WorktreeChangeSummary {
                 changed_files: 0,
                 commits: 0,
-            }),
-            // Unknown state falls to the not-dirty branch (matches the
-            // long-standing sync-path judgment in AgentTool).
-            None,
-        ] {
+            })),
+            removed: std::sync::Mutex::new(Vec::new()),
+        };
+        let kept = agent_worktree_result(&mock, &judgment_handle()).await;
+        assert_eq!(kept, None, "clean worktree is auto-cleaned");
+        assert_eq!(
+            mock.removed.lock().unwrap().len(),
+            1,
+            "clean worktree removed exactly once"
+        );
+    }
+
+    /// Regression (review RV13): an UNKNOWN state — a git error while
+    /// inspecting the worktree (`git status`/`rev-list` non-zero exit, lock
+    /// contention) surfaces as `Ok(None)`, and a manager `Err` — must fail
+    /// closed to KEEP, matching claude `ZVt`'s `{dirty:true, gitError:true}`
+    /// branch (2.1.208 binary). Previously both collapsed to `dirty=false`
+    /// and the checkout was removed, discarding a worktree claude keeps.
+    #[tokio::test]
+    async fn agent_worktree_result_keeps_when_state_unknown() {
+        for summary in [Ok(None), Err(WorktreeError::Git("index.lock".into()))] {
             let mock = JudgmentMock {
                 summary,
                 removed: std::sync::Mutex::new(Vec::new()),
             };
             let kept = agent_worktree_result(&mock, &judgment_handle()).await;
-            assert_eq!(kept, None, "clean worktree is auto-cleaned");
             assert_eq!(
-                mock.removed.lock().unwrap().len(),
-                1,
-                "clean worktree removed exactly once"
+                kept,
+                Some((
+                    "/repo/.lingxi/worktrees/agent-1".to_string(),
+                    "worktree-agent-1".to_string()
+                )),
+                "unknown/errored state fails closed to KEEP"
+            );
+            assert!(
+                mock.removed.lock().unwrap().is_empty(),
+                "a worktree whose state could not be verified is never removed"
             );
         }
     }

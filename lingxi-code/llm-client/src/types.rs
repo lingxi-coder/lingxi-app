@@ -26,6 +26,8 @@ pub enum ProviderId {
     VertexClaude,
     /// Claude on AWS Bedrock.
     BedrockClaude,
+    /// Claude on Azure AI Foundry.
+    FoundryClaude,
     /// Azure `OpenAI`.
     #[serde(rename = "azure_open_ai")]
     AzureOpenAI,

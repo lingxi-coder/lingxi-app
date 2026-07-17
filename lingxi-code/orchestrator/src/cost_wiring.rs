@@ -55,6 +55,8 @@ fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderI
         | llm_client::ProviderId::VertexGemini
         | llm_client::ProviderId::VertexClaude => ProviderId::GoogleGemini,
         llm_client::ProviderId::BedrockClaude => ProviderId::AmazonBedrock,
+        // Foundry hosts Claude models — attribute cost/telemetry to Anthropic.
+        llm_client::ProviderId::FoundryClaude => ProviderId::Anthropic,
         llm_client::ProviderId::OpenAICompatible { name } => {
             ProviderId::OpenAICompatible { name: name.clone() }
         }

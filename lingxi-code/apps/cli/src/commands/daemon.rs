@@ -155,10 +155,55 @@ fn emit_worker_vanished(short: &str) {
     );
 }
 
-/// `tengu_bg_respawn_exhausted` — no safe resume path exists; the job is being
-/// marked terminally `failed`.
-fn emit_respawn_exhausted(short: &str, attempts: i64) {
-    tracing::info!(event = "tengu_bg_respawn_exhausted", short, attempts);
+/// `tengu_bg_reply_undelivered` — a follow-up reply the attach fallback
+/// persisted to the durable offline queue can never be delivered as a turn: its
+/// worker vanished and is failed closed (never respawned), so the queue's only
+/// in-worker drain site (`bg_worker::execute_job` at spawn) will never run for
+/// this job again. Emitted once per stranded reply so the user's input is
+/// recorded, not silently lost.
+fn emit_reply_undelivered(short: &str, text: &str) {
+    tracing::warn!(
+        event = "tengu_bg_reply_undelivered",
+        short,
+        "undelivered queued reply: {text}"
+    );
+}
+
+/// Drain the durable offline reply queue for a job whose worker vanished and is
+/// about to be failed closed, surfacing any stranded follow-up replies.
+///
+/// The daemon fails a vanished worker CLOSED and never respawns it, so the
+/// queue's only in-worker drain site (`bg_worker::execute_job` at (re)spawn)
+/// will never run for this job again — a reply the attach fallback persisted
+/// mid-flight would otherwise sit on disk forever, undelivered (the exact
+/// silent-loss harm the queue exists to prevent). Each reply is logged
+/// (`tengu_bg_reply_undelivered`) and folded into a bounded, user-visible detail
+/// line stamped on the failed job; draining CLAIMS the files (at-most-once) so a
+/// reply is reported exactly once. Returns the detail line, or `None` when the
+/// queue was empty (the caller then fails the job with no detail).
+fn drain_undelivered_replies(runtime_dir: &Path, short: &str) -> Option<String> {
+    let replies = crate::bg_reply_queue::drain_replies(runtime_dir, short);
+    if replies.is_empty() {
+        return None;
+    }
+    for reply in &replies {
+        emit_reply_undelivered(short, &reply.text);
+    }
+    let mut joined = replies
+        .iter()
+        .map(|r| r.text.trim())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    // Bound the detail so a very long queued line cannot bloat state.json.
+    const MAX: usize = 500;
+    if joined.chars().count() > MAX {
+        joined = joined.chars().take(MAX).collect::<String>() + "…";
+    }
+    Some(format!(
+        "worker exited with {} undelivered queued repl{}: {joined}",
+        replies.len(),
+        if replies.len() == 1 { "y" } else { "ies" },
+    ))
 }
 
 /// `tengu_bg_spawn_cwd_gone` — a pending job's recorded working directory no
@@ -454,12 +499,33 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
             // cannot yet live-attach/continue that process, and re-running the
             // recorded prompt would duplicate side effects. Fail closed.
             emit_worker_vanished(&short);
-            if let Err(e) = agents_registry::update_job_state(runtime_dir, &short, "failed", None) {
+            // The vanished worker is failed closed and never respawns, so the
+            // offline reply queue's only in-worker drain site never runs for this
+            // job again. Drain + surface any follow-up replies the attach
+            // fallback persisted mid-flight here, so the user's input is recorded
+            // as undelivered instead of stranded on disk forever.
+            let undelivered = drain_undelivered_replies(runtime_dir, &short);
+            let failed = match undelivered.as_deref() {
+                Some(detail) => agents_registry::update_job_state_with_detail(
+                    runtime_dir,
+                    &short,
+                    "failed",
+                    None,
+                    detail,
+                ),
+                None => agents_registry::update_job_state(runtime_dir, &short, "failed", None),
+            };
+            if let Err(e) = failed {
                 tracing::warn!(
                     "lingxi-cli daemon: could not mark vanished job {short} failed: {e}"
                 );
             }
-            emit_respawn_exhausted(&short, read_respawn_count(runtime_dir, &short));
+            // NB: do NOT emit `tengu_bg_respawn_exhausted` here. CC 2.1.208 emits
+            // that event only from scheduleRespawn once the respawn budget
+            // (Jpp=20) is reached; the fail-closed daemon never respawns, so there
+            // is no budget to exhaust and firing it on the first vanish (with a
+            // constant attempts:0) is a spurious signal. The vanish is already
+            // recorded via `tengu_bg_worker_vanished` above.
             claimed.remove(&short);
             continue;
         }
@@ -665,6 +731,44 @@ mod tests {
 
     fn no_sleep() -> impl FnMut(u64) {
         |_| {}
+    }
+
+    /// A `tracing` layer that records the `event = "..."` field of every emitted
+    /// event, so a test can assert which `tengu_*` telemetry events actually
+    /// fired (or did not).
+    #[derive(Clone, Default)]
+    struct EventCapture {
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct V<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for V<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "event" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "event" && self.0.is_none() {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut name = None;
+            event.record(&mut V(&mut name));
+            if let Some(n) = name {
+                self.events.lock().unwrap().push(n);
+            }
+        }
     }
 
     /// Records the shorts (and env) it was asked to spawn and hands back
@@ -1102,6 +1206,116 @@ mod tests {
             "failed job is terminal (won't re-render as working)"
         );
         assert_eq!(job.worker_pid, None, "stale worker pid cleared");
+    }
+
+    #[test]
+    fn vanished_worker_does_not_emit_respawn_exhausted() {
+        // Regression (RV9): the daemon fails a vanished worker CLOSED and never
+        // respawns it, so there is no respawn budget to exhaust. CC 2.1.208
+        // emits `tengu_bg_respawn_exhausted` ONLY from scheduleRespawn once the
+        // respawn budget (Jpp=20) is reached — never on the first crash. LingXi
+        // used to emit it unconditionally on the very first vanish with a
+        // constant `attempts:0`, a spurious event downstream analytics would
+        // read as a real budget exhaustion. The vanish itself must still be
+        // recorded via `tengu_bg_worker_vanished` (also a CC event).
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let dir = tmpdir();
+        seed_working_job(&dir, "dead0009");
+        agents_registry::update_job_state(&dir, "dead0009", "working", Some(4321)).unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::new(), // 4321 is NOT alive → vanished
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+
+        tracing::subscriber::with_default(subscriber, || {
+            run_supervisor(
+                &dir,
+                4242,
+                "0.0.0",
+                &lockp,
+                &proc,
+                &mut spawner,
+                HEARTBEAT_MS,
+                &mut no_sleep(),
+                &mut || true,
+            );
+        });
+
+        let events = capture.events.lock().unwrap();
+        // The vanish itself is still recorded (a real CC event) …
+        assert!(
+            events.iter().any(|e| e == "tengu_bg_worker_vanished"),
+            "vanish must still be recorded, got {events:?}"
+        );
+        // … but NO spurious respawn-exhausted event on the very first crash.
+        assert!(
+            !events.iter().any(|e| e == "tengu_bg_respawn_exhausted"),
+            "fail-closed vanish must not emit tengu_bg_respawn_exhausted, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn vanished_worker_drains_and_surfaces_stranded_replies() {
+        // Regression (RV2): the durable offline reply queue was write-only. A
+        // follow-up reply the attach fallback persisted while the worker was
+        // dying was only ever drained by `bg_worker::execute_job` at (re)spawn —
+        // but a vanished worker is failed closed and never respawns, so that
+        // drain never ran again and the reply sat on disk forever, undelivered.
+        // The supervisor must drain + surface it when it reaps the vanished job.
+        let dir = tmpdir();
+        seed_working_job(&dir, "beef0002");
+        agents_registry::update_job_state(&dir, "beef0002", "working", Some(4321)).unwrap();
+        // A reply the attach fallback persisted just before the worker died.
+        crate::bg_reply_queue::enqueue_reply(&dir, "beef0002", "please also add tests").unwrap();
+        assert_eq!(crate::bg_reply_queue::pending_count(&dir, "beef0002"), 1);
+
+        let proc = FakeProc {
+            alive: HashMap::new(), // 4321 is NOT alive → vanished
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+        let code = run_supervisor(
+            &dir,
+            4242,
+            "0.0.0",
+            &lockp,
+            &proc,
+            &mut spawner,
+            HEARTBEAT_MS,
+            &mut no_sleep(),
+            &mut || true,
+        );
+        assert_eq!(code, exit_codes::SUCCESS);
+        assert!(
+            spawner.spawned.is_empty(),
+            "vanished worker must not respawn"
+        );
+
+        // The queue is drained (not left write-only) …
+        assert_eq!(
+            crate::bg_reply_queue::pending_count(&dir, "beef0002"),
+            0,
+            "the stranded reply must be claimed, not left undelivered forever"
+        );
+        // … and its text is surfaced on the failed job so the input is not lost.
+        let job = agents_registry::read_job(&dir, "beef0002").unwrap();
+        assert_eq!(job.state, "failed");
+        let detail = job.detail.unwrap_or_default();
+        assert!(
+            detail.contains("please also add tests"),
+            "undelivered reply text must be surfaced in the job detail, got {detail:?}"
+        );
     }
 
     // ---- spawn_cwd_gone (fail-closed, never spawn into a dead cwd) ----------

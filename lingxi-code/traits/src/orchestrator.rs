@@ -1409,6 +1409,16 @@ pub trait OutputStream: Send + Sync {
     /// Emit a compaction-completed event. Default no-op for adapters
     /// that don't care (e.g. NDJSON sink may flush a one-line marker).
     /// (M6-08)
+    /// Emit when compaction has STARTED (before the summarizer call). The
+    /// consumer (TUI / CLI / bridge) should display a progress indicator
+    /// (spinner / "Compacting…") until `emit_compaction_completed`
+    /// fires.
+    ///
+    /// **Default no-op**: pre-existing sinks (CLI, mocks, NDJSON) keep
+    /// compiling unchanged. The TUI bridge overrides this to show a spinner
+    /// during the compaction wait.
+    async fn emit_compaction_started(&self) {}
+
     async fn emit_compaction_completed(
         &self,
         _messages_before: u32,

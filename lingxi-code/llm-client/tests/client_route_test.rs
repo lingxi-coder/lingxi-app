@@ -294,6 +294,120 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
     );
 }
 
+#[tokio::test]
+async fn vision_image_blocks_dropped_for_non_vision_model_not_hard_failed() {
+    // Regression: an image pasted into a conversation persists in session
+    // history, so switching to a model that doesn't advertise vision must
+    // silently drop Image/ImageUrl blocks from history — not break every
+    // subsequent turn with "unsupported capability: vision".
+    let config = ClientConfig {
+        providers: vec![ProviderProfile {
+            provider_id: ProviderId::OpenAICompatible {
+                name: "openrouter".to_string(),
+            },
+            profile_name: "openrouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            protocol: ProtocolFamily::OpenAiChat,
+            auth: AuthStrategy::Bearer,
+            credential: CredentialConfig::None,
+            models: vec![ModelProfile {
+                display_model: "Qwen3 Coder (free)".to_string(),
+                request_model: "qwen/qwen3-coder:free".to_string(),
+                billing_model: "qwen/qwen3-coder:free".to_string(),
+                aliases: vec![],
+                description: None,
+                capabilities: Capabilities {
+                    streaming: true,
+                    tools: true,
+                    vision: false,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+        }],
+    };
+    let client = DefaultLlmClient::from_config(config).unwrap();
+
+    // The common "paste image into input view" scenario.
+    let mut image_request = LlmRequest::new("qwen/qwen3-coder:free");
+    image_request.messages = vec![llm_client::Message {
+        role: "user".to_string(),
+        content: vec![
+            llm_client::ContentBlock::Text {
+                text: "describe this image".to_string(),
+                cache_control: None,
+            },
+            llm_client::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                bytes: vec![1, 2, 3],
+            },
+        ],
+    }];
+    let prepared = client
+        .prepare(&image_request)
+        .await
+        .expect("image block must be silently dropped, not hard-fail the request");
+    let body = prepared.provider_request.body_json.to_string();
+    assert!(
+        !body.contains("\"type\":\"image\""),
+        "image block must be stripped from the wire body: {body}"
+    );
+
+    // The MID-CONVERSATION case: history carries Image blocks from an earlier
+    // vision-capable model. All subsequent turns (even text-only) must not
+    // hard-fail.
+    let mut history_request = LlmRequest::new("qwen/qwen3-coder:free");
+    history_request.messages = vec![
+        llm_client::Message {
+            role: "user".to_string(),
+            content: vec![
+                llm_client::ContentBlock::Text {
+                    text: "look at this".to_string(),
+                    cache_control: None,
+                },
+                llm_client::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    bytes: vec![1, 2, 3],
+                },
+            ],
+        },
+        llm_client::Message {
+            role: "assistant".to_string(),
+            content: vec![llm_client::ContentBlock::Text {
+                text: "i see a photo".to_string(),
+                cache_control: None,
+            }],
+        },
+        llm_client::Message {
+            role: "user".to_string(),
+            content: vec![llm_client::ContentBlock::Text {
+                text: "ok what else".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    // Text-only follow-up: no image in the current turn, but history
+    // carries image blocks. Must silently strip and proceed.
+    let prepared = client
+        .prepare(&history_request)
+        .await
+        .expect("history image blocks must be stripped, not hard-fail");
+    let body = prepared.provider_request.body_json.to_string();
+    assert!(
+        !body.contains("\"type\":\"image\""),
+        "history image block must be stripped from the wire body: {body}"
+    );
+    assert!(
+        body.contains("ok what else"),
+        "text follow-up must survive: {body}"
+    );
+}
+
 #[test]
 fn duplicate_profile_names_are_rejected_during_client_construction() {
     let config = ClientConfig {

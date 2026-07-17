@@ -2355,6 +2355,10 @@ impl ConversationOrchestrator {
         };
         let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = history_before.iter().map(protocol::text_byte_size).sum();
+        // Capture the token estimate before `history_before` is consumed by
+        // `process_iteration` — used for the boundary `preTokens`.
+        let pre_tokens_estimate =
+            compaction::grouping::estimate_tokens_for_range(&history_before);
 
         // Fast-path: if already cancelled, exit without invoking the
         // compactor. tokio::select! random-polls between ready arms,
@@ -2421,11 +2425,13 @@ impl ConversationOrchestrator {
         // Apply the post-compact transition (boundary marker + history swap +
         // CompactionCompleted emit) via the shared helper reused by the
         // proactive trigger (Batch 4) and the reactive 413 fallback (Batch 5).
-        // `bytes_before` was computed from the same `history_before` snapshot.
+        // `bytes_before` / `pre_tokens_estimate` were computed from the same
+        // `history_before` snapshot (consumed by `process_iteration` above).
         let summary_out = self
             .apply_post_compact(
                 result,
                 compaction::CompactTrigger::Manual,
+                pre_tokens_estimate,
                 messages_before,
                 bytes_before,
             )
@@ -2593,6 +2599,7 @@ impl ConversationOrchestrator {
         &self,
         result: compaction::IterationCompactionResult,
         trigger: compaction::CompactTrigger,
+        pre_tokens_estimate: u64,
         messages_before: u32,
         bytes_before: u64,
     ) -> traits::CompactionSummary {
@@ -2627,7 +2634,7 @@ impl ConversationOrchestrator {
         };
         let (marker, metadata) = compaction::create_compact_boundary_with_preserved_tail(
             trigger,
-            0,
+            pre_tokens_estimate,
             None,
             None,
             None,
@@ -3047,6 +3054,10 @@ impl ConversationOrchestrator {
             return;
         }
 
+        // Signal the UI that compaction has started so it can show a
+        // spinner / "Compacting…" while the summarizer runs.
+        self.output.emit_compaction_started().await;
+
         // Run the orchestrator pass under the per-conversation tracking lock so
         // the circuit-breaker state is read + written atomically for this turn.
         let mut tracking = self.compaction_tracking.lock().await;
@@ -3116,6 +3127,7 @@ impl ConversationOrchestrator {
         self.apply_post_compact(
             result,
             compaction::CompactTrigger::Auto,
+            estimate,
             messages_before,
             bytes_before,
         )

@@ -307,21 +307,46 @@ impl DefaultLlmClient {
                     | crate::ContentBlock::RedactedThinking { .. }
             )
         };
-        let needs_degrade = !resolved_route.capabilities.reasoning
+        let needs_reasoning_degrade = !resolved_route.capabilities.reasoning
             && (request.reasoning.is_some()
                 || request
                     .messages
                     .iter()
                     .any(|m| m.content.iter().any(is_reasoning_block)));
-        let degraded = needs_degrade.then(|| {
+
+        // `vision` is similarly best-effort: an image pasted into a conversation
+        // persists in session history, so switching to a model that doesn't
+        // advertise vision must silently drop image blocks from history — not
+        // break every subsequent turn with "unsupported capability: vision".
+        let is_image_block = |b: &crate::ContentBlock| {
+            matches!(
+                b,
+                crate::ContentBlock::Image { .. } | crate::ContentBlock::ImageUrl { .. }
+            )
+        };
+        let needs_vision_degrade = !resolved_route.capabilities.vision
+            && request
+                .messages
+                .iter()
+                .any(|m| m.content.iter().any(is_image_block));
+
+        let mut owned: Option<LlmRequest> = None;
+        if needs_reasoning_degrade || needs_vision_degrade {
             let mut r = request.clone();
-            r.reasoning = None;
-            for m in &mut r.messages {
-                m.content.retain(|b| !is_reasoning_block(b));
+            if needs_reasoning_degrade {
+                r.reasoning = None;
+                for m in &mut r.messages {
+                    m.content.retain(|b| !is_reasoning_block(b));
+                }
             }
-            r
-        });
-        let request = degraded.as_ref().unwrap_or(request);
+            if needs_vision_degrade {
+                for m in &mut r.messages {
+                    m.content.retain(|b| !is_image_block(b));
+                }
+            }
+            owned = Some(r);
+        }
+        let request = owned.as_ref().unwrap_or(request);
 
         validate_capabilities(request, resolved_route.capabilities)?;
 

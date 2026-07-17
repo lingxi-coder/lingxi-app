@@ -1263,6 +1263,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
         };
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
+        // Capture the token estimate before  is consumed by
+        //  — used for the boundary `preTokens`.
+        let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
         // hooks compaction lifecycle: PreCompact fires before the reactive
         // summary pass. The reactive 413/PTL fallback is part of the automatic
         // recovery pipeline, so the trigger is `auto` (TS treats reactive
@@ -1275,6 +1278,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
             tracing::warn!("Reactive compact blocked by PreCompact hook: {detail}");
             return Ok(PtlCallOutcome::PromptTooLong);
         }
+        orch.output.emit_compaction_started().await;
         let compact_result = {
             let mut tracking = orch.compaction_tracking.lock().await;
             compactor
@@ -1309,6 +1313,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 orch.apply_post_compact(
                     result,
                     compaction::CompactTrigger::Auto,
+                    pre_tokens_estimate,
                     messages_before,
                     bytes_before,
                 )

@@ -299,7 +299,7 @@ mod read_file_state_tests {
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
     };
-    use crate::turn_loop::{absolutize, dispatch_tool_uses, execute_one_turn};
+    use crate::turn_loop::{dispatch_tool_uses, execute_one_turn};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use protocol::ToolUseId;
@@ -429,12 +429,6 @@ mod read_file_state_tests {
             Arc::new(StaticMemoryProvider::empty()),
             cwd,
         )
-    }
-
-    /// Drive one `(name, input)` `tool_use` through the dispatch chokepoint.
-    async fn dispatch_one(orch: &ConversationOrchestrator, name: &str, input: serde_json::Value) {
-        let uses = vec![(ToolUseId::new(), name.to_string(), input, None)];
-        dispatch_tool_uses(orch, &uses).await.expect("dispatch");
     }
 
     // ===== Orphaned-permission recovery (run_orphaned_permission) ===========
@@ -1159,97 +1153,53 @@ mod read_file_state_tests {
         );
     }
 
-    // ----- absolutize (pure, lexical — NOT realpath) -----
+    // ----- /files reads the ONE shared read-state registry -----
 
-    #[test]
-    fn absolutize_helper_resolves_lexically() {
-        let cwd = PathBuf::from("/repo");
-        assert_eq!(
-            absolutize(&cwd, "src/main.rs"),
-            PathBuf::from("/repo/src/main.rs")
-        );
-        assert_eq!(absolutize(&cwd, "/abs/x.rs"), PathBuf::from("/abs/x.rs"));
-        // `.` dropped, `..` popped — purely lexical.
-        assert_eq!(absolutize(&cwd, "./a/../b.rs"), PathBuf::from("/repo/b.rs"));
-        // Surrounding whitespace is trimmed (mirrors expandPath).
-        assert_eq!(
-            absolutize(&cwd, "  src/a.rs  "),
-            PathBuf::from("/repo/src/a.rs")
-        );
-    }
-
-    #[test]
-    fn absolutize_does_not_canonicalize_disk() {
-        // A path that does NOT exist must still resolve to the joined string
-        // (expandPath is lexical, not realpath — no fs canonicalization).
-        let cwd = PathBuf::from("/nonexistent-root-xyz");
-        let got = absolutize(&cwd, "does/not/exist.rs");
-        assert_eq!(
-            got,
-            PathBuf::from("/nonexistent-root-xyz/does/not/exist.rs")
-        );
-    }
-
-    #[test]
-    fn absolutize_expands_tilde() {
-        let Some(home) = dirs::home_dir() else {
-            return; // no home dir on this platform — skip
-        };
-        assert_eq!(absolutize(&PathBuf::from("/repo"), "~/x"), home.join("x"));
-        assert_eq!(absolutize(&PathBuf::from("/repo"), "~"), home);
-    }
-
-    // ----- cache population through the dispatch loop -----
-
-    #[tokio::test]
-    async fn cache_records_successful_read() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let sub = dir.path().join("src");
-        std::fs::create_dir_all(&sub).expect("mkdir");
-        std::fs::write(sub.join("a.rs"), b"fn a() {}").expect("write");
-
-        let cwd = dir.path().to_path_buf();
-        let orch = orch_with_tools(
-            cwd.clone(),
-            vec![Arc::new(StubFileTool {
-                name: "Read",
-                cwd: cwd.clone(),
-            }) as Arc<dyn Tool>],
-        );
-        dispatch_one(&orch, "Read", json!({ "file_path": "src/a.rs" })).await;
-
-        let files = orch.files_in_context().await;
-        assert_eq!(files, vec![cwd.join("src").join("a.rs")]);
-        // The richer `read_state_map` is a SEPARATE registry from the `/files`
-        // `Vec`. `record_read_file_state` (which a `StubFileTool` dispatch
-        // exercises) only touches the `Vec`; the map is populated by the real
-        // file tools' `readFileState.set`, which the stub does not call. So the
-        // `/files` ordering semantics above are unaffected by Batch B.
-        assert!(
-            orch.read_state_map.lock().unwrap().is_empty(),
-            "the richer read-state map is independent of the /files Vec"
+    /// Seed the shared read-state registry as a file tool's `readFileState.set`
+    /// would (the orchestrator crate cannot depend on `tool-file`, so the
+    /// tools' population is simulated with a direct `set`).
+    fn seed(orch: &ConversationOrchestrator, path: PathBuf) {
+        tool_api::read_file_state::set(
+            &orch.read_state_map,
+            path,
+            tool_api::read_file_state::ReadFileEntry {
+                content: String::new(),
+                mtime_ms: 0,
+                offset: None,
+                limit: None,
+                from_read: true,
+            },
         );
     }
 
     #[tokio::test]
-    async fn read_state_map_starts_empty_and_is_distinct_from_files_vec() {
-        // Behavior-neutral wiring check: a fresh orchestrator has an empty
-        // read-state registry, separate from the `/files` `Vec`.
+    async fn files_in_context_returns_seeded_read_state() {
+        // `/files` returns exactly the keys of the shared registry (TS
+        // `cacheKeys(context.readFileState)`), which the file tools populate.
+        let orch = orch_with_tools(PathBuf::from("/repo"), vec![]);
+        seed(&orch, PathBuf::from("/repo/src/a.rs"));
+        assert_eq!(
+            orch.files_in_context().await,
+            vec![PathBuf::from("/repo/src/a.rs")]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_state_map_starts_empty() {
+        // A fresh orchestrator has an empty read-state registry, so `/files`
+        // renders the "No files in context" branch.
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
         assert!(orch.read_state_map.lock().unwrap().is_empty());
         assert!(orch.files_in_context().await.is_empty());
     }
 
     #[tokio::test]
-    async fn read_state_map_arc_is_shareable_and_visible_through_orchestrator() {
+    async fn read_state_map_arc_is_shareable_and_feeds_files() {
         // Proves the composition-root contract: the SAME `Arc` the orchestrator
         // holds in `read_state_map` is what the file tools' `BuiltinToolContext`
         // share, so a `readFileState.set` performed against a clone of that
-        // `Arc` (as the real `FileReadTool` does — see the `tool-file`
-        // `read_populates_read_file_state_map_with_offset_limit` test) is
-        // visible through `orch.read_state_map`. Simulated here with a direct
-        // `set` (the orchestrator crate cannot depend on `tool-file`), keeping
-        // the wiring assertion crate-local. The `/files` `Vec` is untouched.
+        // `Arc` (as the real `FileReadTool` does) is visible through
+        // `orch.read_state_map` AND surfaces in `/files`.
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
         let shared = orch.read_state_map.clone();
         tool_api::read_file_state::set(
@@ -1271,8 +1221,11 @@ mod read_file_state_tests {
         assert_eq!(entry.content, "line2\n");
         assert_eq!(entry.offset, Some(2));
         assert_eq!(entry.limit, Some(1));
-        // The `/files` `Vec` remains independent and empty.
-        assert!(orch.files_in_context().await.is_empty());
+        // `/files` is now driven by the SAME registry.
+        assert_eq!(
+            orch.files_in_context().await,
+            vec![PathBuf::from("/tmp/a.txt")]
+        );
     }
 
     // ----- #59 post-compact file/skill attachment restoration -----
@@ -1501,121 +1454,37 @@ mod read_file_state_tests {
     }
 
     #[tokio::test]
-    async fn cache_skips_errored_read() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cwd = dir.path().to_path_buf();
-        let orch = orch_with_tools(
-            cwd.clone(),
-            vec![Arc::new(StubFileTool { name: "Read", cwd }) as Arc<dyn Tool>],
-        );
-        // File does not exist → the tool errors → nothing is cached.
-        dispatch_one(&orch, "Read", json!({ "file_path": "missing.rs" })).await;
-        assert!(orch.files_in_context().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn cache_insertion_order_and_dedup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("a.rs"), b"a").expect("write a");
-        std::fs::write(dir.path().join("b.rs"), b"b").expect("write b");
-
-        let cwd = dir.path().to_path_buf();
-        let orch = orch_with_tools(
-            cwd.clone(),
-            vec![Arc::new(StubFileTool {
-                name: "Read",
-                cwd: cwd.clone(),
-            }) as Arc<dyn Tool>],
-        );
-        // a, b, then a again — first-insertion order [a, b], a not duplicated.
-        // This 2-file re-read case coincides with TS's MRU LRU (also [a, b]);
-        // the divergence only appears at ≥3 files — see
-        // `three_file_reread_locks_first_insertion_order` below.
-        dispatch_one(&orch, "Read", json!({ "file_path": "a.rs" })).await;
-        dispatch_one(&orch, "Read", json!({ "file_path": "b.rs" })).await;
-        dispatch_one(&orch, "Read", json!({ "file_path": "a.rs" })).await;
-
-        let files = orch.files_in_context().await;
-        assert_eq!(files, vec![cwd.join("a.rs"), cwd.join("b.rs")]);
-    }
-
-    #[tokio::test]
-    async fn three_file_reread_locks_first_insertion_order() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for f in ["a.rs", "b.rs", "c.rs"] {
-            std::fs::write(dir.path().join(f), b"x").expect("write");
-        }
-        let cwd = dir.path().to_path_buf();
-        let orch = orch_with_tools(
-            cwd.clone(),
-            vec![Arc::new(StubFileTool {
-                name: "Read",
-                cwd: cwd.clone(),
-            }) as Arc<dyn Tool>],
-        );
-        // read a, b, c, then a again. This `Vec` keeps first-insertion order
-        // [a, b, c]; TS's MRU-promoting LRU would diverge to [a, c, b]. Locking
-        // [a, b, c] pins the documented divergence so a future switch to MRU
-        // semantics cannot pass silently.
-        for f in ["a.rs", "b.rs", "c.rs", "a.rs"] {
-            dispatch_one(&orch, "Read", json!({ "file_path": f })).await;
-        }
-        let files = orch.files_in_context().await;
+    async fn files_in_context_mru_order_and_dedup() {
+        // The file tools populate the shared registry on each read/edit. Seeding
+        // a, b, then a again dedups a (one entry) and — because a re-`set`
+        // promotes its key — yields MRU→LRU `[a, b]`. This 2-file re-read case
+        // coincides with the old first-insertion `Vec` (also `[a, b]`).
+        let cwd = PathBuf::from("/repo");
+        let orch = orch_with_tools(cwd.clone(), vec![]);
+        seed(&orch, cwd.join("a.rs"));
+        seed(&orch, cwd.join("b.rs"));
+        seed(&orch, cwd.join("a.rs"));
         assert_eq!(
-            files,
-            vec![cwd.join("a.rs"), cwd.join("b.rs"), cwd.join("c.rs")]
+            orch.files_in_context().await,
+            vec![cwd.join("a.rs"), cwd.join("b.rs")]
         );
     }
 
     #[tokio::test]
-    async fn notebook_edit_records_notebook_path() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("nb.ipynb"), b"{}").expect("write nb");
-        let cwd = dir.path().to_path_buf();
-        let orch = orch_with_tools(
-            cwd.clone(),
-            vec![Arc::new(StubFileTool {
-                name: "NotebookEdit",
-                cwd: cwd.clone(),
-            }) as Arc<dyn Tool>],
+    async fn files_in_context_reread_promotes_mru() {
+        // Seed a, b, c, then a again. `/files` now keys off the ONE shared LRU
+        // (TS `context.readFileState`), so a re-read PROMOTES a → MRU order
+        // `[a, c, b]`. This is the claude-code-faithful behavior; the old
+        // insertion-ordered `Vec` diverged here to `[a, b, c]`.
+        let cwd = PathBuf::from("/repo");
+        let orch = orch_with_tools(cwd.clone(), vec![]);
+        for f in ["a.rs", "b.rs", "c.rs", "a.rs"] {
+            seed(&orch, cwd.join(f));
+        }
+        assert_eq!(
+            orch.files_in_context().await,
+            vec![cwd.join("a.rs"), cwd.join("c.rs"), cwd.join("b.rs")]
         );
-        // `NotebookEdit` keys the cache on `notebook_path`; the stub reads
-        // `file_path` to confirm the file exists, so pass both (same path).
-        dispatch_one(
-            &orch,
-            "NotebookEdit",
-            json!({ "notebook_path": "nb.ipynb", "file_path": "nb.ipynb" }),
-        )
-        .await;
-        let files = orch.files_in_context().await;
-        assert_eq!(files, vec![cwd.join("nb.ipynb")]);
-    }
-
-    #[tokio::test]
-    async fn edit_and_write_record_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("e.rs"), b"e").expect("write e");
-        std::fs::write(dir.path().join("w.rs"), b"w").expect("write w");
-
-        let cwd = dir.path().to_path_buf();
-        let orch = orch_with_tools(
-            cwd.clone(),
-            vec![
-                Arc::new(StubFileTool {
-                    name: "Edit",
-                    cwd: cwd.clone(),
-                }) as Arc<dyn Tool>,
-                Arc::new(StubFileTool {
-                    name: "Write",
-                    cwd: cwd.clone(),
-                }) as Arc<dyn Tool>,
-            ],
-        );
-        dispatch_one(&orch, "Edit", json!({ "file_path": "e.rs" })).await;
-        dispatch_one(&orch, "Write", json!({ "file_path": "w.rs" })).await;
-
-        let files = orch.files_in_context().await;
-        assert_eq!(files, vec![cwd.join("e.rs"), cwd.join("w.rs")]);
     }
 }
 // ============================================================================

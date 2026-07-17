@@ -13,13 +13,6 @@ use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
 use tool_api::ContextModifier;
 
-/// Tools whose successful execution records `file_path` (or `notebook_path`)
-/// into the orchestrator's read-file-state cache. Mirrors the TS sites that
-/// call `readFileState.set(expandPath(file_path), …)` (`FileReadTool` +
-/// `FileEditTool`/`FileWriteTool`/`MultiEditTool`/`NotebookEditTool`).
-/// `/files` then renders this set (TS `cacheKeys(context.readFileState)`).
-const READ_FILE_STATE_TOOLS: &[&str] = &["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"];
-
 /// Registry name of the worktree-creation tool (`tool_worktree::ENTER_TOOL_NAME`).
 /// A successful invocation of this tool is the port's sole worktree-creation
 /// path, so it is where the turn loop fires the `WorktreeCreate` hook. Held as a
@@ -34,30 +27,6 @@ const ENTER_WORKTREE_TOOL_NAME: &str = "EnterWorktree";
 /// `ENTER_WORKTREE_TOOL_NAME`.
 const AGENT_TOOL_NAME: &str = "Agent";
 const LEGACY_AGENT_TOOL_NAME: &str = "Task";
-
-/// Lexically expand a tool's `file_path` to an absolute, normalized path — the
-/// cache key for [`ConversationOrchestrator::files_in_context`]. 1:1 with TS
-/// `expandPath` (`src/utils/path.ts`): trim; `~`/`~/…` → home; absolute kept;
-/// relative joined on `cwd`; then lexically collapsed (`.` dropped, `..` popped).
-/// LEXICAL only (not `realpath`) — never touches disk, symlinks preserved.
-/// Forced divergences (not gaps): Windows `/c/Users/…` conversion and NFC
-/// normalization skipped (macOS/Linux ASCII parity target).
-fn absolutize(cwd: &Path, raw: &str) -> PathBuf {
-    let trimmed = raw.trim();
-    let expanded: PathBuf = if trimmed == "~" {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed))
-    } else if let Some(rest) = trimmed.strip_prefix("~/") {
-        dirs::home_dir().map_or_else(|| PathBuf::from(trimmed), |h| h.join(rest))
-    } else {
-        let p = Path::new(trimmed);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            cwd.join(p)
-        }
-    };
-    normalize_lexically(&expanded)
-}
 
 /// Collapse `.` and `..` segments without touching the filesystem, mirroring
 /// Node's `path.normalize`/`resolve` (used by `expandPath`). A `..` pops the
@@ -118,40 +87,6 @@ async fn apply_terminal_sequence(
 #[cfg(test)]
 #[path = "turn_loop_test.rs"]
 mod turn_loop_test;
-
-/// Record a successful `Read`/`Edit`/`Write`/… into the read-file-state cache
-/// backing `/files`. Best-effort, order-preserving: pulls `file_path` (or
-/// `notebook_path` for `NotebookEdit`), absolutizes it, and keeps the FIRST
-/// insertion. Matches TS for ≤2 files (`a,b,a → [a,b]`); diverges from TS's
-/// MRU LRU at ≥3 (`a,b,c,a` → TS `[a,c,b]` vs `[a,b,c]`). Silently skips an
-/// absent/non-string path or unknown tool. Populates only the ordered `Vec`;
-/// the richer [`ConversationOrchestrator::read_state_map`] (1:1 TS
-/// `readFileState`) is filled by the tools' own `read_file_state.set` over the
-/// `Arc` the composition root shares into BOTH the tools' `BuiltinToolContext`
-/// and the orchestrator via [`ConversationOrchestrator::with_read_state_map`]
-/// (P1-06). NotebookEdit's `~`/trim skip and BashTool writes are unported.
-async fn record_read_file_state(
-    orch: &ConversationOrchestrator,
-    name: &str,
-    effective_input: &serde_json::Value,
-) {
-    if !READ_FILE_STATE_TOOLS.contains(&name) {
-        return;
-    }
-    let key = if name == "NotebookEdit" {
-        "notebook_path"
-    } else {
-        "file_path"
-    };
-    let Some(raw) = effective_input.get(key).and_then(serde_json::Value::as_str) else {
-        return;
-    };
-    let absolute = absolutize(&orch.cwd, raw);
-    let mut cache = orch.read_file_state.lock().await;
-    if !cache.contains(&absolute) {
-        cache.push(absolute);
-    }
-}
 
 /// Maximum number of consecutive `max_tokens` recovery nudges before the
 /// turn loop gives up and surfaces the `max_tokens` `stop_reason`. 1:1 with TS
@@ -3041,13 +2976,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // in their result data; sum its +/- lines into the session counters.
         accumulate_code_change(&emit_payload, orch.cost_tracker.as_ref()).await;
 
-        // Record the file into the read-file-state cache backing `/files`
-        // (TS `readFileState.set(expandPath(file_path), …)` in FileReadTool /
-        // FileEditTool / FileWriteTool / MultiEditTool / NotebookEditTool).
-        // Only on success — an errored tool never populates the cache.
-        if !is_error {
-            record_read_file_state(orch, name, &effective_input).await;
-        }
+        // NOTE: the read-file-state registry (`context.readFileState`, backing
+        // `/files`, conditional-rule matching, and the relevant-memory dedup) is
+        // populated by the file tools themselves via `readFileState.set`
+        // (Read/Edit/Write/MultiEdit/NotebookEdit) over the shared `Arc` the
+        // composition root hands their `BuiltinToolContext` — 1:1 with
+        // claude-code's single per-session map. The orchestrator no longer keeps
+        // a separate insertion-ordered `Vec`, so there is nothing to record here.
 
         // M5-06 Task 14 + hooks B-tool-failure: the post-dispatch hook chain.
         // Byte-faithful to claude-code's split: a SUCCESSFUL tool result fires

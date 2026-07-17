@@ -623,15 +623,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn files_in_context(&self) -> Vec<PathBuf> {
-        // Read the orchestrator-owned read-file-state cache (TS
-        // `context.readFileState`), populated by the dispatch loop on each
-        // successful Read/Edit/Write/MultiEdit/NotebookEdit
-        // (`turn_loop::record_read_file_state`). Keys are absolutized,
-        // lexically-normalized paths in insertion order — 1:1 with TS
+        // Read the ONE shared read-file-state registry (TS
+        // `context.readFileState`), populated by the file tools' own
+        // `readFileState.set` (Read/Edit/Write/MultiEdit/NotebookEdit) over the
+        // `Arc` the composition root shares into `BuiltinToolContext`. Keys are
+        // the tools' live-cwd absolutized paths in MRU→LRU order — 1:1 with TS
         // `cacheKeys(context.readFileState)` (`Array.from(cache.keys())`),
         // which `/files` renders via `relative(getCwd(), f)`. An empty cache
         // still renders the locked "No files in context" branch.
-        self.read_file_state.lock().await.clone()
+        self.read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
     }
 
     async fn context_window_usage(&self) -> (u64, u64) {

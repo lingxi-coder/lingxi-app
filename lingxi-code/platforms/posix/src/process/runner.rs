@@ -330,15 +330,15 @@ impl ProcessRunner for PosixProcess {
         // the hook (claude-code `hooks.ts:1117-1166`).
         if let Some(async_timeout) = parse_async_first_line(&first_line, default_async_timeout) {
             let stderr = child.stderr.take();
-            let output_path = async_hook_output_path();
-            let output_path_string = output_path.to_string_lossy().into_owned();
-            let _ = std::fs::write(&output_path, b"async hook is still running\n");
+            // The eventual (post-marker) drained output is delivered once through
+            // this channel so the hook layer can fold it back as an
+            // `async_hook_response` (claude-code `registerPendingAsyncHook`).
+            let (output_tx, output_rx) = tokio::sync::oneshot::channel::<ProcessOutput>();
             // Detach: drain remaining output (so the pipe never blocks the child)
             // and reap it, bounded by the async timeout; on timeout the child is
             // dropped → `kill_on_drop` SIGKILLs it.
             tokio::spawn(async move {
                 let mut child = child;
-                let output_path = output_path;
                 let drain_and_wait = async {
                     let mut stdout_buf = Vec::new();
                     let mut stderr_buf = Vec::new();
@@ -349,44 +349,35 @@ impl ProcessRunner for PosixProcess {
                             Ok(0)
                         }
                     };
-                    let (stdout_res, stderr_res) =
+                    let (_stdout_res, _stderr_res) =
                         tokio::join!(reader.read_to_end(&mut stdout_buf), stderr_read);
                     let status = child.wait().await;
-                    (stdout_buf, stderr_buf, stdout_res, stderr_res, status)
+                    (stdout_buf, stderr_buf, status)
                 };
-                let rendered = match tokio::time::timeout(async_timeout, drain_and_wait).await {
-                    Ok((stdout, stderr, stdout_res, stderr_res, status)) => {
-                        let mut s = String::new();
-                        s.push_str("stdout:\n");
-                        s.push_str(&String::from_utf8_lossy(&stdout));
-                        s.push_str("\nstderr:\n");
-                        s.push_str(&String::from_utf8_lossy(&stderr));
-                        if let Err(e) = stdout_res {
-                            s.push_str(&format!("\nstdout read error: {e}\n"));
-                        }
-                        if let Err(e) = stderr_res {
-                            s.push_str(&format!("\nstderr read error: {e}\n"));
-                        }
-                        match status {
-                            Ok(status) => {
-                                s.push_str(&format!(
-                                    "\nexit_code: {}\n",
-                                    status.code().unwrap_or(-1)
-                                ));
-                            }
-                            Err(e) => s.push_str(&format!("\nwait error: {e}\n")),
-                        }
-                        s
-                    }
-                    Err(_) => "async hook timed out; process was terminated\n".to_string(),
+                // The drained stdout is the hook's output AFTER the consumed
+                // `{"async":true}` marker line — exactly the payload the fold-back
+                // maps through the command-hook contract (`map_command_output`).
+                let output = match tokio::time::timeout(async_timeout, drain_and_wait).await {
+                    Ok((stdout_buf, stderr_buf, status)) => ProcessOutput {
+                        stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+                        stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+                        exit_code: status.map_or(-1, |s| s.code().unwrap_or(-1)),
+                        timed_out: false,
+                    },
+                    Err(_) => ProcessOutput {
+                        stdout: String::new(),
+                        stderr: "async hook timed out; process was terminated".to_string(),
+                        exit_code: -1,
+                        timed_out: true,
+                    },
                 };
-                if let Some(parent) = output_path.parent() {
-                    let _ = tokio::fs::create_dir_all(parent).await;
-                }
-                let _ = tokio::fs::write(output_path, rendered).await;
+                // `child` drops at end of scope → `kill_on_drop` SIGKILLs a
+                // still-running (timed-out) child.
+                let _ = output_tx.send(output);
             });
             return Ok(HookRunOutcome::Backgrounded {
-                output_path: Some(output_path_string),
+                async_timeout,
+                output: Some(output_rx),
             });
         }
 
@@ -519,18 +510,6 @@ fn parse_async_first_line(
     Some(timeout)
 }
 
-fn async_hook_output_path() -> std::path::PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!(
-        "lingxi-async-hook-{}-{nanos}.log",
-        std::process::id()
-    ))
-}
-
 /// Generate a unique task id of the form `local_bash_<nanos-hex>`.
 fn generate_task_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -632,15 +611,14 @@ mod async_hook_tests {
             .await
             .expect("runs");
         let HookRunOutcome::Backgrounded {
-            output_path: Some(output_path),
+            async_timeout,
+            output: Some(_output_rx),
         } = outcome
         else {
-            panic!("async hook must background with retained output path");
+            panic!("async hook must background with an eventual-output handle");
         };
-        assert!(
-            std::path::Path::new(&output_path).exists(),
-            "async hook output path should be readable immediately"
-        );
+        // The marker's `asyncTimeout` (100ms) overrides the caller default.
+        assert_eq!(async_timeout, Duration::from_millis(100));
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "async hook must not block the turn (took {:?})",
@@ -650,30 +628,33 @@ mod async_hook_tests {
 
     #[tokio::test]
     async fn async_marker_retains_eventual_stdout_and_stderr() {
-        let cmd = sh("echo '{\"async\":true,\"asyncTimeout\":1000}'; echo after; echo err 1>&2");
+        // The post-marker stdout/stderr + exit are drained and delivered once
+        // through the eventual-output channel (the fold-back payload).
+        let cmd = sh(
+            "echo '{\"async\":true,\"asyncTimeout\":1000}'; echo after; echo err 1>&2; exit 0",
+        );
         let outcome = PosixProcess::new()
             .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
             .await
             .expect("runs");
         let HookRunOutcome::Backgrounded {
-            output_path: Some(output_path),
+            output: Some(output_rx),
+            ..
         } = outcome
         else {
-            panic!("async hook must background with retained output path");
+            panic!("async hook must background with an eventual-output handle");
         };
 
-        let mut body = String::new();
-        for _ in 0..20 {
-            body = tokio::fs::read_to_string(&output_path)
-                .await
-                .unwrap_or_default();
-            if body.contains("after") && body.contains("err") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert!(body.contains("stdout:\nafter"), "retained stdout: {body}");
-        assert!(body.contains("stderr:\nerr"), "retained stderr: {body}");
+        let out = tokio::time::timeout(Duration::from_secs(5), output_rx)
+            .await
+            .expect("eventual output must arrive before the async timeout")
+            .expect("sender must not drop");
+        // The consumed marker line is NOT part of the eventual output; only the
+        // post-marker content is.
+        assert_eq!(out.stdout, "after\n", "eventual stdout: {out:?}");
+        assert_eq!(out.stderr, "err\n", "eventual stderr: {out:?}");
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.timed_out);
     }
 }
 

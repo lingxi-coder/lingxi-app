@@ -401,6 +401,7 @@ impl HookExecutorImpl {
             prompt_runner: self.prompt_runner.clone(),
             process: self.process.clone(),
             sandbox: self.sandbox.clone(),
+            async_registry: self.async_registry.clone(),
         }
     }
 
@@ -869,6 +870,14 @@ struct Dispatcher {
     prompt_runner: Option<Arc<dyn HookPromptRunner>>,
     process: Option<Arc<dyn ProcessRunner>>,
     sandbox: Option<Arc<dyn Sandbox>>,
+    /// P2-09: background registry for the runtime `{"async":true}` marker
+    /// fold-back. When a `Command` hook prints the marker its first stdout line,
+    /// the runner backgrounds it and hands back an eventual-output handle; the
+    /// Command arm registers that handle here so the hook's eventual output
+    /// re-injects as an `async_hook_response` on a later turn (claude-code
+    /// `registerPendingAsyncHook`). `None` ⇒ the marker path degrades to a
+    /// no-op synchronous decision (the hook still ran, but nothing folds back).
+    async_registry: Option<Arc<AsyncHookRegistry>>,
 }
 
 impl Dispatcher {
@@ -1076,18 +1085,60 @@ impl Dispatcher {
                     .run_hook_with_async_detection(&sandboxed, default_async_timeout)
                     .await
                 {
-                    Ok(traits::HookRunOutcome::Backgrounded { output_path }) => (
-                        HookResult {
-                            outcome: HookOutcome::Success,
-                            stdout: output_path
-                                .map(|p| format!("async hook output: {p}"))
-                                .unwrap_or_default(),
-                            stderr: String::new(),
-                            exit_code: None,
-                            response: None,
-                        },
-                        false,
-                    ),
+                    Ok(traits::HookRunOutcome::Backgrounded {
+                        async_timeout,
+                        output,
+                    }) => {
+                        // P2-09 runtime-marker fold-back (claude-code
+                        // `registerPendingAsyncHook`): the hook printed
+                        // `{"async":true}` as its first stdout line, so it
+                        // contributes NO synchronous decision this turn. Its
+                        // eventual (post-marker) output is registered with the
+                        // async registry so it re-injects as an
+                        // `async_hook_response` on a later turn — the completion
+                        // publishes to the registry's `completion_tx`, mapped
+                        // through the same command-hook contract as a foreground
+                        // hook (`map_command_output`).
+                        if let (Some(output_rx), Some(registry)) = (output, &self.async_registry) {
+                            let hook_owned = hook.clone();
+                            let hook_id = hook.id;
+                            let work: HookWork = Box::pin(async move {
+                                let out = output_rx.await.unwrap_or_else(|_| traits::ProcessOutput {
+                                    stdout: String::new(),
+                                    stderr: "async hook output channel closed".to_string(),
+                                    exit_code: -1,
+                                    timed_out: true,
+                                });
+                                map_command_output(&hook_owned, Ok(out), expected_event).0
+                            });
+                            // Bound the registration by the SAME async timeout the
+                            // runner used to bound the child: on normal completion
+                            // the (biased) `work` arm wins and publishes the mapped
+                            // output; on overrun the registry publishes a timeout
+                            // result, matching claude's `asyncTimeout` semantics.
+                            if let Err(e) =
+                                registry.spawn(hook_id, Some(async_timeout), work).await
+                            {
+                                tracing::warn!(
+                                    hook_id = %hook_id,
+                                    error = %e,
+                                    "failed to register async-marker hook fold-back",
+                                );
+                            }
+                        }
+                        // No synchronous decision — an async-marker hook never
+                        // gates the turn.
+                        (
+                            HookResult {
+                                outcome: HookOutcome::Success,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                exit_code: None,
+                                response: None,
+                            },
+                            false,
+                        )
+                    }
                     Ok(traits::HookRunOutcome::Completed(output)) => {
                         map_command_output(hook, Ok(output), expected_event)
                     }

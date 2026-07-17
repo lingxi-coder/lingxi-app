@@ -155,12 +155,6 @@ fn emit_worker_vanished(short: &str) {
     );
 }
 
-/// `tengu_bg_respawn_exhausted` — no safe resume path exists; the job is being
-/// marked terminally `failed`.
-fn emit_respawn_exhausted(short: &str, attempts: i64) {
-    tracing::info!(event = "tengu_bg_respawn_exhausted", short, attempts);
-}
-
 /// `tengu_bg_reply_undelivered` — a follow-up reply the attach fallback
 /// persisted to the durable offline queue can never be delivered as a turn: its
 /// worker vanished and is failed closed (never respawned), so the queue's only
@@ -526,7 +520,12 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
                     "lingxi-cli daemon: could not mark vanished job {short} failed: {e}"
                 );
             }
-            emit_respawn_exhausted(&short, read_respawn_count(runtime_dir, &short));
+            // NB: do NOT emit `tengu_bg_respawn_exhausted` here. CC 2.1.208 emits
+            // that event only from scheduleRespawn once the respawn budget
+            // (Jpp=20) is reached; the fail-closed daemon never respawns, so there
+            // is no budget to exhaust and firing it on the first vanish (with a
+            // constant attempts:0) is a spurious signal. The vanish is already
+            // recorded via `tengu_bg_worker_vanished` above.
             claimed.remove(&short);
             continue;
         }
@@ -732,6 +731,44 @@ mod tests {
 
     fn no_sleep() -> impl FnMut(u64) {
         |_| {}
+    }
+
+    /// A `tracing` layer that records the `event = "..."` field of every emitted
+    /// event, so a test can assert which `tengu_*` telemetry events actually
+    /// fired (or did not).
+    #[derive(Clone, Default)]
+    struct EventCapture {
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct V<'a>(&'a mut Option<String>);
+            impl tracing::field::Visit for V<'_> {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "event" {
+                        *self.0 = Some(value.to_string());
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "event" && self.0.is_none() {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut name = None;
+            event.record(&mut V(&mut name));
+            if let Some(n) = name {
+                self.events.lock().unwrap().push(n);
+            }
+        }
     }
 
     /// Records the shorts (and env) it was asked to spawn and hands back
@@ -1169,6 +1206,60 @@ mod tests {
             "failed job is terminal (won't re-render as working)"
         );
         assert_eq!(job.worker_pid, None, "stale worker pid cleared");
+    }
+
+    #[test]
+    fn vanished_worker_does_not_emit_respawn_exhausted() {
+        // Regression (RV9): the daemon fails a vanished worker CLOSED and never
+        // respawns it, so there is no respawn budget to exhaust. CC 2.1.208
+        // emits `tengu_bg_respawn_exhausted` ONLY from scheduleRespawn once the
+        // respawn budget (Jpp=20) is reached — never on the first crash. LingXi
+        // used to emit it unconditionally on the very first vanish with a
+        // constant `attempts:0`, a spurious event downstream analytics would
+        // read as a real budget exhaustion. The vanish itself must still be
+        // recorded via `tengu_bg_worker_vanished` (also a CC event).
+        use tracing_subscriber::layer::SubscriberExt;
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let dir = tmpdir();
+        seed_working_job(&dir, "dead0009");
+        agents_registry::update_job_state(&dir, "dead0009", "working", Some(4321)).unwrap();
+
+        let proc = FakeProc {
+            alive: HashMap::new(), // 4321 is NOT alive → vanished
+            start: HashMap::new(),
+        };
+        let lockp = FakeLockProbe {
+            alive_daemon: HashMap::new(),
+        };
+        let mut spawner = FakeWorkerSpawner::default();
+
+        tracing::subscriber::with_default(subscriber, || {
+            run_supervisor(
+                &dir,
+                4242,
+                "0.0.0",
+                &lockp,
+                &proc,
+                &mut spawner,
+                HEARTBEAT_MS,
+                &mut no_sleep(),
+                &mut || true,
+            );
+        });
+
+        let events = capture.events.lock().unwrap();
+        // The vanish itself is still recorded (a real CC event) …
+        assert!(
+            events.iter().any(|e| e == "tengu_bg_worker_vanished"),
+            "vanish must still be recorded, got {events:?}"
+        );
+        // … but NO spurious respawn-exhausted event on the very first crash.
+        assert!(
+            !events.iter().any(|e| e == "tengu_bg_respawn_exhausted"),
+            "fail-closed vanish must not emit tengu_bg_respawn_exhausted, got {events:?}"
+        );
     }
 
     #[test]

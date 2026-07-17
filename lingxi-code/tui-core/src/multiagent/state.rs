@@ -78,6 +78,12 @@ pub struct WorkflowRow {
     /// Phase/agent tree parsed from the run's output spool. Empty until enriched
     /// (or when the run emitted no `phase()`/`agent()` progress).
     pub phases: Vec<WorkflowPhase>,
+    /// The run's inline script source, when the workflow was launched from an
+    /// inline `script` (not a saved `name`/`scriptPath`). Present ⇒ the
+    /// `/workflows` picker offers the `s` "Save dynamic workflow" chord (oracle
+    /// gates `save` on a saveable inline script). `None` for name/path-sourced
+    /// runs and until the launcher plumbs the script through.
+    pub script: Option<String>,
 }
 
 /// One teammate/worker row. Populated from the coordinator surface in M9-06;

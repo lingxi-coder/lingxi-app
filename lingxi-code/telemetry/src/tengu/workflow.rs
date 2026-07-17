@@ -17,8 +17,12 @@ pub const AGENT_CAP_EXCEEDED: &str = "tengu_workflow_agent_cap_exceeded";
 pub const BUDGET_CAP_EXCEEDED: &str = "tengu_workflow_budget_cap_exceeded";
 /// `tengu_workflow_journal_started_hit_respawn` — journal resume re-started a prior agent.
 pub const JOURNAL_STARTED_HIT_RESPAWN: &str = "tengu_workflow_journal_started_hit_respawn";
+/// `tengu_workflow_saved` — a dynamic workflow was written to disk via the
+/// `/workflows` "Save dynamic workflow" dialog (oracle `eya`
+/// `M("tengu_workflow_saved", {scope, overwrite, script_size_chars})`).
+pub const SAVED: &str = "tengu_workflow_saved";
 
-/// All 6 reachable workflow telemetry event names (string-lock only, NOT in ALL_EVENT_NAMES).
+/// All 7 reachable workflow telemetry event names (string-lock only, NOT in ALL_EVENT_NAMES).
 pub const NAMES: &[&str] = &[
     LAUNCHED,
     COMPLETED,
@@ -26,10 +30,10 @@ pub const NAMES: &[&str] = &[
     AGENT_CAP_EXCEEDED,
     BUDGET_CAP_EXCEEDED,
     JOURNAL_STARTED_HIT_RESPAWN,
+    SAVED,
 ];
 
 // Unreachable events (no LingXi trigger):
-// - `tengu_workflow_saved` — no `/workflow save` command in LingXi.
 // - `tengu_workflow_keyword` / `_dismissed` / `_restored` — no keyword UI.
 // - `tengu_workflow_usage_warning_accepted` — no usage-warning dialog.
 // - `tengu_workflows_enabled` — feature flag read, not an emitted event.

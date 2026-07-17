@@ -40,6 +40,9 @@ pub fn workflow_row_from_record(r: WorkflowRecord) -> WorkflowRow {
         // `parse_workflow_spool`.
         agent_count: 0,
         phases: Vec::new(),
+        // The reduced `WorkflowRecord` carries no script source; the picker's
+        // `s save` chord stays hidden until the launcher plumbs it through.
+        script: None,
     }
 }
 

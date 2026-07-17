@@ -766,13 +766,13 @@ impl BottomPane {
         now_on
     }
 
-    /// Replace Vim insert-mode two-key remaps. Only two-character source
-    /// sequences are retained; target names are evaluated when matched.
+    /// Replace Vim insert-mode two-key remaps. Entries are canonicalized exactly
+    /// like claude-code 2.1.208's `GGy` (NFC source, two printable graphemes,
+    /// only the `<Esc>` target survives), so non-`<esc>` targets never register
+    /// as a prefix.
     pub fn set_vim_insert_mode_remaps(&mut self, remaps: BTreeMap<String, String>) {
-        self.vim_insert_mode_remaps = remaps
-            .into_iter()
-            .filter(|(from, _)| from.chars().count() == 2)
-            .collect();
+        self.vim_insert_mode_remaps =
+            tui_core::theme_persist::canonicalize_vim_insert_mode_remaps(remaps);
         self.vim_insert_remap_pending = None;
     }
 
@@ -1456,7 +1456,9 @@ impl Renderable for BottomPane {
 }
 
 fn is_escape_remap_target(target: &str) -> bool {
-    matches!(target, "Escape" | "Esc" | "escape" | "esc")
+    // claude-code 2.1.208's `GGy` accepts only `"<esc>"` (case-insensitive) and
+    // stores it canonically as `"<Esc>"`; match that single supported target.
+    target.trim().eq_ignore_ascii_case("<esc>")
 }
 
 /// Whether `s` is a single existing image file path (used to route pastes to
@@ -2399,7 +2401,7 @@ mod tests {
         let mut pane = pane();
         pane.set_vim_insert_mode_remaps(std::collections::BTreeMap::from([(
             "jj".to_string(),
-            "Escape".to_string(),
+            "<Esc>".to_string(),
         )]));
         assert!(pane.toggle_vim());
         typ(&mut pane, "abc");
@@ -2424,7 +2426,7 @@ mod tests {
         let mut pane = pane();
         pane.set_vim_insert_mode_remaps(std::collections::BTreeMap::from([(
             "jj".to_string(),
-            "Escape".to_string(),
+            "<Esc>".to_string(),
         )]));
         assert!(pane.toggle_vim());
 
@@ -2432,6 +2434,24 @@ mod tests {
         let _ = pane.handle_key(key(KeyCode::Char('x')));
 
         assert_eq!(pane.composer().text(), "jx");
+        assert_eq!(pane.vim_mode_label(), Some("INSERT"));
+    }
+
+    #[test]
+    fn vim_insert_mode_remap_non_esc_target_is_dropped_and_types_literally() {
+        // CC's GGy keeps only `<esc>` targets. A legacy `"Escape"` target must
+        // never register as a prefix: "jj" is typed literally, no mode change.
+        let mut pane = pane();
+        pane.set_vim_insert_mode_remaps(std::collections::BTreeMap::from([(
+            "jj".to_string(),
+            "Escape".to_string(),
+        )]));
+        assert!(pane.toggle_vim());
+
+        let _ = pane.handle_key(key(KeyCode::Char('j')));
+        let _ = pane.handle_key(key(KeyCode::Char('j')));
+
+        assert_eq!(pane.composer().text(), "jj");
         assert_eq!(pane.vim_mode_label(), Some("INSERT"));
     }
 

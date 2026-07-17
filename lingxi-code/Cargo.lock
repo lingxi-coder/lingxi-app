@@ -6039,6 +6039,7 @@ version = "0.12.0"
 dependencies = [
  "arboard",
  "async-trait",
+ "branding",
  "command-api",
  "command-core",
  "cost",
@@ -6055,10 +6056,12 @@ dependencies = [
  "secret",
  "serde_json",
  "session",
+ "telemetry",
  "tempfile",
  "tokio",
  "tokio-util",
  "tool-web",
+ "tool-workflow",
  "tracing",
  "traits",
  "tui-core",
@@ -6090,6 +6093,7 @@ dependencies = [
  "tool-shell",
  "tracing",
  "traits",
+ "unicode-normalization",
  "unicode-segmentation",
  "unicode-width 0.1.14",
 ]

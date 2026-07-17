@@ -201,6 +201,211 @@ where
     ))
 }
 
+// ── Save dynamic workflow (claude-code `eya` / `uQ_`, dialog mode:"save") ─────
+
+/// Where a saved workflow is written — the oracle's `scope` field of the "Save
+/// dynamic workflow" dialog (`iNt`). `Project` writes under the project workflow
+/// dir (`<cwd>/.lingxi/workflows`); `User` under the user config dir
+/// (`$LINGXI_CONFIG_DIR` / `~/.lingxi`, `+ /workflows`). Defaults to `Project`
+/// (oracle `useState("project")`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowScope {
+    /// Project scope — `<cwd>/.lingxi/workflows` (oracle `.claude/workflows`).
+    Project,
+    /// User scope — `<userConfigHome>/workflows` (oracle `xDt()`).
+    User,
+}
+
+impl WorkflowScope {
+    /// The wire string used in telemetry / persistence (`"project"` / `"user"`).
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            WorkflowScope::Project => "project",
+            WorkflowScope::User => "user",
+        }
+    }
+    /// The capitalized UI label (oracle `l3p`): `"Project"` / `"User"`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkflowScope::Project => "Project",
+            WorkflowScope::User => "User",
+        }
+    }
+    /// Tab toggles Project ⇄ User (oracle `IQ_`).
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            WorkflowScope::Project => WorkflowScope::User,
+            WorkflowScope::User => WorkflowScope::Project,
+        }
+    }
+}
+
+/// Kebab-sanitize a workflow name (oracle `lme`):
+/// `toLowerCase()` → collapse each `[^a-z0-9]+` run to a single `-` → trim
+/// leading/trailing `-`; an empty result becomes `"workflow"`.
+#[must_use]
+pub fn sanitize_workflow_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        let lc = ch.to_ascii_lowercase();
+        if lc.is_ascii_lowercase() || lc.is_ascii_digit() {
+            out.push(lc);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "workflow".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The directory a workflow of `scope` is saved into (oracle `uQ_(scope, cwd)`).
+/// `User` → `<userConfigHome>/workflows`; `Project` → `<cwd>/.lingxi/workflows`.
+/// (The oracle joins the git root / cwd with `.claude/workflows`; LingXi uses the
+/// `.lingxi` dir name — the accepted branding divergence.) Falls back to the
+/// project dir when the user config home can't be resolved.
+#[must_use]
+pub fn workflow_scope_dir(scope: WorkflowScope, cwd: &Path) -> PathBuf {
+    match scope {
+        WorkflowScope::User => user_config_home_dir()
+            .map(|home| home.join("workflows"))
+            .unwrap_or_else(|| cwd.join(branding::DOT_DIR).join("workflows")),
+        WorkflowScope::Project => cwd.join(branding::DOT_DIR).join("workflows"),
+    }
+}
+
+/// A successful [`save_dynamic_workflow`] — the oracle `eya` return
+/// `{name, path, scope}` plus the `script_size_chars` telemetry field.
+#[derive(Debug, Clone)]
+pub struct WorkflowSaved {
+    /// Sanitized workflow name (the `<name>` in `<name>.js`).
+    pub name: String,
+    /// Absolute path the script was written to.
+    pub path: PathBuf,
+    /// The scope it was saved under.
+    pub scope: WorkflowScope,
+    /// `script.length` (UTF-16 code units, matching JS) — the oracle
+    /// `script_size_chars` telemetry field.
+    pub script_size_chars: usize,
+}
+
+/// Error saving a dynamic workflow (oracle `eya` throw paths).
+#[derive(Debug)]
+pub enum WorkflowSaveError {
+    /// The target file exists and `overwrite` was not set (oracle EEXIST →
+    /// telemetry `"already_exists"`). Message byte-exact with the binary.
+    AlreadyExists {
+        /// Sanitized name that collided.
+        name: String,
+        /// The `<name>.js` path that already exists.
+        path: PathBuf,
+    },
+    /// Any other I/O failure (mkdir / write) — oracle `"write_failed"`.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for WorkflowSaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkflowSaveError::AlreadyExists { name, path } => write!(
+                f,
+                "Dynamic workflow \"{name}\" already exists at {}. Use a different name or overwrite.",
+                path.display()
+            ),
+            WorkflowSaveError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+impl std::error::Error for WorkflowSaveError {}
+
+/// `mkdir(dir, {recursive:true, mode})` — recursive dir creation with a unix
+/// mode on every created component (oracle `mode:448` = `0o700`). The mode is a
+/// no-op on non-unix targets.
+fn create_dir_all_mode(dir: &Path, _mode: u32) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(_mode);
+    }
+    b.create(dir)
+}
+
+/// Save a dynamic workflow to disk (claude-code `eya`). Writes the sanitized
+/// `<name>.js` under [`workflow_scope_dir`], creating the dir `0o700` and the
+/// file `0o600`. Without `overwrite` the file is opened `wx` (create-new), so an
+/// existing file yields [`WorkflowSaveError::AlreadyExists`] (the oracle's EEXIST
+/// path); with `overwrite` it is truncated. Telemetry (`tengu_workflow_saved`)
+/// is emitted by the caller from the returned [`WorkflowSaved`].
+pub fn save_dynamic_workflow(
+    name: &str,
+    scope: WorkflowScope,
+    script: &str,
+    overwrite: bool,
+    cwd: &Path,
+) -> Result<WorkflowSaved, WorkflowSaveError> {
+    let sanitized = sanitize_workflow_name(name);
+    let dir = workflow_scope_dir(scope, cwd);
+    let path = dir.join(format!("{sanitized}.js"));
+
+    create_dir_all_mode(&dir, 0o700).map_err(WorkflowSaveError::Io)?;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    if overwrite {
+        opts.create(true).truncate(true);
+    } else {
+        opts.create_new(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = match opts.open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(WorkflowSaveError::AlreadyExists {
+                name: sanitized,
+                path,
+            });
+        }
+        Err(e) => return Err(WorkflowSaveError::Io(e)),
+    };
+    use std::io::Write;
+    file.write_all(script.as_bytes())
+        .map_err(WorkflowSaveError::Io)?;
+
+    Ok(WorkflowSaved {
+        name: sanitized,
+        path,
+        scope,
+        // JS `.length` counts UTF-16 code units.
+        script_size_chars: script.encode_utf16().count(),
+    })
+}
+
+/// The success feedback string shown after a save (oracle `iNt` `lun(...)`),
+/// byte-exact: `Dynamic workflow saved to <path>. Invoke as /<name> or
+/// Workflow({name: "<name>"}) in future sessions.`
+#[must_use]
+pub fn saved_feedback(name: &str, path: &Path) -> String {
+    format!(
+        "Dynamic workflow saved to {}. Invoke as /{name} or Workflow({{name: \"{name}\"}}) in future sessions.",
+        path.display()
+    )
+}
+
 /// Seam that spawns a `LocalWorkflow` background task and returns its id. The
 /// composition root wires this over the task registry (keeping this crate
 /// decoupled from `tasks`); tests inject a mock.
@@ -1326,6 +1531,129 @@ mod tests {
         assert!(
             enabled,
             "Workflow must stay enabled when env var is '0' (falsy)"
+        );
+    }
+
+    // ── Save dynamic workflow (`eya`/`uQ_`/`lme`) ─────────────────────────────
+
+    #[test]
+    fn sanitize_workflow_name_is_kebab_with_fallback() {
+        // Oracle `lme`: lowercase, collapse non-alnum runs to '-', trim, fallback.
+        assert_eq!(sanitize_workflow_name("My Cool Workflow"), "my-cool-workflow");
+        assert_eq!(sanitize_workflow_name("  Deploy!! Site  "), "deploy-site");
+        assert_eq!(sanitize_workflow_name("a__b--c"), "a-b-c");
+        assert_eq!(sanitize_workflow_name("Review123"), "review123");
+        assert_eq!(sanitize_workflow_name("***"), "workflow");
+        assert_eq!(sanitize_workflow_name(""), "workflow");
+    }
+
+    #[test]
+    fn scope_helpers_toggle_and_label() {
+        assert_eq!(WorkflowScope::Project.wire(), "project");
+        assert_eq!(WorkflowScope::User.wire(), "user");
+        assert_eq!(WorkflowScope::Project.label(), "Project");
+        assert_eq!(WorkflowScope::User.label(), "User");
+        assert_eq!(WorkflowScope::Project.toggled(), WorkflowScope::User);
+        assert_eq!(WorkflowScope::User.toggled(), WorkflowScope::Project);
+    }
+
+    #[test]
+    fn scope_dir_project_is_cwd_dotdir_workflows() {
+        let cwd = std::path::Path::new("/proj/root");
+        let dir = workflow_scope_dir(WorkflowScope::Project, cwd);
+        assert_eq!(dir, cwd.join(branding::DOT_DIR).join("workflows"));
+    }
+
+    #[test]
+    fn scope_dir_user_uses_config_home() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let config_dir = unique_temp_path("scope-user");
+        let dir = with_config_dir_env(&config_dir, || {
+            workflow_scope_dir(WorkflowScope::User, std::path::Path::new("/anything"))
+        });
+        assert_eq!(dir, config_dir.join("workflows"));
+    }
+
+    #[test]
+    fn save_writes_file_and_reports_path_and_size() {
+        let cwd = unique_temp_path("save-project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = "export const meta = { name: 'x' };\n";
+        let saved =
+            save_dynamic_workflow("My WF", WorkflowScope::Project, script, false, &cwd).unwrap();
+        assert_eq!(saved.name, "my-wf");
+        assert_eq!(saved.path, cwd.join(branding::DOT_DIR).join("workflows").join("my-wf.js"));
+        assert_eq!(saved.scope, WorkflowScope::Project);
+        assert_eq!(saved.script_size_chars, script.encode_utf16().count());
+        assert_eq!(std::fs::read_to_string(&saved.path).unwrap(), script);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_sets_600_file_and_700_dir_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = unique_temp_path("save-modes");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let saved =
+            save_dynamic_workflow("perm", WorkflowScope::Project, "x", false, &cwd).unwrap();
+        let file_mode = std::fs::metadata(&saved.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "file mode must be 0o600");
+        let dir_mode = std::fs::metadata(saved.path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "dir mode must be 0o700");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn save_without_overwrite_rejects_existing_file() {
+        let cwd = unique_temp_path("save-eexist");
+        std::fs::create_dir_all(&cwd).unwrap();
+        save_dynamic_workflow("dup", WorkflowScope::Project, "first", false, &cwd).unwrap();
+        let err = save_dynamic_workflow("dup", WorkflowScope::Project, "second", false, &cwd)
+            .unwrap_err();
+        match &err {
+            WorkflowSaveError::AlreadyExists { name, path } => {
+                assert_eq!(name, "dup");
+                assert!(path.ends_with("dup.js"));
+            }
+            other => panic!("expected AlreadyExists, got {other:?}"),
+        }
+        // Byte-exact message.
+        let expected_path = cwd.join(branding::DOT_DIR).join("workflows").join("dup.js");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Dynamic workflow \"dup\" already exists at {}. Use a different name or overwrite.",
+                expected_path.display()
+            )
+        );
+        // The original content is untouched (create-new never opened it).
+        assert_eq!(std::fs::read_to_string(&expected_path).unwrap(), "first");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn save_with_overwrite_replaces_existing_file() {
+        let cwd = unique_temp_path("save-overwrite");
+        std::fs::create_dir_all(&cwd).unwrap();
+        save_dynamic_workflow("dup", WorkflowScope::Project, "first", false, &cwd).unwrap();
+        let saved =
+            save_dynamic_workflow("dup", WorkflowScope::Project, "second", true, &cwd).unwrap();
+        assert_eq!(std::fs::read_to_string(&saved.path).unwrap(), "second");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn saved_feedback_is_byte_exact() {
+        let path = std::path::Path::new("/home/u/.lingxi/workflows/deploy.js");
+        assert_eq!(
+            saved_feedback("deploy", path),
+            "Dynamic workflow saved to /home/u/.lingxi/workflows/deploy.js. \
+             Invoke as /deploy or Workflow({name: \"deploy\"}) in future sessions."
         );
     }
 }

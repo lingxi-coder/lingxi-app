@@ -97,6 +97,20 @@ pub fn emit_cd_command(source: &str) {
     tracing::info!(event = crate::tengu::command::CD_COMMAND, source = %source);
 }
 
+/// Emit `tengu_workflow_saved` — a dynamic workflow was saved via the
+/// `/workflows` "Save dynamic workflow" dialog (oracle `eya`:
+/// `M("tengu_workflow_saved", { scope, overwrite, script_size_chars })`).
+/// `scope` is the low-cardinality wire enum (`"project"` / `"user"`);
+/// `script_size_chars` is the script's `.length` (UTF-16 code units).
+pub fn emit_workflow_saved(scope: &str, overwrite: bool, script_size_chars: usize) {
+    tracing::info!(
+        event = crate::tengu::workflow::SAVED,
+        scope = %scope,
+        overwrite = overwrite,
+        script_size_chars = script_size_chars,
+    );
+}
+
 // -- EXPERIMENTAL_SKILL_SEARCH skill-discovery emit helper -------------------
 
 /// Emit the skill-discovery-collected event with the `hidden_by_main_turn` field

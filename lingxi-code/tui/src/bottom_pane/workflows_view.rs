@@ -18,11 +18,16 @@
 //! `Esc`/`q` closes.
 //!
 //! The list is a snapshot at open time (re-run `/workflows` to refresh). The
-//! oracle's third-level agent-transcript drill-down and the `s save` flow are
-//! not ported; the detail view shows the phase/agent tree (its primary value).
+//! oracle's third-level agent-transcript drill-down is not ported; the detail
+//! view shows the phase/agent tree (its primary value). The `s` "Save dynamic
+//! workflow" flow IS ported ([`WorkflowSaveView`]): when the selected run
+//! carries an inline `script`, `s` opens a name/scope form that writes the
+//! script to `.lingxi/workflows/<name>.js` (project) or the user config dir
+//! (user) via [`tool_workflow::save_dynamic_workflow`].
 
 use std::any::Any;
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -31,6 +36,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
+use tool_workflow::{save_dynamic_workflow, saved_feedback, sanitize_workflow_name, WorkflowSaveError, WorkflowScope};
 use tui_core::multiagent::{WorkflowPhase, WorkflowRow};
 use tui_core::theme::Theme;
 
@@ -81,6 +87,19 @@ fn row_name(row: &WorkflowRow) -> String {
         format!("{head}\u{2026}")
     } else {
         raw.to_string()
+    }
+}
+
+/// The default name pre-filled into the "Save dynamic workflow" form (oracle
+/// `dQ_ = workflowName ?? summary`): the run's `name` (meta.name), else its
+/// script `description` summary, else the literal `"workflow"`.
+fn save_default_name(row: &WorkflowRow) -> String {
+    if !row.name.is_empty() {
+        row.name.clone()
+    } else if !row.description.is_empty() {
+        row.description.clone()
+    } else {
+        "workflow".to_string()
     }
 }
 
@@ -275,6 +294,13 @@ impl WorkflowsView {
             {
                 parts.push("x stop".to_string());
             }
+            if self
+                .rows
+                .get(self.selected)
+                .is_some_and(|r| r.script.is_some())
+            {
+                parts.push("s save".to_string());
+            }
         }
         parts.push("Esc close".to_string());
         parts.join(" \u{00b7} ")
@@ -341,6 +367,21 @@ impl BottomPaneView for WorkflowsView {
                     // `TurnEvent::SystemNotice`.
                     self.rows[self.selected].status = "killed".to_string();
                     ViewOutcome::RunTaskAction(TaskAction::Kill { task_id })
+                }
+                _ => ViewOutcome::Pending,
+            },
+            // Oracle `s` chord (`chord:"s", action:"save"`), gated on the row
+            // carrying a saveable inline script → open the "Save dynamic
+            // workflow" form.
+            KeyCode::Char('s') => match self.rows.get(self.selected) {
+                Some(r) if r.script.is_some() => {
+                    let script = r.script.clone().unwrap_or_default();
+                    let default_name = save_default_name(r);
+                    ViewOutcome::OpenView(Box::new(WorkflowSaveView::new(
+                        script,
+                        default_name,
+                        self.theme,
+                    )))
                 }
                 _ => ViewOutcome::Pending,
             },
@@ -577,6 +618,254 @@ impl BottomPaneView for WorkflowDetailView {
     }
 }
 
+/// The "Save dynamic workflow" form (oracle `iNt`, dialog `mode:"save"`), pushed
+/// by the `s` chord when the selected run carries an inline script. A name input
+/// (default from the run's meta.name / summary), `Tab` toggles scope
+/// Project ⇄ User, `Enter` saves (a second `Enter` overwrites on EEXIST), `Esc`
+/// cancels. The write itself goes through [`tool_workflow::save_dynamic_workflow`]
+/// so the dir resolver + file modes (`0o700` dir / `0o600` file) stay 1:1 with
+/// the launcher/read side; success emits `tengu_workflow_saved`.
+pub struct WorkflowSaveView {
+    /// The inline script to persist.
+    script: String,
+    /// The editable target name (sanitized to kebab on save/preview).
+    name: String,
+    /// Cursor position in `name`, as a char index.
+    cursor: usize,
+    /// Project (default) or User scope.
+    scope: WorkflowScope,
+    /// Active render palette.
+    theme: Theme,
+    /// Working directory used to resolve the project workflow dir.
+    cwd: PathBuf,
+    /// The already-existing path awaiting an overwrite-confirm (`Enter` again).
+    /// Set on an EEXIST save; cleared by any edit or scope toggle.
+    pending_overwrite: Option<String>,
+    /// A non-EEXIST save error message (I/O failure).
+    error: Option<String>,
+    /// The success feedback once the workflow is saved (view then waits on `Esc`).
+    feedback: Option<String>,
+}
+
+impl WorkflowSaveView {
+    /// Build the save form for `script`, pre-filling `default_name`.
+    #[must_use]
+    pub fn new(script: String, default_name: String, theme: Theme) -> Self {
+        let cursor = default_name.chars().count();
+        Self {
+            script,
+            name: default_name,
+            cursor,
+            scope: WorkflowScope::Project,
+            theme,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            pending_overwrite: None,
+            error: None,
+            feedback: None,
+        }
+    }
+
+    /// Clear the transient save state after an edit (name change / scope toggle),
+    /// so a stale "already exists" prompt or error doesn't linger.
+    fn clear_transient(&mut self) {
+        self.pending_overwrite = None;
+        self.error = None;
+        self.feedback = None;
+    }
+
+    /// The sanitized name preview (oracle `nya = lme(wft.trim() || "workflow")`).
+    fn preview_name(&self) -> String {
+        sanitize_workflow_name(self.name.trim())
+    }
+
+    /// The subtitle preview path (oracle `a3p`): a relative `.lingxi/workflows/…`
+    /// for project scope, the absolute user-config path for user scope.
+    fn preview_path(&self) -> String {
+        let file = format!("{}.js", self.preview_name());
+        match self.scope {
+            WorkflowScope::Project => {
+                format!("{}/workflows/{file}", branding::DOT_DIR)
+            }
+            WorkflowScope::User => tool_workflow::workflow_scope_dir(WorkflowScope::User, &self.cwd)
+                .join(&file)
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    /// Perform the save (oracle `s3p`): no-op on an empty name; overwrite when an
+    /// EEXIST prompt is pending; report success / already-exists / error.
+    fn save(&mut self) {
+        // Already saved — the form is showing feedback; ignore further Enter.
+        if self.feedback.is_some() {
+            return;
+        }
+        if self.name.trim().is_empty() {
+            return;
+        }
+        let overwrite = self.pending_overwrite.is_some();
+        match save_dynamic_workflow(&self.name, self.scope, &self.script, overwrite, &self.cwd) {
+            Ok(saved) => {
+                telemetry::emit_workflow_saved(
+                    saved.scope.wire(),
+                    overwrite,
+                    saved.script_size_chars,
+                );
+                self.pending_overwrite = None;
+                self.error = None;
+                self.feedback = Some(saved_feedback(&saved.name, &saved.path));
+            }
+            Err(WorkflowSaveError::AlreadyExists { path, .. }) => {
+                self.error = None;
+                self.pending_overwrite = Some(path.to_string_lossy().into_owned());
+            }
+            Err(WorkflowSaveError::Io(e)) => {
+                self.pending_overwrite = None;
+                self.error = Some(e.to_string());
+            }
+        }
+    }
+
+    fn lines(&self) -> Vec<Line<'static>> {
+        let dim = crate::style_adapter::to_ratatui(self.theme.dim);
+        let accent = crate::style_adapter::to_ratatui(self.theme.suggestion);
+        let success = crate::style_adapter::to_ratatui(self.theme.success);
+        let error = crate::style_adapter::to_ratatui(self.theme.error);
+        let dim_style = Style::default().fg(dim);
+
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(10);
+        lines.push(Line::from(Span::styled(
+            "Save dynamic workflow".to_string(),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("{} scope \u{00b7} {}", self.scope.label(), self.preview_path()),
+            dim_style,
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Save as:".to_string(), dim_style)));
+        lines.push(Line::from(vec![
+            Span::styled("\u{276f} ".to_string(), Style::default().fg(accent)),
+            Span::raw(self.name.clone()),
+        ]));
+        if let Some(path) = &self.pending_overwrite {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("{path} already exists. Press Enter again to overwrite, or change the name."),
+                Style::default().fg(error),
+            )));
+        }
+        if let Some(err) = &self.error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                err.clone(),
+                Style::default().fg(error),
+            )));
+        }
+        if let Some(fb) = &self.feedback {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                fb.clone(),
+                Style::default().fg(success),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(self.footer(), dim_style)));
+        lines
+    }
+
+    /// The chord-hint footer: `Enter save`/`Enter overwrite` · `Tab toggle
+    /// scope` · `Esc cancel`.
+    fn footer(&self) -> String {
+        let action = if self.pending_overwrite.is_some() {
+            "overwrite"
+        } else {
+            "save"
+        };
+        format!("Enter {action} \u{00b7} Tab toggle scope \u{00b7} Esc cancel")
+    }
+}
+
+impl Renderable for WorkflowSaveView {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        let block = Block::new().borders(Borders::ALL);
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        Paragraph::new(self.lines()).render(inner, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        u16::try_from(self.lines().len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(2)
+    }
+}
+
+impl BottomPaneView for WorkflowSaveView {
+    fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
+        match key.code {
+            KeyCode::Esc => ViewOutcome::Cancelled,
+            KeyCode::Tab => {
+                self.scope = self.scope.toggled();
+                self.clear_transient();
+                ViewOutcome::Pending
+            }
+            KeyCode::Enter => {
+                self.save();
+                ViewOutcome::Pending
+            }
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    let idx = self.cursor - 1;
+                    let byte = self
+                        .name
+                        .char_indices()
+                        .nth(idx)
+                        .map(|(b, _)| b)
+                        .unwrap_or(0);
+                    self.name.remove(byte);
+                    self.cursor = idx;
+                    self.clear_transient();
+                }
+                ViewOutcome::Pending
+            }
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                ViewOutcome::Pending
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.name.chars().count());
+                ViewOutcome::Pending
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                let byte = self
+                    .name
+                    .char_indices()
+                    .nth(self.cursor)
+                    .map(|(b, _)| b)
+                    .unwrap_or(self.name.len());
+                self.name.insert(byte, c);
+                self.cursor += 1;
+                self.clear_transient();
+                ViewOutcome::Pending
+            }
+            _ => ViewOutcome::Pending,
+        }
+    }
+
+    fn wants_status_line(&self) -> bool {
+        false
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +901,7 @@ mod tests {
                     },
                 ],
             }],
+            script: None,
         }
     }
 
@@ -874,6 +1164,140 @@ mod tests {
             !text.contains("deploy-site  \u{00b7}"),
             "no spurious dot: {text}"
         );
+    }
+
+    // ── Save dynamic workflow (`s` chord + WorkflowSaveView) ─────────────────
+
+    fn unique_tmp(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "lingxi-saveview-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn save_view() -> WorkflowSaveView {
+        WorkflowSaveView::new(
+            "export const meta = { name: 'x' };\n".to_string(),
+            "My WF".to_string(),
+            Theme::dark(),
+        )
+    }
+
+    #[test]
+    fn s_chord_gated_on_inline_script() {
+        // No inline script → no `s save` hint, `s` is a no-op.
+        let mut no_script = view(vec![row("w1", "completed", "deploy")]);
+        assert!(!no_script.footer().contains("s save"));
+        assert!(matches!(
+            no_script.handle_key(press(KeyCode::Char('s'))),
+            ViewOutcome::Pending
+        ));
+
+        // Inline script present → `s save` hint, `s` opens the save form.
+        let mut r = row("w1", "completed", "deploy");
+        r.script = Some("export const meta = {};\n".to_string());
+        let mut with_script = view(vec![r]);
+        assert!(with_script.footer().contains("s save"));
+        assert!(matches!(
+            with_script.handle_key(press(KeyCode::Char('s'))),
+            ViewOutcome::OpenView(_)
+        ));
+    }
+
+    #[test]
+    fn save_view_preview_scope_and_footer() {
+        let mut v = save_view();
+        // Name is kebab-sanitized in the preview.
+        assert_eq!(v.preview_name(), "my-wf");
+        assert_eq!(
+            v.preview_path(),
+            format!("{}/workflows/my-wf.js", branding::DOT_DIR)
+        );
+        assert!(v.footer().contains("Enter save"));
+        // Tab toggles to User scope; the preview path becomes absolute.
+        v.handle_key(press(KeyCode::Tab));
+        assert_eq!(v.scope, WorkflowScope::User);
+        assert!(v.preview_path().ends_with("workflows/my-wf.js"));
+        assert_ne!(
+            v.preview_path(),
+            format!("{}/workflows/my-wf.js", branding::DOT_DIR)
+        );
+    }
+
+    #[test]
+    fn save_view_typing_edits_name_and_clears_prompt() {
+        let mut v = save_view();
+        v.pending_overwrite = Some("/x/my-wf.js".to_string());
+        v.handle_key(press(KeyCode::Char('2')));
+        assert_eq!(v.name, "My WF2");
+        // Editing clears any pending overwrite prompt.
+        assert!(v.pending_overwrite.is_none());
+        v.handle_key(press(KeyCode::Backspace));
+        assert_eq!(v.name, "My WF");
+    }
+
+    #[test]
+    fn save_view_writes_file_and_shows_feedback() {
+        let tmp = unique_tmp("write");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut v = save_view();
+        v.cwd = tmp.clone();
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::Pending
+        ));
+        let path = tmp.join(branding::DOT_DIR).join("workflows").join("my-wf.js");
+        assert!(path.exists(), "script written to project dir");
+        let fb = v.feedback.as_deref().expect("feedback set");
+        assert!(fb.starts_with("Dynamic workflow saved to "));
+        assert!(fb.contains("Invoke as /my-wf or Workflow({name: \"my-wf\"})"));
+        // Esc closes the form.
+        assert!(matches!(
+            v.handle_key(press(KeyCode::Esc)),
+            ViewOutcome::Cancelled
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn save_view_prompts_then_overwrites_on_second_enter() {
+        let tmp = unique_tmp("overwrite");
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Pre-create the target via a first save.
+        let mut first = save_view();
+        first.cwd = tmp.clone();
+        first.handle_key(press(KeyCode::Enter));
+        assert!(first.feedback.is_some());
+
+        // A fresh form for the same name: first Enter → overwrite prompt.
+        let mut v = save_view();
+        v.cwd = tmp.clone();
+        v.handle_key(press(KeyCode::Enter));
+        assert!(v.pending_overwrite.is_some(), "EEXIST → overwrite prompt");
+        assert!(v.feedback.is_none());
+        assert!(v.footer().contains("Enter overwrite"));
+
+        // Second Enter overwrites → feedback.
+        v.handle_key(press(KeyCode::Enter));
+        assert!(v.feedback.is_some(), "second Enter overwrites");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn save_view_empty_name_is_a_noop() {
+        let tmp = unique_tmp("empty");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut v =
+            WorkflowSaveView::new("script".to_string(), "   ".to_string(), Theme::dark());
+        v.cwd = tmp.clone();
+        v.handle_key(press(KeyCode::Enter));
+        assert!(v.feedback.is_none(), "blank name does not save");
+        assert!(v.pending_overwrite.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     fn buf_text(buf: &Buffer, area: Rect) -> String {

@@ -60,6 +60,15 @@ tracing = { workspace = true }
 # from the deleted iocraft `tui`): pure KeyCode->Outcome reducers over the
 # tool_web provider config + secret store + memory settings.
 tool-web = { path = "../tools/web" }
+# `/workflows` "Save dynamic workflow" (`s` chord) reuses the byte-exact save
+# logic (`save_dynamic_workflow` / `WorkflowScope` / `saved_feedback`) instead of
+# re-implementing the dir resolver + file modes. `tool-workflow` does not depend
+# on `tui`, so this introduces no dependency cycle.
+tool-workflow = { path = "../tools/workflow" }
+# `emit_workflow_saved` (`tengu_workflow_saved`) is fired at the save call site.
+telemetry = { path = "../telemetry" }
+# `.lingxi` dir name for the project-scope save preview path.
+branding = { path = "../branding" }
 secret = { path = "../secret" }
 memory = { path = "../memory" }
 command-core = { path = "../commands/core" }

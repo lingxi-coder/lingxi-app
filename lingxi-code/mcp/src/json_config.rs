@@ -91,7 +91,7 @@ struct McpJsonEntry {
     /// non-positive, wrong type) fails the entry's `safeParse` → the entry is
     /// skipped (mirrored here: a non-`u64` value fails `serde` decode →
     /// [`build_servers_from_map`] logs + skips the entry).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_positive_timeout")]
     timeout: Option<u64>,
     /// sse/http-only alias for `timeout`. claude-code schema:
     /// `request_timeout_ms: nil()` where `nil =
@@ -118,6 +118,25 @@ fn as_positive_int_ms(v: Option<&serde_json::Value>) -> Option<u64> {
     // `as_u64` already rejects negatives, fractional numbers, and non-numbers.
     let n = v?.as_u64()?;
     (n > 0).then_some(n)
+}
+
+/// Deserialize the per-server `timeout` field, mirroring the claude-code zod
+/// schema `timeout: E.number().int().positive().optional()` (NO `.catch`): an
+/// absent field is `None`; a present positive integer is `Some(n)`; a present
+/// non-positive `0` — a valid `u64` that `.positive()` rejects — fails the
+/// deserialize so [`build_servers_from_map`] logs + SKIPS the whole entry
+/// (matching CC's `safeParse` failure). Negatives, fractional, and non-numeric
+/// values are already rejected by the `u64` decode itself.
+fn de_positive_timeout<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u64>::deserialize(deserializer)? {
+        Some(0) => Err(serde::de::Error::custom(
+            "timeout must be a positive integer",
+        )),
+        other => Ok(other),
+    }
 }
 
 /// Parse a `.mcp.json` payload (raw file contents) into a list of configs.
@@ -926,6 +945,26 @@ mod tests {
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "good");
+    }
+
+    #[test]
+    fn zero_timeout_skips_entry() {
+        // `timeout: RKe()` = `number().int().positive()` with NO `.catch`, so a
+        // present non-positive `0` fails the entry's safeParse → the whole
+        // server is skipped (valid siblings kept). `0` is a valid `u64`, so
+        // serde alone accepts it; the positive-integer guard is what drops the
+        // entry, matching CC's `.positive()` (review RV10).
+        let raw = r#"{"mcpServers":{"bad":{"command":"c","timeout":0},"good":{"command":"g"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "good");
+
+        // Same for a remote entry with a non-positive `timeout` (the direct
+        // `timeout` field, distinct from the `.catch`-lenient
+        // `request_timeout_ms` alias).
+        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","timeout":0}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(cfgs.is_empty(), "timeout:0 must drop the remote server");
     }
 
     #[test]

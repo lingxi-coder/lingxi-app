@@ -212,6 +212,10 @@ struct Builder<'a> {
     table_header: Vec<Vec<StyledSpan>>,
     /// Data rows: one row per `TableRow`, each a list of styled cells.
     table_rows: Vec<Vec<Vec<StyledSpan>>>,
+    /// Total number of body rows seen (incl. rows dropped past
+    /// [`markdown_table::MAX_TABLE_ROWS`]); overflow = this − cap drives the
+    /// `… N more rows not shown` notice.
+    table_total_rows: usize,
     /// The cell currently being built (flushed from `pending` on
     /// `End(TableCell)`).
     table_cell: Vec<StyledSpan>,
@@ -242,6 +246,7 @@ impl<'a> Builder<'a> {
             table_aligns: Vec::new(),
             table_header: Vec::new(),
             table_rows: Vec::new(),
+            table_total_rows: 0,
             table_cell: Vec::new(),
             table_row: Vec::new(),
             in_table_head: false,
@@ -455,6 +460,7 @@ impl<'a> Builder<'a> {
                 self.table_aligns = alignments.iter().copied().map(map_alignment).collect();
                 self.table_header.clear();
                 self.table_rows.clear();
+                self.table_total_rows = 0;
                 self.table_row.clear();
                 self.table_cell.clear();
                 self.in_table_head = false;
@@ -474,8 +480,13 @@ impl<'a> Builder<'a> {
                 self.table_row.clear();
             }
             Event::End(TagEnd::TableRow) => {
-                if !self.in_table_head && self.table_rows.len() < markdown_table::MAX_TABLE_ROWS {
-                    self.table_rows.push(std::mem::take(&mut self.table_row));
+                if !self.in_table_head {
+                    // Count every body row so the overflow past the cap is known
+                    // even though we stop collecting their cells.
+                    self.table_total_rows += 1;
+                    if self.table_rows.len() < markdown_table::MAX_TABLE_ROWS {
+                        self.table_rows.push(std::mem::take(&mut self.table_row));
+                    }
                 }
             }
             Event::Start(Tag::TableCell) => {
@@ -492,11 +503,15 @@ impl<'a> Builder<'a> {
             }
             Event::End(TagEnd::Table) => {
                 self.in_table = false;
+                let overflow_rows = self
+                    .table_total_rows
+                    .saturating_sub(markdown_table::MAX_TABLE_ROWS);
                 let lines = markdown_table::render_table(
                     &self.table_header,
                     &self.table_rows,
                     &self.table_aligns,
                     self.table_width,
+                    overflow_rows,
                     self.theme,
                 );
                 self.lines.extend(lines);
@@ -504,6 +519,7 @@ impl<'a> Builder<'a> {
                 self.table_aligns.clear();
                 self.table_header.clear();
                 self.table_rows.clear();
+                self.table_total_rows = 0;
             }
             _ => {}
         }
@@ -1056,5 +1072,41 @@ mod tests {
     fn snapshot_markdown_table_narrow() {
         // Narrow width (24) → exercises the shrink / vertical-fallback paths.
         insta::assert_yaml_snapshot!(render_with_width(TABLE_MD, &theme(), 24));
+    }
+
+    #[test]
+    fn table_over_200_rows_appends_not_shown_notice() {
+        // A table with more than MAX_TABLE_ROWS body rows caps at 200 and
+        // appends the `… N more rows not shown` notice (parity 2.1.208).
+        let total = markdown_table::MAX_TABLE_ROWS + 42;
+        let mut md = String::from("| id |\n|---|\n");
+        for i in 0..total {
+            md.push_str(&format!("| {i} |\n"));
+        }
+        let lines = render(&md, &theme());
+        let joined: String = lines
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Rows beyond the cap are dropped but their count is surfaced.
+        assert!(joined.contains("199"));
+        assert!(!joined.contains("| 200"));
+        assert!(joined.contains("… 42 more rows not shown"));
+    }
+
+    #[test]
+    fn table_at_or_below_200_rows_has_no_notice() {
+        let mut md = String::from("| id |\n|---|\n");
+        for i in 0..markdown_table::MAX_TABLE_ROWS {
+            md.push_str(&format!("| {i} |\n"));
+        }
+        let lines = render(&md, &theme());
+        let joined: String = lines
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains("not shown"));
     }
 }

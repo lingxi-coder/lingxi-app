@@ -213,7 +213,11 @@ fn cell_ideal_width(spans: &[StyledSpan]) -> usize {
 /// each a list of styled cells (a short row's missing trailing cells render
 /// empty, matching `row[colIndex]?.tokens`); `aligns` is the per-column
 /// alignment (defaulting to [`ColumnAlign::Left`] for columns past its end);
-/// `term_width` is the available terminal width; `theme` is currently unused by
+/// `term_width` is the available terminal width; `overflow_rows` is the number
+/// of body rows that exceeded [`MAX_TABLE_ROWS`] and were dropped (the caller
+/// counts them because the parser stops collecting past the cap) — when > 0 a
+/// final `… {N} more {row|rows} not shown` notice is appended, matching
+/// claude-code's `Smo()` in every render path; `theme` is currently unused by
 /// the layout (cell styling already lives in the spans) but kept for signature
 /// parity with the rest of `render::`.
 #[must_use]
@@ -223,6 +227,7 @@ pub fn render_table(
     rows: &[Vec<Vec<StyledSpan>>],
     aligns: &[ColumnAlign],
     term_width: usize,
+    overflow_rows: usize,
     theme: &super::markdown::MarkdownTheme,
 ) -> Vec<StyledLine> {
     let _ = theme;
@@ -231,6 +236,16 @@ pub fn render_table(
     if num_cols == 0 {
         return Vec::new();
     }
+
+    // Append the over-cap notice to whichever layout path we return through.
+    // (`MarkdownTable.tsx` `Smo()`: the horizontal grid, the vertical `P_s`,
+    // and the screen-reader path all push it when the overflow count is > 0.)
+    let append_notice = |mut lines: Vec<StyledLine>| -> Vec<StyledLine> {
+        if overflow_rows > 0 {
+            lines.push(overflow_notice_line(overflow_rows));
+        }
+        lines
+    };
 
     // Helper: fetch the spans of `row`'s column `col`, or an empty slice.
     let cell_of = |row: &[Vec<StyledSpan>], col: usize| -> Vec<StyledSpan> {
@@ -309,7 +324,7 @@ pub fn render_table(
     let use_vertical_format = max_row_lines > MAX_ROW_LINES;
 
     if use_vertical_format {
-        return render_vertical_format(headers, rows, term_width);
+        return append_notice(render_vertical_format(headers, rows, term_width));
     }
 
     // Build the complete horizontal table. (MarkdownTable.tsx:294-307)
@@ -346,10 +361,38 @@ pub fn render_table(
         .max()
         .unwrap_or(0);
     if max_line_width > term_width.saturating_sub(SAFETY_MARGIN) {
-        return render_vertical_format(headers, rows, term_width);
+        return append_notice(render_vertical_format(headers, rows, term_width));
     }
 
-    table_lines
+    append_notice(table_lines)
+}
+
+/// Build the over-cap notice line, a faithful port of claude-code's
+/// `Smo(e)` (`function Smo(e){return`… ${e.toLocaleString()} more
+/// ${qt(e,"row")} not shown`}`): a leading `…`, the dropped-row count with
+/// en-US thousands separators, and a pluralized `row`/`rows`.
+fn overflow_notice_line(overflow_rows: usize) -> StyledLine {
+    let noun = if overflow_rows == 1 { "row" } else { "rows" };
+    StyledLine::plain(format!(
+        "… {} more {noun} not shown",
+        to_locale_string(overflow_rows as u64)
+    ))
+}
+
+/// `Number.prototype.toLocaleString()` for a nonnegative integer under the
+/// en-US locale: comma thousands separators (`1234567 -> "1,234,567"`).
+fn to_locale_string(n: u64) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + len.saturating_sub(1) / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
 }
 
 /// Compute the maximum wrapped-line count across header + data cells.
@@ -759,6 +802,7 @@ mod tests {
             &body(&[&["1", "2"]]),
             &[ColumnAlign::Left, ColumnAlign::Left],
             80,
+            0,
             &theme(),
         );
         let plain = plain_lines(&lines);
@@ -780,6 +824,7 @@ mod tests {
             &body(&[&["a", "b", "c"]]),
             &[ColumnAlign::Left, ColumnAlign::Center, ColumnAlign::Right],
             80,
+            0,
             &theme(),
         );
         let plain = plain_lines(&lines);
@@ -796,6 +841,7 @@ mod tests {
             &body(&[&["alpha beta gamma", "delta epsilon zeta"]]),
             &[ColumnAlign::Left, ColumnAlign::Left],
             40,
+            0,
             &theme(),
         );
         let plain = plain_lines(&lines);
@@ -818,6 +864,7 @@ mod tests {
             &body(&[&["supercalifragilisticexpialidocious"]]),
             &[ColumnAlign::Left],
             20,
+            0,
             &theme(),
         );
         let plain = plain_lines(&lines);
@@ -840,6 +887,7 @@ mod tests {
             &body(&[&[long]]),
             &[ColumnAlign::Left],
             16,
+            0,
             &theme(),
         );
         let plain = plain_lines(&lines);
@@ -869,6 +917,7 @@ mod tests {
             &body(&[&["1"]]),
             &[ColumnAlign::Left, ColumnAlign::Left],
             80,
+            0,
             &theme(),
         );
         let plain = plain_lines(&lines);
@@ -881,7 +930,7 @@ mod tests {
         let bold = vec![StyledSpan::styled("bold", bold_style())];
         let headers = vec![cell("H")];
         let rows = vec![vec![bold]];
-        let lines = render_table(&headers, &rows, &[ColumnAlign::Left], 80, &theme());
+        let lines = render_table(&headers, &rows, &[ColumnAlign::Left], 80, 0, &theme());
         // Find the span carrying "bold" and assert it is bold.
         let span = lines
             .iter()
@@ -893,7 +942,7 @@ mod tests {
 
     #[test]
     fn empty_table_is_no_lines() {
-        let lines = render_table(&[], &[], &[], 80, &theme());
+        let lines = render_table(&[], &[], &[], 80, 0, &theme());
         assert!(lines.is_empty());
     }
 
@@ -903,10 +952,81 @@ mod tests {
         let rows: Vec<Vec<Vec<StyledSpan>>> = (0..=MAX_TABLE_ROWS)
             .map(|idx| vec![cell(&format!("row-{idx}"))])
             .collect();
-        let lines = render_table(&headers, &rows, &[ColumnAlign::Left], 80, &theme());
+        let lines = render_table(&headers, &rows, &[ColumnAlign::Left], 80, 0, &theme());
         let plain = plain_lines(&lines).join("\n");
         assert!(plain.contains("row-199"));
         assert!(!plain.contains("row-200"));
+    }
+
+    #[test]
+    fn to_locale_string_groups_thousands() {
+        assert_eq!(to_locale_string(0), "0");
+        assert_eq!(to_locale_string(999), "999");
+        assert_eq!(to_locale_string(1_000), "1,000");
+        assert_eq!(to_locale_string(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn overflow_notice_pluralizes_and_groups() {
+        // Singular for exactly one dropped row.
+        assert_eq!(
+            overflow_notice_line(1).plain_text(),
+            "… 1 more row not shown"
+        );
+        // Plural + thousands separators for larger counts.
+        assert_eq!(
+            overflow_notice_line(1_300).plain_text(),
+            "… 1,300 more rows not shown"
+        );
+    }
+
+    #[test]
+    fn grid_appends_over_cap_notice() {
+        // With a positive overflow count the horizontal grid ends with the
+        // `… N more rows not shown` notice after the bottom border.
+        let lines = render_table(
+            &header(&["id"]),
+            &body(&[&["1"], &["2"]]),
+            &[ColumnAlign::Left],
+            80,
+            5,
+            &theme(),
+        );
+        let plain = plain_lines(&lines);
+        assert!(plain[plain.len() - 2].starts_with('└'));
+        assert_eq!(plain.last().unwrap(), "… 5 more rows not shown");
+    }
+
+    #[test]
+    fn grid_no_notice_when_no_overflow() {
+        let lines = render_table(
+            &header(&["id"]),
+            &body(&[&["1"]]),
+            &[ColumnAlign::Left],
+            80,
+            0,
+            &theme(),
+        );
+        assert!(!plain_lines(&lines).iter().any(|l| l.contains("not shown")));
+    }
+
+    #[test]
+    fn vertical_fallback_appends_over_cap_notice() {
+        // Force the vertical fallback (rows too tall at a narrow width); the
+        // notice must still be appended as the final line.
+        let long = "one two three four five six seven eight nine ten eleven twelve";
+        let lines = render_table(
+            &header(&["Field"]),
+            &body(&[&[long]]),
+            &[ColumnAlign::Left],
+            16,
+            42,
+            &theme(),
+        );
+        let plain = plain_lines(&lines);
+        // Vertical fallback (no box corners) and notice last.
+        assert!(!plain.iter().any(|l| l.contains('┌')));
+        assert_eq!(plain.last().unwrap(), "… 42 more rows not shown");
     }
 
     /// Assert the cc 2.1.198 overflow clamp: no rendered line may exceed the
@@ -932,6 +1052,7 @@ mod tests {
                 &body(&[&[long_row]]),
                 &[ColumnAlign::Left],
                 width,
+                0,
                 &theme(),
             );
             assert_fits(&lines, width);
@@ -952,6 +1073,7 @@ mod tests {
                 &body(&[&[url, tall]]),
                 &[ColumnAlign::Left, ColumnAlign::Left],
                 width,
+                0,
                 &theme(),
             );
             assert_fits(&lines, width);
@@ -974,6 +1096,7 @@ mod tests {
                 &rows,
                 &[ColumnAlign::Left, ColumnAlign::Left, ColumnAlign::Right],
                 width,
+                0,
                 &theme(),
             );
             assert_fits(&lines, width);

@@ -5080,6 +5080,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .execute(
                 HookEvent::PreCompact {
                     reason: trigger.to_string(),
+                    custom_instructions: None,
                 },
                 ctx,
             )

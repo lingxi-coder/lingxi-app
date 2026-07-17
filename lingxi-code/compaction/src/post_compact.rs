@@ -167,17 +167,21 @@ fn lqn(already_attached: &[AttachedSkillContent], content: &str) -> SkillDedup {
 ///
 /// Byte-exact with the `case"invoked_skills"` attachment renderer
 /// (`bin/claude.exe` v2.1.207): the `$r({content:…, isMeta:!0})` header, with
-/// the per-skill blocks (`### Skill: …`) appended after a newline by
-/// [`render_invoked_skills_attachment`].
-pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were invoked EARLIER in this session (before the conversation was compacted), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. The \"## Input\" sections below reflect the original arguments from when each skill was first invoked — they are NOT the user's current message. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.";
+/// the per-skill blocks (`### Skill: …`) appended after a blank line (`\n\n`) by
+/// [`render_invoked_skills_attachment`]. Its own internal `guidelines.\n\nIMPORTANT`
+/// separator is a blank line too.
+pub const INVOKED_SKILLS_ATTACHMENT_PREAMBLE: &str = "The following skills were invoked EARLIER in this session (before the conversation was compacted), not on the current turn. They are shown here for context only so you remain aware of their guidelines.\n\nIMPORTANT: Do NOT re-execute these skills or perform their one-time setup actions (e.g., scheduling, creating files) again. The \"## Input\" sections below reflect the original arguments from when each skill was first invoked — they are NOT the user's current message. Only continue to apply ongoing behavioral guidelines from these skills where still relevant.";
 
 /// Render restored skills into the model-visible `invoked_skills` attachment
 /// body, or `None` when there is nothing to restore.
 ///
-/// 1:1 with the `case"invoked_skills"` renderer (`bin/claude.exe` v2.1.207):
-/// `e.skills.map((n)=>`### Skill: ${n.name}\nPath: ${n.path}\n${n.content}`).join("\n")`
-/// prefixed by [`INVOKED_SKILLS_ATTACHMENT_PREAMBLE`] and a newline. Emitted as a
-/// single `isMeta` user message (the caller wraps it in
+/// 1:1 with the `case"invoked_skills"` renderer (`bin/claude.exe` v2.1.207 offset
+/// 226440880 / v2.1.208 offset 225821608, byte-verified via `od -c`):
+/// `e.skills.map((n)=>`### Skill: ${n.name}\nPath: ${n.path}\n\n${n.content}`).join(`\n\n---\n\n`)`
+/// wrapped as `${PREAMBLE}\n\n${joined}` — the per-skill blocks are separated by a
+/// `\n\n---\n\n` delimiter, each block puts a blank line before its content, and
+/// the preamble is joined to the blocks by a blank line. Emitted as a single
+/// `isMeta` user message (the caller wraps it in
 /// [`protocol::ConversationMessage::user_meta`]).
 #[must_use]
 pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<String> {
@@ -188,15 +192,15 @@ pub fn render_invoked_skills_attachment(skills: &[RestoredSkill]) -> Option<Stri
         .iter()
         .map(|s| {
             format!(
-                "### Skill: {}\nPath: {}\n{}",
+                "### Skill: {}\nPath: {}\n\n{}",
                 s.name,
                 s.path.display(),
                 s.content
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    Some(format!("{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n{joined}"))
+        .join("\n\n---\n\n");
+    Some(format!("{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n{joined}"))
 }
 
 /// A restored file attachment: the path plus the (possibly per-file-capped)
@@ -862,10 +866,17 @@ mod tests {
             },
         ];
         let body = render_invoked_skills_attachment(&restored).expect("non-empty");
+        // Byte-faithful with the 2.1.207/2.1.208 renderer (verified od -c at
+        // 2.1.208 offset 225821608 / 2.1.207 offset 226440880):
+        //   map:  `### Skill: ${name}\nPath: ${path}\n\n${content}`
+        //   join: `\n\n---\n\n`
+        //   body: `${PREAMBLE}\n\n${joined}`  (preamble internal `\n\n`)
         let expected = format!(
-            "{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n### Skill: deploy\nPath: /skills/deploy\nDeploy guidelines\n### Skill: build\nPath: /skills/build\nBuild guidelines"
+            "{INVOKED_SKILLS_ATTACHMENT_PREAMBLE}\n\n### Skill: deploy\nPath: /skills/deploy\n\nDeploy guidelines\n\n---\n\n### Skill: build\nPath: /skills/build\n\nBuild guidelines"
         );
         assert_eq!(body, expected);
+        // Preamble internal separator is a blank line (`guidelines.\n\nIMPORTANT`).
+        assert!(body.contains("their guidelines.\n\nIMPORTANT: Do NOT"));
         // Empty → None (no attachment).
         assert!(render_invoked_skills_attachment(&[]).is_none());
     }

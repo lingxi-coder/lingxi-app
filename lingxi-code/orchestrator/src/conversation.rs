@@ -6596,7 +6596,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                                 mid_stream_retries += 1;
                                 // Exponential backoff + jitter (binary `sle`).
                                 let base = llm_client::model::retry::scaled_base_delay_ms(
-                                    u8::try_from(mid_stream_retries - 1).unwrap_or(u8::MAX),
+                                    mid_stream_retries - 1,
                                     None,
                                 );
                                 tokio::time::sleep(llm_client::model::retry::jittered_delay(base))

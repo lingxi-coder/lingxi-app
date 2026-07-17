@@ -620,7 +620,7 @@ impl ApiService {
         if let Some(reporter) = &self.retry_reporter {
             reporter.report(RetryInfo {
                 message: error.to_string(),
-                attempt: u32::from(state.attempt),
+                attempt: state.attempt,
                 max_retries: ctl.max_retries,
                 delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             });
@@ -1831,7 +1831,7 @@ impl ApiService {
                             .await;
                             // #5: surface this drive's retry count to the cost
                             // path via `last_retry_count()`.
-                            *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
+                            *self.last_retry_count.lock().unwrap() = state.attempt;
                             return Ok(response);
                         }
                         Err(decode_err) => {
@@ -2452,7 +2452,7 @@ impl ApiService {
                     self.record_rate_limit_from_headers(&streaming.headers, &request_id);
                     // #5: surface the connect-phase retry count to the cost path
                     // via `last_retry_count()` (the value known at stream return).
-                    *self.last_retry_count.lock().unwrap() = u32::from(state.attempt);
+                    *self.last_retry_count.lock().unwrap() = state.attempt;
 
                     // Success: wrap the LlmEventStream from the codec into a BoxStream.
                     // Build the event stream from the codec decoder + raw frames.

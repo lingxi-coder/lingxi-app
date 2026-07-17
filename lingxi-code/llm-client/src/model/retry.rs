@@ -251,7 +251,13 @@ pub enum DriveStep {
 #[derive(Debug, Default)]
 pub struct RetryState {
     /// Number of budget-consuming retry attempts taken so far.
-    pub attempt: u8,
+    ///
+    /// `u32` to match [`RetryControl::max_retries`]: under the retry watchdog
+    /// the budget defaults to [`WATCHDOG_MAX_RETRIES`] (300), which a `u8`
+    /// (max 255, and `saturating_add`-clamped) could never reach — the
+    /// terminal check `attempt >= max_retries` would then be `255 >= 300`
+    /// forever, retrying persistent non-capacity errors indefinitely.
+    pub attempt: u32,
     /// Count of consecutive `Overloaded` errors without an intervening
     /// non-overloaded outcome.
     pub consecutive_overloaded: u8,
@@ -571,7 +577,7 @@ pub fn next_step_with_backoff(
             // budget exhaustion — the watchdog keeps retrying via its separate
             // counter with the ladder capped at 6h (`TLp`). Without the watchdog
             // the normal `attempt >= max_retries` terminal applies.
-            if !ctl.watchdog && u32::from(state.attempt) >= ctl.max_retries {
+            if !ctl.watchdog && state.attempt >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
@@ -603,7 +609,7 @@ pub fn next_step_with_backoff(
 
             // Retry-watchdog (`oMe()`, `SLp(e)=nMe(e)||status===429`): a 429
             // capacity outage is EXEMPT from budget exhaustion, same as 529.
-            if !ctl.watchdog && u32::from(state.attempt) >= ctl.max_retries {
+            if !ctl.watchdog && state.attempt >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
@@ -624,7 +630,7 @@ pub fn next_step_with_backoff(
             // Reset the consecutive-overloaded counter.
             state.consecutive_overloaded = 0;
 
-            if u32::from(state.attempt) >= ctl.max_retries {
+            if state.attempt >= ctl.max_retries {
                 return DriveStep::Terminal;
             }
 
@@ -679,10 +685,10 @@ pub fn next_step_with_backoff(
 /// The `2^attempt` term is computed with saturating arithmetic so a large
 /// `attempt` (which would otherwise overflow `u64`) simply clamps to the
 /// [`MAX_BACKOFF_MS`] cap rather than wrapping.
-pub(crate) fn base_delay_ms(attempt: u8) -> u64 {
+pub(crate) fn base_delay_ms(attempt: u32) -> u64 {
     // 2^attempt via checked shift; any attempt >= 64 (or whose product would
     // exceed u64) saturates, then the `.min` clamps to MAX_BACKOFF_MS anyway.
-    let factor = 1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX);
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
     BASE_DELAY_MS.saturating_mul(factor).min(MAX_BACKOFF_MS)
 }
 
@@ -702,11 +708,11 @@ pub(crate) fn base_delay_ms(attempt: u8) -> u64 {
 /// line of defense against a zero-delay tight retry loop (settings parsing
 /// already rejects `backoffMs = 0`).
 #[must_use]
-pub fn scaled_base_delay_ms(attempt: u8, backoff_ms: Option<u64>) -> u64 {
+pub fn scaled_base_delay_ms(attempt: u32, backoff_ms: Option<u64>) -> u64 {
     match backoff_ms {
         None => base_delay_ms(attempt),
         Some(b) => {
-            let factor = 1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX);
+            let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
             b.saturating_mul(factor).min(MAX_BACKOFF_MS).max(1)
         }
     }
@@ -721,12 +727,12 @@ pub fn scaled_base_delay_ms(attempt: u8, backoff_ms: Option<u64>) -> u64 {
 /// retrying past the normal budget. Saturating arithmetic clamps extreme
 /// `attempt` values to the cap rather than wrapping.
 #[must_use]
-pub fn capacity_base_delay_ms(attempt: u8, backoff_ms: Option<u64>, watchdog: bool) -> u64 {
+pub fn capacity_base_delay_ms(attempt: u32, backoff_ms: Option<u64>, watchdog: bool) -> u64 {
     if !watchdog {
         return scaled_base_delay_ms(attempt, backoff_ms);
     }
     let base = backoff_ms.unwrap_or(BASE_DELAY_MS);
-    let factor = 1u64.checked_shl(u32::from(attempt)).unwrap_or(u64::MAX);
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
     base.saturating_mul(factor)
         .min(WATCHDOG_MAX_BACKOFF_MS)
         .max(1)

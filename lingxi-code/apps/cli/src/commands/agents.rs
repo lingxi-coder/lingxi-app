@@ -668,10 +668,21 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
                 }
                 // Attach = run the resumed session in the foreground; when it
                 // ends, fall through and remount the view with fresh rows.
-                let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lingxi-cli"));
-                let status = std::process::Command::new(exe)
-                    .args(attach_args(cli, &session_id))
-                    .status();
+                // Route the self-respawn through the process wrapper so an
+                // enterprise `CLAUDE_CODE_PROCESS_WRAPPER` launcher isn't
+                // bypassed on interactive attach (mirrors the daemon/
+                // background self-spawns).
+                let exe = std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "lingxi-cli".to_string());
+                let mut argv = vec![exe];
+                argv.extend(attach_args(cli, &session_id));
+                let argv = crate::process_wrapper::wrap_argv(argv);
+                let Some((program, args)) = argv.split_first() else {
+                    eprintln!("lingxi-cli agents: attach failed: empty attach argv");
+                    return crate::exit_codes::RUNTIME_ERROR;
+                };
+                let status = std::process::Command::new(program).args(args).status();
                 if let Err(e) = status {
                     eprintln!("lingxi-cli agents: attach failed: {e}");
                     return crate::exit_codes::RUNTIME_ERROR;

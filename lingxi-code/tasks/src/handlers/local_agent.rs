@@ -447,7 +447,15 @@ impl Task for LocalAgentHandler {
                         }
                     }
                     // Terminal (Failed / Killed / channel-close — NOT a rest):
-                    // run the worktree keep/cleanup judgment (claude-code
+                    // free the INNER pool runner's slot. `spawn_persistent`
+                    // returns only `(agent_id, rx)` with no dealloc owner, so
+                    // even a natural channel-close leaves the parked runner
+                    // holding its `max_concurrent` slot forever (cap exhaustion)
+                    // unless we deallocate here. `stop` is idempotent — an
+                    // already-gone slot (channel-close ⇒ runner terminated) is a
+                    // no-op. Mirrors `in_process_teammate` kill.
+                    let _ = streaming.stop(&agent_id).await;
+                    // Then run the worktree keep/cleanup judgment (claude-code
                     // `getWorktreeResult`): keep when dirty/ahead, else remove.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
                         let _ = traits::worktree::agent_worktree_result(mgr.as_ref(), handle).await;
@@ -577,6 +585,20 @@ impl Task for LocalAgentHandler {
                 .cancel(&rec.handle)
                 .await
                 .map_err(|e| TaskError::Io(e.to_string()))?;
+        }
+        // For a PERSISTENT agent, cancelling the OUTER event-pump worker above
+        // is not enough: the inner pool runner "comes to rest" between turn-sets
+        // and parks on its event channel, holding its `max_concurrent` pool slot
+        // — nothing frees it (the `spawn_persistent` return path has no dealloc
+        // owner), so repeated kill would exhaust the pool. Deliver `UserExit` +
+        // deallocate the slot through the streaming seam, using the `agent_ids`
+        // map already maintained for resume routing. Mirrors
+        // `in_process_teammate::kill`. `stop` is idempotent (already-gone ⇒ Ok).
+        if let Some(streaming) = &self.streaming_spawner {
+            let agent_id = self.agent_ids.lock().await.remove(task_id);
+            if let Some(agent_id) = agent_id {
+                let _ = streaming.stop(&agent_id).await;
+            }
         }
         // Flip status to Killed regardless (best-effort; a worker that already
         // reported a terminal status simply gets a redundant Killed).
@@ -1051,6 +1073,24 @@ mod tests {
     struct MockStreamingSpawner {
         tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>>,
         resume_count: Arc<std::sync::atomic::AtomicUsize>,
+        // Records the agent id passed to `stop` (the inner-runner dealloc), so a
+        // test can assert kill / terminal actually frees the pool slot.
+        stopped: Arc<StdMutex<Vec<AgentId>>>,
+        // The id `spawn_persistent` handed back, so a test can match it to `stop`.
+        spawned_id: Arc<StdMutex<Option<AgentId>>>,
+    }
+    impl MockStreamingSpawner {
+        fn new(
+            tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>>,
+            resume_count: Arc<std::sync::atomic::AtomicUsize>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                tx_slot,
+                resume_count,
+                stopped: Arc::new(StdMutex::new(Vec::new())),
+                spawned_id: Arc::new(StdMutex::new(None)),
+            })
+        }
     }
     #[async_trait]
     impl StreamingSubagentSpawner for MockStreamingSpawner {
@@ -1062,7 +1102,9 @@ mod tests {
         {
             let (tx, rx) = tokio::sync::mpsc::channel(8);
             *self.tx_slot.lock().unwrap() = Some(tx);
-            Ok((AgentId::new(), rx))
+            let id = AgentId::new();
+            *self.spawned_id.lock().unwrap() = Some(id);
+            Ok((id, rx))
         }
         async fn resume(
             &self,
@@ -1071,6 +1113,10 @@ mod tests {
         ) -> Result<(), SubagentSpawnError> {
             self.resume_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError> {
+            self.stopped.lock().unwrap().push(*agent_id);
             Ok(())
         }
     }
@@ -1120,10 +1166,7 @@ mod tests {
         let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
             Arc::new(StdMutex::new(None));
         let resume_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let streaming = Arc::new(MockStreamingSpawner {
-            tx_slot: tx_slot.clone(),
-            resume_count: resume_count.clone(),
-        });
+        let streaming = MockStreamingSpawner::new(tx_slot.clone(), resume_count.clone());
 
         // The one-shot spawner is present but UNUSED on the persistent path.
         let handler = make_handler(
@@ -1230,10 +1273,10 @@ mod tests {
         ));
 
         // Seam wired but no live agent for that id ⇒ TerminatedTask.
-        let streaming = Arc::new(MockStreamingSpawner {
-            tx_slot: Arc::new(StdMutex::new(None)),
-            resume_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        });
+        let streaming = MockStreamingSpawner::new(
+            Arc::new(StdMutex::new(None)),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
         let persistent = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink)
             .with_streaming_spawner(streaming);
         assert!(persistent.supports_messages());
@@ -1460,10 +1503,10 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
             Arc::new(StdMutex::new(None));
-        let streaming = Arc::new(MockStreamingSpawner {
-            tx_slot: tx_slot.clone(),
-            resume_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        });
+        let streaming = MockStreamingSpawner::new(
+            tx_slot.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
         let wt = RecordingWorktree::new(Some(traits::worktree::WorktreeChangeSummary {
             changed_files: 0,
             commits: 0,
@@ -1548,6 +1591,114 @@ mod tests {
         assert!(
             !workers.lock().await.contains_key(&handle.task_id),
             "cancel record removed by kill"
+        );
+    }
+
+    /// P1-04 (parity 2.1.208): killing a PERSISTENT agent must free the INNER
+    /// pool runner's slot, not merely cancel the outer event-pump worker. The
+    /// parked runner holds a `max_concurrent` slot until `stop` (UserExit +
+    /// deallocate) runs; without it, repeated kill exhausts the cap-4 pool. The
+    /// handler looks up the agent id from the resume-routing `agent_ids` map and
+    /// stops the runner, and a later `send_message` sees the agent as gone.
+    #[tokio::test]
+    async fn kill_deallocates_persistent_inner_runner() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let streaming = MockStreamingSpawner::new(
+            tx_slot.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
+            .with_streaming_spawner(streaming.clone());
+        let ctx = make_ctx(fs);
+
+        let handle = handler
+            .spawn(local_agent_input("start"), ctx.clone())
+            .await
+            .unwrap();
+        let task_id = handle.task_id.clone();
+
+        // Wait for spawn_persistent to run (stashes tx + records the id), then
+        // yield so the worker inserts the id into the resume-routing map before
+        // kill reads it.
+        for _ in 0..200 {
+            if tx_slot.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        let spawned_id = streaming.spawned_id.lock().unwrap().expect("spawn ran");
+
+        handler
+            .kill(&task_id, ctx.clone())
+            .await
+            .expect("kill should succeed");
+
+        // The inner pool runner was torn down (UserExit + deallocate) for the
+        // exact agent that was spawned — the slot is freed, not leaked.
+        assert_eq!(
+            streaming.stopped.lock().unwrap().as_slice(),
+            &[spawned_id],
+            "kill stops the inner persistent runner (frees its pool slot)"
+        );
+        assert_eq!(sink.last_status(), Some(TaskStatus::Killed));
+        // The resume-routing entry is gone ⇒ a later message sees a dead agent.
+        assert!(matches!(
+            handler.send_message(&task_id, "hi".into(), ctx).await,
+            Err(TaskError::TerminatedTask)
+        ));
+    }
+
+    /// P1-04: reaching a terminal state on the persistent path (here a natural
+    /// channel-close) also frees the inner pool slot — `spawn_persistent`
+    /// returns no dealloc owner, so even normal termination would leak the slot
+    /// without the worker calling `stop` at terminal.
+    #[tokio::test]
+    async fn terminal_persistent_agent_deallocates_inner_runner() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink::default());
+        let tx_slot: Arc<StdMutex<Option<tokio::sync::mpsc::Sender<SubagentEvent>>>> =
+            Arc::new(StdMutex::new(None));
+        let streaming = MockStreamingSpawner::new(
+            tx_slot.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let handler = make_handler(MockSpawner::new(CannedResult::Pending), mgr, sink.clone())
+            .with_streaming_spawner(streaming.clone());
+
+        handler
+            .spawn(local_agent_input("start"), make_ctx(fs))
+            .await
+            .unwrap();
+
+        // Wait for spawn_persistent, then close the channel ⇒ terminal Completed.
+        let tx = {
+            let mut got = None;
+            for _ in 0..200 {
+                if let Some(t) = tx_slot.lock().unwrap().clone() {
+                    got = Some(t);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            got.expect("spawn_persistent should have run")
+        };
+        let spawned_id = streaming.spawned_id.lock().unwrap().expect("spawn ran");
+        tx_slot.lock().unwrap().take();
+        drop(tx);
+
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        assert_eq!(
+            streaming.stopped.lock().unwrap().as_slice(),
+            &[spawned_id],
+            "terminal state deallocates the inner persistent runner's slot"
         );
     }
 

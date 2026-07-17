@@ -163,8 +163,64 @@ pub fn load_editor_mode_is_vim_from(path: &Path) -> Option<bool> {
     Some(obj.get(EDITOR_MODE_KEY)?.as_str()? == "vim")
 }
 
-/// Read configured Vim insert-mode remaps. Unknown/non-string entries and
-/// sequences that are not exactly two chars are ignored.
+/// The canonical Vim insert-mode remap target claude-code stores. Every
+/// accepted entry maps to this exact string (`GGy` in the 2.1.208 binary:
+/// `t.set(o,"<Esc>")`), so the composer never has to case-fold at match time.
+pub const VIM_INSERT_REMAP_ESCAPE_TARGET: &str = "<Esc>";
+
+/// Canonicalize raw `vimInsertModeRemaps` entries exactly the way claude-code
+/// 2.1.208's `GGy` does. Each entry is kept only when:
+/// * the target string case-insensitively equals `"<esc>"` (the only supported
+///   target — `n.toLowerCase()!=="<esc>"` is skipped), and
+/// * the NFC-normalized source is exactly two printable characters — two code
+///   points that are neither control (`\p{C}`) nor separators (`\p{Z}`,
+///   approximated with control/whitespace here) — and also exactly two grapheme
+///   clusters (`/^[^\p{C}\p{Z}]{2}$/u` plus `Kse(o)===2`).
+///
+/// Surviving entries are stored under their NFC key mapping to the canonical
+/// [`VIM_INSERT_REMAP_ESCAPE_TARGET`].
+#[must_use]
+pub fn canonicalize_vim_insert_mode_remaps<I>(entries: I) -> BTreeMap<String, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    use unicode_normalization::UnicodeNormalization;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut out = BTreeMap::new();
+    for (from, to) in entries {
+        if !to.eq_ignore_ascii_case("<esc>") {
+            continue;
+        }
+        let normalized: String = from.nfc().collect();
+        // `/^[^\p{C}\p{Z}]{2}$/u`: exactly two code points, none control/space.
+        let mut chars = normalized.chars();
+        let (Some(a), Some(b), None) = (chars.next(), chars.next(), chars.next()) else {
+            continue;
+        };
+        if is_forbidden_remap_char(a) || is_forbidden_remap_char(b) {
+            continue;
+        }
+        // `Kse(o)===2`: exactly two grapheme clusters.
+        if normalized.graphemes(true).count() != 2 {
+            continue;
+        }
+        out.insert(normalized, VIM_INSERT_REMAP_ESCAPE_TARGET.to_string());
+    }
+    out
+}
+
+/// Whether `c` is excluded from a remap source by claude-code's
+/// `[^\p{C}\p{Z}]` class. `\p{Z}` (all separators) is a subset of Rust's
+/// `is_whitespace`; `\p{C}`'s control category is `is_control`. (Rust std can
+/// not see the `\p{C}` format/private-use/unassigned subcategories, an accepted
+/// approximation for two-key remaps.)
+fn is_forbidden_remap_char(c: char) -> bool {
+    c.is_control() || c.is_whitespace()
+}
+
+/// Read configured Vim insert-mode remaps. Entries are validated exactly like
+/// claude-code 2.1.208's `GGy` via [`canonicalize_vim_insert_mode_remaps`].
 #[must_use]
 pub fn load_vim_insert_mode_remaps() -> Option<BTreeMap<String, String>> {
     load_vim_insert_mode_remaps_from(&settings_path()?)
@@ -176,13 +232,11 @@ pub fn load_vim_insert_mode_remaps_from(path: &Path) -> Option<BTreeMap<String, 
     let body = std::fs::read_to_string(path).ok()?;
     let obj: Map<String, Value> = serde_json::from_str(&body).ok()?;
     let remaps = obj.get(VIM_INSERT_MODE_REMAPS_KEY)?.as_object()?;
-    let parsed: BTreeMap<String, String> = remaps
-        .iter()
-        .filter_map(|(from, to)| {
-            let to = to.as_str()?;
-            (from.chars().count() == 2).then(|| (from.clone(), to.to_string()))
-        })
-        .collect();
+    let parsed = canonicalize_vim_insert_mode_remaps(
+        remaps
+            .iter()
+            .filter_map(|(from, to)| Some((from.clone(), to.as_str()?.to_string()))),
+    );
     (!parsed.is_empty()).then_some(parsed)
 }
 
@@ -349,10 +403,12 @@ mod tests {
             &path,
             r#"{
   "vimInsertModeRemaps": {
-    "jj": "Escape",
-    "jk": "Esc",
-    "x": "Escape",
-    "long": "Escape",
+    "jj": "<Esc>",
+    "jk": "<ESC>",
+    "kj": "Escape",
+    "x": "<Esc>",
+    "long": "<Esc>",
+    "j k": "<Esc>",
     "nope": false
   }
 }
@@ -361,11 +417,38 @@ mod tests {
         .unwrap();
 
         let remaps = load_vim_insert_mode_remaps_from(&path).expect("remaps");
-        assert_eq!(remaps.get("jj").map(String::as_str), Some("Escape"));
-        assert_eq!(remaps.get("jk").map(String::as_str), Some("Esc"));
+        // `<Esc>` / `<ESC>` accepted, canonicalized to `<Esc>`.
+        assert_eq!(remaps.get("jj").map(String::as_str), Some("<Esc>"));
+        assert_eq!(remaps.get("jk").map(String::as_str), Some("<Esc>"));
+        // Non-`<esc>` target dropped (CC keeps only `<esc>`).
+        assert!(!remaps.contains_key("kj"));
+        // Wrong grapheme count dropped.
         assert!(!remaps.contains_key("x"));
         assert!(!remaps.contains_key("long"));
+        // Source containing a separator (`\p{Z}`) dropped.
+        assert!(!remaps.contains_key("j k"));
+        // Non-string target dropped.
         assert!(!remaps.contains_key("nope"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn canonicalize_vim_remaps_matches_ggy_validation() {
+        // NFC-normalizes the key: "e\u{0301}j" (e + combining acute) folds to
+        // "éj" (2 code points, 2 graphemes) and is kept.
+        let remaps = canonicalize_vim_insert_mode_remaps([
+            ("e\u{0301}j".to_string(), "<esc>".to_string()),
+            ("jj".to_string(), "<Esc>".to_string()),
+        ]);
+        assert_eq!(remaps.get("éj").map(String::as_str), Some("<Esc>"));
+        assert_eq!(remaps.get("jj").map(String::as_str), Some("<Esc>"));
+
+        // "a\u{0327}" (a + combining cedilla) has no precomposed form, so it
+        // stays 2 code points after NFC but is a single grapheme -> dropped.
+        let combined = canonicalize_vim_insert_mode_remaps([(
+            "a\u{0327}".to_string(),
+            "<Esc>".to_string(),
+        )]);
+        assert!(combined.is_empty());
     }
 }

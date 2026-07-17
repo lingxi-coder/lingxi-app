@@ -6093,6 +6093,7 @@ dependencies = [
  "tool-shell",
  "tracing",
  "traits",
+ "unicode-normalization",
  "unicode-segmentation",
  "unicode-width 0.1.14",
 ]

@@ -158,6 +158,11 @@ pub struct Runtime {
     /// calls `add_root(...)` + `notify_roots_list_changed_all()` on it so every
     /// connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: std::sync::Arc<mcp::McpRegistry>,
+    /// The ENFORCING permission gate (`engine_desktop::DesktopRuntime::
+    /// enforcing_permission_gate`), threaded to the TUI so Shift+Tab drives live
+    /// permission-mode cycling via `set_permission_mode`.
+    pub enforcing_permission_gate:
+        Option<std::sync::Arc<dyn permission::gate::PermissionGate>>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -170,6 +175,11 @@ pub struct Runtime {
 pub struct TuiBuild {
     /// Standard runtime bundle.
     pub runtime: Runtime,
+    /// The resolved boot permission mode (claude-code `initialPermissionModeFromCLI`)
+    /// and whether bypass is an available Shift+Tab cycle target — seed the TUI's
+    /// below-composer permission-mode indicator.
+    pub initial_permission_mode: permission::PermissionMode,
+    pub bypass_available: bool,
     /// Bridge receiver — the TUI render loop drains this into
     /// `tui::streaming::apply_event`.
     pub bridge_rx: tokio::sync::mpsc::UnboundedReceiver<tui_core::orchestrator_bridge::TurnEvent>,
@@ -897,6 +907,7 @@ pub async fn build_runtime_from_config(
         orchestrator: rt.orchestrator,
         dispatcher: rt.dispatcher,
         auth: rt.auth,
+        enforcing_permission_gate: rt.enforcing_permission_gate,
         task_registry: rt.task_registry,
         settings_watcher: rt.settings_watcher,
         file_changed_watcher: rt.file_changed_watcher,
@@ -1006,6 +1017,9 @@ pub async fn build_runtime_for_tui_inner(
     let company_announcements = load_settings_company_announcements(incl_user, incl_project);
     Ok(TuiBuild {
         runtime,
+        initial_permission_mode: permission_mode,
+        bypass_available: argv.allow_dangerously_skip_permissions
+            || permission_mode == permission::PermissionMode::BypassPermissions,
         bridge_rx,
         turn_tx,
         permission_rx: perm_rx,

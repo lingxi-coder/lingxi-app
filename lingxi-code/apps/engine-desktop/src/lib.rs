@@ -2253,6 +2253,13 @@ pub struct DesktopRuntime {
     /// from an inbound `ApprovePermission`/`DenyPermission` (F2-06). `None` when
     /// the host opted into the always-allow `NoOpPermissionGate` (the CLI).
     pub permission_gate: Option<Arc<AdapterPermissionGate>>,
+    /// The ENFORCING permission gate (the `PolicyPermissionGate` wrapping the
+    /// injected prompt transport, or the base gate when enforcement is off). The
+    /// interactive TUI holds this to drive Shift+Tab live permission-mode
+    /// cycling via [`permission::gate::PermissionGate::set_permission_mode`], so
+    /// enforcement follows the bottom-of-composer mode indicator. `None` only
+    /// when no gate was built.
+    pub enforcing_permission_gate: Option<Arc<dyn PermissionGate>>,
     /// Live settings watcher firing `ConfigChange` hooks when the user /
     /// project / local / policy settings files mutate on disk (parity:
     /// claude-code `changeDetector.ts` → `executeConfigChangeHooks`). Held by
@@ -4888,6 +4895,10 @@ pub async fn build(
         boot_additional_working_dirs = cfg.add_dir.clone();
         perms
     };
+    // Capture the enforcing gate for the interactive TUI's Shift+Tab live
+    // permission-mode cycling (`set_permission_mode`), before `perms` is moved
+    // into the tool context below.
+    let enforcing_permission_gate: Option<Arc<dyn PermissionGate>> = Some(perms.clone());
 
     // (5.25) M5-13: build the real hook executor now that `hook_registry`
     //        exists. This replaces the `noop_hook_executor()` stub (which fed
@@ -7005,6 +7016,7 @@ pub async fn build(
         coordinator,
         coordinator_mode,
         permission_gate: adapter_gate,
+        enforcing_permission_gate,
         settings_watcher,
         file_changed_watcher,
         subscription,

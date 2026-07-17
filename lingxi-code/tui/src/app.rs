@@ -127,6 +127,11 @@ pub struct AppCallbacks<'cb> {
     /// [`TurnEvent::SystemNotice`], same shape as `on_fast_mode`. The `String`
     /// is the trimmed argument tail.
     pub on_plan_mode: Box<dyn FnMut(String) + 'cb>,
+    /// Executed on [`ChatOutcome::SetPermissionMode`]: Shift+Tab cycled the
+    /// session permission mode; the caller pushes the wire mode id to the live
+    /// engine off-loop via `OrchestratorHandle::set_permission_mode` so
+    /// enforcement follows the indicator the pane already updated.
+    pub on_set_permission_mode: Box<dyn FnMut(String) + 'cb>,
     /// Executed on [`ChatOutcome::SandboxAction`]: the caller persists the
     /// toggled `sandbox.enabled` to user settings, or appends an `exclude`
     /// pattern to local settings, off-loop; the result returns via a
@@ -356,6 +361,12 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::PlanMode(args) => {
                         (self.callbacks.on_plan_mode)(args);
                     }
+                    // Shift+Tab cycled the permission mode: push the wire mode id
+                    // to the live engine off-loop (`set_permission_mode`); the
+                    // pane already updated its indicator.
+                    ChatOutcome::SetPermissionMode(mode) => {
+                        (self.callbacks.on_set_permission_mode)(mode);
+                    }
                     // `/sandbox`: the live toggle already flipped in the widget;
                     // persist the choice / append an exclude off-loop, result via
                     // `TurnEvent::SystemNotice`.
@@ -536,6 +547,10 @@ pub fn run_app(
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
     task_registry: Option<std::sync::Arc<dyn traits::task_registry::TaskRegistryHandle>>,
+    // The resolved boot permission mode + whether bypass is an available
+    // Shift+Tab cycle target — seeds the below-composer mode indicator.
+    initial_permission_mode: permission::PermissionMode,
+    bypass_available: bool,
     on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
@@ -548,6 +563,7 @@ pub fn run_app(
     on_rename: impl FnMut(String),
     on_fast_mode: impl FnMut(Option<bool>),
     on_plan_mode: impl FnMut(String),
+    on_set_permission_mode: impl FnMut(String),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
     on_dispatch_slash: impl FnMut(String, CancellationToken),
@@ -583,6 +599,7 @@ pub fn run_app(
             on_rename: Box::new(on_rename),
             on_fast_mode: Box::new(on_fast_mode),
             on_plan_mode: Box::new(on_plan_mode),
+            on_set_permission_mode: Box::new(on_set_permission_mode),
             on_sandbox_action: Box::new(on_sandbox_action),
             on_task_action: Box::new(on_task_action),
             on_dispatch_slash: Box::new(on_dispatch_slash),
@@ -626,6 +643,10 @@ pub fn run_app(
     if let Some(handle) = orchestrator {
         app.chat_widget.set_orchestrator(handle);
     }
+    // Seed the below-composer permission-mode indicator from the resolved boot
+    // mode (so `--dangerously-skip-permissions` shows `⏵⏵ bypass permissions on`).
+    app.chat_widget
+        .set_permission_mode(initial_permission_mode, bypass_available);
     // `/sandbox`: wire the shared bash-sandbox toggle cell (the same one the
     // bash tool reads). `None` (tests / unsupported host) keeps `/sandbox` a
     // graceful "unavailable" no-op.
@@ -691,6 +712,7 @@ mod tests {
                 on_rename: Box::new(|_| {}),
                 on_fast_mode: Box::new(|_| {}),
                 on_plan_mode: Box::new(|_| {}),
+                on_set_permission_mode: Box::new(|_| {}),
                 on_sandbox_action: Box::new(|_| {}),
                 on_task_action: Box::new(|_| {}),
                 on_dispatch_slash: Box::new(|_, _| {}),

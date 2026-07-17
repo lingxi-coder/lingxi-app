@@ -131,6 +131,12 @@ pub enum ChatOutcome {
     /// store, so a `<description>` is not submitted and `open` does not launch an
     /// editor.
     PlanMode(String),
+    /// Shift+Tab cycled the session permission mode. The `String` is the wire
+    /// mode id (`default`/`acceptEdits`/`plan`/`bypassPermissions`); the caller
+    /// pushes it to the live engine OFF-LOOP via
+    /// `OrchestratorHandle::set_permission_mode` so enforcement follows the
+    /// indicator. The pane already updated its displayed mode.
+    SetPermissionMode(String),
     /// The `/resume` picker resolved to this session uuid. The caller must
     /// UNWIND the app loop (via `AppExit::SwitchSession`) and re-mount that
     /// session in-process so the JSONL writer is retargeted to `<uuid>.jsonl` —
@@ -489,6 +495,42 @@ impl ChatWidget {
     pub fn set_orchestrator(&mut self, handle: std::sync::Arc<dyn traits::OrchestratorHandle>) {
         self.goal_handler = Some(command_core::goal::GoalHandler::new(handle.clone()));
         self.orchestrator = Some(handle);
+    }
+
+    /// Seed the below-composer permission-mode indicator from the resolved boot
+    /// mode (claude-code `initialPermissionModeFromCLI`), and whether bypass is
+    /// an available Shift+Tab cycle target (`--dangerously-skip-permissions` /
+    /// `--allow-dangerously-skip-permissions`). Called once at TUI startup.
+    pub fn set_permission_mode(&mut self, mode: permission::PermissionMode, bypass_available: bool) {
+        self.bottom_pane.set_permission_mode(mode);
+        self.bottom_pane.set_bypass_available(bypass_available);
+    }
+
+    /// Wire mode id for the engine `set_permission_mode` control request
+    /// (claude-code `PermissionMode.ts` string form).
+    fn permission_mode_wire(mode: permission::PermissionMode) -> &'static str {
+        use permission::PermissionMode::{
+            AcceptEdits, Auto, BypassPermissions, Bubble, Default, DontAsk, Plan,
+        };
+        match mode {
+            Default | Bubble => "default",
+            Plan => "plan",
+            AcceptEdits => "acceptEdits",
+            BypassPermissions => "bypassPermissions",
+            DontAsk => "dontAsk",
+            Auto => "auto",
+        }
+    }
+
+    /// Shift+Tab cycled the session permission mode. The pane already flipped its
+    /// displayed indicator; push the new mode to the live engine OFF-LOOP so
+    /// enforcement follows. Without an engine handle the indicator still cycled
+    /// (cosmetic), so nothing further to do.
+    fn cycle_permission_mode(&mut self, mode: permission::PermissionMode) -> ChatOutcome {
+        if self.orchestrator.is_none() {
+            return ChatOutcome::Continue;
+        }
+        ChatOutcome::SetPermissionMode(Self::permission_mode_wire(mode).to_string())
     }
 
     /// Wire the composition-root's shared sandbox-enabled cell (the same
@@ -3060,6 +3102,7 @@ impl ChatWidget {
             }
             BottomPaneOutcome::Submitted(text) => self.dispatch_submission(text),
             BottomPaneOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt),
+            BottomPaneOutcome::CyclePermissionMode(mode) => self.cycle_permission_mode(mode),
             BottomPaneOutcome::SwitchModel {
                 request_model,
                 profile,

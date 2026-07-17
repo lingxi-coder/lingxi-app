@@ -23,6 +23,7 @@ pub mod connect_picker_view;
 pub mod dialog_view;
 pub mod footer;
 pub mod model_picker_view;
+pub mod permission_mode_indicator;
 mod paste_burst;
 pub mod pending_input_preview;
 pub mod permission_view;
@@ -103,6 +104,10 @@ pub enum BottomPaneOutcome {
     Submitted(String),
     /// A stacked view asks the owner to submit `String` as a user prompt.
     SubmitPrompt(String),
+    /// Shift+Tab cycled the session permission mode to this new mode. The pane
+    /// already updated its indicator; the owner pushes the change to the live
+    /// engine (`OrchestratorHandle::set_permission_mode`).
+    CyclePermissionMode(permission::PermissionMode),
     /// The user picked a model — the exact `(request_model, profile)` args
     /// `OrchestratorHandle::switch_model` accepts.
     SwitchModel {
@@ -181,6 +186,16 @@ pub struct BottomPane {
     /// token is being typed. NOT a stacked view — it coexists with the
     /// composer (typing keeps filtering).
     completion: Option<CompletionView>,
+    /// The session's active permission mode, shown as the indicator line below
+    /// the composer (claude-code `⏵⏵ accept edits on (shift+tab to cycle)`) and
+    /// cycled by Shift+Tab. Seeded from the boot mode via
+    /// [`Self::set_permission_mode`]; `Default` renders no indicator row.
+    permission_mode: permission::PermissionMode,
+    /// Whether `BypassPermissions` is an available cycle target (the session was
+    /// launched with `--dangerously-skip-permissions` /
+    /// `--allow-dangerously-skip-permissions`). Gates the Shift+Tab cycle into
+    /// bypass, mirroring claude-code `isBypassPermissionsModeAvailable`.
+    bypass_available: bool,
     /// Vim editing state when `/vim` is enabled (`None` → plain editor).
     vim: Option<VimState>,
     /// Vim insert-mode two-key remaps, e.g. `{ "jj": "Escape" }`.
@@ -247,6 +262,8 @@ impl BottomPane {
         Self {
             composer: Composer::default(),
             completion: None,
+            permission_mode: permission::PermissionMode::Default,
+            bypass_available: false,
             vim: None,
             vim_insert_mode_remaps: BTreeMap::new(),
             vim_insert_remap_pending: None,
@@ -275,6 +292,25 @@ impl BottomPane {
     /// when the command registry is wired and after `/reload-skills`.
     pub fn set_registry_commands(&mut self, rows: Vec<RegistrySlashRow>) {
         self.registry_commands = rows;
+    }
+
+    /// Set the active permission mode shown by the below-composer indicator.
+    /// Seeded from the boot mode and refreshed when the engine reports a mode
+    /// change; `Default` hides the indicator row.
+    pub fn set_permission_mode(&mut self, mode: permission::PermissionMode) {
+        self.permission_mode = mode;
+    }
+
+    /// The active permission mode (for the owner to read when reporting a cycle).
+    #[must_use]
+    pub fn permission_mode(&self) -> permission::PermissionMode {
+        self.permission_mode
+    }
+
+    /// Mark `BypassPermissions` as an available Shift+Tab cycle target (the
+    /// session was launched with the skip-permissions flag).
+    pub fn set_bypass_available(&mut self, available: bool) {
+        self.bypass_available = available;
     }
 
     /// Whether `name` (WITH the leading `/`) resolves to a registry-backed
@@ -317,6 +353,20 @@ impl BottomPane {
                     return outcome;
                 }
             }
+        }
+        // Shift+Tab (BackTab) cycles the session permission mode — claude-code's
+        // bottom-of-input mode cycle (`default → acceptEdits → plan → bypass?/
+        // default`). Handled after any active view / completion popup consumed
+        // the key, so it only fires at the bare composer. `Auto` is excluded
+        // (its classifier is an unwired stub, so it is not a cycle target).
+        if key.code == KeyCode::BackTab && self.completion.is_none() {
+            let next = permission::next_permission_mode(
+                self.permission_mode,
+                self.bypass_available,
+                false,
+            );
+            self.permission_mode = next;
+            return BottomPaneOutcome::CyclePermissionMode(next);
         }
         // When vim is enabled, the vim layer sees the key first. It fully
         // handles Normal-mode motions/edits; Insert-mode typing + all Ctrl
@@ -1248,6 +1298,8 @@ impl BottomPane {
         } else {
             footer::footer_height(&self.footer_props())
         };
+        let mode_row =
+            permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1255,6 +1307,7 @@ impl BottomPane {
                 Constraint::Length(u16::from(self.context_pressure.is_some())),
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
                 Constraint::Min(3),
+                Constraint::Length(mode_row),
                 Constraint::Length(below),
             ])
             .split(area)
@@ -1290,7 +1343,9 @@ impl BottomPane {
         } else {
             footer::footer_height(&self.footer_props())
         };
-        let base = running + banner + preview + composer + below;
+        let mode_row =
+            permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
+        let base = running + banner + preview + composer + mode_row + below;
         let overlay = if let Some(view) = self.view_stack.active() {
             view.desired_height(width)
         } else {
@@ -1324,7 +1379,14 @@ impl Renderable for BottomPane {
             .with_attached_images(&self.attached_image_labels)
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
             .render(zones[3], buf);
-        let below = zones[4];
+        // Permission-mode indicator (below the composer, above the footer);
+        // empty for `Default` mode (zero-height zone → nothing drawn).
+        if let Some(line) =
+            permission_mode_indicator::indicator_line(self.permission_mode, &self.theme)
+        {
+            Paragraph::new(line).render(zones[4], buf);
+        }
+        let below = zones[5];
         if let Some(popup) = &self.completion {
             // `CompletionView::render` anchors UPWARD from the rect it is
             // given (it grew up from the composer's top edge in the old
@@ -1867,6 +1929,49 @@ mod tests {
         // (synthetic keystrokes are machine-speed = the burst signature);
         // burst tests opt back in with set_disable_paste_burst(false).
         BottomPane::new(Theme::dark())
+    }
+
+    // ===== Shift+Tab permission-mode cycle =====
+
+    #[test]
+    fn shift_tab_cycles_permission_mode_and_reports_it() {
+        use permission::PermissionMode;
+        let mut pane = pane();
+        // Boot in bypass with bypass available (launched with the skip flag).
+        pane.set_permission_mode(PermissionMode::BypassPermissions);
+        pane.set_bypass_available(true);
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        // bypass → default (next_permission_mode: bypass, no auto → default).
+        match pane.handle_key(back_tab) {
+            BottomPaneOutcome::CyclePermissionMode(m) => assert_eq!(m, PermissionMode::Default),
+            other => panic!("expected CyclePermissionMode, got {other:?}"),
+        }
+        assert_eq!(pane.permission_mode(), PermissionMode::Default);
+        // default → acceptEdits → plan → bypass (available) → default.
+        for expected in [
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+            PermissionMode::BypassPermissions,
+            PermissionMode::Default,
+        ] {
+            match pane.handle_key(back_tab) {
+                BottomPaneOutcome::CyclePermissionMode(m) => assert_eq!(m, expected),
+                other => panic!("expected {expected:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn shift_tab_without_bypass_skips_bypass_mode() {
+        use permission::PermissionMode;
+        let mut pane = pane();
+        // No bypass available: plan cycles straight back to default.
+        pane.set_permission_mode(PermissionMode::Plan);
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);
+        match pane.handle_key(back_tab) {
+            BottomPaneOutcome::CyclePermissionMode(m) => assert_eq!(m, PermissionMode::Default),
+            other => panic!("expected Default (bypass unavailable), got {other:?}"),
+        }
     }
 
     // ===== Large-paste placeholders (codex pending_pastes) =====

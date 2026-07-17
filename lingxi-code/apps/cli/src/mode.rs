@@ -284,6 +284,10 @@ pub(crate) async fn run_ratatui(
     resumed_messages: Vec<tui::RenderedMessage>,
 ) -> RunOutcome {
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
+    // Boot permission mode + bypass-cycle availability for the indicator (Copy,
+    // captured before `tui_build` is partly consumed below).
+    let initial_permission_mode = tui_build.initial_permission_mode;
+    let bypass_available = tui_build.bypass_available;
     let (bridge_rx, permission_rx) = match &registration {
         Some(reg) => (
             spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
@@ -304,8 +308,11 @@ pub(crate) async fn run_ratatui(
     // `/add-dir` effect widens; cloned before `tui_build.runtime` is consumed.
     let permission_session_cwd = tui_build.runtime.session_cwd.clone();
     let permission_mcp_registry = tui_build.runtime.mcp_registry.clone();
+    // The ENFORCING permission gate, for Shift+Tab live permission-mode cycling.
+    let set_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
     let web_turn_tx = turn_tx.clone();
+    let set_mode_turn_tx = turn_tx.clone();
     let connect_turn_tx = turn_tx.clone();
     let permission_turn_tx = turn_tx.clone();
     let bash_turn_tx = turn_tx.clone();
@@ -360,6 +367,7 @@ pub(crate) async fn run_ratatui(
     // `on_submit` moves `orchestrator`/`handle` into its closure.
     let compact_orch = orchestrator.clone();
     let compact_handle = handle.clone();
+    let set_mode_handle = handle.clone();
     let rename_orch = orchestrator.clone();
     let rename_handle = handle.clone();
     let fast_orch = orchestrator.clone();
@@ -748,6 +756,24 @@ pub(crate) async fn run_ratatui(
                 tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
         });
     };
+    // (Shift+Tab) Push the cycled permission mode to the live ENFORCING gate
+    // off the render thread, so enforcement follows the bottom-of-composer
+    // indicator (the pane already updated its display). On failure — e.g. the
+    // bypass killswitch — report via `TurnEvent::SystemNotice`.
+    let on_set_permission_mode = move |mode: String| {
+        let Some(gate) = set_mode_gate.clone() else {
+            return;
+        };
+        let tx = set_mode_turn_tx.clone();
+        set_mode_handle.spawn(async move {
+            if let Err(e) = gate.set_permission_mode(&mode).await {
+                let _ = tx.send(tui::TurnEvent::SystemNotice {
+                    body: format!("Could not change permission mode: {e}"),
+                    is_error: true,
+                });
+            }
+        });
+    };
     // (/sandbox) The live toggle already flipped in the widget (a lock-free
     // AtomicBool store); this closure only PERSISTS the choice / appends an
     // exclude to the settings files off the render thread, reporting via
@@ -906,6 +932,8 @@ pub(crate) async fn run_ratatui(
             Some(sandbox_toggle),
             Some(command_registry),
             Some(task_registry_handle),
+            initial_permission_mode,
+            bypass_available,
             on_submit,
             on_switch_model,
             on_web_action,
@@ -918,6 +946,7 @@ pub(crate) async fn run_ratatui(
             on_rename,
             on_fast_mode,
             on_plan_mode,
+            on_set_permission_mode,
             on_sandbox_action,
             on_task_action,
             on_dispatch_slash,

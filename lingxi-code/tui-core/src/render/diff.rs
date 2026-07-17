@@ -52,24 +52,23 @@ pub struct DiffRow {
     pub line_no: usize,
 }
 
-/// Green background for added lines (claude-code `diffAdded`). Dark + low
-/// saturation so syntax fg stays readable.
-///
-/// (M7-15) The diff *line* backgrounds stay these locked dark/desaturated
-/// values (independent of the active theme) so the syntect fg — which DOES
-/// follow the theme via [`syntax::highlight`] — stays readable on every theme;
-/// the `theme` arg now carries the active [`ThemeName`] for that fg lookup.
-/// `Theme.diff_added` (the claude-code line bg) is brighter and would wash out
-/// the fg here, so it is intentionally NOT used for the terminal diff bg.
+/// Green background for added lines — claude-code `theme.diffAdded`, the
+/// DESATURATED dark-theme value `rgb(34,92,43)` (not a pure-green `#004000`).
+/// The desaturation is what keeps the block from reading as an aggressive
+/// "matrix-green" bar while syntax fg stays readable — the exact color
+/// claude-code layers its diff fg over. Locked to the dark-theme token like the
+/// gutter decorations (the syntect fg still follows the active theme via
+/// [`syntax::highlight`]).
 #[must_use]
 pub fn add_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(0x00, 0x40, 0x00)
+    StyleColor::Rgb(34, 92, 43)
 }
 
-/// Red background for removed lines (claude-code `diffRemoved`).
+/// Red background for removed lines — claude-code `theme.diffRemoved`
+/// (`rgb(122,41,54)`, dark-theme value).
 #[must_use]
 pub fn remove_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(0x40, 0x00, 0x00)
+    StyleColor::Rgb(122, 41, 54)
 }
 
 /// (diff-02) Green decoration color for the Add gutter (sigil + line number)
@@ -102,18 +101,18 @@ pub fn remove_text_fg(_theme: ThemeName) -> StyleColor {
 /// abandoned for whole-line coloring (lines too dissimilar to align words).
 const CHANGE_THRESHOLD: f64 = 0.4;
 
-/// Brighter emphasis background for the changed *words* of a paired add line
-/// (claude-code `diffAddedWord`).
+/// Brighter emphasis background for the changed *words* of a paired add line —
+/// claude-code `theme.diffAddedWord` (`rgb(56,166,96)`, dark-theme value).
 #[must_use]
 pub fn add_word_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(0x00, 0x80, 0x00)
+    StyleColor::Rgb(56, 166, 96)
 }
 
 /// Brighter emphasis background for the changed *words* of a paired remove
-/// line (claude-code `diffRemovedWord`).
+/// line — claude-code `theme.diffRemovedWord` (`rgb(179,89,107)`, dark-theme).
 #[must_use]
 pub fn remove_word_bg(_theme: ThemeName) -> StyleColor {
-    StyleColor::Rgb(0x80, 0x00, 0x00)
+    StyleColor::Rgb(179, 89, 107)
 }
 
 /// Classify a single `similar` line change into a [`DiffRow`] — the ONE source
@@ -603,6 +602,16 @@ mod tests {
             .into_iter()
             .flat_map(|(_, rows)| rows)
             .collect()
+    }
+
+    #[test]
+    fn diff_backgrounds_match_claude_code_dark_theme() {
+        // Byte-exact claude-code 2.1.211 dark-theme diff tokens (desaturated, so
+        // the block doesn't read as an aggressive pure-green bar).
+        assert_eq!(add_bg(ThemeName::Dark), StyleColor::Rgb(34, 92, 43)); // diffAdded
+        assert_eq!(remove_bg(ThemeName::Dark), StyleColor::Rgb(122, 41, 54)); // diffRemoved
+        assert_eq!(add_word_bg(ThemeName::Dark), StyleColor::Rgb(56, 166, 96)); // diffAddedWord
+        assert_eq!(remove_word_bg(ThemeName::Dark), StyleColor::Rgb(179, 89, 107)); // diffRemovedWord
     }
 
     #[test]

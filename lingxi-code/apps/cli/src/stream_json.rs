@@ -808,23 +808,42 @@ impl StreamJsonStream {
     /// `data.type==="agent_progress"`): a forwarded subagent assistant turn is
     /// re-emitted onto the PARENT stream as
     /// ```text
-    /// { type:"assistant", message, parent_tool_use_id, session_id, uuid, … }
+    /// { type:"assistant", message:{...o.message, content:Xzt(content)},
+    ///   parent_tool_use_id, session_id, uuid:o.uuid, timestamp, error,
+    ///   ...request_id, ...subagent_type, ...task_description, ...tool_use_meta }
     /// ```
     /// where `parent_tool_use_id` is the spawning `Task`/`Agent` tool_use_id —
     /// NON-NULL, which is exactly what distinguishes a forwarded subagent frame
-    /// from the top-level `assistant` frames (which hardcode `null`). The binary
-    /// re-emits with the subagent message spread and its `content` swapped for
-    /// the filtered blocks (`{...o.message, content: s}`); we mirror that by
-    /// cloning the subagent message and replacing `content`.
+    /// from the top-level `assistant` frames (which hardcode `null`).
+    ///
+    /// The binary re-emits the subagent message spread with its `content`
+    /// swapped for `Xzt(content)`. `Xzt` rewrites ONLY `text`/`thinking` blocks
+    /// (stripping a `<cc-memory>` wrapper via `i0`) and RETURNS EVERY OTHER
+    /// block — including `tool_use` — UNCHANGED. So the forwarded `content`
+    /// KEEPS tool_use blocks; the earlier port dropped them, which was wrong
+    /// about CC's actual frame shape. LingXi has no `<cc-memory>`/`i0` stripping
+    /// yet, so the text/thinking rewrite is currently the identity — we keep the
+    /// whole `content` array intact (cloning the message) and leave the
+    /// text/thinking branch as the seam where an `i0`-equivalent would land.
+    ///
+    /// The frame's `uuid` is the SUBAGENT message's own uuid (`o.uuid`), sourced
+    /// here from the serialized message's `id` field — NOT a fresh v4 — so a
+    /// forwarded child frame correlates to the subagent message that produced it.
+    ///
+    /// Fields CC additionally spreads that this seam genuinely CANNOT source
+    /// (the value threaded here is a serialized `protocol::ConversationMessage`
+    /// = `{role,id,content,stop_reason}`, and the progress event carries no more)
+    /// are deliberately omitted rather than fabricated: `timestamp`, `error`,
+    /// `request_id` (not on `ConversationMessage`), `subagent_type` /
+    /// `task_description` (come from the progress event's `agentType` /
+    /// `taskDescription`, not plumbed to this sink), and `tool_use_meta`
+    /// (`Per(content)` MCP display-metadata, not reconstructable here).
     ///
     /// Returns `None` (nothing forwarded) when:
     ///   - the flag is OFF (`forward_subagent_text()` is false), or
     ///   - `suppress_frames` is set (json/`--json` output path), or
     ///   - the message is not an assistant message, or
-    ///   - after filtering to `text` + `thinking` blocks nothing remains
-    ///     (tool_use / tool_result blocks are skipped — they already surface via
-    ///     the always-on nested-progress path, so `--forward-subagent-text` adds
-    ///     only the assistant TEXT + THINKING blocks).
+    ///   - the message has no `content` array.
     fn build_forwarded_subagent_frame(
         &self,
         message: &Value,
@@ -835,30 +854,28 @@ impl StreamJsonStream {
         if !self.forward_subagent_text() || self.suppress_frames {
             return None;
         }
-        // Only assistant turns are forwarded here (text + thinking).
+        // Only assistant turns are forwarded here.
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             return None;
         }
+        // Mirror the binary's `{...o.message, content: Xzt(content)}`. `Xzt`
+        // keeps tool_use (and every non-text/thinking) block UNCHANGED and only
+        // rewrites text/thinking; with no `i0`/`<cc-memory>` stripping in LingXi
+        // that rewrite is the identity, so the whole `content` array is kept.
         let content = message.get("content").and_then(Value::as_array)?;
-        let filtered: Vec<Value> = content
+        let rewritten: Vec<Value> = content
             .iter()
-            .filter(|b| {
-                matches!(
-                    b.get("type").and_then(Value::as_str),
-                    Some("text") | Some("thinking")
-                )
+            .map(|block| match block.get("type").and_then(Value::as_str) {
+                // Seam for a future `i0`/`<cc-memory>` strip on text/thinking.
+                // No-op today (pass through unchanged).
+                Some("text") | Some("thinking") => block.clone(),
+                // Every other block (incl. tool_use) is returned unchanged.
+                _ => block.clone(),
             })
-            .cloned()
             .collect();
-        if filtered.is_empty() {
-            return None;
-        }
-        // Mirror the binary's `{...o.message, content: s}`: keep the subagent
-        // message's own fields (role, id, stop_reason) and swap in the filtered
-        // content blocks.
         let mut fwd_message = message.clone();
         if let Some(obj) = fwd_message.as_object_mut() {
-            obj.insert("content".to_string(), Value::Array(filtered));
+            obj.insert("content".to_string(), Value::Array(rewritten));
         }
         Some(json!({
             "type": "assistant",
@@ -886,7 +903,15 @@ impl OutputStream for StreamJsonStream {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
-        let uuid = uuid::Uuid::new_v4().to_string();
+        // CC spreads `uuid:o.uuid` — the SUBAGENT message's OWN uuid, not a
+        // fresh one. The serialized `ConversationMessage` carries it as the
+        // (transparent-UUID) `id` field; reuse it so a forwarded child frame
+        // correlates to the subagent message. Fall back to a fresh v4 only if
+        // the message is malformed and carries no `id`.
+        let uuid = message
+            .get("id")
+            .and_then(Value::as_str)
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
         if let Some(frame) =
             self.build_forwarded_subagent_frame(message, parent_tool_use_id, &session_id, &uuid)
         {
@@ -1721,8 +1746,9 @@ mod tests {
 
     /// (2.1.212 `--forward-subagent-text`) With the flag ON, a subagent
     /// assistant message is re-shaped into an `assistant` frame carrying the
-    /// NON-NULL spawning `parent_tool_use_id` and the forwarded text block;
-    /// tool_use / tool_result blocks are dropped.
+    /// NON-NULL spawning `parent_tool_use_id`. CC's `Xzt` keeps EVERY block —
+    /// including `tool_use` — in the forwarded `content` (only rewriting
+    /// text/thinking), so the frame preserves tool_use blocks unchanged.
     #[test]
     fn forwarded_subagent_frame_carries_parent_tool_use_id_and_text() {
         let stream = StreamJsonStream::new(make_params("sess-fwd"));
@@ -1747,12 +1773,16 @@ mod tests {
         assert!(!frame["parent_tool_use_id"].is_null());
         assert_eq!(frame["session_id"], "sess-fwd");
         assert_eq!(frame["uuid"], "uuid-1");
-        // Content filtered to text + thinking (tool_use dropped).
+        // Content KEEPS every block: thinking + text + tool_use (CC's Xzt
+        // returns non-text/thinking blocks unchanged — tool_use is NOT dropped).
         let content = frame["message"]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2, "tool_use block dropped, text+thinking kept");
+        assert_eq!(content.len(), 3, "all blocks kept incl. tool_use");
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[1]["type"], "text");
         assert_eq!(content[1]["text"], "hello from subagent");
+        assert_eq!(content[2]["type"], "tool_use");
+        assert_eq!(content[2]["id"], "toolu_x");
+        assert_eq!(content[2]["name"], "Read");
         // The message keeps its own id / stop_reason.
         assert_eq!(frame["message"]["id"], "msg_child_1");
         assert_eq!(frame["message"]["stop_reason"], "end_turn");
@@ -1777,11 +1807,12 @@ mod tests {
         );
     }
 
-    /// With the flag ON but only tool_use / tool_result blocks (no text or
-    /// thinking), nothing is forwarded — those blocks already surface via the
-    /// always-on nested-progress path.
+    /// With the flag ON and a tool_use-only assistant message, CC's `Xzt` still
+    /// returns the tool_use block unchanged, so the frame IS forwarded with the
+    /// tool_use block intact (the earlier port wrongly dropped it and returned
+    /// `None`).
     #[test]
-    fn forwarded_subagent_frame_none_when_no_text_or_thinking() {
+    fn forwarded_subagent_frame_keeps_tool_use_only_message() {
         let stream = StreamJsonStream::new(make_params("sess-fwd"));
         stream.set_forward_subagent_text(true);
         let msg = json!({
@@ -1790,12 +1821,57 @@ mod tests {
             "content": [{"type": "tool_use", "id": "toolu_x", "name": "Read", "input": {}}],
             "stop_reason": "tool_use",
         });
-        assert!(
-            stream
-                .build_forwarded_subagent_frame(&msg, "toolu_parent", "sess-fwd", "uuid-1")
-                .is_none(),
-            "tool_use-only message forwards nothing"
-        );
+        let frame = stream
+            .build_forwarded_subagent_frame(&msg, "toolu_parent", "sess-fwd", "uuid-1")
+            .expect("tool_use-only message is forwarded, not dropped");
+        let content = frame["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "the tool_use block is kept");
+        assert_eq!(content[0]["type"], "tool_use");
+        assert_eq!(content[0]["id"], "toolu_x");
+    }
+
+    /// (2.1.212 `--forward-subagent-text`) The emitted frame REUSES the subagent
+    /// message's own uuid (CC's `uuid:o.uuid`, sourced from the serialized
+    /// message's `id` field) — NOT a fresh `Uuid::new_v4()` — and carries the
+    /// full content including tool_use blocks. Captures the enqueued frame off
+    /// the drain channel (the drain task is not started in tests).
+    #[tokio::test]
+    async fn emitted_forwarded_frame_reuses_subagent_uuid_and_keeps_tool_use() {
+        let stream = StreamJsonStream::new(make_params("sess-fwd"));
+        stream.set_forward_subagent_text(true);
+        // Take the drain receiver so enqueued frames stay readable here.
+        let mut rx = stream
+            .drain_rx
+            .lock()
+            .await
+            .take()
+            .expect("drain receiver available");
+        let msg = json!({
+            "role": "assistant",
+            "id": "018f-subagent-uuid",
+            "content": [
+                {"type": "text", "text": "child text"},
+                {"type": "tool_use", "id": "toolu_child", "name": "Grep", "input": {}},
+            ],
+            "stop_reason": "tool_use",
+        });
+        stream
+            .emit_forwarded_subagent_message(&msg, "toolu_parent_task")
+            .await;
+        let line = match rx.try_recv().expect("a frame was enqueued") {
+            OutboundMsg::Line(l) => l,
+            OutboundMsg::Flush(_) => panic!("expected a Line frame"),
+        };
+        let frame: Value = serde_json::from_str(&line).expect("frame is valid json");
+        assert_eq!(frame["type"], "assistant");
+        assert_eq!(frame["parent_tool_use_id"], "toolu_parent_task");
+        // uuid is the subagent message's own id, NOT a random v4.
+        assert_eq!(frame["uuid"], "018f-subagent-uuid");
+        // tool_use block survives the forward.
+        let content = frame["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(content[1]["id"], "toolu_child");
     }
 
     /// Verify that `emit_stream_event` is suppressed in suppress_frames mode

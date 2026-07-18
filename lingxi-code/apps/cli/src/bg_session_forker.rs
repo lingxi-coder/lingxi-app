@@ -57,6 +57,7 @@ impl BgSessionForker for CliBgSessionForker {
         history: &[protocol::ConversationMessage],
         system_prompt: Option<Arc<str>>,
         prompt: &str,
+        model: &str,
     ) -> Result<String, BgForkError> {
         // The copied session RE-DERIVES its own system prompt on resume from its
         // cwd/LINGXI.md hierarchy (the resume loader rebuilds it), so the parent's
@@ -80,6 +81,7 @@ impl BgSessionForker for CliBgSessionForker {
             &new_session_id,
             &cwd,
             &self.version,
+            model,
         );
         let fs: Arc<dyn FileSystem> =
             Arc::new(platform_posix::PosixFileSystem::new(cwd_pb.clone()));

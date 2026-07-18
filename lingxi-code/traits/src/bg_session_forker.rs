@@ -52,6 +52,12 @@ pub trait BgSessionForker: Send + Sync {
     /// dispatch a detached worker that resumes it. `prompt` is the OPTIONAL
     /// `[prompt]` argument (empty string = no seed turn).
     ///
+    /// `model` is the parent session's CURRENT active model: the snapshot
+    /// stamps it onto the copied assistant lines so the resumed background
+    /// session lands on the parent's model (and re-derives its provider profile
+    /// by id) instead of the `DEFAULT_MODEL` seed — `ConversationMessage`s carry
+    /// no per-line model, so the live session model is the only source.
+    ///
     /// Returns the system line to display in the LIVE (interactive) session —
     /// the composition root owns the exact text since it mints the new short id.
     async fn fork_to_background(
@@ -59,6 +65,7 @@ pub trait BgSessionForker: Send + Sync {
         history: &[protocol::ConversationMessage],
         system_prompt: Option<Arc<str>>,
         prompt: &str,
+        model: &str,
     ) -> Result<String, BgForkError>;
 
     /// Resume an EXISTING on-disk session as a NEW background session — the

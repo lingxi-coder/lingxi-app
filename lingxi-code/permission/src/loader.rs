@@ -25,6 +25,55 @@ use crate::mode::PermissionMode;
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 use serde::Deserialize;
 
+/// Startup warning for a permission rule whose tool has NO file-permission
+/// matcher of its own — parity 2.1.210 (`validatePermissionRule` / `EPr`'s final
+/// `valid:!0, warning:…` branch, added in 2.1.210). `Write`, `NotebookEdit`, and
+/// `MultiEdit` share the `Edit(path)` matcher; `Glob` shares the `Read(path)`
+/// matcher — so a `Write(src/**)` rule silently matches nothing. When such a rule
+/// carries a real path content (NOT a Bash-style `:*` prefix), the binary keeps
+/// the rule (`valid:!0`) but surfaces this warning at startup, steering the user
+/// to the covering `Edit(path)` / `Read(path)` rule.
+///
+/// Byte-locked to the binary template:
+/// ``${sp(o)} is not matched by file permission checks — only ${a}(path) rules
+/// are. Use ${sp({toolName:a,ruleContent:o.ruleContent})} instead (${a} rules
+/// cover all file-${a==="Edit"?"editing":"reading"} tools).`` where `sp` is
+/// [`PermissionRuleValue::to_rule_string`] and `a` is the covering tool.
+///
+/// Returns `None` for tools with their own matcher (`Edit`/`Read`/`Bash`/…), for
+/// bare tool-wide rules (`rule_content == None`), and — matching the binary's
+/// `!o.ruleContent.includes(":*")` guard — for any content carrying a `:*`
+/// prefix (`EPr`'s earlier `qvl` branch already errors on `:*` for these file
+/// tools, so the warning branch never sees it). Behavior-independent: the binary
+/// runs this branch for allow, deny, and ask rules alike.
+#[must_use]
+pub fn permission_rule_file_warning(value: &PermissionRuleValue) -> Option<String> {
+    let content = value.rule_content.as_deref()?;
+    let covering = match value.tool_name.as_str() {
+        "Write" | "NotebookEdit" | "MultiEdit" => "Edit",
+        "Glob" => "Read",
+        _ => return None,
+    };
+    if content.contains(":*") {
+        return None;
+    }
+    let file_verb = if covering == "Edit" {
+        "editing"
+    } else {
+        "reading"
+    };
+    let suggested = PermissionRuleValue {
+        tool_name: covering.to_string(),
+        rule_content: Some(content.to_string()),
+    };
+    Some(format!(
+        "{} is not matched by file permission checks — only {covering}(path) rules are. \
+         Use {} instead ({covering} rules cover all file-{file_verb} tools).",
+        value.to_rule_string(),
+        suggested.to_rule_string(),
+    ))
+}
+
 /// Top-level projection consumed by [`permission_rules_from_settings_json`].
 /// A separate private struct (like the hooks loader) so this loader stays
 /// decoupled from the engine's typed `SettingsJson`.
@@ -77,6 +126,30 @@ struct PermissionsBlock {
     /// and `b$` unions with cwd for the `kF` working-dir auto-allow check.
     #[serde(default, rename = "additionalDirectories")]
     additional_directories: Vec<String>,
+}
+
+/// The full startup warning LINE for a rule that carries a
+/// [`permission_rule_file_warning`], prefixed exactly like the binary:
+/// ``Permission ${ruleBehavior} rule (${sourceDisplay}): ${warning}``. Returns
+/// `None` when the rule needs no warning. `source_display` is the caller-resolved
+/// origin label — the binary uses the settings file path for the on-disk tiers
+/// (`mwo`), `"managed policy settings"` for `policySettings`, `--allowed-tools` /
+/// `--disallowed-tools` for `cliArg`, and `--settings` for `flagSettings`. The
+/// `ruleBehavior` token is the lowercase wire name (`allow` / `deny` / `ask`).
+#[must_use]
+pub fn permission_rule_startup_warning(
+    rule: &PermissionRule,
+    source_display: &str,
+) -> Option<String> {
+    let warning = permission_rule_file_warning(&rule.value)?;
+    let behavior = match rule.behavior {
+        PermissionBehavior::Allow => "allow",
+        PermissionBehavior::Deny => "deny",
+        PermissionBehavior::Ask => "ask",
+    };
+    Some(format!(
+        "Permission {behavior} rule ({source_display}): {warning}"
+    ))
 }
 
 /// Parse one settings file's raw JSON into permission rules tagged with
@@ -566,6 +639,90 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].value.tool_name, "Bash");
         assert!(matches!(rules[0].behavior, PermissionBehavior::Deny));
+    }
+
+    #[test]
+    fn file_warning_covers_write_family_and_glob() {
+        let warn = |spec: &str| {
+            permission_rule_file_warning(&PermissionRuleValue::from_rule_string(spec))
+        };
+        // parity 2.1.210: Write/NotebookEdit/MultiEdit steer to Edit(path).
+        assert_eq!(
+            warn("Write(src/foo.ts)").as_deref(),
+            Some(
+                "Write(src/foo.ts) is not matched by file permission checks — only Edit(path) rules are. Use Edit(src/foo.ts) instead (Edit rules cover all file-editing tools)."
+            )
+        );
+        assert_eq!(
+            warn("NotebookEdit(nb.ipynb)").as_deref(),
+            Some(
+                "NotebookEdit(nb.ipynb) is not matched by file permission checks — only Edit(path) rules are. Use Edit(nb.ipynb) instead (Edit rules cover all file-editing tools)."
+            )
+        );
+        assert_eq!(
+            warn("MultiEdit(src/**)").as_deref(),
+            Some(
+                "MultiEdit(src/**) is not matched by file permission checks — only Edit(path) rules are. Use Edit(src/**) instead (Edit rules cover all file-editing tools)."
+            )
+        );
+        // Glob steers to Read(path) with the "reading" verb.
+        assert_eq!(
+            warn("Glob(**/*.rs)").as_deref(),
+            Some(
+                "Glob(**/*.rs) is not matched by file permission checks — only Read(path) rules are. Use Read(**/*.rs) instead (Read rules cover all file-reading tools)."
+            )
+        );
+    }
+
+    #[test]
+    fn startup_warning_line_matches_binary_prefix() {
+        let rule = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Write(src/foo.ts)"),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::ProjectSettings,
+        };
+        assert_eq!(
+            permission_rule_startup_warning(&rule, ".lingxi/settings.json").as_deref(),
+            Some(
+                "Permission allow rule (.lingxi/settings.json): Write(src/foo.ts) is not matched by file permission checks — only Edit(path) rules are. Use Edit(src/foo.ts) instead (Edit rules cover all file-editing tools)."
+            )
+        );
+        // Deny behavior surfaces the `deny` token; managed display label.
+        let deny = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Glob(**/*.rs)"),
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::PolicySettings,
+        };
+        assert_eq!(
+            permission_rule_startup_warning(&deny, "managed policy settings").as_deref(),
+            Some(
+                "Permission deny rule (managed policy settings): Glob(**/*.rs) is not matched by file permission checks — only Read(path) rules are. Use Read(**/*.rs) instead (Read rules cover all file-reading tools)."
+            )
+        );
+        // A covered rule produces no line at all.
+        let ok = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Edit(src/foo.ts)"),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::UserSettings,
+        };
+        assert!(permission_rule_startup_warning(&ok, "settings.json").is_none());
+    }
+
+    #[test]
+    fn file_warning_absent_for_covered_and_bare_and_prefix_rules() {
+        let warn = |spec: &str| {
+            permission_rule_file_warning(&PermissionRuleValue::from_rule_string(spec))
+        };
+        // Tools with their OWN matcher never warn.
+        assert!(warn("Edit(src/foo.ts)").is_none());
+        assert!(warn("Read(secret.env)").is_none());
+        assert!(warn("Bash(npm run:*)").is_none());
+        // Bare tool-wide rule (rule_content None) → no warning.
+        assert!(warn("Write").is_none());
+        assert!(warn("Write(*)").is_none());
+        // `:*` prefix content is handled by EPr's earlier error branch, not the
+        // warning branch (binary guard `!ruleContent.includes(":*")`).
+        assert!(warn("Write(foo:*)").is_none());
     }
 
     #[test]

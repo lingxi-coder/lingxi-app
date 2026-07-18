@@ -46,6 +46,61 @@ pub const WEB_SEARCH_DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Canonical tool name in the registry.
 pub const TOOL_NAME: &str = "WebSearch";
 
+/// Default session-wide WebSearch budget — claude-code `ifg = 200` (the `??`
+/// fallback of `ktu()`).
+pub const DEFAULT_MAX_WEB_SEARCHES_PER_SESSION: u32 = 200;
+
+/// `tengu_feature_bad` event name — the generic feature-failure telemetry the
+/// binary's `me(e,t,r)` helper emits (`M("tengu_feature_bad",{...r,feature_name:
+/// e,error_code:t})`). WebSearch fires it once when the per-session budget is hit.
+const TENGU_FEATURE_BAD: &str = "tengu_feature_bad";
+/// `feature_name` metadata value on the session-cap `tengu_feature_bad` event
+/// (the `me("tool_web_search", …)` first arg).
+const WEB_SEARCH_FEATURE_NAME: &str = "tool_web_search";
+/// `error_code` metadata value on the session-cap `tengu_feature_bad` event
+/// (the `me(…, "web_search_session_cap", …)` second arg).
+const WEB_SEARCH_SESSION_CAP_CODE: &str = "web_search_session_cap";
+
+/// Resolve the per-session WebSearch budget — 1:1 with claude-code `ktu()`
+/// (`return Z.CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION ?? 200`). The env var is
+/// parsed as `Pe.int({ min: 1, digitsOnly: true })`: the trimmed value must be an
+/// integer literal AND be `>= 1`; anything else (absent / non-numeric / `< 1`)
+/// falls back to the 200 default. An over-`u32` value clamps to `u32::MAX`
+/// (effectively unlimited — matching CC's "huge number ⇒ never caps"). The env
+/// var keeps its verbatim `CLAUDE_CODE_*` spelling (LingXi retains those).
+#[must_use]
+pub fn resolve_max_web_searches_per_session() -> u32 {
+    parse_max_web_searches(
+        std::env::var("CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure core of [`resolve_max_web_searches_per_session`] (testable without env
+/// mutation). Mirrors `Pe.int({ min: 1, digitsOnly: true }) ?? 200`.
+fn parse_max_web_searches(raw: Option<&str>) -> u32 {
+    raw.map(str::trim)
+        // `u64::from_str` accepts an optional leading `+` and rejects any
+        // non-digit / `-` / decimal-point input — the same set the binary's
+        // `^[+-]?\d+$` digitsOnly regex + `parseInt` admits (a `-N` value fails
+        // the `min: 1` check there and fails u64 parse here; both ⇒ default).
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n >= 1)
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        .unwrap_or(DEFAULT_MAX_WEB_SEARCHES_PER_SESSION)
+}
+
+/// The session-cap budget notice — 1:1 with the binary's
+/// `` `Web search was not performed: this session has used its web search budget
+/// (${l} of ${a} WebSearch calls). …` `` where `l` is the current count and `a`
+/// the resolved max. Returned verbatim as the single `results` entry.
+fn web_search_budget_notice(used: u32, max: u32) -> String {
+    format!(
+        "Web search was not performed: this session has used its web search budget ({used} of {max} WebSearch calls). Continue with the information already gathered instead of issuing more searches. If more searches are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION."
+    )
+}
+
 /// `anthropic-beta` value that gates the web-search tool on the Anthropic API.
 ///
 /// Wire-locked byte-for-byte against `claude-code/src/constants/betas.ts`
@@ -628,6 +683,32 @@ pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String
     out.trim().to_string()
 }
 
+/// Build the budget-capped [`ToolCallResult`] returned WITHOUT searching once the
+/// session WebSearch budget is exhausted — 1:1 with the binary's
+/// `{data:{query,results:[<notice>],durationSeconds:0,searchCount:0}}` return.
+/// The model-facing text runs the single-entry notice through
+/// [`build_model_content`] (the binary's `mapToolResultToToolResultBlockParam`,
+/// which wraps every result set in the `Web search results for query: "<q>"`
+/// header + cite-sources footer). `is_error` stays `false`: CC returns the cap as
+/// a normal (non-thrown) tool result so the model reads the notice and stops.
+fn budget_capped_result(query: &str, used: u32, max: u32) -> ToolCallResult {
+    let notice = web_search_budget_notice(used, max);
+    let model_content = build_model_content(query, &[SearchResultEntry::Text(notice.clone())]);
+    ToolCallResult {
+        data: json!({
+            "query": query,
+            "results": [notice],
+            "durationSeconds": 0,
+            "searchCount": 0,
+        }),
+        model_content: Some(model_content),
+        new_messages: vec![],
+        context_modifier: None,
+        is_error: false,
+        mcp_meta: None,
+    }
+}
+
 /// `WebSearchTool` — routes the agent's query through Anthropic's Messages
 /// API with `anthropic-beta: web-search-2025-03-05` and the
 /// `web_search_20250305` tool block. Never self-retries.
@@ -732,6 +813,31 @@ impl WebSearchTool {
             AnalyticsValue::Int(duration_ms as i64),
         );
         self.ctx.bus.log_event(WEB_SEARCH_FAILED, md).await;
+    }
+
+    /// Emit the session-cap `tengu_feature_bad` event — 1:1 with the binary's
+    /// `me("tool_web_search","web_search_session_cap",{max_web_searches_per_session:a})`
+    /// (`me(e,t,r) = M("tengu_feature_bad",{...r,feature_name:e,error_code:t})`).
+    /// Fired once, immediately before the budget notice is returned.
+    async fn emit_web_search_session_cap(&self, max: u32) {
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert(
+            "feature_name".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(WEB_SEARCH_FEATURE_NAME.to_string()).into_inner(),
+            ),
+        );
+        md.insert(
+            "error_code".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(WEB_SEARCH_SESSION_CAP_CODE.to_string()).into_inner(),
+            ),
+        );
+        md.insert(
+            "max_web_searches_per_session".into(),
+            AnalyticsValue::Int(i64::from(max)),
+        );
+        self.ctx.bus.log_event(TENGU_FEATURE_BAD, md).await;
     }
 
     /// Provider-agnostic client-side search path (non-Anthropic providers).
@@ -1086,6 +1192,26 @@ impl Tool for WebSearchTool {
             return Err(ToolError::InvalidInput(
                 "query must be at least 2 characters".into(),
             ));
+        }
+
+        // Session-wide WebSearch budget (parity 2.1.212): claude-code reads the
+        // session counter off the task registry BEFORE every search
+        // (`l=t.taskRegistry.getWebSearchCalls(); if(l>=a) return <notice>`); on
+        // `>= max` (default 200, `CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION`) it
+        // returns a budget notice WITHOUT searching, else increments the counter
+        // (`incrementWebSearchCalls()`) and proceeds. Placed BEFORE the provider
+        // split so it gates BOTH the hosted and the LingXi client-side paths (1:1
+        // with CC where the gate is the first logic in `call`). No registry wired
+        // (`None`, e.g. library/unit callers) ⇒ never caps — byte-identical to the
+        // binary's null-registry `getWebSearchCalls(){return 0}` stub.
+        if let Some(registry) = &self.ctx.task_registry {
+            let max = resolve_max_web_searches_per_session();
+            let used = registry.web_search_calls();
+            if used >= max {
+                self.emit_web_search_session_cap(max).await;
+                return Ok(budget_capped_result(&parsed_input.query, used, max));
+            }
+            registry.increment_web_search_calls();
         }
 
         // Provider split: Anthropic-hosted search only works on the first-party
@@ -2790,6 +2916,194 @@ mod tests {
         assert!(
             result.model_content.unwrap().contains("Weather Now"),
             "client-side results must be returned to the model"
+        );
+    }
+
+    // ---- session-wide WebSearch budget (parity 2.1.212) --------------------
+
+    // `AnalyticsValue` is already in scope via `use super::*` (the module's
+    // top-level `telemetry::sink` import); the metadata asserts below use it.
+    use traits::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
+
+    /// Minimal `TaskRegistryHandle` exposing ONLY the session WebSearch counter;
+    /// the 7 CRUD methods are unused error/empty stubs. `at(n)` presets the count;
+    /// `increments()` reports how many times the gate bumped it.
+    struct BudgetRegistry {
+        count: std::sync::atomic::AtomicU32,
+        increments: std::sync::atomic::AtomicU32,
+    }
+    impl BudgetRegistry {
+        fn at(count: u32) -> Arc<Self> {
+            Arc::new(Self {
+                count: std::sync::atomic::AtomicU32::new(count),
+                increments: std::sync::atomic::AtomicU32::new(0),
+            })
+        }
+        fn increments(&self) -> u32 {
+            self.increments.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    #[async_trait]
+    impl TaskRegistryHandle for BudgetRegistry {
+        async fn create(&self, _: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn get(&self, _: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+        async fn list(&self, _: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(vec![])
+        }
+        async fn update(
+            &self,
+            _: &str,
+            _: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn set_status(&self, _: &str, _: &str) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn kill(&self, _: &str) -> Result<TaskRecord, TaskRegistryError> {
+            Err(TaskRegistryError::Internal("unused".into()))
+        }
+        async fn output(
+            &self,
+            _: &str,
+            _: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            Ok(TaskOutputChunk::default())
+        }
+        fn web_search_calls(&self) -> u32 {
+            self.count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn increment_web_search_calls(&self) {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.increments
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn parse_max_web_searches_mirrors_pe_int_min1_digits_only() {
+        // Absent ⇒ default 200 (`ktu()`'s `?? 200`).
+        assert_eq!(parse_max_web_searches(None), 200);
+        // Plain digit strings.
+        assert_eq!(parse_max_web_searches(Some("5")), 5);
+        assert_eq!(parse_max_web_searches(Some("200")), 200);
+        // Trimmed + optional leading '+' (both accepted by the digitsOnly regex).
+        assert_eq!(parse_max_web_searches(Some("  10  ")), 10);
+        assert_eq!(parse_max_web_searches(Some("+7")), 7);
+        // `< 1` (min:1) ⇒ default.
+        assert_eq!(parse_max_web_searches(Some("0")), 200);
+        assert_eq!(parse_max_web_searches(Some("-4")), 200);
+        // Non-integer / junk ⇒ default.
+        assert_eq!(parse_max_web_searches(Some("abc")), 200);
+        assert_eq!(parse_max_web_searches(Some("3.5")), 200);
+        assert_eq!(parse_max_web_searches(Some("200abc")), 200);
+        assert_eq!(parse_max_web_searches(Some("")), 200);
+    }
+
+    #[test]
+    fn budget_notice_is_byte_exact() {
+        assert_eq!(
+            web_search_budget_notice(200, 200),
+            "Web search was not performed: this session has used its web search budget (200 of 200 WebSearch calls). Continue with the information already gathered instead of issuing more searches. If more searches are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION."
+        );
+    }
+
+    #[tokio::test]
+    async fn web_search_over_budget_returns_notice_without_searching() {
+        // Registry already AT the default budget (200) ⇒ 200 >= 200 ⇒ capped.
+        let http = Arc::new(StreamingMockHttp::new());
+        let (mut ctx, sink) = make_streaming_ctx(http.clone());
+        ctx.bus.attach_sink(sink.clone()).await;
+        let registry = BudgetRegistry::at(200);
+        ctx.task_registry = Some(registry.clone() as Arc<dyn TaskRegistryHandle>);
+        let tool = WebSearchTool::new(ctx);
+        let (tx, _rx) = progress_channel();
+
+        let res = tool
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
+            .await
+            .expect("cap path returns Ok");
+
+        // No HTTP issued (neither stream nor blocking) — the search never runs.
+        assert!(
+            http.received_requests().is_empty(),
+            "capped search must not touch the network"
+        );
+        // The counter is NOT bumped past the cap.
+        assert_eq!(registry.increments(), 0);
+        // `data` shape: results=[notice], durationSeconds:0, searchCount:0.
+        assert_eq!(res.data["searchCount"], 0);
+        assert_eq!(res.data["durationSeconds"], 0);
+        let arr = res.data["results"].as_array().expect("results array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0], web_search_budget_notice(200, 200));
+        assert!(!res.is_error);
+        // Model text wraps the notice in the standard header + footer.
+        let mc = res.model_content.as_deref().expect("model_content");
+        assert!(mc.contains("Web search results for query: \"rust async\""));
+        assert!(
+            mc.contains("this session has used its web search budget (200 of 200 WebSearch calls)")
+        );
+
+        // `tengu_feature_bad` fired once with the session-cap metadata.
+        let events = sink.events().await;
+        let cap = events
+            .iter()
+            .find(|e| e.name == "tengu_feature_bad")
+            .expect("tengu_feature_bad emitted");
+        assert!(matches!(
+            cap.metadata.get("feature_name"),
+            Some(AnalyticsValue::String(s)) if s == "tool_web_search"
+        ));
+        assert!(matches!(
+            cap.metadata.get("error_code"),
+            Some(AnalyticsValue::String(s)) if s == "web_search_session_cap"
+        ));
+        assert!(matches!(
+            cap.metadata.get("max_web_searches_per_session"),
+            Some(AnalyticsValue::Int(200))
+        ));
+        // The normal per-query lifecycle telemetry is NOT emitted on the cap path.
+        assert!(!events
+            .iter()
+            .any(|e| e.name == "tengu_tool_web_search_started"));
+    }
+
+    #[tokio::test]
+    async fn web_search_under_budget_increments_and_searches() {
+        // Registry BELOW the budget ⇒ the gate increments once and runs the search.
+        let http = Arc::new(StreamingMockHttp::new());
+        http.set_stream(vec![
+            sse(json!({ "type": "message_start", "message": { "usage": { "input_tokens": 1, "output_tokens": 0 } } })),
+            sse(json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "server_tool_use", "id": "stu_1", "name": "web_search", "input": {} } })),
+            sse(json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"query\":\"q\"}" } })),
+            sse(json!({ "type": "content_block_stop", "index": 0 })),
+            sse(json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "web_search_tool_result", "tool_use_id": "stu_1", "content": [] } })),
+            sse(json!({ "type": "content_block_stop", "index": 1 })),
+            sse(json!({ "type": "message_stop" })),
+        ]);
+        let (mut ctx, _sink) = make_streaming_ctx(http.clone());
+        let registry = BudgetRegistry::at(0);
+        ctx.task_registry = Some(registry.clone() as Arc<dyn TaskRegistryHandle>);
+        let tool = WebSearchTool::new(ctx);
+        let (tx, _rx) = progress_channel();
+
+        let _res = tool
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
+            .await
+            .expect("under-budget search runs");
+
+        assert_eq!(registry.increments(), 1, "gate must increment exactly once");
+        assert!(
+            !http.received_requests().is_empty(),
+            "under-budget search must hit the network"
         );
     }
 }

@@ -798,10 +798,102 @@ impl StreamJsonStream {
         }
         model_usage
     }
+
+    /// Build the forwarded-subagent `assistant` frame for `--forward-subagent-text`.
+    ///
+    /// Gate + shape live here so the emit wrapper is a thin
+    /// build-then-enqueue and the shape is unit-testable without stdout.
+    ///
+    /// GROUND-TRUTH (2.1.212 stream-json output-stream `case "progress"` →
+    /// `data.type==="agent_progress"`): a forwarded subagent assistant turn is
+    /// re-emitted onto the PARENT stream as
+    /// ```text
+    /// { type:"assistant", message, parent_tool_use_id, session_id, uuid, … }
+    /// ```
+    /// where `parent_tool_use_id` is the spawning `Task`/`Agent` tool_use_id —
+    /// NON-NULL, which is exactly what distinguishes a forwarded subagent frame
+    /// from the top-level `assistant` frames (which hardcode `null`). The binary
+    /// re-emits with the subagent message spread and its `content` swapped for
+    /// the filtered blocks (`{...o.message, content: s}`); we mirror that by
+    /// cloning the subagent message and replacing `content`.
+    ///
+    /// Returns `None` (nothing forwarded) when:
+    ///   - the flag is OFF (`forward_subagent_text()` is false), or
+    ///   - `suppress_frames` is set (json/`--json` output path), or
+    ///   - the message is not an assistant message, or
+    ///   - after filtering to `text` + `thinking` blocks nothing remains
+    ///     (tool_use / tool_result blocks are skipped — they already surface via
+    ///     the always-on nested-progress path, so `--forward-subagent-text` adds
+    ///     only the assistant TEXT + THINKING blocks).
+    fn build_forwarded_subagent_frame(
+        &self,
+        message: &Value,
+        parent_tool_use_id: &str,
+        session_id: &str,
+        uuid: &str,
+    ) -> Option<Value> {
+        if !self.forward_subagent_text() || self.suppress_frames {
+            return None;
+        }
+        // Only assistant turns are forwarded here (text + thinking).
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            return None;
+        }
+        let content = message.get("content").and_then(Value::as_array)?;
+        let filtered: Vec<Value> = content
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.get("type").and_then(Value::as_str),
+                    Some("text") | Some("thinking")
+                )
+            })
+            .cloned()
+            .collect();
+        if filtered.is_empty() {
+            return None;
+        }
+        // Mirror the binary's `{...o.message, content: s}`: keep the subagent
+        // message's own fields (role, id, stop_reason) and swap in the filtered
+        // content blocks.
+        let mut fwd_message = message.clone();
+        if let Some(obj) = fwd_message.as_object_mut() {
+            obj.insert("content".to_string(), Value::Array(filtered));
+        }
+        Some(json!({
+            "type": "assistant",
+            "message": fwd_message,
+            "parent_tool_use_id": parent_tool_use_id,
+            "session_id": session_id,
+            "uuid": uuid,
+        }))
+    }
+
 }
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
+    /// Emit a forwarded subagent assistant message (`--forward-subagent-text`).
+    ///
+    /// `message` is the serialized subagent `protocol::ConversationMessage`
+    /// (carried by `agent::SubagentEvent::Message`); `parent_tool_use_id` is the
+    /// `Task`/`Agent` tool_use_id that spawned the child. Gated + shaped by
+    /// [`Self::build_forwarded_subagent_frame`]; a no-op when the flag is off or
+    /// the message has no forwardable text/thinking blocks.
+    async fn emit_forwarded_subagent_message(&self, message: &Value, parent_tool_use_id: &str) {
+        // Cheap gate before locking / minting a uuid.
+        if !self.forward_subagent_text() || self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        if let Some(frame) =
+            self.build_forwarded_subagent_frame(message, parent_tool_use_id, &session_id, &uuid)
+        {
+            self.enqueue(&frame);
+        }
+    }
+
     async fn emit_text(&self, text: &str) {
         let mut acc = self.accum.lock().await;
         // Append to last text block if present; else push a new one.
@@ -1625,6 +1717,85 @@ mod tests {
         assert!(stream.forward_subagent_text());
         stream.set_forward_subagent_text(false);
         assert!(!stream.forward_subagent_text());
+    }
+
+    /// (2.1.212 `--forward-subagent-text`) With the flag ON, a subagent
+    /// assistant message is re-shaped into an `assistant` frame carrying the
+    /// NON-NULL spawning `parent_tool_use_id` and the forwarded text block;
+    /// tool_use / tool_result blocks are dropped.
+    #[test]
+    fn forwarded_subagent_frame_carries_parent_tool_use_id_and_text() {
+        let stream = StreamJsonStream::new(make_params("sess-fwd"));
+        stream.set_forward_subagent_text(true);
+        // Serialized subagent ConversationMessage::Assistant shape.
+        let msg = json!({
+            "role": "assistant",
+            "id": "msg_child_1",
+            "content": [
+                {"type": "thinking", "thinking": "pondering", "signature": null},
+                {"type": "text", "text": "hello from subagent"},
+                {"type": "tool_use", "id": "toolu_x", "name": "Read", "input": {}},
+            ],
+            "stop_reason": "end_turn",
+        });
+        let frame = stream
+            .build_forwarded_subagent_frame(&msg, "toolu_parent_task", "sess-fwd", "uuid-1")
+            .expect("frame forwarded when flag is on");
+        assert_eq!(frame["type"], "assistant");
+        // The distinguishing feature: NON-NULL parent_tool_use_id = spawner.
+        assert_eq!(frame["parent_tool_use_id"], "toolu_parent_task");
+        assert!(!frame["parent_tool_use_id"].is_null());
+        assert_eq!(frame["session_id"], "sess-fwd");
+        assert_eq!(frame["uuid"], "uuid-1");
+        // Content filtered to text + thinking (tool_use dropped).
+        let content = frame["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "tool_use block dropped, text+thinking kept");
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "hello from subagent");
+        // The message keeps its own id / stop_reason.
+        assert_eq!(frame["message"]["id"], "msg_child_1");
+        assert_eq!(frame["message"]["stop_reason"], "end_turn");
+    }
+
+    /// With the flag OFF nothing is forwarded (returns `None`).
+    #[test]
+    fn forwarded_subagent_frame_none_when_flag_off() {
+        let stream = StreamJsonStream::new(make_params("sess-fwd"));
+        // Default: forward_subagent_text = false.
+        let msg = json!({
+            "role": "assistant",
+            "id": "msg_child_1",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+        });
+        assert!(
+            stream
+                .build_forwarded_subagent_frame(&msg, "toolu_parent", "sess-fwd", "uuid-1")
+                .is_none(),
+            "flag OFF forwards nothing"
+        );
+    }
+
+    /// With the flag ON but only tool_use / tool_result blocks (no text or
+    /// thinking), nothing is forwarded — those blocks already surface via the
+    /// always-on nested-progress path.
+    #[test]
+    fn forwarded_subagent_frame_none_when_no_text_or_thinking() {
+        let stream = StreamJsonStream::new(make_params("sess-fwd"));
+        stream.set_forward_subagent_text(true);
+        let msg = json!({
+            "role": "assistant",
+            "id": "msg_child_1",
+            "content": [{"type": "tool_use", "id": "toolu_x", "name": "Read", "input": {}}],
+            "stop_reason": "tool_use",
+        });
+        assert!(
+            stream
+                .build_forwarded_subagent_frame(&msg, "toolu_parent", "sess-fwd", "uuid-1")
+                .is_none(),
+            "tool_use-only message forwards nothing"
+        );
     }
 
     /// Verify that `emit_stream_event` is suppressed in suppress_frames mode

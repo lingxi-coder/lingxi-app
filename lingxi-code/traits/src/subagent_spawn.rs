@@ -71,12 +71,13 @@ pub struct SubagentSpawnRequest {
     /// routing is deferred.
     #[serde(default)]
     pub team_name: Option<String>,
-    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`). The
-    /// spawner clamps it against the parent's live mode (claude-code 2.1.207
-    /// `wKe`/`zol`) and threads the result into the child's tool-dispatch
-    /// permission checks (`SubagentContext::permission_mode_override`) so a
-    /// `mode:"plan"` child gates mutations while reads stay frictionless. The fork
-    /// path leaves it `None`.
+    /// Permission mode for a spawned teammate (TS `mode`, e.g. `"plan"`).
+    /// DEPRECATED and ignored as of claude-code 2.1.212: the Agent/Task entrypoint
+    /// no longer threads the call param here (it always sends `None`), and the
+    /// spawner no longer applies it. A spawned subagent inherits the parent's live
+    /// permission mode (claude `_=yn(l),y=_.mode`), with the agent-definition
+    /// frontmatter as the only override. The field is retained for back-compat with
+    /// callers that still populate it, but the spawner does not consult it.
     #[serde(default)]
     pub mode: Option<String>,
     /// Isolation mode (`"worktree"` | `"remote"`, TS `isolation`). `worktree`
@@ -442,6 +443,18 @@ pub fn should_inject_agent_list_in_messages() -> bool {
     // v2.1.193: catalog is always externalized ⇒ default ON.
     true
 }
+
+/// Sentinel key wrapping a forwarded subagent assistant message on the
+/// [`SubagentSpawner::spawn_with_progress`] `String` channel
+/// (`--forward-subagent-text`, 2.1.212).
+///
+/// The `spawn_with_progress` progress channel is `String`-typed (a `traits →
+/// tool-api` cycle blocks a richer type), so the pool spawner JSON-encodes a
+/// forwarded assistant message as `{"<KEY>": <message>}` and the Agent tool
+/// decodes it back into a structured `ToolProgress` for the stream-json sink.
+/// Plain activity lines (`"Read(foo)"`) never parse as a JSON object carrying
+/// this key, so the two payload kinds never collide.
+pub const FORWARD_SUBAGENT_MESSAGE_SENTINEL: &str = "__forward_subagent_message__";
 
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]

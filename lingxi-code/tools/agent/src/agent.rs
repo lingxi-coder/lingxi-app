@@ -127,7 +127,11 @@ pub struct AgentToolInput {
     /// `team_name?` — optional team name (AgentTool.tsx:95).
     #[serde(default)]
     pub team_name: Option<String>,
-    /// `mode?` — optional permission mode (AgentTool.tsx:96).
+    /// `mode?` — DEPRECATED and ignored (claude 2.1.212). Still accepted on the
+    /// wire for back-compat, but the value is never applied: spawned subagents
+    /// inherit the parent session's live permission mode (claude `_=yn(l),
+    /// y=_.mode`), and only the agent-definition frontmatter may override it. The
+    /// call param is read but NEVER threaded into the spawn request.
     #[serde(default)]
     pub mode: Option<String>,
     /// `isolation?` — optional `'worktree' | 'remote'` (AgentTool.tsx:99).
@@ -156,6 +160,18 @@ fn normalize_agent_type(s: &str) -> String {
         .flat_map(char::to_lowercase)
         .filter(|c| !(c.is_whitespace() || *c == '_' || is_pd_dash(*c)))
         .collect()
+}
+
+/// Decode a forwarded-subagent-message progress line (`--forward-subagent-text`,
+/// 2.1.212). Returns the inner subagent message `Value` when `line` is a JSON
+/// object carrying [`traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
+/// (the pool spawner's sentinel wrapper); `None` for a plain nested-activity
+/// line, which never parses as such an object.
+fn decode_forward_subagent_message(line: &str) -> Option<Value> {
+    let parsed: Value = serde_json::from_str(line).ok()?;
+    parsed
+        .get(traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
+        .cloned()
 }
 
 /// Unicode `Pd` (dash punctuation) membership test for [`normalize_agent_type`].
@@ -279,7 +295,7 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "mode": {
                 "type": "string",
                 "enum": ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
-                "description": "Permission mode for spawned teammate (e.g., \"plan\" to require plan approval)."
+                "description": "Deprecated; ignored. Subagents inherit the parent session's permission mode; agent-definition frontmatter may override it."
             },
             "isolation": {
                 "type": "string",
@@ -1015,7 +1031,11 @@ Reach for this when the task matches an available agent type, when you have inde
             } else {
                 parsed.team_name.clone()
             },
-            mode: if is_fork { None } else { parsed.mode.clone() },
+            // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored:
+            // claude no longer destructures/passes it. The child inherits the
+            // parent's live permission mode (with agent-definition frontmatter as
+            // the only override), so `parsed.mode` is never threaded here.
+            mode: None,
             isolation: if is_fork { None } else { effective_isolation },
             // The RESOLVED cwd (explicit `cwd` override, else the isolation
             // worktree's path — claude `cwd ?? worktreePath`); `None` on fork.
@@ -1856,7 +1876,10 @@ Use /mcp to configure and authenticate the required MCP servers.",
             } else {
                 parsed.team_name.clone()
             },
-            mode: if is_fork { None } else { parsed.mode.clone() },
+            // (parity 2.1.212) DEPRECATED `mode` call param — ignored (see the
+            // async spawn path). The child inherits the parent's live permission
+            // mode; only agent-definition frontmatter overrides it.
+            mode: None,
             isolation: if is_fork {
                 None
             } else {
@@ -1917,10 +1940,20 @@ Use /mcp to configure and authenticate the required MCP servers.",
         let forward_progress = progress.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(line) = prog_rx.recv().await {
+                // (2.1.212 `--forward-subagent-text`) A forwarded subagent
+                // assistant message arrives sentinel-wrapped as a JSON line; hand
+                // its inner message through as a structured `forward_subagent_message`
+                // payload so the turn loop's stream-json sink can re-emit it with
+                // `parent_tool_use_id` set. Everything else is a plain nested
+                // activity line.
+                let data = decode_forward_subagent_message(&line).map_or_else(
+                    || serde_json::json!({ "subagent_activity": line }),
+                    |message| serde_json::json!({ "forward_subagent_message": message }),
+                );
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
                         tool_use_id: protocol::ToolUseId::new(),
-                        data: serde_json::json!({ "subagent_activity": line }),
+                        data,
                     })
                     .await;
             }

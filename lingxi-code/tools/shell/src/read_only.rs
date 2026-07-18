@@ -271,6 +271,26 @@ fn is_normalized_cd_command(subcommand: &str) -> bool {
     )
 }
 
+/// Does a command contain a statement-level directory-change builtin?
+///
+/// Port of `ror` (claude-code 2.1.210+): `wS(e).some(t => N1e(t.trim()))` —
+/// split into statements ([`split_command`], the `wS` analogue) and check
+/// whether any statement's base command (after stripping leading `KEY=val`
+/// env prefixes, the `N1e`/`vne`+`jx` first-token check) is `cd`, `pushd`,
+/// `popd`, or `chdir`. Used to decide whether a backgrounded command needs the
+/// "Session cwd remains …" hint. Note `N1e` includes `chdir`, unlike the
+/// permission-gate [`command_has_any_cd`].
+#[must_use]
+pub fn command_has_statement_level_cd(command: &str) -> bool {
+    split_command(command).iter().any(|sub| {
+        let stripped = strip_leading_env_vars(sub.trim());
+        matches!(
+            base_command(stripped).as_deref(),
+            Some("cd" | "pushd" | "popd" | "chdir")
+        )
+    })
+}
+
 /// Port of `isCommandReadOnly` (`readOnlyValidation.ts:1678`): is a SINGLE
 /// subcommand read-only?
 fn is_command_read_only(subcommand: &str) -> bool {
@@ -891,6 +911,27 @@ mod tests {
         assert!(!command_has_any_cd("ls && echo cd"));
         assert!(!command_has_any_cd("cdg"));
         assert!(!command_has_any_cd("grep cd file"));
+    }
+
+    // ---- command_has_statement_level_cd (ror / N1e) ----
+    #[test]
+    fn statement_level_cd_detects_all_builtins() {
+        assert!(command_has_statement_level_cd("cd x"));
+        assert!(command_has_statement_level_cd("ls && cd y"));
+        assert!(command_has_statement_level_cd("pushd /tmp"));
+        assert!(command_has_statement_level_cd("popd"));
+        // `chdir` is included by `N1e` (unlike the permission-gate cd check).
+        assert!(command_has_statement_level_cd("chdir /tmp"));
+        assert!(command_has_statement_level_cd("FOO=bar cd /tmp"));
+        assert!(!command_has_any_cd("chdir /tmp"));
+    }
+
+    #[test]
+    fn statement_level_cd_ignores_substring() {
+        assert!(!command_has_statement_level_cd("echo cd"));
+        assert!(!command_has_statement_level_cd("ls -la"));
+        assert!(!command_has_statement_level_cd("grep cd file"));
+        assert!(!command_has_statement_level_cd("cdg"));
     }
 
     #[test]

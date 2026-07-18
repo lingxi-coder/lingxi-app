@@ -1352,10 +1352,21 @@ impl Tool for BashTool {
                     // Model-facing background note (`d` in the binary's mapper):
                     // `Command running in background with ID: … Output is being
                     // written to: … use Read on that file path.` (offset 183106320).
-                    let note = format!(
+                    let mut note = format!(
                         "Command running in background with ID: {}. Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
                         handle.task_id, out_path
                     );
+                    // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
+                    // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
+                    // (`ror`), the binary appends this hint on a new line so the
+                    // model does not assume the directory change took effect for
+                    // subsequent commands (the bg run never mutates the session cwd).
+                    if crate::read_only::command_has_statement_level_cd(&cmd_str) {
+                        note.push_str(&format!(
+                            "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
+                            workspace.display()
+                        ));
+                    }
                     let model_content = bash_model_content("", "", false, Some(&note));
                     Ok(ToolCallResult {
                         // Backgrounded launch: the binary's result data is the
@@ -1499,10 +1510,21 @@ impl Tool for BashTool {
                 // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`
                 // (the binary's `${Math.max(1,Math.round(l/1000))}s`).
                 let secs = (((timeout_ms as f64) / 1000.0).round() as i64).max(1);
-                let note = format!(
+                let mut note = format!(
                     "Command did not complete within its {secs}s timeout and was moved to the background (ID: {}). Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
                     handle.task_id, out_path
                 );
+                // PARITY 2.1.210 (`backgroundCwdHint`): same hint as an explicit
+                // background launch — a timed-out-and-backgrounded command whose
+                // text contains a statement-level `cd` never mutates the session
+                // cwd, so tell the model it remains unchanged (`ror` + mapper's
+                // `if(a)_+="\n"+a`).
+                if crate::read_only::command_has_statement_level_cd(&cmd_str) {
+                    note.push_str(&format!(
+                        "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
+                        workspace.display()
+                    ));
+                }
                 let model_content = bash_model_content("", "", false, Some(&note));
                 Ok(ToolCallResult {
                     // Same empty main shape as an explicit background launch,
@@ -3008,6 +3030,50 @@ mod tests {
         assert!(
             note.contains("task-abc123") && note.contains("Command running in background"),
             "note must carry the task id + path, got: {note}",
+        );
+        // A `cd`-free command gets NO `backgroundCwdHint` (`ror` is false).
+        assert!(
+            !note.contains("Session cwd remains"),
+            "non-cd bg command must not carry the cwd hint, got: {note}",
+        );
+    }
+
+    #[tokio::test]
+    async fn background_cd_command_appends_session_cwd_hint() {
+        // PARITY 2.1.210 (`backgroundCwdHint`): a backgrounded command containing
+        // a statement-level `cd` gets the "Session cwd remains …" hint appended on
+        // a new line so the model does not assume the `cd` took effect.
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = Arc::new(BgStub);
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(
+                json!({"command": "cd /tmp && sleep 5", "run_in_background": true}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let note = res.model_content.as_deref().expect("background model note");
+        assert!(
+            note.contains("Command running in background"),
+            "base bg note missing, got: {note}",
+        );
+        assert!(
+            note.contains(
+                "; directory changes made by the backgrounded command do not apply to subsequent commands."
+            ),
+            "cd bg command must carry the session-cwd hint, got: {note}",
+        );
+        // The hint rides on its own line after the base note (mapper `_+="\n"+a`).
+        assert!(
+            note.contains("\nSession cwd remains "),
+            "hint must be appended on a new line, got: {note}",
         );
     }
 

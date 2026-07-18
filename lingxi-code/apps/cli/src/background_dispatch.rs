@@ -225,6 +225,137 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
     exit_codes::SUCCESS
 }
 
+/// Dispatch a `/fork`-to-background COPY: a background daemon that RESUMES an
+/// ALREADY-SNAPSHOTTED session (its `<session_id>.jsonl` transcript was written
+/// by the caller — [`crate::bg_session_forker::CliBgSessionForker`]). Unlike
+/// [`dispatch_background`] (a fresh session), this mints only the short id (the
+/// session id is supplied) and records a [`Launch::Resume`] so the worker seeds
+/// its history from the copied transcript.
+///
+/// Returns the minted short id on success (the caller renders the live-session
+/// system line from it). Production entry point: resolves nothing itself — the
+/// caller passes the already-resolved `config_home` / `runtime_dir` / `cwd` so
+/// the same values back the snapshot write and this dispatch.
+pub fn dispatch_forked_session(
+    config_home: &Path,
+    runtime_dir: &Path,
+    cwd: &str,
+    session_id: &str,
+    prompt: &str,
+) -> std::io::Result<String> {
+    dispatch_forked_session_inner(
+        config_home,
+        runtime_dir,
+        cwd,
+        session_id,
+        prompt,
+        &SystemLockProbe,
+        &mut RealSpawner,
+    )
+}
+
+/// Testable core of [`dispatch_forked_session`] — the lock-liveness probe and
+/// the daemon spawner are injected.
+fn dispatch_forked_session_inner<LP: LockProbe, S: DaemonSpawner>(
+    config_home: &Path,
+    runtime_dir: &Path,
+    cwd: &str,
+    session_id: &str,
+    prompt: &str,
+    lock_probe: &LP,
+    spawner: &mut S,
+) -> std::io::Result<String> {
+    let cli_pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+    let version = env!("CARGO_PKG_VERSION");
+    let now = now_millis();
+
+    let short = agents_registry::mint_short_id(config_home);
+    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let seed_prompt = (!prompt.trim().is_empty()).then(|| prompt.to_string());
+    let intent = intent_from_prompt(seed_prompt.as_deref());
+
+    // Write the durable job — same shape as `dispatch_background` but with the
+    // caller-supplied (already-snapshotted) session id.
+    let respawn_flags: Vec<String> = Vec::new();
+    let job = JobStateWrite {
+        state: "working",
+        tempo: Some("active"),
+        name: None,
+        session_id: Some(session_id),
+        cwd: Some(cwd),
+        origin_cwd: Some(cwd),
+        created_at: Some(&created_at),
+        intent: intent.as_deref(),
+        display_intent: None,
+        template: Some("bg"),
+        respawn_flags: &respawn_flags,
+        in_flight: None,
+        backend: Some("daemon"),
+        initial_prompt: seed_prompt.as_deref(),
+        detail: None,
+        worker_pid: None,
+    };
+    agents_registry::write_job_state(config_home, &short, &job)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    // Roster handoff — a `Launch::Resume` so the worker seeds its history from
+    // the snapshotted `<session_id>.jsonl` transcript (fork = a COPY, not a
+    // continue-in-place).
+    let transcript_path = session::jsonl::path::session_path(config_home, cwd, session_id)
+        .to_str()
+        .map(str::to_string);
+    let mut roster = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
+    let record = WorkerRecord {
+        pid: cli_pid,
+        proc_start: daemon_roster::read_proc_start(cli_pid),
+        session_id: session_id.to_string(),
+        rendezvous_sock: String::new(),
+        pty_sock: None,
+        messaging_sock: None,
+        cli_version: Some(version.to_string()),
+        started_at: now,
+        attempt: 0,
+        cwd: cwd.to_string(),
+        worktree_path: None,
+        dispatch: Dispatch {
+            proto: daemon_roster::PROTO,
+            short: short.clone(),
+            nonce: None,
+            session_id: session_id.to_string(),
+            created_at: now,
+            source: DispatchSource::Shell,
+            cwd: cwd.to_string(),
+            launch: Launch::Resume {
+                session_id: session_id.to_string(),
+                transcript_path,
+                fork: true,
+                flag_args: Vec::new(),
+            },
+            env: dispatch_env(),
+            reattach_env: None,
+            worktree: None,
+            isolation: Isolation::None,
+            respawn_flags: Vec::new(),
+            attach_stall_respawns: None,
+            agent: None,
+            routine: None,
+            seed: intent.clone().map(|intent| Seed { intent, name: None }),
+            cols: None,
+            rows: None,
+        },
+        pending_respawn: None,
+        dec_modes: None,
+        rv_auth: None,
+        pty_auth: None,
+        extra: serde_json::Map::new(),
+    };
+    roster.workers.insert(short.clone(), record);
+    let _ = daemon_roster::write_roster(runtime_dir, &roster);
+
+    ensure_daemon(runtime_dir, lock_probe, spawner);
+    Ok(short)
+}
+
 /// Spawn a detached `lingxi-cli daemon` unless a live supervisor already holds
 /// `daemon.lock`. A benign double-spawn is fine — `acquire_or_yield` resolves
 /// the loser via `Yield`/`AlreadyOurs` (exit 0). The spawned argv carries the

@@ -61,6 +61,7 @@ pub mod ax_screen_reader;
 pub mod background_dispatch;
 pub mod bg_attach;
 pub mod bg_reply_queue;
+pub mod bg_session_forker;
 mod bypass_env;
 pub mod commands;
 pub mod control_plane;

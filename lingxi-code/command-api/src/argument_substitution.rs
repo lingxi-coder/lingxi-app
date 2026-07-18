@@ -147,6 +147,21 @@ fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Strip the U+FFFF sentinel from a substituted argument value before it is
+/// inserted, mirroring TS `i=(f)=>(f??"").replaceAll(QQn,"")` (`QQn="￿"`).
+/// Every substituted value (named, indexed, shorthand, and full `$ARGUMENTS`)
+/// is routed through this, so the later sentinel-restore
+/// (`replaceAll(QQn, "$")`) only ever converts the genuine out-of-range
+/// sentinels back to `$` — never a literal U+FFFF that a user supplied inside
+/// an argument value (which TS drops rather than corrupting into `$`).
+fn strip_sentinel(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.contains('\u{FFFF}') {
+        std::borrow::Cow::Owned(value.replace('\u{FFFF}', ""))
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
 /// Faithful port of TS `substituteArguments`.
 ///
 /// `args == None` (TS `undefined`/`null`) returns `content` unchanged. An empty
@@ -184,8 +199,8 @@ pub fn substitute_arguments_faithful(
         if name.is_empty() {
             continue;
         }
-        let replacement = parsed_args.get(i).map_or("", String::as_str);
-        content = replace_named_arg(&content, name, replacement)?;
+        let replacement = strip_sentinel(parsed_args.get(i).map_or("", String::as_str));
+        content = replace_named_arg(&content, name, &replacement)?;
     }
 
     // (2) Indexed: $ARGUMENTS[<digits>]. An out-of-range index is preserved
@@ -199,8 +214,10 @@ pub fn substitute_arguments_faithful(
     // out-of-range index is left verbatim (parity 2.1.212).
     content = replace_shorthand_indexed(&content, &parsed_args);
 
-    // (4) Full arguments string.
-    content = content.replace("$ARGUMENTS", args);
+    // (4) Full arguments string. The value is sentinel-stripped before
+    // insertion (TS `i(t)`) so a literal U+FFFF in `args` is dropped, not
+    // corrupted into `$` by the restore below.
+    content = content.replace("$ARGUMENTS", &strip_sentinel(args));
 
     // Restore the sentinel emitted for out-of-range `$ARGUMENTS[N]` back to `$`
     // (TS `if (u || p) e = e.replaceAll(QQn, "$")`). Only runs when such a
@@ -352,7 +369,7 @@ fn replace_arguments_indexed(content: &str, parsed_args: &[String]) -> (String, 
             if j > digits_start && j < bytes.len() && bytes[j] == b']' {
                 let index: usize = content[digits_start..j].parse().unwrap_or(usize::MAX);
                 match parsed_args.get(index) {
-                    Some(replacement) => out.push_str(replacement),
+                    Some(replacement) => out.push_str(&strip_sentinel(replacement)),
                     None => {
                         // Preserve verbatim, shielded by the sentinel (TS
                         // `QQn + f.slice(1)`, where `f` is the whole `$…]` match
@@ -410,7 +427,7 @@ fn replace_shorthand_indexed(content: &str, parsed_args: &[String]) -> String {
                         .parse()
                         .unwrap_or(usize::MAX);
                     match parsed_args.get(index) {
-                        Some(replacement) => out.push_str(replacement),
+                        Some(replacement) => out.push_str(&strip_sentinel(replacement)),
                         // Out-of-range index is preserved verbatim, not stripped
                         // (TS 2.1.212 `if (s[g] === void 0) return f`): re-emit
                         // the whole `$<digits>` match unchanged.
@@ -612,6 +629,23 @@ mod tests {
             sub("$ARGUMENTS[9] $ARGUMENTS", Some("a"), false, &[]),
             "$ARGUMENTS[9] a"
         );
+    }
+
+    #[test]
+    fn literal_sentinel_in_args_is_stripped_not_restored() {
+        // A literal U+FFFF in the argument value must be STRIPPED before
+        // insertion (TS `i=(f)=>f.replaceAll(QQn,"")`), so the out-of-range
+        // sentinel-restore only ever converts genuine sentinels back to `$`.
+        // `$ARGUMENTS[9]` is out of range -> preserves the sentinel and gates
+        // the restore; bare `$ARGUMENTS` expands to the (stripped) arg value.
+        // TS `yot("$ARGUMENTS[9] $ARGUMENTS", "a￿b", false, [])` -> "$ARGUMENTS[9] ab".
+        assert_eq!(
+            sub("$ARGUMENTS[9] $ARGUMENTS", Some("a\u{FFFF}b"), false, &[]),
+            "$ARGUMENTS[9] ab"
+        );
+        // Indexed and shorthand insertions strip the sentinel too.
+        assert_eq!(sub("$ARGUMENTS[0]", Some("a\u{FFFF}b"), false, &[]), "ab");
+        assert_eq!(sub("$0", Some("a\u{FFFF}b"), false, &[]), "ab");
     }
 
     #[test]

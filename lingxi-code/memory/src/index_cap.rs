@@ -9,7 +9,8 @@
 //! ## Ported functions (2.1.212 binary)
 //!
 //! - `qAt(content)` → [`measure`]: trims the content, then reports
-//!   `lineCount = <count of '\n' in trimmed> + 1` and `byteCount = trimmed len`.
+//!   `lineCount = <count of '\n' in trimmed> + 1` and
+//!   `byteCount = <trimmed String.length>` (UTF-16 code units).
 //! - `ypo({rawSizeBytes, surfaceCap, splicedSizeBytes, spliceCap, spliceActive})`
 //!   → resolves the `(sizeBytes, byteCap)` pair. For the plain memdir entrypoint
 //!   `surfaceCap` (`promptIndexMaxBytes`) is undefined, so `ypo` reduces to
@@ -66,23 +67,29 @@ pub struct MemoryIndexNotice {
 /// Trimmed line/byte measurement of memory-index content (claude-code `qAt`).
 ///
 /// `line_count = <'\n' occurrences in the trimmed content> + 1`;
-/// `byte_count = <trimmed UTF-8 length>` (claude-code measures `String.length`
-/// UTF-16 units — identical for the ASCII index lines the format prescribes).
+/// `byte_count = <trimmed String.length>` — claude-code `qAt` reports
+/// `t.length`, i.e. UTF-16 code units, so we count those (not UTF-8 bytes):
+/// a real MEMORY.md index carries non-ASCII glyphs (em-dash U+2014, emoji) on
+/// nearly every entry line, where UTF-8 `.len()` would over-count (em-dash is
+/// 3 UTF-8 bytes vs 1 UTF-16 unit) and flip the near-cap advisory tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexMeasure {
     /// Line count of the trimmed content (always ≥ 1).
     pub line_count: usize,
-    /// Byte count of the trimmed content.
+    /// UTF-16 code-unit count of the trimmed content (claude-code
+    /// `String.length`).
     pub byte_count: usize,
 }
 
-/// Measure `content` the way claude-code `qAt` does: trim, then count.
+/// Measure `content` the way claude-code `qAt` does: trim, then count. The
+/// `byte_count` is the trimmed content's UTF-16 code-unit length (JS
+/// `String.length`), matching `qAt`'s `byteCount: t.length`.
 #[must_use]
 pub fn measure(content: &str) -> IndexMeasure {
     let trimmed = content.trim();
     IndexMeasure {
         line_count: trimmed.matches('\n').count() + 1,
-        byte_count: trimmed.len(),
+        byte_count: trimmed.chars().map(|c| c.len_utf16()).sum(),
     }
 }
 
@@ -310,6 +317,52 @@ mod tests {
         let m = measure("\n\n  a\nb\nc  \n\n");
         assert_eq!(m.line_count, 3); // "a\nb\nc" -> 2 newlines + 1
         assert_eq!(m.byte_count, 5); // "a\nb\nc"
+    }
+
+    #[test]
+    fn measure_counts_utf16_code_units_not_utf8_bytes() {
+        // A non-ASCII index line: em-dash (U+2014, 3 UTF-8 bytes / 1 UTF-16
+        // unit) and an emoji (U+2705, 3 UTF-8 bytes / 1 UTF-16 unit; astral
+        // emoji would be 4 bytes / 2 units). CC's qAt reports `t.length`
+        // (UTF-16), so we must count code units, not `.len()` bytes.
+        let line = "- [x](y.md) \u{2014} \u{2705} note"; // trimmed already
+        let m = measure(line);
+        // CC's `t.length` is UTF-16 code units — every glyph here is BMP, so
+        // that equals the char count.
+        assert_eq!(m.byte_count, line.encode_utf16().count());
+        // UTF-8 `.len()` over-counts (em-dash and this emoji are 3 bytes / 1
+        // UTF-16 unit each = +2 apiece), which must NOT be what we report.
+        assert_ne!(m.byte_count, line.len());
+        assert_eq!(m.byte_count + 4, line.len());
+    }
+
+    #[test]
+    fn non_ascii_index_drives_advisory_by_utf16_count() {
+        // Build a near-cap index whose UTF-16 code-unit total is UNDER the 0.8
+        // byte threshold (20000) but whose UTF-8 byte total would cross it — so
+        // a `.len()`-based measure would wrongly surface an advisory CC does
+        // not. Use few, long lines so the LINE dimension stays comfortably
+        // under its 200-line cap and only the byte dimension is near-cap.
+        //
+        // Each entry: 180 ASCII + 10 em-dashes + '\n' = 191 UTF-16 units but
+        // 211 UTF-8 bytes (each em-dash is +2). 100 entries => 100 lines,
+        // UTF-16 = 19_100 (< 20_000, no advisory), UTF-8 = 21_100 (>= 20_000,
+        // would falsely advise).
+        let entry = format!("{}{}\n", "x".repeat(180), "\u{2014}".repeat(10));
+        assert_eq!(entry.encode_utf16().count(), 191);
+        assert_eq!(entry.len(), 211);
+        let body = entry.repeat(100);
+
+        let m = measure(&body);
+        assert_eq!(m.line_count, 100); // well under the 200-line cap
+        // trim() strips the trailing '\n', so both totals drop by 1.
+        assert_eq!(m.byte_count, 19_100 - 1);
+        // A UTF-8 `.len()` measure would be over the 20_000 (0.8) threshold.
+        assert!(body.trim().len() >= 20_000);
+
+        // CC reports the file as under-cap (no advisory); the byte-len bug
+        // would have surfaced the "approaching" advisory here.
+        assert!(memory_index_cap_notice(&body).is_none());
     }
 
     #[test]

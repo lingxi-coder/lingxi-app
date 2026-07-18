@@ -50,7 +50,7 @@ pub enum Commands {
     Mcp(mcp::Cli),
     /// Manage authentication
     Auth(auth::Cli),
-    /// Inspect auto mode classifier configuration
+    /// Inspect or reset auto mode classifier configuration
     #[command(name = "auto-mode")]
     AutoMode(auto_mode::Cli),
     /// Check the health of your LingXi auto-updater. Note: The workspace

@@ -227,6 +227,74 @@ fn deduplicate_by_session_id(rows: Vec<SessionMetadata>) -> Vec<SessionMetadata>
     by_id.into_values().collect()
 }
 
+/// `isLoopSession` — detect whether a transcript was started by `/loop`, by
+/// finding its FIRST GENUINE user prompt and testing it for the `/loop`
+/// command-name tag. 1:1 with the CC 2.1.212 detector (the 2.1.211 fix that
+/// stopped `/loop` from hiding sessions from `/resume` after a single use):
+/// the pre-fix code tested `messages[0]` blindly, so a compacted or
+/// meta-first transcript checked the WRONG line and mis-hid (or mis-showed)
+/// the session. The fixed detector iterates messages and:
+///   - skips any line that is not `type === "user"`,
+///   - skips `isMeta === true` and `isCompactSummary === true`,
+///   - skips user lines whose `message.content` array carries a `tool_result`
+///     (tool-result turns are user-typed only in shape, not intent),
+/// then returns whether the FIRST surviving user message's text contains
+/// `"<command-name>/loop</command-name>"` (@ binary offset ~339753,
+/// tag confirmed @ 113388700). It returns on the first real prompt — a
+/// non-`/loop` first prompt yields `false` without scanning further.
+fn is_loop_session(messages: &[JsonlMessage]) -> bool {
+    const LOOP_TAG: &str = "<command-name>/loop</command-name>";
+    for m in messages {
+        // `if(s.type!=="user") continue` (mirrors the raw `"type":"user"` prefilter).
+        if m.message_type != "user" {
+            continue;
+        }
+        // `if(s.isMeta===!0||s.isCompactSummary===!0) continue`.
+        if m.extra.get("isMeta") == Some(&Value::Bool(true))
+            || m.extra.get("isCompactSummary") == Some(&Value::Bool(true))
+        {
+            continue;
+        }
+        // `let a=s.message; if(!a) continue` — a null/absent message is skipped.
+        if m.message.is_null() {
+            continue;
+        }
+        // `let l=a.content` — string → single candidate; array → gather `text`
+        // blocks but bail out of THIS message if it carries a `tool_result`.
+        let content = m.message.get("content");
+        let mut texts: Vec<&str> = Vec::new();
+        if let Some(s) = content.and_then(Value::as_str) {
+            texts.push(s);
+        } else if let Some(arr) = content.and_then(Value::as_array) {
+            let mut has_tool_result = false;
+            for d in arr {
+                if !d.is_object() {
+                    continue;
+                }
+                match d.get("type").and_then(Value::as_str) {
+                    Some("tool_result") => {
+                        has_tool_result = true;
+                        break;
+                    }
+                    Some("text") => {
+                        if let Some(t) = d.get("text").and_then(Value::as_str) {
+                            texts.push(t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if has_tool_result {
+                continue;
+            }
+        }
+        // `return c.some((u)=>u.includes("<command-name>/loop</command-name>"))`
+        // — decide on the FIRST genuine prompt and stop.
+        return texts.iter().any(|t| t.contains(LOOP_TAG));
+    }
+    false
+}
+
 /// Scan a single project dir, appending one [`SessionMetadata`] row per resumable
 /// `.jsonl` file to `rows`. Applies the SESSION.1 sidechain/`teamName` hide
 /// filter (first parsed line only). Each row's `title` follows claude-code's
@@ -368,29 +436,16 @@ async fn collect_dir(
         //   `if(!a&&n.isLoopSession) return C(...),null`
         // Binary log: `"% filtered from /resume: /loop session"` @ 113414577.
         // Confirmed string: `"<command-name>/loop</command-name>"` @ 113388700.
-        // The binary sets `isLoopSession` by scanning the FIRST LINE (the raw
-        // string) for the `/loop` command-name tag — we scan the first message's
-        // content text for the same tag. We do this OUTSIDE the `if let Some(first)`
-        // block so we don't shadow the first-check path; the session is only reachable
-        // here when it has at least one message (the block above `continue`d otherwise).
-        {
-            let raw_first_line = {
-                // Reconstruct the first raw JSONL line from messages_in_order[0] to
-                // check for the /loop tag. Because route_lines drops raw text after
-                // parse, we must re-serialize the message back to JSON and scan it.
-                // This is cheap (one message) and correct — the tag appears verbatim
-                // in the user message content.
-                loaded
-                    .messages_in_order
-                    .first()
-                    .and_then(|m| serde_json::to_string(m).ok())
-                    .unwrap_or_default()
-            };
-            if !current_is_sdk_entrypoint
-                && raw_first_line.contains("<command-name>/loop</command-name>")
-            {
-                continue;
-            }
+        // 2.1.212 fix (2.1.211 changelog): the detector no longer tests
+        // `messages[0]` blindly — it walks to the FIRST GENUINE user prompt,
+        // skipping non-user lines, `isMeta`/`isCompactSummary` lines, and
+        // `tool_result` turns, so a compacted / meta-first transcript is no
+        // longer mis-hidden (or mis-shown). See [`is_loop_session`]. We test
+        // OUTSIDE the `if let Some(first)` block so we don't shadow the
+        // first-check path; the session is only reachable here when it has at
+        // least one message (the block above `continue`d otherwise).
+        if !current_is_sdk_entrypoint && is_loop_session(&loaded.messages_in_order) {
+            continue;
         }
 
         // Title precedence — 1:1 with claude-code's resolution, which composes
@@ -1460,7 +1515,10 @@ mod tests {
         extra.insert("subtype".to_string(), json!("compact_boundary"));
         extra.insert("content".to_string(), json!("Conversation compacted"));
         extra.insert("level".to_string(), json!("info"));
-        extra.insert("compactMetadata".to_string(), Value::Object(compact_metadata));
+        extra.insert(
+            "compactMetadata".to_string(),
+            Value::Object(compact_metadata),
+        );
         JsonlMessage {
             message_type: "system".to_string(),
             uuid: uuid.to_string(),
@@ -1502,6 +1560,78 @@ mod tests {
         }
     }
 
+    fn user_with_content(uuid: &str, content: Value) -> JsonlMessage {
+        let mut m = user_line(uuid);
+        m.message = json!({ "role": "user", "content": content });
+        m
+    }
+
+    const LOOP_TAG: &str = "<command-name>/loop</command-name>";
+
+    #[test]
+    fn is_loop_session_detects_plain_first_prompt() {
+        let msgs = vec![user_with_content("u1", json!(LOOP_TAG))];
+        assert!(is_loop_session(&msgs));
+    }
+
+    #[test]
+    fn is_loop_session_false_when_first_prompt_not_loop() {
+        let msgs = vec![
+            user_with_content("u1", json!("just a normal question")),
+            user_with_content("u2", json!(LOOP_TAG)),
+        ];
+        // Detector returns on the FIRST genuine prompt — a non-`/loop` first
+        // prompt yields false even if a later message carries the tag.
+        assert!(!is_loop_session(&msgs));
+    }
+
+    #[test]
+    fn is_loop_session_skips_meta_and_compact_before_real_prompt() {
+        // A compacted / meta-first transcript: the 2.1.211 fix. The old
+        // `messages[0]` check would test the isMeta line (no tag) → false and
+        // fail to hide the session. The fixed detector skips it.
+        let mut meta = user_with_content("m1", json!("<system reminder>"));
+        meta.extra.insert("isMeta".to_string(), json!(true));
+        let mut compact = user_with_content("c1", json!("compacted summary"));
+        compact
+            .extra
+            .insert("isCompactSummary".to_string(), json!(true));
+        let msgs = vec![
+            meta,
+            compact,
+            user_with_content("u1", json!([{ "type": "text", "text": LOOP_TAG }])),
+        ];
+        assert!(is_loop_session(&msgs));
+    }
+
+    #[test]
+    fn is_loop_session_skips_tool_result_turns() {
+        // A tool_result comes back as a `type:"user"` line; it must be skipped
+        // so the genuine `/loop` prompt behind it is the one that's tested.
+        let msgs = vec![
+            user_with_content(
+                "t1",
+                json!([{ "type": "tool_result", "tool_use_id": "x", "content": "ok" }]),
+            ),
+            user_with_content("u1", json!([{ "type": "text", "text": LOOP_TAG }])),
+        ];
+        assert!(is_loop_session(&msgs));
+    }
+
+    #[test]
+    fn is_loop_session_ignores_non_user_lines() {
+        let msgs = vec![
+            boundary_line("b1", None),
+            user_with_content("u1", json!(LOOP_TAG)),
+        ];
+        assert!(is_loop_session(&msgs));
+    }
+
+    #[test]
+    fn is_loop_session_empty_transcript_is_false() {
+        assert!(!is_loop_session(&[]));
+    }
+
     #[test]
     fn pre_compact_discovered_tools_scans_single_boundary_sorted() {
         let msgs = vec![
@@ -1511,7 +1641,11 @@ mod tests {
         ];
         assert_eq!(
             pre_compact_discovered_tools(&msgs),
-            vec!["Agent".to_string(), "Task".to_string(), "WebFetch".to_string()],
+            vec![
+                "Agent".to_string(),
+                "Task".to_string(),
+                "WebFetch".to_string()
+            ],
         );
     }
 

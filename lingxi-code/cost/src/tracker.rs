@@ -256,6 +256,36 @@ impl CostTracker {
         self.state.write().await.total_nano_usd = nano_usd;
     }
 
+    /// Reset every cumulative counter to zero — the parity twin of claude-code
+    /// `resetCostState` (`yJe`), which `clearConversation` invokes so `/clear`
+    /// starts a fresh session with a zeroed cost footer/status line instead of
+    /// carrying the prior conversation's accumulated total (2.1.211 fix
+    /// "Fixed /clear not resetting session cost counter").
+    ///
+    /// Zeroes the money total, per-model usage breakdown, API/tool durations,
+    /// unpriced-model flags, web-search count, and code-change line counters —
+    /// the full set `yJe` resets (`totalCostUSD`, `totalAPIDuration`,
+    /// `totalAPIDurationWithoutRetries`, `totalToolDuration`, `modelUsage`,
+    /// `hasUnknownModelCost`, `totalLinesAdded`, `totalLinesRemoved`).
+    ///
+    /// The `session_id` is PRESERVED: claude-code regenerates the id in a
+    /// separate step (`regenerateSessionId`), and lingxi's orchestrator mints
+    /// the fresh `SessionId` on `SessionState` in `clear_session`; the tracker's
+    /// copy is informational (snapshots key the id off the live session state).
+    ///
+    /// In-memory only: like [`Self::restore_total_nano_usd`], this does NOT emit
+    /// on the persist channel — a reset is not a new charge, and it mirrors
+    /// `yJe`, which mutates the in-process cost singleton only (the prior
+    /// session's totals are saved separately, before the reset).
+    pub async fn reset(&self) {
+        let mut state = self.state.write().await;
+        let session_id = state.session_id;
+        *state = CostState {
+            session_id,
+            ..Default::default()
+        };
+    }
+
     /// Accumulate one edit's line changes (claude-code `Bhn(added, removed)`:
     /// `Pt.totalLinesAdded += added; Pt.totalLinesRemoved += removed`).
     pub async fn record_code_change(&self, added: u64, removed: u64) {
@@ -585,6 +615,83 @@ mod tests {
             vec!["zzz-first".to_string(), "aaa-second".to_string()],
             "per_model_usage must iterate in insertion order, not hash order"
         );
+    }
+
+    #[tokio::test]
+    async fn reset_zeros_every_cumulative_counter_and_keeps_session_id() {
+        // parity 2.1.212: `/clear` → resetCostState (yJe) zeroes the whole cost
+        // state so a freshly-cleared session no longer shows the prior total.
+        let (tx, mut rx) = mpsc::channel(8);
+        let tracker = CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        );
+        // Accrue a known model, an unknown model (flags unpriced_models), a web
+        // search, and code-change lines so every reset target is non-zero.
+        let priced = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        let unknown = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-nonexistent-model".into(),
+        };
+        tracker
+            .record_api_response(
+                priced,
+                Usage {
+                    tokens: TokenUsage {
+                        input: 1_000,
+                        output: 500,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Duration::from_millis(200),
+                0,
+            )
+            .await;
+        let _ = rx.recv().await.unwrap();
+        tracker
+            .record_api_response(
+                unknown.clone(),
+                Usage {
+                    tokens: TokenUsage {
+                        input: 10,
+                        output: 5,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Duration::from_millis(10),
+                1, // a retry — folds into total_api_duration_ms only
+            )
+            .await;
+        let _ = rx.recv().await.unwrap();
+        tracker.record_code_change(7, 3).await;
+
+        let before = tracker.snapshot().await;
+        assert!(before.total_nano_usd > 0);
+        assert!(!before.per_model_usage.is_empty());
+        assert!(before.unpriced_models.contains(&unknown));
+        assert!(before.total_api_duration_ms > 0);
+
+        tracker.reset().await;
+
+        let snap = tracker.snapshot().await;
+        assert_eq!(snap.total_nano_usd, 0);
+        assert!(snap.per_model_usage.is_empty());
+        assert_eq!(snap.total_api_duration_ms, 0);
+        assert_eq!(snap.total_api_duration_without_retries_ms, 0);
+        assert_eq!(snap.total_tool_duration_ms, 0);
+        assert_eq!(snap.total_lines_added, 0);
+        assert_eq!(snap.total_lines_removed, 0);
+        assert_eq!(snap.total_web_search_requests, 0);
+        assert!(snap.unpriced_models.is_empty());
+        // session_id survives the reset (claude-code regenerates it separately).
+        assert_eq!(snap.session_id, SessionId::nil());
+        assert_eq!(tracker.total_nano_usd().await, 0);
     }
 
     #[tokio::test]

@@ -468,3 +468,82 @@ fn managed_domain_allowlist_collects_subsection_and_webfetch() {
         ]
     );
 }
+
+// --- deny-write symlink hardening (parity 2.1.210, sandbox-adapter.ts `SS`) ---
+
+#[cfg(unix)]
+#[test]
+fn seeded_symlink_settings_deny_write_resolves_escape_target() {
+    // A `.lingxi/settings.json` that is a SYMLINK to a path outside the
+    // workspace must contribute its REAL target to deny_write, not the symlink
+    // path — otherwise a write through the redirect escapes the sandbox. The
+    // composition root passes every deny-write seed through
+    // `resolve_deny_write_symlink` before it enters the context; this exercises
+    // that end-to-end with a real on-disk symlink.
+    use sandbox::policy_convert::resolve_deny_write_symlink;
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let dot = root.join(".lingxi");
+    std::fs::create_dir_all(&dot).expect("mkdir .lingxi");
+
+    // The escape target the attacker points the settings symlink at.
+    let evil = root.join("evil_settings.json");
+    std::fs::write(&evil, b"{}").expect("write evil");
+    let canonical_evil = std::fs::canonicalize(&evil)
+        .expect("canonicalize evil")
+        .to_string_lossy()
+        .into_owned();
+
+    // `.lingxi/settings.json` → evil target.
+    let link = dot.join("settings.json");
+    symlink(&evil, &link).expect("symlink");
+    let link_str = link.to_string_lossy().into_owned();
+
+    // Seed exactly as the composition root does.
+    let seed = resolve_deny_write_symlink(&link_str);
+
+    let s = SettingsJson {
+        permissions: None,
+        sandbox: Some(SandboxSettingsJson {
+            enabled: Some(true),
+            ..Default::default()
+        }),
+        settings_dir: Some(dot.clone()),
+    };
+    let c = SandboxConvertContext {
+        settings_file_paths: vec![seed],
+        ..Default::default()
+    };
+    let cfg = convert_settings_to_runtime_config(&s, &c);
+
+    // deny_write holds the CANONICAL escape target …
+    assert!(
+        cfg.filesystem.deny_write.contains(&canonical_evil),
+        "deny_write must contain the resolved symlink target {canonical_evil:?}, got {:?}",
+        cfg.filesystem.deny_write
+    );
+    // … and NOT the unresolved symlink path, which a redirect would bypass.
+    assert!(
+        !cfg.filesystem.deny_write.contains(&link_str),
+        "deny_write must not keep the unresolved symlink path {link_str:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn seeded_non_symlink_settings_deny_write_kept_literal() {
+    // The common case: a real (non-symlink) settings file passes through
+    // unchanged, so the seeded deny-write path is byte-identical to today.
+    use sandbox::policy_convert::resolve_deny_write_symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dot = tmp.path().join(".lingxi");
+    std::fs::create_dir_all(&dot).expect("mkdir");
+    let real = dot.join("settings.json");
+    std::fs::write(&real, b"{}").expect("write");
+    let real_str = real.to_string_lossy().into_owned();
+
+    assert_eq!(resolve_deny_write_symlink(&real_str), real_str);
+}

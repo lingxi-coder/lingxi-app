@@ -451,6 +451,112 @@ fn resolve_sandbox_filesystem_path(pattern: &str, settings_dir: &Path) -> String
     resolve_sandbox_filesystem_path_with(pattern, settings_dir, &home_dir)
 }
 
+/// Pure core of [`resolve_deny_write_symlink`] — a 1:1 port of the deny-write
+/// symlink resolver `SS` from `convertToSandboxRuntimeConfig`
+/// (`claude-code/src/utils/sandbox/sandbox-adapter.ts`, the 2.1.210 hardening).
+///
+/// When a seeded `.lingxi/*` deny-write path is a symlink, the sandbox must deny
+/// the symlink's REAL target — otherwise a repository- or session-planted
+/// `.lingxi/settings.json → /etc/evil` redirect lets a write escape the deny
+/// scope (the write follows the link to a path the sandbox never denied). So
+/// this resolves the literal path to its target BEFORE it enters `deny_write`.
+///
+/// Deliberately UNLIKE [`crate::runtime_config`]'s allowlist normalization (and
+/// `sandbox-runtime`'s `is_symlink_outside_boundary`): it follows symlinks that
+/// point OUTSIDE the workspace boundary, because that out-of-boundary target is
+/// exactly the escape destination that must be denied.
+///
+/// Mirrors CC's three branches:
+/// - `readlink` fails ⇒ not a symlink ⇒ return `path` unchanged
+///   (CC: `catch { return gRt.push(e), e }` — the literal is kept; the `gRt`
+///   tracking exists only for CC's per-command reconcile pass, which has no
+///   analog in lingxi's build-once-at-boot sandbox config, so it is omitted);
+/// - `realpath` succeeds ⇒ symlink with a live target ⇒ return the canonical
+///   target (CC: `realpathSync(e)`);
+/// - `realpath` fails ⇒ broken symlink ⇒ manually follow the link chain up to 8
+///   hops from the link text (CC: `resolve(dirname(e), t)` then the 8-iteration
+///   `readlinkSync` loop).
+///
+/// `readlink` returns the link's target text (or `None` when `path` is not a
+/// symlink / cannot be read); `realpath` returns the fully-canonicalized path
+/// (or `None` when it does not exist). Both are injected so the resolver is
+/// deterministic and unit-testable without touching the filesystem.
+pub(crate) fn resolve_deny_write_symlink_with<R, P>(path: &str, readlink: R, realpath: P) -> String
+where
+    R: Fn(&str) -> Option<String>,
+    P: Fn(&str) -> Option<String>,
+{
+    // Not a symlink: keep the literal path (CC: `catch { return ..., e }`).
+    let Some(link_text) = readlink(path) else {
+        return path.to_string();
+    };
+    // Symlink with a resolvable target: deny the canonical target
+    // (CC: `realpathSync(e)`).
+    if let Some(resolved) = realpath(path) {
+        return resolved;
+    }
+    // Broken symlink: manually follow the link chain up to 8 hops
+    // (CC: `let n = resolve(dirname(e), t); for (o=0; o<8; o++) { … }`).
+    let mut current = resolve_link_target(path, &link_text);
+    for _ in 0..8 {
+        let Some(next) = readlink(&current) else {
+            break;
+        };
+        current = resolve_link_target(&current, &next);
+    }
+    current
+}
+
+/// `path.resolve(path.dirname(from), link)`: an absolute `link` wins outright,
+/// otherwise it is joined onto `from`'s parent directory; the result is
+/// lexically normalized like Node's `path.resolve` (collapsing `.`/`..`).
+fn resolve_link_target(from: &str, link: &str) -> String {
+    let parent = Path::new(from)
+        .parent()
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+    let joined = if Path::new(link).is_absolute() {
+        link.to_string()
+    } else {
+        parent.join(link).to_string_lossy().into_owned()
+    };
+    if joined.starts_with('/') {
+        crate::path_pattern::lexically_normalize_absolute(&joined)
+    } else {
+        joined
+    }
+}
+
+/// Real-filesystem wrapper over [`resolve_deny_write_symlink_with`]: resolves a
+/// seeded deny-write path to its symlink target using `std::fs::read_link`
+/// (`readlinkSync`) and `std::fs::canonicalize` (`realpathSync`). Non-symlink
+/// and non-existent seeds pass through unchanged, so only genuinely-symlinked
+/// `.lingxi/*` paths are rewritten to their escape target before they enter the
+/// sandbox `deny_write` list.
+///
+/// Applied by the composition root to each boot-seeded deny-write path so the
+/// hardening fires against symlinks that exist at boot. CC additionally
+/// reconciles symlinks that APPEAR mid-session (`bcg()` in sandbox-adapter.ts,
+/// re-scanning its `gRt` tracking list into a live, mutable sandbox config);
+/// lingxi builds the sandbox config once at boot into an immutable
+/// `SandboxRuntimeConfig` with no live-update / re-consult path, so that
+/// mid-session reconcile has no analog here and is intentionally not ported.
+#[must_use]
+pub fn resolve_deny_write_symlink(path: &str) -> String {
+    resolve_deny_write_symlink_with(
+        path,
+        |p| {
+            std::fs::read_link(p)
+                .ok()
+                .map(|t| t.to_string_lossy().into_owned())
+        },
+        |p| {
+            std::fs::canonicalize(p)
+                .ok()
+                .map(|c| c.to_string_lossy().into_owned())
+        },
+    )
+}
+
 fn apply_rule(
     rule_string: &str,
     settings_dir: &Path,
@@ -643,5 +749,89 @@ mod resolve_fs_path_tests {
             resolve_sandbox_filesystem_path_with("~/a/../b", sd, "/home/u"),
             "/home/u/b"
         );
+    }
+}
+
+#[cfg(test)]
+mod deny_write_symlink_tests {
+    use super::resolve_deny_write_symlink_with;
+    use std::collections::HashMap;
+
+    // Not a symlink (`readlink` returns None): the literal path is kept — the
+    // common case, so non-symlink deny-write seeds are unchanged (CC: `catch {
+    // return gRt.push(e), e }`).
+    #[test]
+    fn non_symlink_keeps_literal() {
+        let out = resolve_deny_write_symlink_with(
+            "/proj/.lingxi/settings.json",
+            |_| None,
+            |_| Some("/should/not/be/used".to_string()),
+        );
+        assert_eq!(out, "/proj/.lingxi/settings.json");
+    }
+
+    // Symlink with a live target: `realpath` wins and the CANONICAL target is
+    // denied — even when it escapes the workspace boundary (CC: `realpathSync`).
+    #[test]
+    fn symlink_resolves_to_realpath_target() {
+        let out = resolve_deny_write_symlink_with(
+            "/proj/.lingxi/settings.json",
+            |_| Some("/etc/evil".to_string()),
+            |p| (p == "/proj/.lingxi/settings.json").then(|| "/etc/evil".to_string()),
+        );
+        assert_eq!(out, "/etc/evil");
+    }
+
+    // Broken symlink (`realpath` fails): manually resolve one hop from the link
+    // text against the link's parent dir (CC: `resolve(dirname(e), t)`).
+    #[test]
+    fn broken_symlink_relative_target_resolves_against_parent() {
+        let out = resolve_deny_write_symlink_with(
+            "/proj/.lingxi/settings.json",
+            |p| (p == "/proj/.lingxi/settings.json").then(|| "../../evil".to_string()),
+            |_| None,
+        );
+        // dirname = /proj/.lingxi → join("../../evil") → /evil (collapsed).
+        assert_eq!(out, "/evil");
+    }
+
+    // Broken symlink with an absolute target: the absolute link text wins.
+    #[test]
+    fn broken_symlink_absolute_target_used_directly() {
+        let out = resolve_deny_write_symlink_with(
+            "/proj/.lingxi/skills",
+            |p| (p == "/proj/.lingxi/skills").then(|| "/tmp/planted".to_string()),
+            |_| None,
+        );
+        assert_eq!(out, "/tmp/planted");
+    }
+
+    // Broken symlink chain: follow up to 8 hops through the link text
+    // (CC: the `for (o=0; o<8; o++)` readlink loop).
+    #[test]
+    fn broken_symlink_chain_follows_multiple_hops() {
+        let mut links: HashMap<&str, &str> = HashMap::new();
+        links.insert("/a/link1", "/a/link2");
+        links.insert("/a/link2", "/a/link3");
+        links.insert("/a/link3", "/final/target");
+        let out = resolve_deny_write_symlink_with(
+            "/a/link1",
+            move |p| links.get(p).map(|s| (*s).to_string()),
+            |_| None, // realpath always fails ⇒ manual chain walk
+        );
+        assert_eq!(out, "/final/target");
+    }
+
+    // The manual chain is bounded at 8 hops: an infinite loop terminates on the
+    // last resolved link rather than hanging (CC bounds the loop at 8).
+    #[test]
+    fn broken_symlink_chain_is_bounded() {
+        let out = resolve_deny_write_symlink_with(
+            "/a/loop",
+            // Every path is a symlink to itself → never resolves, but bounded.
+            |p| Some(p.to_string()),
+            |_| None,
+        );
+        assert_eq!(out, "/a/loop");
     }
 }

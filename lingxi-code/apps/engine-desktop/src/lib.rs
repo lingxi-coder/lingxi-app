@@ -5711,17 +5711,23 @@ pub async fn build(
         // (cwd_settings_paths / worktree_main_repo_path / additional_md_dirs)
         // stay empty — see spec §5.
         let managed = crate::settings_watch::managed_settings_dir();
-        let to_s = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+        // Each deny-write seed is resolved through the `SS` symlink hardening
+        // (sandbox-adapter.ts, parity 2.1.210): if a seeded `.lingxi/*` path is a
+        // symlink, deny its REAL target so a redirected write can't escape the
+        // sandbox. Non-symlink / non-existent seeds pass through unchanged.
+        let deny_seed = |p: std::path::PathBuf| {
+            sandbox::policy_convert::resolve_deny_write_symlink(&p.to_string_lossy())
+        };
         let ctx = sandbox::policy_convert::SandboxConvertContext {
             lingxi_temp_dir: Some(lingxi_temp_dir()),
             settings_file_paths: vec![
-                to_s(cfg.lingxi_home.join("settings.json")),
-                to_s(cwd.join(branding::DOT_DIR).join("settings.json")),
-                to_s(cwd.join(branding::DOT_DIR).join("settings.local.json")),
-                to_s(managed.join("managed-settings.json")),
+                deny_seed(cfg.lingxi_home.join("settings.json")),
+                deny_seed(cwd.join(branding::DOT_DIR).join("settings.json")),
+                deny_seed(cwd.join(branding::DOT_DIR).join("settings.local.json")),
+                deny_seed(managed.join("managed-settings.json")),
             ],
-            managed_drop_in_dir: Some(to_s(managed.join("managed-settings.d"))),
-            skills_dirs: vec![to_s(cwd.join(branding::DOT_DIR).join("skills"))],
+            managed_drop_in_dir: Some(deny_seed(managed.join("managed-settings.d"))),
+            skills_dirs: vec![deny_seed(cwd.join(branding::DOT_DIR).join("skills"))],
             managed_allowed_domains,
             managed_read_paths,
             allow_apple_events_override,

@@ -206,8 +206,12 @@ pub fn context_window_for_model(model: &str, betas: &[String]) -> u64 {
     // Takes precedence over all other resolution, including 1M detection.
     if std::env::var("USER_TYPE").ok().as_deref() == Some("ant") {
         if let Ok(raw) = std::env::var("LINGXI_MAX_CONTEXT_TOKENS") {
-            if let Some(parsed) = parse_positive_i64(&raw) {
-                return parsed;
+            // `Z.CLAUDE_CODE_MAX_CONTEXT_TOKENS` (coerced by the shared `hp`
+            // helper) then `!== void 0 && > 0`; a `NaN`/non-positive value falls
+            // through (unset/empty ⇒ `NaN` ⇒ skip).
+            let n = traits::env::parse_int_env(&raw);
+            if !n.is_nan() && n > 0.0 {
+                return n as u64;
             }
         }
     }
@@ -308,12 +312,14 @@ fn model_max_output_tokens(model: &str) -> (u64, u64) {
 pub fn max_output_tokens_for_model(model: &str) -> u64 {
     let (default_tokens, upper_limit) = model_max_output_tokens(model);
 
-    // validateBoundedIntEnvVar('LINGXI_MAX_OUTPUT_TOKENS', …, default, upper):
-    // a positive integer override is clamped to the upper limit; otherwise the
-    // default is used.
+    // validateBoundedIntEnvVar('LINGXI_MAX_OUTPUT_TOKENS', …, default, upper)
+    // (`IPe`): the raw value is parsed by the shared `hp` helper; a `NaN`/
+    // non-positive value falls back to the default, anything above the upper
+    // limit is capped down to it.
     if let Ok(raw) = std::env::var("LINGXI_MAX_OUTPUT_TOKENS") {
-        if let Some(parsed) = parse_positive_i64(&raw) {
-            return parsed.min(upper_limit);
+        let o = traits::env::parse_int_env(&raw);
+        if !o.is_nan() && o > 0.0 {
+            return o.min(upper_limit as f64) as u64;
         }
     }
 
@@ -331,46 +337,6 @@ pub fn max_output_tokens_for_model(model: &str) -> u64 {
 pub fn max_thinking_tokens_for_model(model: &str) -> u32 {
     let (_default_tokens, upper_limit) = model_max_output_tokens(model);
     u32::try_from(upper_limit.saturating_sub(1)).unwrap_or(u32::MAX)
-}
-
-/// Parse a positive integer override. Leading whitespace and a trailing
-/// non-numeric suffix are tolerated to match the historical `parseInt` behavior,
-/// but scientific notation is read as a full numeric literal (`1e6` -> 1000000).
-fn parse_positive_i64(raw: &str) -> Option<u64> {
-    let trimmed = raw.trim_start();
-    let literal = leading_numeric_literal(trimmed);
-    if literal.is_empty() {
-        return None;
-    }
-    if literal.contains(['.', 'e', 'E']) {
-        let parsed = literal.parse::<f64>().ok()?;
-        if !parsed.is_finite() || parsed <= 0.0 || parsed.fract() != 0.0 {
-            return None;
-        }
-        if parsed > u64::MAX as f64 {
-            return None;
-        }
-        return Some(parsed as u64);
-    }
-    literal.parse::<u64>().ok().filter(|&v| v > 0)
-}
-
-fn leading_numeric_literal(s: &str) -> &str {
-    let mut end = 0;
-    let mut prev = '\0';
-    for (idx, ch) in s.char_indices() {
-        let allowed = ch.is_ascii_digit()
-            || ch == '.'
-            || ch == 'e'
-            || ch == 'E'
-            || ((ch == '+' || ch == '-') && (prev == 'e' || prev == 'E'));
-        if !allowed {
-            break;
-        }
-        end = idx + ch.len_utf8();
-        prev = ch;
-    }
-    &s[..end]
 }
 
 #[cfg(test)]
@@ -629,21 +595,6 @@ mod tests {
             max_output_tokens_for_model("totally-unregistered-xyz"),
             32_000
         );
-    }
-
-    #[test]
-    fn parse_positive_i64_semantics() {
-        assert_eq!(parse_positive_i64("12345"), Some(12_345));
-        assert_eq!(parse_positive_i64("  42"), Some(42));
-        assert_eq!(parse_positive_i64("100abc"), Some(100));
-        assert_eq!(parse_positive_i64("1e6"), Some(1_000_000));
-        assert_eq!(parse_positive_i64("2E5tokens"), Some(200_000));
-        assert_eq!(parse_positive_i64("1.5e6"), Some(1_500_000));
-        assert_eq!(parse_positive_i64("1.5"), None);
-        assert_eq!(parse_positive_i64("0"), None);
-        assert_eq!(parse_positive_i64(""), None);
-        assert_eq!(parse_positive_i64("abc"), None);
-        assert_eq!(parse_positive_i64("-5"), None);
     }
 
     #[test]

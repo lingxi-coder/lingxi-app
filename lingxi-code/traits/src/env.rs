@@ -28,6 +28,183 @@ pub fn is_env_defined_falsy(value: Option<&str>) -> bool {
     }
 }
 
+/// Group-digit separator characters accepted by claude-code's `BZa`/`$Za`
+/// regexes: ASCII underscore/comma/space plus U+00A0 NO-BREAK SPACE and
+/// U+202F NARROW NO-BREAK SPACE (`/[_,   ]/`).
+const fn is_group_separator(c: char) -> bool {
+    matches!(c, '_' | ',' | '\u{00A0}' | '\u{202F}' | ' ')
+}
+
+/// `qem.test(e)` — does `e` match claude-code's JS scientific-notation form
+/// `/^[+-]?(\d+(\.\d*)?|\.\d+)[eE][+-]?\d+$/`? The mantissa is ASCII-only, so a
+/// byte scan is exact (any multi-byte lead byte fails the digit/`.`/`e` checks).
+fn matches_scientific(s: &str) -> bool {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    if i < n && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    // mantissa: `\d+(\.\d*)?` | `\.\d+`
+    if i < n && b[i] == b'.' {
+        // `\.\d+` — at least one fractional digit.
+        i += 1;
+        let ds = i;
+        while i < n && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == ds {
+            return false;
+        }
+    } else {
+        // `\d+` — at least one integer digit.
+        let ds = i;
+        while i < n && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == ds {
+            return false;
+        }
+        // optional `(\.\d*)`
+        if i < n && b[i] == b'.' {
+            i += 1;
+            while i < n && b[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+    }
+    // exponent: `[eE][+-]?\d+`
+    if i >= n || (b[i] != b'e' && b[i] != b'E') {
+        return false;
+    }
+    i += 1;
+    if i < n && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let es = i;
+    while i < n && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == es {
+        return false;
+    }
+    i == n
+}
+
+/// `BZa.test(e)` — does `e` match the grouped-thousands form
+/// `/^[+-]?\d{1,3}([_,   ])\d{3}(?:\1\d{3})*$/`? The leading group is
+/// 1-3 digits; every subsequent group is exactly 3 digits, joined by a single
+/// separator character that must stay identical across the whole string.
+fn matches_grouped(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    if i < n && (chars[i] == '+' || chars[i] == '-') {
+        i += 1;
+    }
+    // `\d{1,3}` (greedy stops at the separator; a 4th digit here => no match).
+    let lead = i;
+    while i < n && i - lead < 3 && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == lead {
+        return false;
+    }
+    // first separator — pins the separator used for the rest of the string.
+    if i >= n || !is_group_separator(chars[i]) {
+        return false;
+    }
+    let sep = chars[i];
+    i += 1;
+    // one-or-more `\d{3}` groups joined by `sep`.
+    loop {
+        let g = i;
+        while i < n && i - g < 3 && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i - g != 3 {
+            return false;
+        }
+        if i == n {
+            return true;
+        }
+        if chars[i] != sep {
+            return false;
+        }
+        i += 1;
+    }
+}
+
+/// `parseInt(s, 10)` as a JS number: skip leading ASCII whitespace, read an
+/// optional sign then base-10 digits, stop at the first non-digit, and return
+/// `NaN` when no digits are present. Absurdly long digit runs saturate to `∞`
+/// (a finite-but-huge JS number the callers then cap), matching `parseInt`.
+fn js_parse_int_base10(s: &str) -> f64 {
+    let t = s.trim_start_matches([' ', '\t', '\n', '\r', '\u{000B}', '\u{000C}']);
+    let b = t.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    let mut neg = false;
+    if i < n && (b[i] == b'+' || b[i] == b'-') {
+        neg = b[i] == b'-';
+        i += 1;
+    }
+    let start = i;
+    while i < n && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return f64::NAN;
+    }
+    let mag = t[start..i].parse::<f64>().unwrap_or(f64::INFINITY);
+    if neg {
+        -mag
+    } else {
+        mag
+    }
+}
+
+/// `jem(e)` (`envValidation.ts`): the length-guarded coercion tried before the
+/// bare `parseInt` fallback. For a value of at most 32 UTF-16 code units, a
+/// scientific-notation literal is read via `Number()` and kept only when it is
+/// integral (else `NaN`), and a grouped-thousands literal has its separators
+/// stripped and is `parseInt`-ed. Anything else (or an over-long value) returns
+/// `None`, signalling the caller to fall through to `parseInt`.
+fn jem(e: &str) -> Option<f64> {
+    if e.encode_utf16().count() > 32 {
+        return None;
+    }
+    if matches_scientific(e) {
+        // `Number(e)`, kept iff `Number.isInteger(...)`, else `NaN`.
+        let t = e.parse::<f64>().unwrap_or(f64::NAN);
+        return Some(if t.is_finite() && t.fract() == 0.0 {
+            t
+        } else {
+            f64::NAN
+        });
+    }
+    if matches_grouped(e) {
+        let stripped: String = e.chars().filter(|c| !is_group_separator(*c)).collect();
+        return Some(js_parse_int_base10(&stripped));
+    }
+    None
+}
+
+/// `hp(e)` (`envValidation.ts`): the shared integer env-var parse used across
+/// claude-code — directly at many call sites and by the `Pe.int()` env schema /
+/// `validateBoundedIntEnvVar` (`IPe`). Since 2.1.211 it accepts scientific
+/// notation (`1e6`) and digit-group separators (`1_000`, `1,000`, and the
+/// `U+00A0`/`U+202F` space variants) in addition to plain `parseInt` values:
+/// `String(e).trim()`, then `jem(t) ?? parseInt(t, 10)`.
+///
+/// Returned as a JS number (`f64`); `NaN` mirrors JS `NaN`, so callers replicate
+/// the JS guards with `!v.is_nan() && v > 0.0` (or `>= 0.0`).
+#[must_use]
+pub fn parse_int_env(value: &str) -> f64 {
+    let t = value.trim();
+    jem(t).unwrap_or_else(|| js_parse_int_base10(t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +246,76 @@ mod tests {
             );
         }
         assert!(!is_env_defined_falsy(None));
+    }
+
+    /// Plain `parseInt`-style values still parse (the `jem` regexes miss, the
+    /// `?? parseInt(t,10)` fallback fires): leading/trailing junk, signs, and
+    /// radix-10 stop-at-non-digit all match JS `parseInt(_, 10)`.
+    #[test]
+    fn parse_int_env_plain_parseint_fallback() {
+        assert_eq!(parse_int_env("50000"), 50_000.0);
+        assert_eq!(parse_int_env("  42 "), 42.0);
+        assert_eq!(parse_int_env("12000abc"), 12_000.0);
+        assert_eq!(parse_int_env("0x10"), 0.0); // base-10 stops at 'x'
+        assert_eq!(parse_int_env("-7"), -7.0);
+        assert_eq!(parse_int_env("+9"), 9.0);
+        assert!(parse_int_env("abc").is_nan());
+        assert!(parse_int_env("").is_nan());
+        assert!(parse_int_env("   ").is_nan());
+    }
+
+    /// Scientific notation (2.1.211+): a `qem`-matching literal is read via
+    /// `Number()` and kept only when integral; a non-integer result is `NaN`
+    /// (and, unlike an unmatched value, does NOT fall through to `parseInt`).
+    #[test]
+    fn parse_int_env_scientific_notation() {
+        assert_eq!(parse_int_env("1e6"), 1_000_000.0);
+        assert_eq!(parse_int_env("+1E6"), 1_000_000.0);
+        assert_eq!(parse_int_env("-2e3"), -2_000.0);
+        assert_eq!(parse_int_env("1.5e2"), 150.0);
+        assert_eq!(parse_int_env(".5e3"), 500.0);
+        assert_eq!(parse_int_env("1.e2"), 100.0);
+        // A negative exponent that still lands on an integer is kept.
+        assert_eq!(parse_int_env("10e-1"), 1.0); // 10 * 10^-1 == 1
+                                                 // Non-integer scientific value => NaN (no parseInt fallback).
+        assert!(parse_int_env("1.5e0").is_nan());
+        assert!(parse_int_env("1e-1").is_nan()); // 0.1
+                                                 // Overflow to Infinity is not an integer => NaN.
+        assert!(parse_int_env("1e400").is_nan());
+        // A scientific-looking value with trailing junk misses `qem`, so the
+        // parseInt fallback reads the leading integer digits only.
+        assert_eq!(parse_int_env("1e6x"), 1.0);
+    }
+
+    /// Digit-group separators (2.1.211+): a `BZa`-matching literal has its
+    /// separators stripped (`$Za`) and is `parseInt`-ed. The separator must be
+    /// one character, identical across groups, with 3-digit trailing groups.
+    #[test]
+    fn parse_int_env_digit_separators() {
+        assert_eq!(parse_int_env("1,000"), 1_000.0);
+        assert_eq!(parse_int_env("1_000_000"), 1_000_000.0);
+        assert_eq!(parse_int_env("12,345,678"), 12_345_678.0);
+        assert_eq!(parse_int_env("-1_500"), -1_500.0);
+        assert_eq!(parse_int_env("1\u{00A0}000"), 1_000.0); // NO-BREAK SPACE
+        assert_eq!(parse_int_env("1\u{202F}000"), 1_000.0); // NARROW NBSP
+        assert_eq!(parse_int_env("1 000 000"), 1_000_000.0); // regular space
+                                                             // Mixed separators do not match `BZa`; parseInt reads the leading run.
+        assert_eq!(parse_int_env("1_000,000"), 1.0);
+        // Wrong group sizes miss `BZa` too.
+        assert_eq!(parse_int_env("1,00"), 1.0);
+        assert_eq!(parse_int_env("1234,567"), 1_234.0);
+    }
+
+    /// The 32-code-unit length guard: an over-long value skips `jem` entirely
+    /// and goes straight to `parseInt` (so its separators are NOT stripped).
+    #[test]
+    fn parse_int_env_length_guard() {
+        // 33 chars of grouped digits: `jem` is skipped, parseInt reads "1".
+        let long = format!("1{}", ",000".repeat(8)); // "1" + 8*",000" = 33 chars
+        assert_eq!(long.chars().count(), 33);
+        assert_eq!(parse_int_env(&long), 1.0);
+        // 31 chars of the same shape parses fully through the separator branch.
+        let ok = format!("1{}", ",000".repeat(7)); // 29 chars
+        assert_eq!(parse_int_env(&ok), 1_000_000_000_000_000_000_000.0);
     }
 }

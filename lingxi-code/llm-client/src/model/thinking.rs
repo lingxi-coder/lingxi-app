@@ -208,27 +208,6 @@ pub fn session_thinking_active(thinking: ThinkingConfig) -> bool {
     thinking != ThinkingConfig::Disabled && !is_thinking_env_disabled("LINGXI_DISABLE_THINKING")
 }
 
-/// Parse a base-10 integer with JavaScript `parseInt(s, 10)` semantics: skip
-/// leading ASCII whitespace, accept an optional leading `+`/`-`, then consume
-/// leading decimal digits and stop at the first non-digit (so `"50000abc"` →
-/// `50000`, `"0x10"` → `0`, `"  42 "` → `42`). Returns `None` for `NaN`
-/// (no leading digit run) — mirroring how claude-code's `parseInt(env,10)`
-/// yields `NaN`, which compares false against both `> 0` and `=== 0`.
-pub(crate) fn js_parse_int_base10(s: &str) -> Option<i64> {
-    let t = s.trim_start_matches([' ', '\t', '\n', '\r', '\u{0c}', '\u{0b}']);
-    let (neg, rest) = match t.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, t.strip_prefix('+').unwrap_or(t)),
-    };
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return None; // NaN
-    }
-    // Overflow of an absurd value → treat as NaN-ish (falls through to disabled).
-    let mag: i64 = digits.parse().ok()?;
-    Some(if neg { -mag } else { mag })
-}
-
 /// Resolve the boot SESSION [`ThinkingConfig`] from the `MAX_THINKING_TOKENS`
 /// env var, the `--max-thinking-tokens` CLI flag (`cli_budget`), and the
 /// `alwaysThinkingEnabled` setting (`always_thinking`) — byte-mirroring
@@ -239,20 +218,24 @@ pub(crate) fn js_parse_int_base10(s: &str) -> Option<i64> {
 /// let gm = qIe(), lp = gm !== false ? {type:"adaptive"} : {type:"disabled"};
 /// // (the --thinking flag override omitted here — a separate unwired surface)
 /// let wn = process.env.MAX_THINKING_TOKENS
-///     ? parseInt(process.env.MAX_THINKING_TOKENS, 10)
+///     ? hp(process.env.MAX_THINKING_TOKENS)   // shared int-env parse (`hp`)
 ///     : a.maxThinkingTokens;                 // the --max-thinking-tokens flag
 /// if (wn !== void 0) {
 ///     if (wn > 0)  lp = {type:"enabled", budgetTokens: wn};   // pre-empts adaptive
 ///     else if (wn === 0) lp = {type:"disabled"};
 /// }
-/// // qIe(): if(env) return parseInt(env,10)>0;
+/// // qIe(): if(env) return hp(env)>0;
 /// //        if(settings.alwaysThinkingEnabled===false) return false; return true
 /// ```
+///
+/// The env value is parsed by claude-code's shared `hp` helper
+/// ([`traits::env::parse_int_env`]), which since 2.1.211 accepts scientific
+/// notation and digit-group separators in addition to plain `parseInt` values.
 ///
 /// A positive env/flag budget PRE-EMPTS adaptive thinking (claude-code sets the
 /// fixed `enabled`+`budgetTokens` config before the adaptive default applies);
 /// `0` hard-disables; a `NaN`/non-positive env value disables (`qIe` returns
-/// `parseInt(env,10) > 0` = false). When neither env nor flag pins a budget the
+/// `hp(env) > 0` = false). When neither env nor flag pins a budget the
 /// gate falls to `alwaysThinkingEnabled === false ? disabled : adaptive`. The
 /// `--thinking` flag override (`adaptive`/`enabled`/`disabled`) is a SEPARATE,
 /// still-unwired CLI surface and is intentionally not folded here.
@@ -271,12 +254,14 @@ pub fn session_thinking_from_env(
         .ok()
         .filter(|s| !s.is_empty())
     {
-        return match js_parse_int_base10(&raw) {
-            Some(n) if n > 0 => ThinkingConfig::Enabled {
-                budget_tokens: u32::try_from(n).unwrap_or(u32::MAX),
-            },
-            // n <= 0 or NaN → disabled (`qIe`: `parseInt(env,10) > 0` is false).
-            _ => ThinkingConfig::Disabled,
+        let wn = traits::env::parse_int_env(&raw);
+        return if wn > 0.0 {
+            ThinkingConfig::Enabled {
+                budget_tokens: u32::try_from(wn as u64).unwrap_or(u32::MAX),
+            }
+        } else {
+            // wn <= 0 or NaN → disabled (`qIe`: `hp(env) > 0` is false).
+            ThinkingConfig::Disabled
         };
     }
     // env unset → `wn = a.maxThinkingTokens` (the `--max-thinking-tokens` flag).
@@ -650,16 +635,35 @@ mod tests {
         );
     }
 
+    /// MAX_THINKING_TOKENS is parsed by the shared `hp` helper (2.1.211+), so a
+    /// scientific-notation or digit-separator budget now resolves to `Enabled`.
     #[test]
-    fn js_parse_int_base10_matches_js_semantics() {
-        assert_eq!(js_parse_int_base10("50000"), Some(50_000));
-        assert_eq!(js_parse_int_base10("  42 "), Some(42));
-        assert_eq!(js_parse_int_base10("12000abc"), Some(12_000));
-        assert_eq!(js_parse_int_base10("0x10"), Some(0)); // radix-10 stops at 'x'
-        assert_eq!(js_parse_int_base10("-7"), Some(-7));
-        assert_eq!(js_parse_int_base10("+9"), Some(9));
-        assert_eq!(js_parse_int_base10("abc"), None); // NaN
-        assert_eq!(js_parse_int_base10(""), None);
-        assert_eq!(js_parse_int_base10("   "), None);
+    fn max_thinking_tokens_accepts_scientific_and_separators() {
+        {
+            let _g = EnvGuard::set("MAX_THINKING_TOKENS", "1e4");
+            assert_eq!(
+                session_thinking_from_env(None, None),
+                ThinkingConfig::Enabled {
+                    budget_tokens: 10_000
+                }
+            );
+        }
+        {
+            let _g = EnvGuard::set("MAX_THINKING_TOKENS", "12_000");
+            assert_eq!(
+                session_thinking_from_env(None, None),
+                ThinkingConfig::Enabled {
+                    budget_tokens: 12_000
+                }
+            );
+        }
+        {
+            // Non-integer scientific value => NaN => disabled.
+            let _g = EnvGuard::set("MAX_THINKING_TOKENS", "1.5e0");
+            assert_eq!(
+                session_thinking_from_env(None, None),
+                ThinkingConfig::Disabled
+            );
+        }
     }
 }

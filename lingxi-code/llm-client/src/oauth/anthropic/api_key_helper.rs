@@ -66,11 +66,12 @@ pub fn api_key_helper_ttl_ms() -> u64 {
 /// the process environment).
 #[must_use]
 pub fn resolve_ttl_ms(raw: &str) -> u64 {
-    // `parseInt(e,10)` + `!Number.isNaN(t) && t>=0`.
-    if let Some(t) = crate::model::thinking::js_parse_int_base10(raw) {
-        if t >= 0 {
-            return t as u64;
-        }
+    // `Z.CLAUDE_CODE_API_KEY_HELPER_TTL_MS` is coerced by the shared `hp` helper
+    // (2.1.211+: scientific notation + digit separators), then `jMc` keeps it
+    // when `!Number.isNaN(e) && e >= 0`.
+    let t = traits::env::parse_int_env(raw);
+    if !t.is_nan() && t >= 0.0 {
+        return t as u64;
     }
     tracing::error!(
         "Found {API_KEY_HELPER_TTL_ENV} env var, but it was not a valid number. Got {raw}"

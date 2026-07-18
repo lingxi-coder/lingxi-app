@@ -1876,6 +1876,15 @@ pub struct DesktopConfig {
     /// mirroring the 206 constraint "Create a tmux session for the worktree
     /// (requires --worktree)".
     pub tmux_launch: Option<String>,
+    /// 2.1.212 `/fork` (`vAd`) background-session forker seam. When `Some`,
+    /// `build()` wires it onto the orchestrator via `with_bg_session_forker`, so
+    /// `OrchestratorHandle::fork_to_background_session` copies the live
+    /// conversation into a new background session (the `--bg`/daemon session-copy
+    /// path). `None` (the default, and every host but `apps/cli`) ⟶ that `/fork`
+    /// variant fails with a clear `ActionFailed` — INERT boot. The concrete impl
+    /// lives in `apps/cli` (which owns the daemon dispatch machinery); injecting
+    /// it here keeps the leaf `orchestrator` crate off an `apps/cli` dependency.
+    pub bg_session_forker: Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
 }
 
 /// `--safe-mode` / `--bare` reduced-mode customization gates (M3, cc 2.1.198).
@@ -2037,6 +2046,14 @@ impl std::fmt::Debug for DesktopConfig {
             .field("initial_effort", &self.initial_effort)
             .field("default_model_env_pinned", &self.default_model_env_pinned)
             .field("session_thinking", &self.session_thinking)
+            .field(
+                "bg_session_forker",
+                if self.bg_session_forker.is_some() {
+                    &"Some(<forker>)"
+                } else {
+                    &"None"
+                },
+            )
             .finish()
     }
 }
@@ -2095,6 +2112,9 @@ impl Default for DesktopConfig {
             worktree_launch: None,
             // Default: no `--tmux` flag ⟶ inert boot (no tmux session).
             tmux_launch: None,
+            // Default: no `/fork`-to-background forker ⟶ that /fork variant
+            // fails with a clear ActionFailed until `apps/cli` injects one.
+            bg_session_forker: None,
         }
     }
 }
@@ -6647,6 +6667,16 @@ pub async fn build(
         None => orch_builder,
     };
 
+    // 2.1.212 `/fork` (`vAd`) background-session forker seam. When the host
+    // (`apps/cli`) injects one, wire it so `fork_to_background_session` copies
+    // the live conversation into a new background session. `None` (default /
+    // non-CLI hosts) leaves that `/fork` variant failing with a clear
+    // `ActionFailed`, byte-identical to before this seam existed.
+    let orch_builder = match cfg.bg_session_forker.clone() {
+        Some(forker) => orch_builder.with_bg_session_forker(forker),
+        None => orch_builder,
+    };
+
     // EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch ACTIVATION (gated,
     // default OFF). claude-code keeps this behind `feature('EXPERIMENTAL_SKILL_SEARCH')`
     // — DCE'd out of the shipping 2.1.195 binary (every skill-search literal = 0
@@ -7946,6 +7976,8 @@ mod tests {
             // No `--tmux` flag by default; individual tmux-launch tests
             // override this field via struct-update syntax.
             tmux_launch: None,
+            // No `/fork`-to-background forker in tests.
+            bg_session_forker: None,
         };
         (tmp, cfg)
     }

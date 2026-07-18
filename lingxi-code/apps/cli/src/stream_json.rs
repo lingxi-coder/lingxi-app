@@ -869,6 +869,10 @@ impl StreamJsonStream {
         }))
     }
 
+}
+
+#[async_trait]
+impl OutputStream for StreamJsonStream {
     /// Emit a forwarded subagent assistant message (`--forward-subagent-text`).
     ///
     /// `message` is the serialized subagent `protocol::ConversationMessage`
@@ -876,7 +880,7 @@ impl StreamJsonStream {
     /// `Task`/`Agent` tool_use_id that spawned the child. Gated + shaped by
     /// [`Self::build_forwarded_subagent_frame`]; a no-op when the flag is off or
     /// the message has no forwardable text/thinking blocks.
-    pub async fn emit_forwarded_subagent_message(&self, message: &Value, parent_tool_use_id: &str) {
+    async fn emit_forwarded_subagent_message(&self, message: &Value, parent_tool_use_id: &str) {
         // Cheap gate before locking / minting a uuid.
         if !self.forward_subagent_text() || self.suppress_frames {
             return;
@@ -889,10 +893,7 @@ impl StreamJsonStream {
             self.enqueue(&frame);
         }
     }
-}
 
-#[async_trait]
-impl OutputStream for StreamJsonStream {
     async fn emit_text(&self, text: &str) {
         let mut acc = self.accum.lock().await;
         // Append to last text block if present; else push a new one.

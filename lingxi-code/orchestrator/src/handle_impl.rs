@@ -256,9 +256,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
             HandleError::ActionFailed("fork: no background-session forker wired".into())
         })?;
-        // Snapshot the live conversation. The clone releases the session lock
-        // before the (potentially slow) dispatch.
-        let history = self.session.lock().await.history.clone();
+        // Snapshot the live conversation + capture the parent's CURRENT active
+        // model. The clone releases the session lock before the (potentially
+        // slow) dispatch. The model is threaded into the snapshot so the forked
+        // background session resumes on the parent's model (e.g. after `/model
+        // sonnet`, or a cross-provider model) instead of the `DEFAULT_MODEL`
+        // seed — the copied assistant lines otherwise carry no `model` for
+        // `state_from_messages` to restore.
+        let (history, model) = {
+            let s = self.session.lock().await;
+            (s.history.clone(), s.model.clone())
+        };
         // The parent's rendered system-prompt bytes (`None` until the first
         // successful turn) so the copy carries a cache-identical prefix.
         let system_prompt = self
@@ -266,7 +274,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
             .map(|s| Arc::from(s.as_str()));
         forker
-            .fork_to_background(&history, system_prompt, prompt)
+            .fork_to_background(&history, system_prompt, prompt, &model)
             .await
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
     }

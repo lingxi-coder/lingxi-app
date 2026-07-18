@@ -424,6 +424,30 @@ fn normalize_description_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Default per-session subagent spawn cap (claude 2.1.212 `ofg = 200`).
+const MAX_SUBAGENTS_PER_SESSION_DEFAULT: u64 = 200;
+
+/// Resolve the per-session subagent spawn cap from a raw
+/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` value (claude 2.1.212 `xtu()` =
+/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`). Split from the env read for
+/// testability. An unset OR unparseable value falls back to the default 200 (the
+/// binary keeps a non-numeric env string, whose numeric comparison never trips
+/// the cap; treating garbage as "default 200" is the faithful common-case
+/// behavior and avoids a silently-disabled cap).
+fn max_subagents_per_session_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(MAX_SUBAGENTS_PER_SESSION_DEFAULT)
+}
+
+/// The live per-session subagent spawn cap (claude 2.1.212 `xtu()`).
+fn max_subagents_per_session() -> u64 {
+    max_subagents_per_session_from(
+        std::env::var("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION")
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// The parent / main-loop model a spawn's `AgentModel::Inherit` + bare family
 /// aliases resolve against — claude-code `AgentTool.tsx:418`
 /// `getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, …)`.
@@ -1441,6 +1465,36 @@ impl Tool for AgentTool {
                 }
             }
         };
+
+        // Per-session subagent spawn cap (claude 2.1.212 `AgentTool.call` `N()`):
+        // before every spawn, reject the launch once the session has already
+        // spawned `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` agents (default 200),
+        // otherwise bump the counter. The counter lives on the session
+        // `taskRegistry` (`getTotalAgentSpawns` / `incrementTotalAgentSpawns`) so
+        // it is shared across every `AgentTool::call` in the session and across
+        // the fork / regular / teammate spawn paths. Matches the binary's
+        // placement: after type resolution, before the required-MCP gate and the
+        // sync/async dispatch. When no registry is wired (defaulted seam) the cap
+        // is inert.
+        if let Some(registry) = &self.ctx.task_registry {
+            let cap = max_subagents_per_session();
+            let spawned = registry.get_total_agent_spawns();
+            if spawned >= cap {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "subagent_count_cap",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
+Complete the remaining work directly with your tools instead of spawning more agents. \
+If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
+                )));
+            }
+            registry.increment_total_agent_spawns();
+        }
 
         // 4. (G3) Required-MCP-servers gate (claude AgentTool.tsx:367-409): if the
         // resolved agent declares `required_mcp_servers`, every required pattern

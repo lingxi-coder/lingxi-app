@@ -294,6 +294,109 @@ mod tests {
         );
     }
 
+    // =====================================================================
+    // Per-session subagent spawn cap (claude 2.1.212 `xtu()` /
+    // `taskRegistry.getTotalAgentSpawns` / `incrementTotalAgentSpawns`).
+    // =====================================================================
+
+    // `xtu()` = `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`.
+    #[test]
+    fn max_subagents_per_session_resolves_env_and_default() {
+        assert_eq!(max_subagents_per_session_from(None), 200);
+        assert_eq!(max_subagents_per_session_from(Some("50")), 50);
+        assert_eq!(max_subagents_per_session_from(Some("  7 ")), 7);
+        assert_eq!(max_subagents_per_session_from(Some("0")), 0);
+        // Unparseable / empty → default 200 (never a silently-disabled cap).
+        assert_eq!(max_subagents_per_session_from(Some("abc")), 200);
+        assert_eq!(max_subagents_per_session_from(Some("")), 200);
+    }
+
+    // Once the session has spawned >= the cap, the next spawn is rejected with
+    // the byte-exact message and the spawner is NOT invoked; the counter is not
+    // bumped on a rejected spawn.
+    #[tokio::test]
+    async fn spawn_cap_rejects_once_session_limit_reached() {
+        use traits::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        registry.set_total_agent_spawns(1000); // already past the default 200 cap
+        let bctx = wired_ctx(
+            spawner.clone(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let input = serde_json::json!({
+            "description": "do work",
+            "subagent_type": "general-purpose",
+            "prompt": "hi"
+        });
+        let err = tool
+            .call(input, ctx, fresh_tx())
+            .await
+            .expect_err("spawn cap must trip once the session limit is reached");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(
+                "Subagent spawn limit reached (1000 of 200 agents spawned). \
+Complete the remaining work directly with your tools instead of spawning more agents. \
+If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
+            ),
+            "cap message must be byte-exact: {msg}"
+        );
+        assert!(
+            spawner.invocations().is_empty(),
+            "spawner must not be invoked once the cap trips"
+        );
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            1000,
+            "a rejected spawn must not bump the counter"
+        );
+    }
+
+    // A cleared spawn increments the shared per-session counter, and the counter
+    // is cumulative across successive `AgentTool::call` invocations.
+    #[tokio::test]
+    async fn spawn_increments_session_counter_cumulatively() {
+        use traits::task_registry::TaskRegistryHandle;
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner.clone(),
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx);
+        let input = || {
+            serde_json::json!({
+                "description": "say hi",
+                "subagent_type": "general-purpose",
+                "prompt": "hi"
+            })
+        };
+        assert_eq!(registry.get_total_agent_spawns(), 0);
+        tool.call(
+            input(),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("first spawn clears the cap");
+        assert_eq!(registry.get_total_agent_spawns(), 1);
+        tool.call(
+            input(),
+            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_tx(),
+        )
+        .await
+        .expect("second spawn clears the cap");
+        assert_eq!(registry.get_total_agent_spawns(), 2);
+    }
+
     #[test]
     fn agent_tool_name_locked() {
         assert_eq!(AGENT_TOOL_NAME, "Agent");

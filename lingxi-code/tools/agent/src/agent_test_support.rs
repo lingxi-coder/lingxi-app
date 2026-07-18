@@ -351,6 +351,9 @@ impl SubagentSpawner for MockSubagentSpawner {
 pub struct MockTaskRegistryHandle {
     records: Mutex<HashMap<String, TaskRecord>>,
     counter: AtomicU64,
+    /// Per-session subagent-spawn counter backing `get_total_agent_spawns` /
+    /// `increment_total_agent_spawns` (the 2.1.212 spawn-cap gate).
+    spawns: AtomicU64,
 }
 
 impl MockTaskRegistryHandle {
@@ -360,7 +363,14 @@ impl MockTaskRegistryHandle {
         Self {
             records: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(0),
+            spawns: AtomicU64::new(0),
         }
+    }
+
+    /// Seed the per-session subagent-spawn counter, so a test can drive the
+    /// `Agent` tool's spawn-cap gate deterministically.
+    pub fn set_total_agent_spawns(&self, n: u64) {
+        self.spawns.store(n, Ordering::SeqCst);
     }
 
     fn fresh_id(&self, task_type: &str) -> String {
@@ -391,6 +401,14 @@ impl Default for MockTaskRegistryHandle {
 
 #[async_trait]
 impl TaskRegistryHandle for MockTaskRegistryHandle {
+    fn get_total_agent_spawns(&self) -> u64 {
+        self.spawns.load(Ordering::SeqCst)
+    }
+
+    fn increment_total_agent_spawns(&self) {
+        self.spawns.fetch_add(1, Ordering::SeqCst);
+    }
+
     async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
         let rec = TaskRecord {
             task_id: self.fresh_id(&input.task_type),

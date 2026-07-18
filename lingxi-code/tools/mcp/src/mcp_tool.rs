@@ -2230,6 +2230,9 @@ mod auto_background_race_tests {
     struct RecordingRegistry {
         registered: StdMutex<Vec<McpTaskRegistration>>,
         settled: StdMutex<Vec<(String, String, bool)>>,
+        /// The cancel token handed to the most recent `register_mcp_task` — a
+        /// test fires it to simulate a `TaskStop` (F3-2 regression).
+        captured_cancel: StdMutex<Option<tokio_util::sync::CancellationToken>>,
     }
 
     #[async_trait]
@@ -2270,9 +2273,10 @@ mod auto_background_race_tests {
         async fn register_mcp_task(
             &self,
             reg: McpTaskRegistration,
-            _cancel: tokio_util::sync::CancellationToken,
+            cancel: tokio_util::sync::CancellationToken,
         ) -> Result<String, TaskRegistryError> {
             self.registered.lock().unwrap().push(reg);
+            *self.captured_cancel.lock().unwrap() = Some(cancel);
             Ok("ktest0001".to_string())
         }
         async fn settle_mcp_task(
@@ -2424,5 +2428,92 @@ mod auto_background_race_tests {
             .await
             .expect("unwired seam falls back to a direct await");
         assert_eq!(result.model_content.as_deref(), Some("ok"));
+    }
+
+    // F3-2: once a slow call auto-backgrounds, firing the mcp_task cancel token
+    // (the port equivalent of `TaskStop`) must genuinely abort the in-flight
+    // call — NONE of the completed-side-effects may run. Concretely: even if the
+    // server LATER answers the (now abandoned) request, no MCP_COMPLETED
+    // telemetry is emitted and the task is never settled-as-completed. Before
+    // the fix the cancel token merely woke the settle-waiter, which DETACHED the
+    // still-running call_task; the late server response then ran
+    // `process_mcp_call_result`, emitting MCP_COMPLETED for a killed task.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_after_background_suppresses_completed_side_effects() {
+        use telemetry::InMemorySink;
+
+        // Large router timeout so the tool's 120s auto-bg race, not the
+        // transport's, decides the outcome.
+        let (conn, peer_tx, mut peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let sink = Arc::new(InMemorySink::new());
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-cancel"));
+
+        // Auto-backgrounds (peer has not answered) and registers the mcp_task.
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message)");
+        assert!(
+            result
+                .model_content
+                .as_deref()
+                .is_some_and(|t| t.contains("moved to the background as task ktest0001")),
+            "call auto-backgrounded"
+        );
+
+        // Simulate `TaskStop`: fire the token the registry captured.
+        let cancel = recorder
+            .captured_cancel
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("register_mcp_task captured a cancel token");
+        cancel.cancel();
+
+        // The server now answers the abandoned request. A NON-cancelled call
+        // would resolve here and run the completed-side-effects; the cancelled
+        // call must ignore it.
+        let frame = peer_rx.recv().await.expect("client sent a request frame");
+        let req: Value = serde_json::from_slice(&frame).expect("json request");
+        let id = req["id"].clone();
+        let resp = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [{ "type": "text", "text": "ok" }], "isError": false },
+        });
+        let mut bytes = serde_json::to_vec(&resp).unwrap();
+        bytes.push(b'\n');
+        let _ = peer_tx.send(Bytes::from(bytes)).await;
+
+        // Let the detached call_task + settle-waiter observe the cancel/response.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        let names: Vec<String> = sink.events().await.into_iter().map(|e| e.name).collect();
+        assert!(
+            names.iter().any(|n| n == MCP_STARTED),
+            "sanity: STARTED telemetry captured: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == MCP_COMPLETED),
+            "cancelled call must NOT emit COMPLETED telemetry: {names:?}"
+        );
+        assert!(
+            recorder.settled.lock().unwrap().is_empty(),
+            "cancelled call must NOT be settled-as-completed"
+        );
     }
 }

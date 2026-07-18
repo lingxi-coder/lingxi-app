@@ -845,20 +845,24 @@ impl Argv {
     }
 
     /// (2.1.211) Effective `--forward-subagent-text` state. The binary computes
-    /// `xe = k || Z.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`: the CLI flag OR a truthy
-    /// `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT` env var. When the flag is absent a
-    /// truthy env still enables forwarding, but if the runtime context is not
-    /// `--print` + `--output-format=stream-json` the env-only opt-in is silently
-    /// disabled (only an EXPLICIT flag is a fatal error — see `run_cli`). Kept
-    /// verbatim (`CLAUDE_CODE_*`) to match the binary's env registry key.
+    /// `xe = k || Z.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`: the CLI flag OR the env
+    /// var read RAW off `process.env` (`Z.…`) — NOT through `isEnvTruthy`. So the
+    /// truthiness here is plain JS string truthiness: any present, non-empty
+    /// value enables it (even `"0"`/`"false"`), an empty or unset value does not.
+    /// This deliberately differs from the `--include-partial-messages` sibling,
+    /// which the binary DOES gate through `Gt(…)`/`isEnvTruthy`
+    /// (`Re = D || Gt(process.env.CLAUDE_CODE_INCLUDE_PARTIAL_MESSAGES)`). When
+    /// the flag is absent a truthy env still enables forwarding, but if the
+    /// runtime context is not `--print` + `--output-format=stream-json` the
+    /// env-only opt-in is silently disabled (only an EXPLICIT flag is a fatal
+    /// error — see `run_cli`). Kept verbatim (`CLAUDE_CODE_*`) to match the
+    /// binary's env registry key.
     #[must_use]
     pub fn forward_subagent_text_effective(&self) -> bool {
         self.forward_subagent_text
-            || traits::env::is_env_truthy(
-                std::env::var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT")
-                    .ok()
-                    .as_deref(),
-            )
+            || std::env::var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
     }
 
     /// (M4 cc2.1.198) Normalize `--effort` exactly like the binary's argParser

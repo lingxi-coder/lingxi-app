@@ -1021,9 +1021,26 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT");
         assert!(!b.forward_subagent_text_effective());
 
-        // No flag, truthy env → effective true (binary `xe = k || env`).
+        // No flag, canonical truthy env → effective true (binary `xe = k || env`).
         std::env::set_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1");
         assert!(b.forward_subagent_text_effective());
+
+        // No flag, NON-canonical non-empty env → still effective true. The binary
+        // reads this var RAW off `process.env` (`Z.CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`),
+        // so plain JS string truthiness applies: `"0"`/`"false"` are non-empty and
+        // therefore truthy. (This differs from `--include-partial-messages`, which
+        // the binary gates through `isEnvTruthy`.)
+        for v in ["0", "false", "off", "no"] {
+            std::env::set_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", v);
+            assert!(
+                b.forward_subagent_text_effective(),
+                "{v:?} is non-empty ⇒ raw-truthy per the binary"
+            );
+        }
+
+        // No flag, empty env → effective false (empty string is JS-falsy).
+        std::env::set_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "");
+        assert!(!b.forward_subagent_text_effective());
 
         // Restore.
         match prev {

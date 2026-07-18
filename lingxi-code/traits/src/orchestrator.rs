@@ -1111,6 +1111,29 @@ pub trait OrchestratorHandle: Send + Sync {
         Err(HandleError::Unimplemented("fork_conversation".into()))
     }
 
+    /// Copy the CURRENT conversation into a NEW BACKGROUND session and keep the
+    /// interactive session live, per the redefined 2.1.212 `/fork` (`vAd`).
+    /// `prompt` is the optional `[prompt]` argument to seed the background
+    /// session's next turn. Returns the system-line to display in the live
+    /// session (the composition root owns the exact text, since it knows the new
+    /// session id).
+    ///
+    /// This is the seam the special dispatcher fills: `vAd` has no `load`
+    /// function — upstream intercepts `name === "fork"` and routes it through
+    /// the background (`--bg`/daemon) session-copy path while leaving the
+    /// foreground session interactive.
+    ///
+    /// Default returns `Err(HandleError::Unimplemented(..))` so existing handle
+    /// impls (and the test mock) keep compiling; the composition roots override
+    /// it against the real background-session dispatch (`jobs/<short>/state.json`
+    /// daemon supervisor + `__bg-run` worker).
+    async fn fork_to_background_session(&self, prompt: &str) -> Result<String, HandleError> {
+        let _ = prompt;
+        Err(HandleError::Unimplemented(
+            "fork_to_background_session".into(),
+        ))
+    }
+
     /// Generate a one-line session recap via an isolated, read-only,
     /// tool-denied, single-turn side query, per `/recap`. Returns the trimmed
     /// recap text (or [`RecapOutcome::Cancelled`] if aborted mid-flight).

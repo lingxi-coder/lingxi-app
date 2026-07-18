@@ -318,6 +318,151 @@ impl ProcessRunner for PosixProcess {
         })
     }
 
+    // PARITY 2.1.210 (timeout → move-to-background): a foreground Bash command
+    // that exceeds its timeout is NOT killed — the still-running child is handed
+    // off to a detached reaper that keeps draining its output into a per-task
+    // file, and `MovedToBackground` is returned so the tool layer surfaces the
+    // "…did not complete within its Ns timeout and was moved to the background"
+    // note. The spawn preamble mirrors `run` exactly (identical env, the same
+    // print/SDK-mode setsid + active-children registration) so the
+    // finished-in-time path is byte-identical to `run`.
+    async fn run_foreground(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<traits::ForegroundOutcome, ProcessError> {
+        let inner = cmd.inner();
+        let mut tcmd = Self::build_command(cmd);
+        tcmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // As in `run`: a dropped `Child` (cancellation / early return)
+            // SIGKILLs the process. On the timeout→background handoff below the
+            // child is MOVED into a detached reaper before this future returns,
+            // so it is NOT dropped and survives; only cancellation still kills.
+            .kill_on_drop(true);
+
+        let print_mode_cleanup = active_children::print_mode_child_cleanup_enabled();
+        if print_mode_cleanup {
+            attach_setsid(&mut tcmd);
+        }
+
+        let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let child_registration = if print_mode_cleanup {
+            child.id().map(|pid| {
+                active_children::register(pid);
+                ChildRegistration(pid)
+            })
+        } else {
+            None
+        };
+        if let Some(stdin_text) = &inner.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(stdin_text.as_bytes())
+                    .await
+                    .map_err(|e| ProcessError::Io(e.to_string()))?;
+            }
+        }
+
+        let timeout = inner.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let mut sout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProcessError::Io("child has no stdout pipe".into()))?;
+        let mut serr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ProcessError::Io("child has no stderr pipe".into()))?;
+        let mut out_buf: Vec<u8> = Vec::new();
+        let mut err_buf: Vec<u8> = Vec::new();
+        let mut out_done = false;
+        let mut err_done = false;
+        let mut exit_status: Option<std::process::ExitStatus> = None;
+
+        let sleep = tokio::time::sleep(timeout);
+        tokio::pin!(sleep);
+
+        // Drive both pipes and the child's exit concurrently, bounded by the
+        // deadline. Reading into buffers (rather than `wait_with_output`) keeps
+        // the child + its still-open pipes in hand if the deadline fires.
+        let timed_out = loop {
+            if out_done && err_done && exit_status.is_some() {
+                break false;
+            }
+            tokio::select! {
+                biased;
+                () = &mut sleep => break true,
+                r = sout.read_buf(&mut out_buf), if !out_done => {
+                    match r { Ok(0) | Err(_) => out_done = true, Ok(_) => {} }
+                }
+                r = serr.read_buf(&mut err_buf), if !err_done => {
+                    match r { Ok(0) | Err(_) => err_done = true, Ok(_) => {} }
+                }
+                s = child.wait(), if exit_status.is_none() => {
+                    exit_status = Some(s.map_err(|e| ProcessError::Io(e.to_string()))?);
+                }
+            }
+        };
+
+        if !timed_out {
+            let status = exit_status.expect("loop breaks with a status when not timed out");
+            return Ok(traits::ForegroundOutcome::Completed(ProcessOutput {
+                stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+                stderr: String::from_utf8_lossy(&err_buf).into_owned(),
+                exit_code: status.code().unwrap_or(-1),
+                timed_out: false,
+            }));
+        }
+
+        // ===== Timeout → move to background =====
+        // Land a per-task output file (same O_NOFOLLOW symlink guard as
+        // `spawn_background`) and hand the live child to a detached reaper. The
+        // partial output captured before the deadline is flushed first so a
+        // `Read` on the file shows everything from the start; the reaper then
+        // keeps copying both pipes to the file until EOF and reaps the child.
+        let task_id = generate_task_id();
+        let out_path = task_output_path(&task_id);
+        if let Some(parent) = out_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ProcessError::Io(format!("mkdir task-output: {e}")))?;
+        }
+        let std_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&out_path)
+            .map_err(|e| ProcessError::Io(format!("open task-output {out_path:?}: {e}")))?;
+        let std_file2 = std_file
+            .try_clone()
+            .map_err(|e| ProcessError::Io(format!("clone fd: {e}")))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| ProcessError::Io("backgrounded child has no pid".into()))?;
+
+        tokio::spawn(async move {
+            // Hold the print-mode registration for the child's remaining life so
+            // an abrupt process SIGTERM can still `killpg` the backgrounded tree.
+            let _child_registration = child_registration;
+            let mut child = child;
+            let mut file = tokio::fs::File::from_std(std_file);
+            let mut file2 = tokio::fs::File::from_std(std_file2);
+            let _ = file.write_all(&out_buf).await;
+            let _ = file.write_all(&err_buf).await;
+            let _ = file.flush().await;
+            let copy_out = tokio::io::copy(&mut sout, &mut file);
+            let copy_err = tokio::io::copy(&mut serr, &mut file2);
+            let _ = tokio::join!(copy_out, copy_err);
+            let _ = file.flush().await;
+            let _ = file2.flush().await;
+            let _ = child.wait().await;
+        });
+
+        Ok(traits::ForegroundOutcome::MovedToBackground(
+            ProcessHandle { task_id, pid },
+        ))
+    }
+
     async fn run_hook_with_async_detection(
         &self,
         cmd: &SandboxedCommand,
@@ -664,9 +809,8 @@ mod async_hook_tests {
     async fn async_marker_retains_eventual_stdout_and_stderr() {
         // The post-marker stdout/stderr + exit are drained and delivered once
         // through the eventual-output channel (the fold-back payload).
-        let cmd = sh(
-            "echo '{\"async\":true,\"asyncTimeout\":1000}'; echo after; echo err 1>&2; exit 0",
-        );
+        let cmd =
+            sh("echo '{\"async\":true,\"asyncTimeout\":1000}'; echo after; echo err 1>&2; exit 0");
         let outcome = PosixProcess::new()
             .run_hook_with_async_detection(&cmd, Duration::from_millis(15_000))
             .await

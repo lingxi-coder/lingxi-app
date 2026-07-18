@@ -65,6 +65,44 @@ pub trait ProcessRunner: Send + Sync {
     ) -> Result<HookRunOutcome, ProcessError> {
         Ok(HookRunOutcome::Completed(self.run(cmd).await?))
     }
+
+    /// Run a sandboxed FOREGROUND tool command, but — matching claude-code
+    /// 2.1.210+ — when the command hits its timeout, hand the still-running child
+    /// off to the background instead of killing it. Returns
+    /// [`ForegroundOutcome::Completed`] when the command finished within its
+    /// timeout, or [`ForegroundOutcome::MovedToBackground`] carrying the new
+    /// background task handle when it timed out and was left running (its output
+    /// keeps streaming to the task file so the model can Read it).
+    ///
+    /// The default implementation does NOT background: it defers to
+    /// [`ProcessRunner::run`], mapping a normal finish to
+    /// [`ForegroundOutcome::Completed`] and propagating the runner's timeout
+    /// error unchanged, so a platform without the streaming handoff keeps its
+    /// current kill-on-timeout behavior (the caller then falls back to the
+    /// interrupted result). Only runners that can detach a timed-out child
+    /// override this.
+    ///
+    /// # Errors
+    /// Returns [`ProcessError`] on spawn/I/O failure. The default impl also
+    /// surfaces [`ProcessError::Timeout`] on the timeout path.
+    async fn run_foreground(
+        &self,
+        cmd: &SandboxedCommand,
+    ) -> Result<ForegroundOutcome, ProcessError> {
+        Ok(ForegroundOutcome::Completed(self.run(cmd).await?))
+    }
+}
+
+/// Outcome of [`ProcessRunner::run_foreground`].
+#[derive(Debug)]
+pub enum ForegroundOutcome {
+    /// The command finished within its timeout; carries its collected output.
+    Completed(ProcessOutput),
+    /// The command exceeded its timeout and was moved to the background
+    /// (claude-code 2.1.210+). The child keeps running detached with its output
+    /// streaming to the task file; the handle names the task so the caller can
+    /// build the "moved to the background" note and the model can Read the file.
+    MovedToBackground(ProcessHandle),
 }
 
 /// Outcome of [`ProcessRunner::run_hook_with_async_detection`].

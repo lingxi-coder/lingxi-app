@@ -340,11 +340,15 @@ pub fn register_core_batch_8(
 ) {
     use crate::{
         AutocompactHandler, ForkHandler, GoalHandler, RecapHandler, ReloadSkillsHandler,
-        SkillDoctorHandler, StopHandler,
+        SkillDoctorHandler, StopHandler, SubtaskHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AutocompactHandler::new()));
     reg.register_builtin_handler(Arc::new(ForkHandler::new(handle.clone())));
+    // cc2.1.212: `/subtask` (net-new, not in the locked name surface) is the
+    // renamed in-session subagent-spawn that `/fork` historically had. Reuses
+    // the same `fork_conversation` spawn seam; wired here beside `/fork`.
+    reg.register_builtin_handler(Arc::new(SubtaskHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(GoalHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(RecapHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ReloadSkillsHandler::with_all_roots(
@@ -1010,6 +1014,68 @@ mod batch_4_tests {
         match h.handle(&args("continue")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(s, "No resumable sessions found.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod batch_8_tests {
+    use super::*;
+    use command_api::model::CommandResult;
+    use command_api::parser::ParsedSlashCommand;
+    use orchestrator::test_support::MockOrchestratorHandle;
+
+    fn batch_8(reg: &mut CommandRegistry, handle: Arc<dyn traits::OrchestratorHandle>) {
+        register_core_batch_8(
+            reg,
+            handle,
+            Arc::new(tokio::sync::RwLock::new(CommandRegistry::new())),
+            std::env::temp_dir(),
+            std::env::temp_dir(),
+            None,
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+    }
+
+    /// cc2.1.212: `/subtask` (the renamed in-session subagent) resolves with a
+    /// real handler after batch-8, and both `/fork` and `/subtask` are present.
+    #[test]
+    fn subtask_and_fork_resolve_after_batch_8() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));
+
+        for name in ["subtask", "fork"] {
+            assert!(reg.resolve(name).is_some(), "/{name} missing");
+            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+        }
+        let cmd = reg.resolve("subtask").expect("/subtask must resolve");
+        assert_eq!(
+            cmd.description,
+            "Send a subagent off with your full context; its result comes back here"
+        );
+    }
+
+    /// `/subtask` with no task renders the byte-exact usage string.
+    #[tokio::test]
+    async fn subtask_empty_renders_usage() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));
+
+        let h = reg.get_handler("subtask").expect("subtask handler missing");
+        let args = ParsedSlashCommand {
+            name: "subtask".to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        };
+        match h.handle(&args).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "Usage: /subtask \\<task\\>");
             }
             other => panic!("expected Done, got {other:?}"),
         }

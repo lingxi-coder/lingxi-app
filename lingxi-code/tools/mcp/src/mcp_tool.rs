@@ -2605,5 +2605,219 @@ mod auto_background_race_tests {
             recorder.settled.lock().unwrap().is_empty(),
             "cancelled call must NOT be settled-as-completed"
         );
+        // F3-3: a cancelled (never-settled) call must NOT emit the
+        // `mcp_auto_background` outcome counter (the binary's `!k` guard).
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == TENGU_FEATURE_OK || n == TENGU_FEATURE_SAD || n == TENGU_FEATURE_BAD),
+            "cancelled call must NOT emit an mcp_auto_background outcome: {names:?}"
+        );
+    }
+
+    // F3-3: `emit_auto_background_outcome` maps each terminal outcome to the
+    // binary's `ve`/`Ue`/`me` feature counter with the exact wire event name +
+    // `feature_name` / `error_code` payload.
+    #[tokio::test]
+    async fn auto_background_outcome_events_map_to_feature_counters() {
+        use telemetry::InMemorySink;
+
+        for (outcome, event, error_code) in [
+            (AutoBackgroundOutcome::Completed, TENGU_FEATURE_OK, None),
+            (
+                AutoBackgroundOutcome::ToolError,
+                TENGU_FEATURE_SAD,
+                Some("tool_error"),
+            ),
+            (
+                AutoBackgroundOutcome::CallFailed,
+                TENGU_FEATURE_BAD,
+                Some("call_failed"),
+            ),
+        ] {
+            let bus = Arc::new(AnalyticsBus::new());
+            let sink = Arc::new(InMemorySink::new());
+            bus.attach_sink(sink.clone()).await;
+
+            emit_auto_background_outcome(&bus, outcome).await;
+
+            let events = sink.events().await;
+            let ev = events
+                .iter()
+                .find(|e| e.name == event)
+                .unwrap_or_else(|| panic!("{event} emitted for {outcome:?}: {events:?}"));
+            assert!(
+                matches!(
+                    ev.metadata.get("feature_name"),
+                    Some(AnalyticsValue::String(s)) if s == MCP_AUTO_BACKGROUND_FEATURE
+                ),
+                "feature_name==mcp_auto_background for {outcome:?}"
+            );
+            match error_code {
+                Some(code) => assert!(
+                    matches!(
+                        ev.metadata.get("error_code"),
+                        Some(AnalyticsValue::String(s)) if s == code
+                    ),
+                    "error_code=={code} for {outcome:?}"
+                ),
+                // `ve("mcp_auto_background")` (completed) carries NO error_code.
+                None => assert!(
+                    ev.metadata.get("error_code").is_none(),
+                    "completed outcome carries no error_code"
+                ),
+            }
+        }
+    }
+
+    // Drive the peer: read the client's `tools/call` request frame and answer it
+    // with the given `result`/`error` JSON-RPC response object.
+    async fn answer_call(
+        peer_rx: &mut mpsc::Receiver<Bytes>,
+        peer_tx: &mpsc::Sender<Bytes>,
+        response: Value,
+    ) {
+        let frame = peer_rx.recv().await.expect("client sent a request frame");
+        let req: Value = serde_json::from_slice(&frame).expect("json request");
+        let mut resp = json!({ "jsonrpc": "2.0", "id": req["id"].clone() });
+        for (k, v) in response.as_object().expect("response object") {
+            resp[k] = v.clone();
+        }
+        let mut bytes = serde_json::to_vec(&resp).unwrap();
+        bytes.push(b'\n');
+        let _ = peer_tx.send(Bytes::from(bytes)).await;
+    }
+
+    // F3-3: a backgrounded call that later RESOLVES (isError:false) settles the
+    // mcp_task and emits `ve("mcp_auto_background")` → `tengu_feature_ok`.
+    #[tokio::test(start_paused = true)]
+    async fn backgrounded_call_completed_emits_feature_ok() {
+        use telemetry::InMemorySink;
+
+        let (conn, peer_tx, mut peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let sink = Arc::new(InMemorySink::new());
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-ok"));
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message)");
+        assert!(result
+            .model_content
+            .as_deref()
+            .is_some_and(|t| t.contains("moved to the background as task ktest0001")));
+
+        // The call now RESOLVES successfully; the settle-waiter settles + emits.
+        answer_call(
+            &mut peer_rx,
+            &peer_tx,
+            json!({ "result": { "content": [{ "type": "text", "text": "done" }], "isError": false } }),
+        )
+        .await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            recorder.settled.lock().unwrap().len(),
+            1,
+            "resolved call settled the mcp_task"
+        );
+        let events = sink.events().await;
+        let ev = events
+            .iter()
+            .find(|e| e.name == TENGU_FEATURE_OK)
+            .unwrap_or_else(|| panic!("tengu_feature_ok emitted: {events:?}"));
+        assert!(matches!(
+            ev.metadata.get("feature_name"),
+            Some(AnalyticsValue::String(s)) if s == MCP_AUTO_BACKGROUND_FEATURE
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.name == TENGU_FEATURE_SAD || e.name == TENGU_FEATURE_BAD),
+            "completed path emits ONLY feature_ok: {events:?}"
+        );
+    }
+
+    // F3-3: a backgrounded call whose result carries `isError:true` settles the
+    // mcp_task as failed and emits `Ue("mcp_auto_background","tool_error")` →
+    // `tengu_feature_sad` (a recognized MCP failure, `BZu` true).
+    #[tokio::test(start_paused = true)]
+    async fn backgrounded_call_tool_error_emits_feature_sad() {
+        use telemetry::InMemorySink;
+
+        let (conn, peer_tx, mut peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let sink = Arc::new(InMemorySink::new());
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-toolerr"));
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message)");
+        assert!(result
+            .model_content
+            .as_deref()
+            .is_some_and(|t| t.contains("moved to the background as task ktest0001")));
+
+        // The call resolves with an `isError:true` tool result → tool_error.
+        answer_call(
+            &mut peer_rx,
+            &peer_tx,
+            json!({ "result": { "content": [{ "type": "text", "text": "boom" }], "isError": true } }),
+        )
+        .await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        let settled = recorder.settled.lock().unwrap();
+        assert_eq!(settled.len(), 1, "errored call settled the mcp_task");
+        assert!(settled[0].2, "settled as failed");
+        drop(settled);
+
+        let events = sink.events().await;
+        let ev = events
+            .iter()
+            .find(|e| e.name == TENGU_FEATURE_SAD)
+            .unwrap_or_else(|| panic!("tengu_feature_sad emitted: {events:?}"));
+        assert!(matches!(
+            ev.metadata.get("feature_name"),
+            Some(AnalyticsValue::String(s)) if s == MCP_AUTO_BACKGROUND_FEATURE
+        ));
+        assert!(matches!(
+            ev.metadata.get("error_code"),
+            Some(AnalyticsValue::String(s)) if s == "tool_error"
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.name == TENGU_FEATURE_OK || e.name == TENGU_FEATURE_BAD),
+            "tool_error path emits ONLY feature_sad: {events:?}"
+        );
     }
 }

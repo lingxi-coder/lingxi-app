@@ -28,6 +28,7 @@ impl RetryPolicy {
             | LlmError::InvalidRequest { .. }
             | LlmError::QuotaExceeded
             | LlmError::ContextOverflow { .. }
+            | LlmError::RequestTooLarge
             | LlmError::ModelUnavailable
             | LlmError::StreamInterrupted { .. }
             | LlmError::CostUnavailable { .. }

@@ -574,7 +574,17 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             // message stays `e.to_string()` (`createAssistantAPIErrorMessage`
             // renders content verbatim); the envelope adds `error`/`apiErrorStatus`.
             let env = classify_api_error(&e);
-            let assistant_id = surface_model_error(orch, &e.to_string(), env).await;
+            // Content is rendered verbatim (`e.to_string()`) EXCEPT a 413
+            // `request_too_large` (accumulated images/attachments), which the
+            // 2.1.212 handler renders with the byte-exact `$Vi()` notice.
+            let content = match &e {
+                OrchestratorError::ApiCall(LlmError::RequestTooLarge)
+                | OrchestratorError::Streaming(LlmError::RequestTooLarge) => {
+                    crate::conversation::request_too_large_notice()
+                }
+                _ => e.to_string(),
+            };
+            let assistant_id = surface_model_error(orch, &content, env).await;
             return Ok((
                 TurnStepOutcome::Ended {
                     final_message_id: assistant_id,

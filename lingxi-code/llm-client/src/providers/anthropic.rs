@@ -762,7 +762,14 @@ fn map_error(error_type: &str, message: String, retry_after: Option<Duration>) -
             retry_after,
             scope: None,
         },
-        "request_too_large" => LlmError::ContextOverflow { token_gap: 0 },
+        // 413 split (parity 2.1.212): a `request_too_large` whose message
+        // mentions the context window is a token overflow → keep the
+        // prompt-too-long / compaction path; otherwise it is accumulated
+        // image/attachment bytes → the distinct `RequestTooLarge` notice.
+        "request_too_large" if message.to_ascii_lowercase().contains("context window") => {
+            LlmError::ContextOverflow { token_gap: 0 }
+        }
+        "request_too_large" => LlmError::RequestTooLarge,
         "invalid_request_error" if message.to_ascii_lowercase().contains("prompt is too long") => {
             LlmError::ContextOverflow {
                 token_gap: ptl_token_gap(&message),

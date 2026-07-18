@@ -382,6 +382,27 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// once a spawn clears the cap gate. Default impl is a no-op so existing mock
     /// handles compile unchanged.
     fn increment_total_agent_spawns(&self) {}
+
+    /// Session-wide count of WebSearch calls executed so far — 1:1 with
+    /// claude-code's `taskRegistry.getWebSearchCalls(){return n}` (parity
+    /// 2.1.212). The `WebSearch` tool reads this before every search and compares
+    /// it against `CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION` (default 200) to gate
+    /// the session budget. Default `0` so existing mock handles compile unchanged
+    /// and a null / no-registry context never caps — byte-identical to the
+    /// binary's stub `getWebSearchCalls(){return 0}`.
+    fn web_search_calls(&self) -> u32 {
+        0
+    }
+
+    /// Increment the session WebSearch counter — 1:1 with
+    /// `taskRegistry.incrementWebSearchCalls(){n++}`. Called once for every
+    /// non-capped `WebSearch` invocation. Default no-op so mock handles and
+    /// registry-less contexts are unaffected.
+    fn increment_web_search_calls(&self) {}
+
+    /// Reset the session WebSearch counter to zero — 1:1 with
+    /// `taskRegistry.resetWebSearchCalls(){n=0}`. Default no-op.
+    fn reset_web_search_calls(&self) {}
 }
 
 #[cfg(test)]

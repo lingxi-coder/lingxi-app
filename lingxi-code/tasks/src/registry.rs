@@ -76,6 +76,13 @@ pub struct TaskRegistry {
     /// (default 200), then bumps it on a cleared spawn. Interior-mutable so the
     /// shared `Arc<TaskRegistry>` the tool holds can count without a write lock.
     total_agent_spawns: AtomicU64,
+    /// Session-wide WebSearch call counter — the `taskRegistry` `n` behind
+    /// `getWebSearchCalls`/`incrementWebSearchCalls`/`resetWebSearchCalls` (parity
+    /// 2.1.212). Session-global (shared across the main loop and its subagents,
+    /// which route through the same registry), so the `WebSearch` tool enforces
+    /// ONE budget per session. An `Arc<AtomicU32>` — cheap atomic reads/writes off
+    /// the tool's hot path, no lock.
+    web_search_calls: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// The optional `<result>` / `<usage>` payload an agent carries when it comes to
@@ -114,6 +121,7 @@ impl TaskRegistry {
             task_created_firer: None,
             pending_rest: Arc::new(RwLock::new(std::collections::HashMap::new())),
             total_agent_spawns: AtomicU64::new(0),
+            web_search_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -129,6 +137,26 @@ impl TaskRegistry {
     /// `incrementTotalAgentSpawns`), called once a spawn clears the cap gate.
     pub fn increment_total_agent_spawns(&self) {
         self.total_agent_spawns.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Current session-wide WebSearch call count — `getWebSearchCalls(){return n}`
+    /// (parity 2.1.212).
+    #[must_use]
+    pub fn web_search_calls(&self) -> u32 {
+        self.web_search_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Increment the session WebSearch counter — `incrementWebSearchCalls(){n++}`.
+    pub fn increment_web_search_calls(&self) {
+        self.web_search_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Reset the session WebSearch counter — `resetWebSearchCalls(){n=0}`.
+    pub fn reset_web_search_calls(&self) {
+        self.web_search_calls
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Inject the best-effort `TaskCompleted` hook firer. Default-`None`

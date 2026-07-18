@@ -454,6 +454,24 @@ impl TaskRegistryHandle for TaskRegistry {
         // `Ok`.
         Ok(TaskRegistry::take_pending_task_notifications(self).await)
     }
+
+    fn web_search_calls(&self) -> u32 {
+        // Delegate to the inherent atomic-load method (`getWebSearchCalls(){return
+        // n}`). Explicit `TaskRegistry::` path selects the inherent method over the
+        // trait default, so the `WebSearch` tool observes the real session counter
+        // through the seam rather than the null-registry `0` stub.
+        TaskRegistry::web_search_calls(self)
+    }
+
+    fn increment_web_search_calls(&self) {
+        // `incrementWebSearchCalls(){n++}` — the inherent atomic fetch-add.
+        TaskRegistry::increment_web_search_calls(self);
+    }
+
+    fn reset_web_search_calls(&self) {
+        // `resetWebSearchCalls(){n=0}` — the inherent atomic store.
+        TaskRegistry::reset_web_search_calls(self);
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +598,25 @@ mod tests {
         ));
         let registry = Arc::new(TaskRegistry::new(runtime, fs, out_mgr));
         (dir, registry)
+    }
+
+    #[test]
+    fn web_search_counter_is_visible_through_the_handle_seam() {
+        // Regression: the `TaskRegistryHandle` impl MUST delegate the session
+        // WebSearch counter to the inherent atomic — not fall through to the
+        // trait's `getWebSearchCalls(){return 0}` default. The `WebSearch` tool's
+        // budget gate reads the count exclusively through this `&dyn` seam, so a
+        // missing override would leave the counter permanently at 0 and never cap.
+        let (_dir, registry) = make_registry();
+        let handle: &dyn TaskRegistryHandle = registry.as_ref();
+        assert_eq!(handle.web_search_calls(), 0);
+        handle.increment_web_search_calls();
+        handle.increment_web_search_calls();
+        assert_eq!(handle.web_search_calls(), 2, "seam must observe increments");
+        // Inherent and seam views share the same atomic.
+        assert_eq!(registry.web_search_calls(), 2);
+        handle.reset_web_search_calls();
+        assert_eq!(handle.web_search_calls(), 0);
     }
 
     // ── agent-specific output helpers (T3) ───────────────────────────────

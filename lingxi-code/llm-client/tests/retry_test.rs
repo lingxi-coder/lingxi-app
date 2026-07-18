@@ -108,6 +108,9 @@ fn non_retryable_errors_do_not_retry() {
             message: "bad".to_string(),
         },
         LlmError::ContextOverflow { token_gap: 0 },
+        // 2.1.212 413 request-too-large is terminal: compaction cannot shed the
+        // image/attachment bytes, so retrying only burns the budget.
+        LlmError::RequestTooLarge,
         LlmError::UnsupportedCapability {
             capability: "vision".to_string(),
         },

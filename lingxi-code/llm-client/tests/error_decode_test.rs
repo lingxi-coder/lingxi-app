@@ -271,7 +271,8 @@ fn ptl_context_overflow_carries_token_gap() {
         "gap should be 0 (no counts); got {err3:?}"
     );
 
-    // request_too_large → gap = 0 (no message to parse)
+    // request_too_large WITHOUT "context window" → RequestTooLarge (2.1.212 413
+    // split: accumulated images/attachments, NOT a token overflow).
     let err4 = codec
         .decode_response(anthropic_error(
             413,
@@ -280,8 +281,22 @@ fn ptl_context_overflow_carries_token_gap() {
         ))
         .unwrap_err();
     assert!(
-        matches!(err4, LlmError::ContextOverflow { token_gap: 0 }),
-        "request_too_large gap should be 0; got {err4:?}"
+        matches!(err4, LlmError::RequestTooLarge),
+        "request_too_large (no context window) should be RequestTooLarge; got {err4:?}"
+    );
+
+    // request_too_large WHOSE MESSAGE mentions the context window → stays a
+    // ContextOverflow (prompt-too-long / compaction path).
+    let err5 = codec
+        .decode_response(anthropic_error(
+            413,
+            "request_too_large",
+            "prompt exceeds the model's context window",
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err5, LlmError::ContextOverflow { token_gap: 0 }),
+        "413 mentioning context window should be ContextOverflow; got {err5:?}"
     );
 }
 

@@ -17,7 +17,7 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{WEB_SEARCH_COMPLETED, WEB_SEARCH_FAILED, WEB_SEARCH_STARTED};
@@ -1253,53 +1253,109 @@ impl Tool for WebSearchTool {
         // The streaming body's tool block / beta header / model are identical to
         // the blocking body.
         let stream_body = build_streaming_request_body(&self.ctx.default_model, &parsed_input);
-        let stream_req = self.build_messages_request(&stream_body);
 
-        match self.ctx.http.stream_sse(stream_req).await {
-            Ok(stream) => {
-                // Connected — drive the SSE stream to completion, reassembling
-                // the raw content-block array and emitting progress as blocks
-                // start. A mid-stream transport error aborts the search.
-                let (blocks, usage) =
-                    match Self::consume_stream(stream, &parsed_input.query, &ctx, &tx).await {
-                        Ok(out) => out,
-                        Err(err) => {
-                            let elapsed_ms = started.elapsed().as_millis() as u64;
-                            return Err(self
-                                .map_stream_error(&invocation_id, err, elapsed_ms)
-                                .await);
-                        }
-                    };
-                let elapsed_ms = started.elapsed().as_millis() as u64;
-                let search_count = count_searches(&blocks);
-                let results = parse_response_content(&blocks);
-                Ok(self
-                    .build_success_result(
-                        &invocation_id,
-                        &parsed_input.query,
-                        results,
-                        search_count,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        elapsed_ms,
-                    )
-                    .await)
-            }
-            // FALLBACK PATH — `stream_sse` failed at connect (e.g. a transport or
-            // test mock that does not implement SSE). Fall back to the original
-            // blocking POST + `parse_response_content`, keeping non-SSE
-            // transports and the existing blocking tests working. The functional
-            // result is identical; only the incremental progress is lost.
-            Err(_connect_err) => {
-                let body = build_request_body(&self.ctx.default_model, &parsed_input);
-                let req = self.build_messages_request(&body);
-                let resp_result = self.ctx.http.request(req).await;
-                let elapsed_ms = started.elapsed().as_millis() as u64;
-                self.finish_blocking(&invocation_id, &parsed_input.query, resp_result, elapsed_ms)
-                    .await
+        // Bounded 529/overloaded retry around the streaming connect (parity
+        // 2.1.212): CC routes this hosted `web_search_tool` query through the
+        // retrying `queryModelWithStreaming` wrapper — `initialConsecutive529Errors`
+        // + `subscribeRetry`/`onRetryStatus`, where the retry predicate `dNe` is
+        // `status===529 || error==="overloaded_error"` and the backoff `sle` is
+        // `min(500*2^(n-1), 32000)ms`. lingxi's HttpError collapses the overloaded
+        // signal onto HTTP 529, so a connect-phase 529 is retried in place (fresh
+        // request per attempt) up to `LINGXI_MAX_RETRIES` (default 10) before
+        // falling through to the existing blocking fallback. Non-529 connect errors
+        // and a successful connect are unchanged.
+        let max_retries = web_search_max_529_retries();
+        let mut attempt: u32 = 0;
+        loop {
+            let stream_req = self.build_messages_request(&stream_body);
+            match self.ctx.http.stream_sse(stream_req).await {
+                Ok(stream) => {
+                    // Connected — drive the SSE stream to completion, reassembling
+                    // the raw content-block array and emitting progress as blocks
+                    // start. A mid-stream transport error aborts the search.
+                    let (blocks, usage) =
+                        match Self::consume_stream(stream, &parsed_input.query, &ctx, &tx).await {
+                            Ok(out) => out,
+                            Err(err) => {
+                                let elapsed_ms = started.elapsed().as_millis() as u64;
+                                return Err(self
+                                    .map_stream_error(&invocation_id, err, elapsed_ms)
+                                    .await);
+                            }
+                        };
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    let search_count = count_searches(&blocks);
+                    let results = parse_response_content(&blocks);
+                    return Ok(self
+                        .build_success_result(
+                            &invocation_id,
+                            &parsed_input.query,
+                            results,
+                            search_count,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            elapsed_ms,
+                        )
+                        .await);
+                }
+                // RETRY ARM — a connect-phase 529/overloaded, with attempts left:
+                // wait out the `sle` exponential backoff and re-issue the stream
+                // request (mirrors CC's `queryModelWithStreaming` 529 retry loop).
+                Err(err) if is_overloaded_status(&err) && attempt < max_retries => {
+                    attempt += 1;
+                    tokio::time::sleep(retry_backoff_529(attempt)).await;
+                    continue;
+                }
+                // FALLBACK PATH — `stream_sse` failed at connect (e.g. a transport
+                // or test mock that does not implement SSE, or a 529 whose retries
+                // are exhausted). Fall back to the original blocking POST +
+                // `parse_response_content`, keeping non-SSE transports and the
+                // existing blocking tests working. The functional result is
+                // identical; only the incremental progress is lost.
+                Err(_connect_err) => {
+                    let body = build_request_body(&self.ctx.default_model, &parsed_input);
+                    let req = self.build_messages_request(&body);
+                    let resp_result = self.ctx.http.request(req).await;
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    return self
+                        .finish_blocking(
+                            &invocation_id,
+                            &parsed_input.query,
+                            resp_result,
+                            elapsed_ms,
+                        )
+                        .await;
+                }
             }
         }
     }
+}
+
+/// `dNe` retry predicate: HTTP 529 is lingxi's `HttpError` embodiment of CC's
+/// `status===529 || error==="overloaded_error"` overloaded signal (the transport
+/// maps the Anthropic `overloaded_error` body to a 529 status).
+fn is_overloaded_status(err: &HttpError) -> bool {
+    matches!(err, HttpError::Status { status: 529, .. })
+}
+
+/// `sle` exponential backoff: `min(500 * 2^(attempt-1), 32000)` ms, `attempt`
+/// 1-indexed. CC's `queryModelWithStreaming` applies jitter on top; it is omitted
+/// here so the (test-observable) delay is deterministic. The shift is clamped so
+/// `1 << shift` never overflows before the `min(…, 32_000)` cap applies.
+fn retry_backoff_529(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(20);
+    let base = 500u64.saturating_mul(1u64 << shift);
+    Duration::from_millis(base.min(32_000))
+}
+
+/// `DEFAULT_MAX_RETRIES = 10`, overridable via `LINGXI_MAX_RETRIES` (a trimmed
+/// integer literal; anything else falls back to the default) — mirrors CC's
+/// `maxRetries` default on the streaming query wrapper.
+fn web_search_max_529_retries() -> u32 {
+    std::env::var("LINGXI_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(10)
 }
 
 impl WebSearchTool {
@@ -2884,6 +2940,109 @@ mod tests {
             1,
             "successful stream must issue exactly one request (no self-retry)"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streaming_retries_hosted_search_on_529_overloaded() {
+        // Parity 2.1.212: a connect-phase 529/overloaded on the hosted streaming
+        // path is retried in place (CC's `queryModelWithStreaming` 529 loop),
+        // NOT dropped to the non-retrying blocking fallback. First `stream_sse`
+        // returns Err(529); second returns a success stream. `start_paused`
+        // fast-forwards the `sle` backoff so the test runs instantly.
+        struct Retry529ThenOk {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl HttpTransport for Retry529ThenOk {
+            async fn request(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, HttpError> {
+                // The blocking fallback must NOT be reached — the retry succeeds.
+                Err(HttpError::InvalidRequest(
+                    "blocking fallback must not run".into(),
+                ))
+            }
+            async fn stream_sse(
+                &self,
+                _req: protocol::HttpRequest,
+            ) -> Result<traits::http::SseStream, HttpError> {
+                let n = self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    // First connect: transient capacity 529 (== overloaded).
+                    return Err(HttpError::Status {
+                        status: 529,
+                        body: "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}"
+                            .into(),
+                    });
+                }
+                // Second connect: a minimal success stream.
+                struct S(u8);
+                impl futures_util::Stream for S {
+                    type Item = Result<protocol::SseEvent, HttpError>;
+                    fn poll_next(
+                        mut self: std::pin::Pin<&mut Self>,
+                        _cx: &mut std::task::Context<'_>,
+                    ) -> std::task::Poll<Option<Self::Item>> {
+                        self.0 += 1;
+                        let ev = match self.0 {
+                            1 => json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+                            2 => json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "recovered" } }),
+                            3 => json!({ "type": "content_block_stop", "index": 0 }),
+                            4 => json!({ "type": "message_stop" }),
+                            _ => return std::task::Poll::Ready(None),
+                        };
+                        std::task::Poll::Ready(Some(Ok(protocol::SseEvent {
+                            event_type: ev
+                                .get("type")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            data: ev.to_string(),
+                            id: None,
+                        })))
+                    }
+                }
+                Ok(Box::pin(S(0)))
+            }
+        }
+        let http = Arc::new(Retry529ThenOk {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(InMemorySink::default());
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            bus,
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.http = http.clone() as Arc<dyn HttpTransport>;
+        ctx.provider = Arc::new(tool_api::AnthropicRequestBuilder::new("test-key", None));
+        ctx.default_model = "claude-sonnet-4-20250514".into();
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = WebSearchTool::new(ctx);
+        let (tx, _rx) = progress_channel();
+        let res = tool
+            .call(json!({ "query": "rust async" }), anthropic_ctx(), tx)
+            .await
+            .expect("529 must be retried, then succeed");
+        assert!(!res.is_error, "retried run must succeed, not error");
+        // The recovered stream's text survived into the results.
+        let mc = res.model_content.as_deref().expect("model_content");
+        assert!(mc.contains("recovered"), "recovered text missing: {mc}");
+        // Exactly two stream_sse connects: the 529 + the successful retry (the
+        // blocking fallback was never reached).
+        assert_eq!(
+            http.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "must retry the stream connect exactly once after 529"
+        );
+        // COMPLETED (not FAILED) telemetry fired.
+        let events = sink.events().await;
+        let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"tengu_tool_web_search_completed"));
+        assert!(!names.contains(&"tengu_tool_web_search_failed"));
     }
 
     #[tokio::test]

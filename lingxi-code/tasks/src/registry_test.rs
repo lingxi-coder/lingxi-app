@@ -1718,3 +1718,143 @@ async fn finished_background_bash_task_does_not_stay_running() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
+
+// ---- G07/G08: mcp_task auto-background lifecycle -------------------------
+
+#[tokio::test]
+async fn register_mcp_task_inserts_running_working_state() {
+    let (_d, registry) = make_registry();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let id = registry
+        .register_mcp_task("git".into(), "status".into(), Some("tu-1".into()), cancel)
+        .await
+        .unwrap();
+    // `NZu`/`r7h` mints a `k…` id for an mcp_task.
+    assert!(id.starts_with('k'), "mcp_task id is `k…`: {id}");
+    let state = registry.get(&id).await.expect("registered");
+    assert_eq!(state.base().status, TaskStatus::Running);
+    assert_eq!(state.base().description, "git/status");
+    assert_eq!(state.base().tool_use_id.as_deref(), Some("tu-1"));
+    match &state {
+        TaskState::McpTask(m) => {
+            assert_eq!(m.server_name, "git");
+            assert_eq!(m.tool_name, "status");
+            assert_eq!(m.mcp_status, "working", "seeded mcpStatus:\"working\"");
+        }
+        other => panic!("expected McpTask, got {other:?}"),
+    }
+    // A running task is not terminal → no notification yet.
+    assert!(registry.take_pending_task_notifications().await.is_empty());
+}
+
+#[tokio::test]
+async fn settle_mcp_task_writes_result_and_drains_notification() {
+    let (_d, registry) = make_registry();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let id = registry
+        .register_mcp_task("git".into(), "status".into(), Some("tu-9".into()), cancel)
+        .await
+        .unwrap();
+
+    registry
+        .settle_mcp_task(&id, "clean working tree", false)
+        .await
+        .unwrap();
+
+    let state = registry.get(&id).await.unwrap();
+    assert_eq!(state.base().status, TaskStatus::Completed);
+    match &state {
+        TaskState::McpTask(m) => assert_eq!(m.mcp_status, "completed"),
+        other => panic!("expected McpTask, got {other:?}"),
+    }
+
+    // The REAL result was written into the task spool so the notification's
+    // `output-file` carries it.
+    let path = registry.output_manager.path_for(&id).unwrap();
+    let read = registry
+        .output_manager
+        .read(&path, crate::output_manager::OutputOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        read.content.contains("clean working tree"),
+        "the settled result is spooled: {:?}",
+        read.content
+    );
+
+    // Drains exactly one notification carrying the mcp_task fields.
+    let drained = registry.take_pending_task_notifications().await;
+    assert_eq!(drained.len(), 1, "one settled mcp_task ⇒ one notification");
+    let n = &drained[0];
+    assert_eq!(n.task_id, id);
+    assert_eq!(n.task_type, "mcp_task");
+    assert_eq!(n.status, "completed");
+    assert_eq!(n.description, "git/status");
+    assert_eq!(n.tool_use_id.as_deref(), Some("tu-9"));
+    assert!(
+        n.output_path
+            .as_deref()
+            .is_some_and(|p| p.ends_with(&format!("{id}.output"))),
+        "output_path is the spool path: {:?}",
+        n.output_path
+    );
+    // consume-once.
+    assert!(
+        registry.take_pending_task_notifications().await.is_empty(),
+        "a settled mcp_task is not reported twice"
+    );
+}
+
+#[tokio::test]
+async fn settle_mcp_task_failed_marks_failed() {
+    let (_d, registry) = make_registry();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let id = registry
+        .register_mcp_task("db".into(), "query".into(), None, cancel)
+        .await
+        .unwrap();
+    registry.settle_mcp_task(&id, "boom", true).await.unwrap();
+    let state = registry.get(&id).await.unwrap();
+    assert_eq!(state.base().status, TaskStatus::Failed);
+    match &state {
+        TaskState::McpTask(m) => assert_eq!(m.mcp_status, "failed"),
+        other => panic!("expected McpTask, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn kill_mcp_task_fires_cancel_and_later_settle_noops() {
+    let (_d, registry) = make_registry();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let id = registry
+        .register_mcp_task("git".into(), "log".into(), None, cancel.clone())
+        .await
+        .unwrap();
+
+    assert!(!cancel.is_cancelled());
+    registry.kill(&id).await.unwrap();
+    assert!(
+        cancel.is_cancelled(),
+        "kill fires the mcp_task cancel token (the port's abortController)"
+    );
+
+    let state = registry.get(&id).await.unwrap();
+    assert_eq!(state.base().status, TaskStatus::Killed);
+    match &state {
+        TaskState::McpTask(m) => assert_eq!(m.mcp_status, "cancelled"),
+        other => panic!("expected McpTask, got {other:?}"),
+    }
+
+    // A late settle after a kill is a no-op — the `notified`/terminal guard
+    // (`if(O.notified) return O`) prevents resurrecting a killed task.
+    registry
+        .settle_mcp_task(&id, "late result", false)
+        .await
+        .unwrap();
+    let state = registry.get(&id).await.unwrap();
+    assert_eq!(
+        state.base().status,
+        TaskStatus::Killed,
+        "a killed mcp_task is not resurrected by a late settle"
+    );
+}

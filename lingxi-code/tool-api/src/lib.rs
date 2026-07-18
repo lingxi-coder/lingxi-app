@@ -59,4 +59,6 @@ pub use tool_search_view::{
     SharedToolSearchView, StaticRegistryView, ToolRegistryView, ToolSearchEntry,
 };
 pub use tool_trait::*;
-pub use worktree_session::{new_worktree_session_cell, WorktreeSession, WorktreeSessionCell};
+pub use worktree_session::{
+    new_worktree_session_cell, WorktreeSession, WorktreeSessionCell, WorktreeStatePersister,
+};

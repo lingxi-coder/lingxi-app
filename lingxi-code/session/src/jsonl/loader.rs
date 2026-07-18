@@ -1498,7 +1498,10 @@ mod tests {
         extra.insert("subtype".to_string(), json!("compact_boundary"));
         extra.insert("content".to_string(), json!("Conversation compacted"));
         extra.insert("level".to_string(), json!("info"));
-        extra.insert("compactMetadata".to_string(), Value::Object(compact_metadata));
+        extra.insert(
+            "compactMetadata".to_string(),
+            Value::Object(compact_metadata),
+        );
         JsonlMessage {
             message_type: "system".to_string(),
             uuid: uuid.to_string(),
@@ -1549,7 +1552,11 @@ mod tests {
         ];
         assert_eq!(
             pre_compact_discovered_tools(&msgs),
-            vec!["Agent".to_string(), "Task".to_string(), "WebFetch".to_string()],
+            vec![
+                "Agent".to_string(),
+                "Task".to_string(),
+                "WebFetch".to_string()
+            ],
         );
     }
 
@@ -1952,11 +1959,9 @@ mod tests {
         let writer = crate::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone());
 
         // Absent transcript → None.
-        assert!(
-            read_worktree_state(&path, fs.clone(), session_id)
-                .await
-                .is_none()
-        );
+        assert!(read_worktree_state(&path, fs.clone(), session_id)
+            .await
+            .is_none());
 
         // After EnterWorktree persists an active session → Some(payload).
         let payload = serde_json::json!({

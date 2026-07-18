@@ -324,11 +324,8 @@ mod tests {
     /// `sessionId`, last-write-wins.
     #[tokio::test]
     async fn append_worktree_state_writes_parseable_lines() {
-        let tmp = std::env::temp_dir().join(format!(
-            "lingxi-writer-wt-{}-{}",
-            std::process::id(),
-            "wt"
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("lingxi-writer-wt-{}-{}", std::process::id(), "wt"));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
         let session_id = "33333333-4444-5555-6666-777777777777";
         let session_path = tmp.join(format!("{session_id}.jsonl"));

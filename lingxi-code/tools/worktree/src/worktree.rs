@@ -500,13 +500,41 @@ fn resolve_enter_target(cwd: &Path, resolved: &Path) -> EnterTargetInfo {
 /// `WorktreeManager` trait. Branch + path layout are byte-locked.
 pub struct EnterWorktreeTool {
     ctx: BuiltinToolContext,
+    /// Optional sink that persists the recorded [`tool_api::WorktreeSession`] to
+    /// the transcript as a `worktree-state` entry (parity 2.1.212), so a later
+    /// `--continue`/`--resume` rehydrates the active worktree. `None` (mobile /
+    /// offline factory / tests) skips the write — byte-identical to the
+    /// pre-persist behavior.
+    state_persister: Option<std::sync::Arc<dyn tool_api::WorktreeStatePersister>>,
 }
 
 impl EnterWorktreeTool {
     /// Construct a new tool wired to the shared builtin context.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            state_persister: None,
+        }
+    }
+
+    /// Inject the transcript persister (parity 2.1.212 `saveWorktreeState`).
+    #[must_use]
+    pub fn with_state_persister(
+        mut self,
+        persister: std::sync::Arc<dyn tool_api::WorktreeStatePersister>,
+    ) -> Self {
+        self.state_persister = Some(persister);
+        self
+    }
+
+    /// Persist the CURRENT `worktree_session` cell value to the transcript (a
+    /// `worktree-state` entry). Best-effort: no-op when no persister is wired.
+    async fn persist_worktree_state(&self) {
+        if let Some(persister) = &self.state_persister {
+            let snapshot = self.ctx.worktree_session.lock().unwrap().clone();
+            persister.persist_worktree_state(snapshot.as_ref()).await;
+        }
     }
 
     async fn emit_started(&self, invocation_id: &str, slug: &str) {
@@ -607,6 +635,10 @@ impl EnterWorktreeTool {
                 // restores. `entered_existing: true` — this session entered a
                 // pre-existing worktree via `path`, so it is NOT its owner.
                 self.record_worktree_session(&handle, true);
+                // (parity 2.1.212) Persist the just-recorded session as a
+                // `worktree-state` transcript entry so `--continue`/`--resume`
+                // rehydrates it and `ExitWorktree` operates instead of no-oping.
+                self.persist_worktree_state().await;
                 // Switch the session into the worktree — every FS tool reads
                 // through `ctx.cwd()`/`ctx.trusted_dirs()` (Task 2), so this
                 // single swap is what makes subsequent tool calls observe the
@@ -698,6 +730,9 @@ impl EnterWorktreeTool {
                 // `entered_existing: false` — this session CREATED the worktree,
                 // so `ExitWorktree` may remove it.
                 self.record_worktree_session(&handle, false);
+                // (parity 2.1.212) Persist for resume restoration — see the
+                // matching call in `call_enter_existing`.
+                self.persist_worktree_state().await;
                 self.ctx
                     .session_cwd
                     .swap(handle.path.clone(), vec![handle.path.clone()]);
@@ -1140,6 +1175,11 @@ pub struct ExitWorktreeTool {
     /// Production wires a real `std::fs` probe (see [`Self::new`]); tests inject
     /// a stub to exercise the exists / missing branches without touching the FS.
     dir_exists: fn(&std::path::Path) -> bool,
+    /// Optional transcript persister (parity 2.1.212): on a completed exit the
+    /// tool writes the `worktree-state` CLEAR record (`worktreeSession: null`,
+    /// claude's `gne(null)`) so a subsequent `--resume` does NOT re-restore the
+    /// removed/kept worktree. `None` skips the write.
+    state_persister: Option<std::sync::Arc<dyn tool_api::WorktreeStatePersister>>,
 }
 
 impl ExitWorktreeTool {
@@ -1150,7 +1190,18 @@ impl ExitWorktreeTool {
         Self {
             ctx,
             dir_exists: |p| std::fs::metadata(p).is_ok(),
+            state_persister: None,
         }
+    }
+
+    /// Inject the transcript persister (parity 2.1.212 `saveWorktreeState`).
+    #[must_use]
+    pub fn with_state_persister(
+        mut self,
+        persister: std::sync::Arc<dyn tool_api::WorktreeStatePersister>,
+    ) -> Self {
+        self.state_persister = Some(persister);
+        self
     }
 
     /// Test constructor: the cwd-restore probe reports every directory as still
@@ -1162,6 +1213,7 @@ impl ExitWorktreeTool {
         Self {
             ctx,
             dir_exists: |_| true,
+            state_persister: None,
         }
     }
 
@@ -1172,7 +1224,11 @@ impl ExitWorktreeTool {
         ctx: BuiltinToolContext,
         dir_exists: fn(&std::path::Path) -> bool,
     ) -> Self {
-        Self { ctx, dir_exists }
+        Self {
+            ctx,
+            dir_exists,
+            state_persister: None,
+        }
     }
 
     /// Restore the session's cwd on exit — a faithful port of 206's `xCd`
@@ -1579,6 +1635,12 @@ impl Tool for ExitWorktreeTool {
         // regardless of `remove_failed`: 206 considers the session exited
         // once removal is attempted, whether or not it actually succeeded.
         *self.ctx.worktree_session.lock().unwrap() = None;
+        // (parity 2.1.212) Persist the CLEAR record (`worktreeSession: null`,
+        // claude's `gne(null)`) so a later `--resume` does not re-restore the
+        // exited worktree. Best-effort; no-op when no persister is wired.
+        if let Some(persister) = &self.state_persister {
+            persister.persist_worktree_state(None).await;
+        }
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;
@@ -2267,6 +2329,70 @@ mod tests {
         bctx.session_cwd.swap(
             worktree_path.to_path_buf(),
             vec![worktree_path.to_path_buf()],
+        );
+    }
+
+    /// Recording [`tool_api::WorktreeStatePersister`] test double: captures every
+    /// `persist_worktree_state` call's payload (the serialized worktreeSession, or
+    /// `None` for a clear record) so tests can assert the enter→persist(Some) /
+    /// exit→persist(None) contract (parity 2.1.212).
+    #[derive(Default)]
+    struct RecordingPersister {
+        calls: std::sync::Mutex<Vec<Option<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl tool_api::WorktreeStatePersister for RecordingPersister {
+        async fn persist_worktree_state(&self, session: Option<&tool_api::WorktreeSession>) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(session.map(tool_api::WorktreeSession::to_persisted_json));
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_persists_active_worktree_state() {
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-persist"));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let persister = Arc::new(RecordingPersister::default());
+        let tool = EnterWorktreeTool::new(bctx).with_state_persister(persister.clone());
+        tool.call(json!({ "name": "feat" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("create must succeed");
+        let calls = persister.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "enter persists exactly once");
+        let payload = calls[0]
+            .as_ref()
+            .expect("active session persisted, not null");
+        assert_eq!(
+            payload["worktreePath"].as_str().unwrap(),
+            "/tmp/repo-persist/.lingxi/worktrees/feat"
+        );
+        assert_eq!(payload["worktreeBranch"], "worktree-feat");
+        assert_eq!(payload["enteredExisting"], false);
+    }
+
+    #[tokio::test]
+    async fn exit_persists_clear_record() {
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-clear"));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let original_cwd = PathBuf::from("/tmp/repo-clear");
+        let worktree_path = PathBuf::from("/tmp/repo-clear/.lingxi/worktrees/feat");
+        populate_session(&bctx, &original_cwd, &worktree_path, "worktree-feat", None);
+        let persister = Arc::new(RecordingPersister::default());
+        let tool =
+            ExitWorktreeTool::new_assuming_cwd_exists(bctx).with_state_persister(persister.clone());
+        tool.call(json!({ "action": "keep" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("keep must succeed");
+        let calls = persister.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "exit persists exactly once");
+        assert!(
+            calls[0].is_none(),
+            "exit persists the CLEAR record (worktreeSession: null)"
         );
     }
 

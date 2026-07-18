@@ -19,7 +19,29 @@ pub mod worktree;
 pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 /// Register the worktree enter/exit tools against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    register_all_with_persister(reg, ctx, None);
+}
+
+/// Register the worktree enter/exit tools with an optional transcript persister
+/// (parity 2.1.212's `saveWorktreeState`). When `persister` is `Some`, a
+/// successful `EnterWorktree` writes a `worktree-state` entry and `ExitWorktree`
+/// writes the clear record, so a later `--continue`/`--resume` can rehydrate the
+/// active worktree. `None` keeps the pre-persist behavior (offline factory,
+/// `--no-session-persistence`, tests).
+pub fn register_all_with_persister(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    persister: Option<std::sync::Arc<dyn tool_api::WorktreeStatePersister>>,
+) {
     use std::sync::Arc;
-    reg.register_builtin(Arc::new(EnterWorktreeTool::new(ctx.clone())));
-    reg.register_builtin(Arc::new(ExitWorktreeTool::new(ctx)));
+    let enter = match &persister {
+        Some(p) => EnterWorktreeTool::new(ctx.clone()).with_state_persister(p.clone()),
+        None => EnterWorktreeTool::new(ctx.clone()),
+    };
+    let exit = match persister {
+        Some(p) => ExitWorktreeTool::new(ctx).with_state_persister(p),
+        None => ExitWorktreeTool::new(ctx),
+    };
+    reg.register_builtin(Arc::new(enter));
+    reg.register_builtin(Arc::new(exit));
 }

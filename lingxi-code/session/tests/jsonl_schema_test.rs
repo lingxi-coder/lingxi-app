@@ -27,6 +27,43 @@ fn assistant_message_with_tool_use_round_trips() {
 }
 
 #[test]
+fn assistant_effort_field_sits_after_timestamp_before_trailer() {
+    // 2.1.212: a REAL assistant line records the resolved effort LEVEL as a
+    // top-level `effort` field, placed as the last field of the assistant head
+    // (after `timestamp`) and BEFORE the `userType`/`cwd`/`version` trailer —
+    // matching claude's `...effort!==void 0&&{effort}` spread onto the assistant
+    // message object that persists verbatim into the transcript record.
+    let mut extra: Map<String, Value> = Map::new();
+    extra.insert("effort".into(), Value::String("high".into()));
+
+    let msg = JsonlMessage {
+        message_type: "assistant".into(),
+        uuid: "22222222-3333-4444-5555-666666666666".into(),
+        parent_uuid: Some("0a1b2c3d-4e5f-6789-abcd-ef0123456789".into()),
+        session_id: "11111111-2222-3333-4444-555555555555".into(),
+        timestamp: "2026-05-25T14:30:01.000Z".into(),
+        cwd: "/x".into(),
+        version: "0.6.0".into(),
+        message: json!({"role":"assistant","content":"hi"}),
+        is_sidechain: false,
+        user_type: Some("external".into()),
+        git_branch: None,
+        entrypoint: None,
+        slug: None,
+        prompt_id: None,
+        logical_parent_uuid: None,
+        extra,
+    };
+    let s = serde_json::to_string(&msg).expect("ser");
+    let expected = r#"{"parentUuid":"0a1b2c3d-4e5f-6789-abcd-ef0123456789","isSidechain":false,"message":{"role":"assistant","content":"hi"},"type":"assistant","uuid":"22222222-3333-4444-5555-666666666666","timestamp":"2026-05-25T14:30:01.000Z","effort":"high","userType":"external","cwd":"/x","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.6.0"}"#;
+    assert_eq!(s, expected);
+
+    // Round-trips: reading the emitted line and re-emitting is byte-stable.
+    let parsed: JsonlMessage = serde_json::from_str(&s).expect("parse");
+    assert_eq!(serde_json::to_string(&parsed).expect("re-ser"), expected);
+}
+
+#[test]
 fn unknown_outer_fields_preserved_in_extra() {
     // `agentId` is still an UNKNOWN optional field → round-trips via `extra`.
     // `promptId` and `slug` are now NAMED fidelity fields (§G gap 4): they are

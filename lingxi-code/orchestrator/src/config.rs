@@ -261,6 +261,20 @@ pub struct OrchestratorConfig {
     /// keeps the byte-identical default plans directory.
     #[serde(default)]
     pub plans_directory: Option<String>,
+
+    /// (2.1.212) The session's resolved reasoning-effort LEVEL string
+    /// (`low`/`medium`/`high`/`xhigh`/`max`), sourced from CLI `--effort`
+    /// (already normalized by the CLI). When `Some(_)`, every REAL assistant
+    /// transcript line records it as a top-level `effort` field — 1:1 with
+    /// claude-code 2.1.212, which spreads `...effort!==void 0&&{effort}` (the
+    /// `Y4n(effort).level`) onto the in-memory assistant message object that is
+    /// persisted verbatim into the on-disk record.
+    ///
+    /// `None` (the parity default) omits the `effort` field on every line,
+    /// matching claude's `!==void 0` guard — so sessions without an explicit
+    /// effort keep byte-identical transcripts.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -286,6 +300,7 @@ impl Default for OrchestratorConfig {
             user_email: None,
             plan_mode_instructions: None,
             plans_directory: None,
+            effort: None,
         }
     }
 }
@@ -337,6 +352,7 @@ mod tests {
             user_email: Some("u@example.com".into()),
             plan_mode_instructions: Some("MY BODY".into()),
             plans_directory: Some("docs/plans".into()),
+            effort: Some("high".into()),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();

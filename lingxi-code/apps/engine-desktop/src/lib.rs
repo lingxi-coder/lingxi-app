@@ -4300,6 +4300,13 @@ pub async fn build(
     // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
     // 529-overload interception a strict no-op (`turn_loop.rs:496`).
     orch_cfg.fallback_model.clone_from(&cfg.fallback_model);
+    // (2.1.212) CLI `--effort <level>` — the session's resolved reasoning-effort
+    // level (already normalized to low/medium/high/xhigh/max). Threaded here so
+    // every REAL assistant transcript line records it as a top-level `effort`
+    // field (the SAME source the provider adapter uses for `output_config.effort`
+    // via `with_initial_effort`). `None` (no `--effort`) omits the field, keeping
+    // transcripts byte-identical.
+    orch_cfg.effort.clone_from(&cfg.initial_effort);
     // CLI `--max-turns` / `--max-budget` caps. Unset leaves the OrchestratorConfig
     // defaults (unbounded turns / no cost cap). USD → nano-USD for the cost cap.
     if let Some(max_turns) = cfg.max_turns {

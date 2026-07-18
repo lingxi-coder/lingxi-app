@@ -3929,6 +3929,24 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 serde_json::Value::String(rid.to_string()),
             );
         }
+        // Top-level `effort` (2.1.212): the session's resolved reasoning-effort
+        // LEVEL string. claude-code spreads `...effort!==void 0&&{effort}` (the
+        // `Y4n(effort).level`) as the last field of the in-memory assistant
+        // message object, which persists verbatim into the transcript record —
+        // so it lands on REAL assistant lines only, right after `timestamp` and
+        // before the `userType`/`cwd` trailer (the serializer places it there).
+        // Gated on a REAL response (`assistant_model.is_some()`) so synthetic
+        // api-error assistant lines — which claude builds via a different builder
+        // with no effort — stay byte-identical. `None` effort omits the field,
+        // matching claude's `!==void 0` guard.
+        if kind == "assistant" && assistant_model.is_some() {
+            if let Some(effort) = &self.config.effort {
+                extra.insert(
+                    "effort".to_string(),
+                    serde_json::Value::String(effort.clone()),
+                );
+            }
+        }
         // Top-level api-error envelope (`createAssistantAPIErrorMessage`/`fje`):
         // `error` (omitted when the builder took no `error:` arg), the always-on
         // `isApiErrorMessage: true`, and `apiErrorStatus` (set only for an

@@ -1101,6 +1101,7 @@ pub fn desktop_tool_registry(
         None,
         None,
         None,
+        None,
     );
     reg
 }
@@ -1349,6 +1350,32 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
 /// is builtin-first — and no duplicate name in the system prompt). When `None`,
 /// `tool_team::register_all` + the full `tool_ui::register_all` run as before and
 /// the coordinator tools are absent — byte-identical to the pre-M10 build.
+/// JSONL-backed [`tool_api::WorktreeStatePersister`] (parity 2.1.212's
+/// `saveWorktreeState`): appends a `worktree-state` entry — carrying the active
+/// worktree's serialized session, or `null` on exit — to the session transcript,
+/// keyed by the bare `session_uuid` the resume loader reads back
+/// (`read_worktree_state`). Persistence is best-effort: a failed append is logged
+/// and swallowed so it never fails the `EnterWorktree`/`ExitWorktree` tool call
+/// (matching claude's `.catch(...)` on `xX`).
+struct JsonlWorktreeStatePersister {
+    writer: Arc<session::jsonl::writer::JsonlWriter>,
+    session_uuid: String,
+}
+
+#[async_trait::async_trait]
+impl tool_api::WorktreeStatePersister for JsonlWorktreeStatePersister {
+    async fn persist_worktree_state(&self, session: Option<&tool_api::WorktreeSession>) {
+        let payload = session.map(tool_api::WorktreeSession::to_persisted_json);
+        if let Err(e) = self
+            .writer
+            .append_worktree_state(&self.session_uuid, payload.as_ref())
+            .await
+        {
+            tracing::warn!(error = %e, "failed to persist worktree-state transcript record");
+        }
+    }
+}
+
 pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
     ctx: BuiltinToolContext,
@@ -1358,6 +1385,7 @@ pub fn register_desktop_tools(
     cwd_changed_firer: hooks::OptionalCwdChangedFirer,
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
+    worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
 ) -> tool_cron::WakeupSchedulerCell {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     // (P2-08) The shared live-cwd cell (`getCwd()`/`Ct()`): the desktop `BashTool`
@@ -1443,7 +1471,12 @@ pub fn register_desktop_tools(
         // Default session: `tool_team`'s pair, coordinator tools absent.
         None => tool_team::register_all(reg, ctx.clone()),
     }
-    tool_worktree::register_all(reg, ctx.clone());
+    // (parity 2.1.212) Thread the transcript persister into EnterWorktree /
+    // ExitWorktree so a create/enter writes a `worktree-state` entry and an exit
+    // writes the clear record — the persist half of resume restoration. `None`
+    // (offline factory / `--no-session-persistence`) leaves the tools on their
+    // pre-persist path.
+    tool_worktree::register_all_with_persister(reg, ctx.clone(), worktree_state_persister);
     tool_mcp::register_all(reg, ctx.clone());
     tool_lsp::register_all_with_live_cwd(reg, ctx, live_cwd);
     wakeup_cell
@@ -5709,17 +5742,23 @@ pub async fn build(
         // (cwd_settings_paths / worktree_main_repo_path / additional_md_dirs)
         // stay empty — see spec §5.
         let managed = crate::settings_watch::managed_settings_dir();
-        let to_s = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+        // Each deny-write seed is resolved through the `SS` symlink hardening
+        // (sandbox-adapter.ts, parity 2.1.210): if a seeded `.lingxi/*` path is a
+        // symlink, deny its REAL target so a redirected write can't escape the
+        // sandbox. Non-symlink / non-existent seeds pass through unchanged.
+        let deny_seed = |p: std::path::PathBuf| {
+            sandbox::policy_convert::resolve_deny_write_symlink(&p.to_string_lossy())
+        };
         let ctx = sandbox::policy_convert::SandboxConvertContext {
             lingxi_temp_dir: Some(lingxi_temp_dir()),
             settings_file_paths: vec![
-                to_s(cfg.lingxi_home.join("settings.json")),
-                to_s(cwd.join(branding::DOT_DIR).join("settings.json")),
-                to_s(cwd.join(branding::DOT_DIR).join("settings.local.json")),
-                to_s(managed.join("managed-settings.json")),
+                deny_seed(cfg.lingxi_home.join("settings.json")),
+                deny_seed(cwd.join(branding::DOT_DIR).join("settings.json")),
+                deny_seed(cwd.join(branding::DOT_DIR).join("settings.local.json")),
+                deny_seed(managed.join("managed-settings.json")),
             ],
-            managed_drop_in_dir: Some(to_s(managed.join("managed-settings.d"))),
-            skills_dirs: vec![to_s(cwd.join(branding::DOT_DIR).join("skills"))],
+            managed_drop_in_dir: Some(deny_seed(managed.join("managed-settings.d"))),
+            skills_dirs: vec![deny_seed(cwd.join(branding::DOT_DIR).join("skills"))],
             managed_allowed_domains,
             managed_read_paths,
             allow_apple_events_override,
@@ -5847,6 +5886,43 @@ pub async fn build(
     // trusted set (the same `Arc<SessionCwd>` is moved into the orchestrator
     // builder below via `with_session_cwd`). P1-08.
     let runtime_session_cwd = session_cwd.clone();
+    // (parity 2.1.212) Restore a persisted active worktree on --continue/--resume.
+    // The `worktree_session` cell (written by EnterWorktree, cleared by
+    // ExitWorktree) is in-memory only; on a cold resume it starts `None`, so
+    // ExitWorktree would take its no-op path ("No-op: there is no active
+    // EnterWorktree session to exit") even for a session that was inside a
+    // worktree. Read the last `worktree-state` transcript record for this session
+    // and, when it names a worktree still on disk, rehydrate the cell + move the
+    // session into it (`session_cwd` swap) — the Rust analog of claude's
+    // `restoreWorktreeSession`/`Z_t`. A missing worktree dir (removed since)
+    // restores nothing, so the session stays out of the worktree and ExitWorktree
+    // correctly no-ops — mirroring `Z_t`'s chdir-failure `gne(null)` guard.
+    // (The upstream-reset optimization `[worktree] reset resumed worktree` and the
+    // cross-project `tengu_resume_worktree_fallback` search are deferred
+    // refinements — not needed to close the ExitWorktree-after-resume no-op.)
+    let worktree_session_cell = tool_api::worktree_session::new_worktree_session_cell();
+    if cfg.session_id_override.is_some() {
+        let restore_fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(cwd.clone()));
+        if let Some(payload) = session::jsonl::loader::read_worktree_state(
+            &main_transcript_path,
+            restore_fs,
+            &main_session_uuid,
+        )
+        .await
+        {
+            if let Some(restored) = tool_api::WorktreeSession::from_persisted_json(&payload) {
+                if restored.worktree_path.is_dir() {
+                    // Move the session into the worktree exactly as EnterWorktree's
+                    // own swap does (worktree path as the sole trusted dir).
+                    session_cwd.swap(
+                        restored.worktree_path.clone(),
+                        vec![restored.worktree_path.clone()],
+                    );
+                    *worktree_session_cell.lock().unwrap() = Some(restored);
+                }
+            }
+        }
+    }
     // P1-06: ONE per-session read-file-state registry (claude-code's single
     // `readFileState` map on the `ToolUseContext`). Created here, cloned into
     // every file tool's `BuiltinToolContext` below, and the SAME `Arc` handed to
@@ -5929,11 +6005,12 @@ pub async fn build(
         }),
         sandbox_available,
         session_cwd: session_cwd.clone(),
-        // Worktree 206 parity (Task 8): a fresh, empty (`None`) session
-        // record — inert until `EnterWorktree` populates it. Not shared with
-        // anything else at this composition root (no other consumer reads it
-        // yet).
-        worktree_session: tool_api::worktree_session::new_worktree_session_cell(),
+        // Worktree 206 parity (Task 8): the session record cell — normally a
+        // fresh `None` (inert until `EnterWorktree` populates it), but on a
+        // `--continue`/`--resume` it may have just been rehydrated from the
+        // persisted `worktree-state` transcript record above (parity 2.1.212), so
+        // ExitWorktree operates on the resumed worktree instead of no-oping.
+        worktree_session: worktree_session_cell,
         platform: sandbox_platform,
         http: http.clone(),
         provider: tool_provider,
@@ -6153,6 +6230,24 @@ pub async fn build(
         )
         .with_watcher_rebinder(Arc::new(file_changed_watcher_rebinder.clone())),
     ));
+    // (parity 2.1.212) The worktree-state persister: a JSONL writer at the SAME
+    // `main_transcript_path` the orchestrator persists messages to, so an
+    // `EnterWorktree`/`ExitWorktree` `worktree-state` record lands in the one
+    // session `<uuid>.jsonl` the resume loader reads. Gated on
+    // `session_persistence` (no writer ⇒ nothing to resume from), mirroring the
+    // `main_jsonl_writer` wiring below.
+    let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> =
+        if cfg.session_persistence {
+            Some(Arc::new(JsonlWorktreeStatePersister {
+                writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
+                    main_transcript_path.clone(),
+                    Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn traits::FileSystem>,
+                )),
+                session_uuid: main_session_uuid.clone(),
+            }))
+        } else {
+            None
+        };
     // The wakeup cell for the registered `ScheduleWakeup` tool — surfaced on
     // `DesktopRuntime` so the bridge composition root fills it once the
     // per-connection queue + spawner exist (`boot::assemble`).
@@ -6168,6 +6263,7 @@ pub async fn build(
         // orchestrator (`.with_current_cwd`) hold, so the desktop `BashTool` is
         // the single writer of the live cwd Read/Glob/Grep + LSP read.
         Some(current_cwd_cell.clone()),
+        worktree_state_persister,
     );
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`

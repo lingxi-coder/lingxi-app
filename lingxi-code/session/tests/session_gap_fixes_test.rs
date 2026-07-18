@@ -660,14 +660,33 @@ fn route_lines_parses_permission_mode_entries() {
 
 #[test]
 fn route_lines_parses_worktree_state_entries() {
-    // Binary: `worktreeStates.set(N.agentId, N)`.
+    // Binary (2.1.212 `Yle`): `worktreeStates.set(N.sessionId, N.worktreeSession)`
+    // — keyed by `sessionId`, storing the inner `worktreeSession` payload.
     let content = concat!(
-        r#"{"type":"worktree-state","agentId":"agent-1","state":{"branch":"main"}}"#,
+        r#"{"type":"worktree-state","sessionId":"s1","worktreeSession":{"worktreePath":"/repo/.lingxi/worktrees/feat","worktreeBranch":"worktree-feat"}}"#,
         "\n",
     );
     let t = route_lines(content);
-    let ws = t.worktree_states.get("agent-1").expect("worktree state");
-    assert_eq!(ws.get("agentId").and_then(|v| v.as_str()), Some("agent-1"));
+    let ws = t.worktree_states.get("s1").expect("worktree state");
+    assert_eq!(
+        ws.get("worktreePath").and_then(|v| v.as_str()),
+        Some("/repo/.lingxi/worktrees/feat")
+    );
+}
+
+#[test]
+fn route_lines_worktree_state_null_supersedes_active() {
+    // The ExitWorktree clear record persists `worktreeSession: null`; last-write
+    // -wins means it supersedes an earlier active session for the same sessionId.
+    let content = concat!(
+        r#"{"type":"worktree-state","sessionId":"s1","worktreeSession":{"worktreePath":"/repo/.lingxi/worktrees/feat","worktreeBranch":"worktree-feat"}}"#,
+        "\n",
+        r#"{"type":"worktree-state","sessionId":"s1","worktreeSession":null}"#,
+        "\n",
+    );
+    let t = route_lines(content);
+    let ws = t.worktree_states.get("s1").expect("worktree state present");
+    assert!(ws.is_null(), "later null record supersedes the active one");
 }
 
 #[test]

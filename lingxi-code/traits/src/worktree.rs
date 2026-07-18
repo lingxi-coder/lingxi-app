@@ -279,6 +279,15 @@ pub enum WorktreeError {
     /// Filesystem error (permissions, disk full, ...).
     #[error("io error: {0}")]
     Io(String),
+    /// Pre-flight worktree-creation guard refused the operation because a
+    /// repository-committed symlink at the managed dot-dir (`<dot>`,
+    /// `<dot>/worktrees`, or the target `<dot>/worktrees/<name>`) could redirect
+    /// creation outside the repository — or that dot-dir entry could not be
+    /// `lstat`ed. Byte-faithful port of claude-code 2.1.212's `yWi` guard, whose
+    /// message is carried verbatim (Display is the bare `{0}`, matching CC's
+    /// direct `ev(...)` surfacing with no extra prefix).
+    #[error("{0}")]
+    SymlinkRejected(String),
 }
 
 #[cfg(test)]

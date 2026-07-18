@@ -140,6 +140,18 @@ impl WorktreeManager for WindowsWorktreeManager {
             .join("worktrees")
             .join(&flat);
 
+        // Refuse a repository-committed symlink at the managed dot-dir chain
+        // before we `mkdir` through it or spawn `git worktree add` — a symlink
+        // at `.lingxi`, `.lingxi/worktrees`, or the target could redirect the
+        // checkout outside the repo. Byte-faithful port of CC 2.1.212 `yWi`,
+        // called immediately before the worktree-add spawn.
+        platform_common::reject_worktree_create_symlinks(
+            &self.repo_root,
+            branding::DOT_DIR,
+            &worktree_path,
+        )
+        .await?;
+
         // git worktree add creates the leaf; the `.lingxi/worktrees/` parent
         // may not exist yet.
         if let Some(parent) = worktree_path.parent() {

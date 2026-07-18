@@ -1858,3 +1858,89 @@ async fn kill_mcp_task_fires_cancel_and_later_settle_noops() {
         "a killed mcp_task is not resurrected by a late settle"
     );
 }
+
+// F3-1: `settle_mcp_task`'s terminal transition must be ATOMIC vs a concurrent
+// kill. Pre-fix, settle set `end_time`/`mcpStatus` under one write guard, DROPPED
+// it, awaited `cleanups.lock()`, then flipped the terminal status via a SEPARATE
+// `set_status()` acquisition — so a kill racing in that gap set `Killed` /
+// `mcpStatus:"cancelled"`, which settle then partially overwrote (`set_status`
+// touches only `base.status`, not `mcpStatus`), producing the torn state
+// `status==Completed` + `mcpStatus=="cancelled"` AND firing a spurious
+// `TaskCompleted` hook a `Killed` transition must never fire.
+//
+// This stress test races settle against kill on the SAME mcp_task across many
+// iterations on a multi-threaded runtime and asserts the terminal state is
+// never TORN: the winner is either fully settled (`Completed` + `mcpStatus:
+// "completed"`) or fully killed (`Killed` + `mcpStatus:"cancelled"`), never the
+// forbidden `Completed` + `mcpStatus:"cancelled"` combination.
+//
+// That torn combination is produced ONLY by the forward interleave this finding
+// targets: pre-fix, a kill landing in settle's guard→set_status gap set
+// `mcpStatus:"cancelled"`, then settle's `set_status(Completed)` flipped only
+// `base.status` (never touching `mcpStatus`) — leaving `Completed`+`cancelled`
+// and firing a spurious `TaskCompleted`. Post-fix the flip is atomic with the
+// terminal re-check, so settle either wins wholesale or no-ops on the kill.
+//
+// (Note: the reverse race — a kill CLOBBERING an already-`Completed` settle
+// because `kill` carries no terminal guard — is a distinct issue outside this
+// finding; it yields `Killed`+`cancelled`, which this invariant permits.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_vs_kill_terminal_transition_is_atomic() {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let firer = RecordingFirer::new();
+    let registry = Arc::new(
+        TaskRegistry::new(runtime, fs, out_mgr).with_task_completed_firer(firer.clone()),
+    );
+
+    const ITERS: usize = 400;
+    for _ in 0..ITERS {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let id = registry
+            .register_mcp_task("git".into(), "log".into(), None, cancel)
+            .await
+            .unwrap();
+
+        // Race a settle (call resolved) against a kill (user TaskStop) on the
+        // same task, in genuine parallel on the multi-thread runtime.
+        let (r1, r2) = {
+            let reg_s = registry.clone();
+            let id_s = id.clone();
+            let settle =
+                tokio::spawn(async move { reg_s.settle_mcp_task(&id_s, "done", false).await });
+            let reg_k = registry.clone();
+            let id_k = id.clone();
+            let kill = tokio::spawn(async move { reg_k.kill(&id_k).await });
+            (settle.await.unwrap(), kill.await.unwrap())
+        };
+        assert!(r1.is_ok(), "settle errored: {r1:?}");
+        assert!(r2.is_ok(), "kill errored: {r2:?}");
+
+        let state = registry.get(&id).await.unwrap();
+        let (status, mcp_status) = match &state {
+            TaskState::McpTask(m) => (state.base().status, m.mcp_status.clone()),
+            other => panic!("expected McpTask, got {other:?}"),
+        };
+        // The winner is either fully settled or fully killed — never the torn
+        // `Completed` + `cancelled` the forward settle-over-kill race produced.
+        match status {
+            TaskStatus::Completed => assert_eq!(
+                mcp_status, "completed",
+                "torn state — status Completed but mcpStatus not completed (id {id})"
+            ),
+            TaskStatus::Killed => assert_eq!(
+                mcp_status, "cancelled",
+                "a Killed task keeps mcpStatus cancelled (id {id})"
+            ),
+            other => panic!("unexpected terminal status {other:?} (id {id})"),
+        }
+    }
+    // `firer` kept registered so the `TaskCompleted` fire path is exercised
+    // under the race (a spurious fire would surface any panic in that path).
+    let _ = firer.recorded();
+}

@@ -227,6 +227,73 @@ async fn emit(bus: &Arc<AnalyticsBus>, event: &'static str, fields: &[(&str, Ana
     bus.log_event(event, md).await;
 }
 
+// `tengu_feature_ok` / `tengu_feature_sad` / `tengu_feature_bad` — the generic
+// feature success / soft-error / hard-error counters the binary's `ve`/`Ue`/`me`
+// telemetry helpers emit:
+//   `ve(e)   = M("tengu_feature_ok",  {feature_name: e})`
+//   `Ue(e,t) = M("tengu_feature_sad", {feature_name: e, error_code: t})`
+//   `me(e,t) = M("tengu_feature_bad", {feature_name: e, error_code: t})`
+const TENGU_FEATURE_OK: &str = "tengu_feature_ok";
+const TENGU_FEATURE_SAD: &str = "tengu_feature_sad";
+const TENGU_FEATURE_BAD: &str = "tengu_feature_bad";
+
+/// `feature_name` value for the auto-background outcome counter — the bare
+/// `"mcp_auto_background"` string the binary's settle callback `E` passes to
+/// `ve`/`Ue`/`me`. Distinct from BOTH the `tengu_mcp_auto_background` feature
+/// flag (`getMcpAutoBackgroundMs`) AND the `tengu_mcp_tool_auto_backgrounded`
+/// background-TIME event already emitted at `M("tengu_mcp_tool_auto_backgrounded",{})`.
+const MCP_AUTO_BACKGROUND_FEATURE: &str = "mcp_auto_background";
+
+/// Terminal outcome of an auto-backgrounded MCP call, mirroring the discriminant
+/// the binary's settle callback `E` feeds into `ve`/`Ue`/`me`
+/// (`p.then(completed, err => E("failed", …, BZu(err) ? "tool_error" : "call_failed"))`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoBackgroundOutcome {
+    /// The detached call resolved — `ve("mcp_auto_background")`.
+    Completed,
+    /// The call produced a recognized MCP failure (an `isError` tool result, a
+    /// timeout, or an rpc/protocol error — every `process_mcp_call_result` `Err`
+    /// falls in `BZu`'s tool-error set) — `Ue("mcp_auto_background","tool_error")`.
+    ToolError,
+    /// The call failed unexpectedly (the settle-waiter's spawned task panicked —
+    /// `BZu` false fallback) — `me("mcp_auto_background","call_failed")`.
+    CallFailed,
+}
+
+/// Emit the `mcp_auto_background` outcome counter for a settled auto-backgrounded
+/// call — the binary's `E` callback firing `ve`/`Ue`/`me` (gated on the terminal
+/// transition actually happening; see [`settle_mcp_task`]'s `Ok(true)`).
+async fn emit_auto_background_outcome(bus: &Arc<AnalyticsBus>, outcome: AutoBackgroundOutcome) {
+    let feature = verified_str(MCP_AUTO_BACKGROUND_FEATURE);
+    match outcome {
+        AutoBackgroundOutcome::Completed => {
+            emit(bus, TENGU_FEATURE_OK, &[("feature_name", feature)]).await;
+        }
+        AutoBackgroundOutcome::ToolError => {
+            emit(
+                bus,
+                TENGU_FEATURE_SAD,
+                &[
+                    ("feature_name", feature),
+                    ("error_code", verified_str("tool_error")),
+                ],
+            )
+            .await;
+        }
+        AutoBackgroundOutcome::CallFailed => {
+            emit(
+                bus,
+                TENGU_FEATURE_BAD,
+                &[
+                    ("feature_name", feature),
+                    ("error_code", verified_str("call_failed")),
+                ],
+            )
+            .await;
+        }
+    }
+}
+
 /// Produce the `(now_millis, rand_tag)` seed for a blob `persistId`, mirroring
 /// the TS `Date.now()` + `Math.random().toString(36).slice(2, 8)` pair that
 /// `persistBlobToTextBlock` feeds into its persistId template
@@ -901,6 +968,23 @@ impl Tool for MCPTool {
         // Race path (`callMcpToolWithAutoBackground`/`Gc_`): spawn the call +
         // its post-processing onto a task so it can outlive the turn, then race
         // that against the auto-background timeout.
+        //
+        // F3-2: the cancel token is minted BEFORE the spawn and threaded INTO
+        // the call task (the oracle passes the abort signal into the call,
+        // `p=e(c.signal)`), and the parent turn/abort token (`ctx.cancel`, the
+        // oracle's `cUr(o,c)` link) is observed alongside it. On cancel the
+        // in-flight call future is DROPPED (cancel-on-drop, restoring the
+        // pre-G08 direct-await semantics) and the completed-side-effects
+        // (`process_mcp_call_result` — MCP_COMPLETED telemetry, large-output
+        // persistence) are SKIPPED, mirroring the oracle's `notified` guard
+        // (`if(O.notified)return O`). Without this, on `TaskStop` the token
+        // merely woke the settle-waiter's `select!`, dropping the JoinHandle
+        // (which DETACHES, not aborts) — the RPC kept running and still emitted
+        // COMPLETED telemetry / persisted result files for a killed task, and an
+        // Esc during the pre-background window leaked an untracked in-flight
+        // task with no cancel path at all.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let parent_cancel = ctx.cancel.clone();
         let mut call_task = {
             let client = client.clone();
             let bus = bus.clone();
@@ -911,26 +995,49 @@ impl Tool for MCPTool {
             let progress = progress.clone();
             let dispatch_full_name = dispatch_full_name.clone();
             let tool_use_id_str = tool_use_id_str.clone();
+            let cancel = cancel.clone();
+            let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
-                let res = client
-                    .call_tool_with_progress(
-                        &dispatch_full_name,
-                        arguments,
-                        tool_use_id_str.as_deref(),
-                        on_progress,
-                    )
-                    .await;
-                process_mcp_call_result(
-                    bus,
-                    cwd,
-                    server,
-                    tool,
-                    tool_use_id,
-                    progress,
-                    started,
-                    res,
-                )
-                .await
+                let call_fut = client.call_tool_with_progress(
+                    &dispatch_full_name,
+                    arguments,
+                    tool_use_id_str.as_deref(),
+                    on_progress,
+                );
+                tokio::pin!(call_fut);
+                // Fires on the mcp_task cancel token (`TaskStop`, once
+                // registered) OR the parent turn/abort token (`ctx.cancel`).
+                let cancelled = async {
+                    match &parent_cancel {
+                        Some(pc) => {
+                            tokio::select! {
+                                () = cancel.cancelled() => {}
+                                () = pc.cancelled() => {}
+                            }
+                        }
+                        None => cancel.cancelled().await,
+                    }
+                };
+                // `biased` toward cancellation: a cancelled call must NOT run the
+                // completed-side-effects even if it resolves at the same instant
+                // (the oracle's `notified` guard suppresses post-processing).
+                tokio::select! {
+                    biased;
+                    () = cancelled => Err(ToolError::Aborted),
+                    res = &mut call_fut => {
+                        process_mcp_call_result(
+                            bus,
+                            cwd,
+                            server,
+                            tool,
+                            tool_use_id,
+                            progress,
+                            started,
+                            res,
+                        )
+                        .await
+                    }
+                }
             })
         };
 
@@ -952,9 +1059,10 @@ impl Tool for MCPTool {
         }
 
         // Timeout — move the still-running call to the background as an
-        // `mcp_task`. `NZu`/`i.register(g)`: a cancel token fires on `TaskStop`
-        // (the port equivalent of the state's `abortController`).
-        let cancel = tokio_util::sync::CancellationToken::new();
+        // `mcp_task`. `NZu`/`i.register(g)`: the pre-minted `cancel` token
+        // (already threaded into the call task above) is handed to the registry
+        // so `TaskStop` fires it (the port equivalent of the state's
+        // `abortController`), which now genuinely cancels the in-flight call.
         let registration = traits::task_registry::McpTaskRegistration {
             server_name: server.clone(),
             tool_name: tool.clone(),
@@ -989,26 +1097,46 @@ impl Tool for MCPTool {
         {
             let task_registry = task_registry.clone();
             let task_id = task_id.clone();
+            let bus = bus.clone();
             tokio::spawn(async move {
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => {}
                     joined = &mut call_task => {
-                        let (text, failed) = match joined {
+                        // Outcome discriminant mirrors the binary's settle
+                        // callback `E`: resolve → completed; a recognized MCP
+                        // failure (`Ok(Err)` — every `process_mcp_call_result`
+                        // `Err` is an `isError` tool result / timeout / rpc
+                        // error, all inside `BZu`'s tool-error set) → tool_error;
+                        // an unexpected task panic (`Err(join_err)`, `BZu` false)
+                        // → call_failed.
+                        let (text, failed, outcome) = match joined {
                             Ok(Ok(result)) => (
                                 result
                                     .model_content
                                     .clone()
                                     .unwrap_or_else(|| result.data.to_string()),
                                 result.is_error,
+                                AutoBackgroundOutcome::Completed,
                             ),
-                            Ok(Err(e)) => (e.to_string(), true),
+                            Ok(Err(e)) => {
+                                (e.to_string(), true, AutoBackgroundOutcome::ToolError)
+                            }
                             Err(join_err) => (
                                 format!("background task join error: {join_err}"),
                                 true,
+                                AutoBackgroundOutcome::CallFailed,
                             ),
                         };
-                        let _ = task_registry.settle_mcp_task(&task_id, &text, failed).await;
+                        // Emit the `mcp_auto_background` outcome counter ONLY when
+                        // this settle won the terminal transition (the binary's
+                        // `!k` guard — a killed / already-settled task never
+                        // re-emits). `settle_mcp_task` reports that via `Ok(true)`.
+                        if let Ok(true) =
+                            task_registry.settle_mcp_task(&task_id, &text, failed).await
+                        {
+                            emit_auto_background_outcome(&bus, outcome).await;
+                        }
                     }
                 }
             });
@@ -2189,6 +2317,9 @@ mod auto_background_race_tests {
     struct RecordingRegistry {
         registered: StdMutex<Vec<McpTaskRegistration>>,
         settled: StdMutex<Vec<(String, String, bool)>>,
+        /// The cancel token handed to the most recent `register_mcp_task` — a
+        /// test fires it to simulate a `TaskStop` (F3-2 regression).
+        captured_cancel: StdMutex<Option<tokio_util::sync::CancellationToken>>,
     }
 
     #[async_trait]
@@ -2229,9 +2360,10 @@ mod auto_background_race_tests {
         async fn register_mcp_task(
             &self,
             reg: McpTaskRegistration,
-            _cancel: tokio_util::sync::CancellationToken,
+            cancel: tokio_util::sync::CancellationToken,
         ) -> Result<String, TaskRegistryError> {
             self.registered.lock().unwrap().push(reg);
+            *self.captured_cancel.lock().unwrap() = Some(cancel);
             Ok("ktest0001".to_string())
         }
         async fn settle_mcp_task(
@@ -2239,12 +2371,15 @@ mod auto_background_race_tests {
             id: &str,
             result_text: &str,
             failed: bool,
-        ) -> Result<(), TaskRegistryError> {
+        ) -> Result<bool, TaskRegistryError> {
             self.settled
                 .lock()
                 .unwrap()
                 .push((id.to_string(), result_text.to_string(), failed));
-            Ok(())
+            // The mock always "wins" the terminal transition (it has no prior
+            // state), so the caller emits the `mcp_auto_background` outcome — the
+            // real registry returns `Ok(false)` for an already-terminal task.
+            Ok(true)
         }
     }
 
@@ -2383,5 +2518,306 @@ mod auto_background_race_tests {
             .await
             .expect("unwired seam falls back to a direct await");
         assert_eq!(result.model_content.as_deref(), Some("ok"));
+    }
+
+    // F3-2: once a slow call auto-backgrounds, firing the mcp_task cancel token
+    // (the port equivalent of `TaskStop`) must genuinely abort the in-flight
+    // call — NONE of the completed-side-effects may run. Concretely: even if the
+    // server LATER answers the (now abandoned) request, no MCP_COMPLETED
+    // telemetry is emitted and the task is never settled-as-completed. Before
+    // the fix the cancel token merely woke the settle-waiter, which DETACHED the
+    // still-running call_task; the late server response then ran
+    // `process_mcp_call_result`, emitting MCP_COMPLETED for a killed task.
+    #[tokio::test(start_paused = true)]
+    async fn cancel_after_background_suppresses_completed_side_effects() {
+        use telemetry::InMemorySink;
+
+        // Large router timeout so the tool's 120s auto-bg race, not the
+        // transport's, decides the outcome.
+        let (conn, peer_tx, mut peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let sink = Arc::new(InMemorySink::new());
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-cancel"));
+
+        // Auto-backgrounds (peer has not answered) and registers the mcp_task.
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message)");
+        assert!(
+            result
+                .model_content
+                .as_deref()
+                .is_some_and(|t| t.contains("moved to the background as task ktest0001")),
+            "call auto-backgrounded"
+        );
+
+        // Simulate `TaskStop`: fire the token the registry captured.
+        let cancel = recorder
+            .captured_cancel
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("register_mcp_task captured a cancel token");
+        cancel.cancel();
+
+        // The server now answers the abandoned request. A NON-cancelled call
+        // would resolve here and run the completed-side-effects; the cancelled
+        // call must ignore it.
+        let frame = peer_rx.recv().await.expect("client sent a request frame");
+        let req: Value = serde_json::from_slice(&frame).expect("json request");
+        let id = req["id"].clone();
+        let resp = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [{ "type": "text", "text": "ok" }], "isError": false },
+        });
+        let mut bytes = serde_json::to_vec(&resp).unwrap();
+        bytes.push(b'\n');
+        let _ = peer_tx.send(Bytes::from(bytes)).await;
+
+        // Let the detached call_task + settle-waiter observe the cancel/response.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        let names: Vec<String> = sink.events().await.into_iter().map(|e| e.name).collect();
+        assert!(
+            names.iter().any(|n| n == MCP_STARTED),
+            "sanity: STARTED telemetry captured: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == MCP_COMPLETED),
+            "cancelled call must NOT emit COMPLETED telemetry: {names:?}"
+        );
+        assert!(
+            recorder.settled.lock().unwrap().is_empty(),
+            "cancelled call must NOT be settled-as-completed"
+        );
+        // F3-3: a cancelled (never-settled) call must NOT emit the
+        // `mcp_auto_background` outcome counter (the binary's `!k` guard).
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == TENGU_FEATURE_OK || n == TENGU_FEATURE_SAD || n == TENGU_FEATURE_BAD),
+            "cancelled call must NOT emit an mcp_auto_background outcome: {names:?}"
+        );
+    }
+
+    // F3-3: `emit_auto_background_outcome` maps each terminal outcome to the
+    // binary's `ve`/`Ue`/`me` feature counter with the exact wire event name +
+    // `feature_name` / `error_code` payload.
+    #[tokio::test]
+    async fn auto_background_outcome_events_map_to_feature_counters() {
+        use telemetry::InMemorySink;
+
+        for (outcome, event, error_code) in [
+            (AutoBackgroundOutcome::Completed, TENGU_FEATURE_OK, None),
+            (
+                AutoBackgroundOutcome::ToolError,
+                TENGU_FEATURE_SAD,
+                Some("tool_error"),
+            ),
+            (
+                AutoBackgroundOutcome::CallFailed,
+                TENGU_FEATURE_BAD,
+                Some("call_failed"),
+            ),
+        ] {
+            let bus = Arc::new(AnalyticsBus::new());
+            let sink = Arc::new(InMemorySink::new());
+            bus.attach_sink(sink.clone()).await;
+
+            emit_auto_background_outcome(&bus, outcome).await;
+
+            let events = sink.events().await;
+            let ev = events
+                .iter()
+                .find(|e| e.name == event)
+                .unwrap_or_else(|| panic!("{event} emitted for {outcome:?}: {events:?}"));
+            assert!(
+                matches!(
+                    ev.metadata.get("feature_name"),
+                    Some(AnalyticsValue::String(s)) if s == MCP_AUTO_BACKGROUND_FEATURE
+                ),
+                "feature_name==mcp_auto_background for {outcome:?}"
+            );
+            match error_code {
+                Some(code) => assert!(
+                    matches!(
+                        ev.metadata.get("error_code"),
+                        Some(AnalyticsValue::String(s)) if s == code
+                    ),
+                    "error_code=={code} for {outcome:?}"
+                ),
+                // `ve("mcp_auto_background")` (completed) carries NO error_code.
+                None => assert!(
+                    ev.metadata.get("error_code").is_none(),
+                    "completed outcome carries no error_code"
+                ),
+            }
+        }
+    }
+
+    // Drive the peer: read the client's `tools/call` request frame and answer it
+    // with the given `result`/`error` JSON-RPC response object.
+    async fn answer_call(
+        peer_rx: &mut mpsc::Receiver<Bytes>,
+        peer_tx: &mpsc::Sender<Bytes>,
+        response: Value,
+    ) {
+        let frame = peer_rx.recv().await.expect("client sent a request frame");
+        let req: Value = serde_json::from_slice(&frame).expect("json request");
+        let mut resp = json!({ "jsonrpc": "2.0", "id": req["id"].clone() });
+        for (k, v) in response.as_object().expect("response object") {
+            resp[k] = v.clone();
+        }
+        let mut bytes = serde_json::to_vec(&resp).unwrap();
+        bytes.push(b'\n');
+        let _ = peer_tx.send(Bytes::from(bytes)).await;
+    }
+
+    // F3-3: a backgrounded call that later RESOLVES (isError:false) settles the
+    // mcp_task and emits `ve("mcp_auto_background")` → `tengu_feature_ok`.
+    #[tokio::test(start_paused = true)]
+    async fn backgrounded_call_completed_emits_feature_ok() {
+        use telemetry::InMemorySink;
+
+        let (conn, peer_tx, mut peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let sink = Arc::new(InMemorySink::new());
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-ok"));
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message)");
+        assert!(result
+            .model_content
+            .as_deref()
+            .is_some_and(|t| t.contains("moved to the background as task ktest0001")));
+
+        // The call now RESOLVES successfully; the settle-waiter settles + emits.
+        answer_call(
+            &mut peer_rx,
+            &peer_tx,
+            json!({ "result": { "content": [{ "type": "text", "text": "done" }], "isError": false } }),
+        )
+        .await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            recorder.settled.lock().unwrap().len(),
+            1,
+            "resolved call settled the mcp_task"
+        );
+        let events = sink.events().await;
+        let ev = events
+            .iter()
+            .find(|e| e.name == TENGU_FEATURE_OK)
+            .unwrap_or_else(|| panic!("tengu_feature_ok emitted: {events:?}"));
+        assert!(matches!(
+            ev.metadata.get("feature_name"),
+            Some(AnalyticsValue::String(s)) if s == MCP_AUTO_BACKGROUND_FEATURE
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.name == TENGU_FEATURE_SAD || e.name == TENGU_FEATURE_BAD),
+            "completed path emits ONLY feature_ok: {events:?}"
+        );
+    }
+
+    // F3-3: a backgrounded call whose result carries `isError:true` settles the
+    // mcp_task as failed and emits `Ue("mcp_auto_background","tool_error")` →
+    // `tengu_feature_sad` (a recognized MCP failure, `BZu` true).
+    #[tokio::test(start_paused = true)]
+    async fn backgrounded_call_tool_error_emits_feature_sad() {
+        use telemetry::InMemorySink;
+
+        let (conn, peer_tx, mut peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client =
+            Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let sink = Arc::new(InMemorySink::new());
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-toolerr"));
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message)");
+        assert!(result
+            .model_content
+            .as_deref()
+            .is_some_and(|t| t.contains("moved to the background as task ktest0001")));
+
+        // The call resolves with an `isError:true` tool result → tool_error.
+        answer_call(
+            &mut peer_rx,
+            &peer_tx,
+            json!({ "result": { "content": [{ "type": "text", "text": "boom" }], "isError": true } }),
+        )
+        .await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        let settled = recorder.settled.lock().unwrap();
+        assert_eq!(settled.len(), 1, "errored call settled the mcp_task");
+        assert!(settled[0].2, "settled as failed");
+        drop(settled);
+
+        let events = sink.events().await;
+        let ev = events
+            .iter()
+            .find(|e| e.name == TENGU_FEATURE_SAD)
+            .unwrap_or_else(|| panic!("tengu_feature_sad emitted: {events:?}"));
+        assert!(matches!(
+            ev.metadata.get("feature_name"),
+            Some(AnalyticsValue::String(s)) if s == MCP_AUTO_BACKGROUND_FEATURE
+        ));
+        assert!(matches!(
+            ev.metadata.get("error_code"),
+            Some(AnalyticsValue::String(s)) if s == "tool_error"
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.name == TENGU_FEATURE_OK || e.name == TENGU_FEATURE_BAD),
+            "tool_error path emits ONLY feature_sad: {events:?}"
+        );
     }
 }

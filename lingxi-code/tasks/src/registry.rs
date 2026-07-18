@@ -385,18 +385,25 @@ impl TaskRegistry {
     /// A task already terminal (e.g. killed via `TaskStop`, or already settled)
     /// is left untouched — the binary's `if(O.notified) return O` guard — so a
     /// race between kill and settle never resurrects a killed task.
+    ///
+    /// Returns `Ok(true)` when THIS call won the terminal transition (the
+    /// binary's `E` callback observing `k = true` after `i.update`), and
+    /// `Ok(false)` when the task was already terminal so the update no-op'd
+    /// (`if (O.notified) return O`). Callers use this to gate the
+    /// `mcp_auto_background` outcome counter — a killed / already-settled task
+    /// must never re-emit it.
     pub async fn settle_mcp_task(
         &self,
         task_id: &str,
         result_text: &str,
         failed: bool,
-    ) -> Result<(), TaskError> {
+    ) -> Result<bool, TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         // Guard + recover the spool path under a read lock.
         let output_file = {
             let map = self.tasks.read().await;
             match map.get(&task_id) {
-                Some(s) if s.base().status.is_terminal() => return Ok(()),
+                Some(s) if s.base().status.is_terminal() => return Ok(false),
                 Some(s) => s.base().output_file.clone(),
                 None => return Err(TaskError::NotFound(task_id)),
             }
@@ -404,40 +411,70 @@ impl TaskRegistry {
         // Persist the real result so the notification's `output-file` carries it
         // (the port surfaces the result via the spool, not an inline value).
         let _ = self.output_manager.append(&output_file, result_text).await;
-        // Terminal transition + `mcpStatus`. Done under one write guard so a
-        // concurrent kill sees either the pre- or post-settle state, never a
-        // torn one.
-        {
-            let mut map = self.tasks.write().await;
-            if let Some(state) = map.get_mut(&task_id) {
-                // Re-check terminal under the write lock (a kill may have raced
-                // in between the read guard above and here).
-                if state.base().status.is_terminal() {
-                    return Ok(());
-                }
-                state.base_mut().end_time = Some(SystemTime::now());
-                if let TaskState::McpTask(m) = state {
-                    m.mcp_status = if failed {
-                        "failed".to_string()
-                    } else {
-                        "completed".to_string()
-                    };
-                }
-            } else {
-                return Err(TaskError::NotFound(task_id));
-            }
-        }
         // The call has settled, so it is no longer cancellable — drop the
-        // cancel hook before the terminal `set_status` (which also fires the
-        // `TaskCompleted` hook + makes the task drain-eligible).
+        // cancel hook before the atomic terminal transition below (this also
+        // makes the task drain-eligible once it goes terminal). Removing it
+        // first keeps the `.await` on `cleanups.lock()` OUT of the write guard.
         self.cleanups.lock().await.remove(&task_id);
         let status = if failed {
             TaskStatus::Failed
         } else {
             TaskStatus::Completed
         };
-        self.set_status(&task_id, status).await?;
-        Ok(())
+        // Terminal transition + `mcpStatus`, done ATOMICALLY under ONE write
+        // guard — the binary's single-closure `i.update(_, O => { if (O.notified)
+        // return O; … })`. `end_time`, `mcpStatus`, AND the terminal status flip
+        // all land under the same held guard, so a concurrent kill either wins
+        // fully (settle's re-check below sees `Killed`/terminal and no-ops) or
+        // loses fully — never a torn half-settled state. This is why settle can
+        // no longer overwrite a kill (nor fire a spurious `TaskCompleted`): the
+        // status write is inside the guard, not a separate `set_status`
+        // acquisition split off by the `cleanups.lock()` await above.
+        let settled_base = {
+            let mut map = self.tasks.write().await;
+            let Some(state) = map.get_mut(&task_id) else {
+                return Err(TaskError::NotFound(task_id));
+            };
+            // Re-check terminal under the write lock: a kill may have raced in
+            // (set `Killed` / `mcpStatus:"cancelled"`) after the read guard
+            // above. If so, leave it untouched — the `if (O.notified) return O`
+            // no-op — so a killed task is never resurrected as `Completed`.
+            if state.base().status.is_terminal() {
+                return Ok(false);
+            }
+            state.base_mut().end_time = Some(SystemTime::now());
+            if let TaskState::McpTask(m) = state {
+                m.mcp_status = if failed {
+                    "failed".to_string()
+                } else {
+                    "completed".to_string()
+                };
+            }
+            state.base_mut().status = status;
+            state.base().clone()
+            // `map` write-guard drops here — the best-effort hook fire below
+            // runs WITHOUT holding the registry lock (mirrors `set_status`).
+        };
+        // Best-effort `TaskCompleted` fire on the terminal transition THIS
+        // settle just won (claude-code `executeTaskCompletedHooks`). Because the
+        // status write above is atomic, a raced kill can never reach this fire:
+        // it either wins the guard (settle no-ops before here) or loses it (and
+        // its `Killed` transition, which has no claude-code counterpart, never
+        // fires). Only `Completed` / `Failed` fire; no-op without a firer.
+        if let Some(firer) = &self.task_completed_firer {
+            let status_str = if failed { "failed" } else { "completed" };
+            firer
+                .fire(hooks::TaskCompletedFire {
+                    task_id: task_id.to_string(),
+                    status: status_str.to_string(),
+                    task_subject: settled_base.description.clone(),
+                    task_description: Some(settled_base.description.clone()),
+                    teammate_name: None,
+                    team_name: None,
+                })
+                .await;
+        }
+        Ok(true)
     }
 
     /// Spawn a task by dispatching to its registered per-type handler.

@@ -318,6 +318,128 @@ impl TaskRegistry {
         }
     }
 
+    /// Register a backgrounded MCP tool call (claude-code 2.1.212
+    /// `callMcpToolWithAutoBackground`'s `i.register(NZu(...))`). Inserts a
+    /// `running` [`crate::state::McpTaskState`] with `mcpStatus:"working"`,
+    /// keyed on a freshly-minted `k…` id, and stores a cancel cleanup so a later
+    /// [`kill`](Self::kill) aborts the still-running in-flight call (the port
+    /// equivalent of the state's `abortController` + the poll loop's
+    /// `cancelTask` on `status==="killed"`). Returns the minted id.
+    pub async fn register_mcp_task(
+        &self,
+        server_name: String,
+        tool_name: String,
+        tool_use_id: Option<String>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, TaskError> {
+        let id = generate_task_id(TaskType::McpTask);
+        let path = self
+            .output_manager
+            .allocate(&id)
+            .await
+            .map_err(|e| TaskError::Io(e.to_string()))?;
+        // Description mirrors `NZu`'s `${serverName}/${toolName}` (also what
+        // `background_message` interpolates as the tool label).
+        let description = format!("{server_name}/{tool_name}");
+        let description_for_hook = description.clone();
+        let base = TaskStateBase {
+            id: id.clone(),
+            task_type: TaskType::McpTask,
+            // `NZu` seeds `status:"running"` (distinct from the `create`
+            // placeholder's `Pending`); the call is already in flight.
+            status: TaskStatus::Running,
+            description,
+            tool_use_id,
+            start_time: SystemTime::now(),
+            end_time: None,
+            total_paused_ms: 0,
+            output_file: path,
+            output_offset: 0,
+            notified: false,
+        };
+        let state = TaskState::McpTask(crate::state::McpTaskState {
+            base,
+            server_name,
+            tool_name,
+            // `NZu` seeds `mcpStatus:"working"`.
+            mcp_status: "working".to_string(),
+            status_message: None,
+        });
+        self.tasks.write().await.insert(id.clone(), state);
+        // Cancel-on-kill hook: `kill` runs this cleanup (no handler / no
+        // `BackgroundTaskHandle` for an mcp_task), which fires the token the
+        // caller races its in-flight call against.
+        let cleanup: TaskCleanup = Arc::new(move || cancel.cancel());
+        self.cleanups.lock().await.insert(id.clone(), cleanup);
+        self.fire_task_created(&id, TaskType::McpTask, &description_for_hook)
+            .await;
+        Ok(id)
+    }
+
+    /// Settle a backgrounded MCP tool call once its detached `tools/call`
+    /// resolves (claude-code `callMcpToolWithAutoBackground`'s `E` +
+    /// `p.then(…)`). Writes `result_text` into the task spool so the drained
+    /// `<task-notification>`'s `output-file` carries the real result, then marks
+    /// the task terminal (`completed`/`failed`) and updates `mcpStatus`.
+    ///
+    /// A task already terminal (e.g. killed via `TaskStop`, or already settled)
+    /// is left untouched — the binary's `if(O.notified) return O` guard — so a
+    /// race between kill and settle never resurrects a killed task.
+    pub async fn settle_mcp_task(
+        &self,
+        task_id: &str,
+        result_text: &str,
+        failed: bool,
+    ) -> Result<(), TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        // Guard + recover the spool path under a read lock.
+        let output_file = {
+            let map = self.tasks.read().await;
+            match map.get(&task_id) {
+                Some(s) if s.base().status.is_terminal() => return Ok(()),
+                Some(s) => s.base().output_file.clone(),
+                None => return Err(TaskError::NotFound(task_id)),
+            }
+        };
+        // Persist the real result so the notification's `output-file` carries it
+        // (the port surfaces the result via the spool, not an inline value).
+        let _ = self.output_manager.append(&output_file, result_text).await;
+        // Terminal transition + `mcpStatus`. Done under one write guard so a
+        // concurrent kill sees either the pre- or post-settle state, never a
+        // torn one.
+        {
+            let mut map = self.tasks.write().await;
+            if let Some(state) = map.get_mut(&task_id) {
+                // Re-check terminal under the write lock (a kill may have raced
+                // in between the read guard above and here).
+                if state.base().status.is_terminal() {
+                    return Ok(());
+                }
+                state.base_mut().end_time = Some(SystemTime::now());
+                if let TaskState::McpTask(m) = state {
+                    m.mcp_status = if failed {
+                        "failed".to_string()
+                    } else {
+                        "completed".to_string()
+                    };
+                }
+            } else {
+                return Err(TaskError::NotFound(task_id));
+            }
+        }
+        // The call has settled, so it is no longer cancellable — drop the
+        // cancel hook before the terminal `set_status` (which also fires the
+        // `TaskCompleted` hook + makes the task drain-eligible).
+        self.cleanups.lock().await.remove(&task_id);
+        let status = if failed {
+            TaskStatus::Failed
+        } else {
+            TaskStatus::Completed
+        };
+        self.set_status(&task_id, status).await?;
+        Ok(())
+    }
+
     /// Spawn a task by dispatching to its registered per-type handler.
     ///
     /// Unlike [`create`](Self::create) — which only inserts a `Pending`
@@ -793,6 +915,12 @@ impl TaskRegistry {
                 match s {
                     TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
                     TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
+                    // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
+                    // (the poll loop's `status==="killed"` → `cancelTask` branch).
+                    TaskState::McpTask(m) => {
+                        m.base.status = TaskStatus::Killed;
+                        m.mcp_status = "cancelled".to_string();
+                    }
                     _ => {}
                 }
             }
@@ -814,6 +942,12 @@ impl TaskRegistry {
             match s {
                 TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
                 TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
+                // A backgrounded MCP call: the stored cancel cleanup aborts the
+                // in-flight call; reflect the kill + `mcpStatus:"cancelled"`.
+                TaskState::McpTask(m) => {
+                    m.base.status = TaskStatus::Killed;
+                    m.mcp_status = "cancelled".to_string();
+                }
                 // Other variants intentionally fall through in M1.
                 _ => {}
             }

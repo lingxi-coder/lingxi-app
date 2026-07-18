@@ -825,12 +825,23 @@ impl Tool for GrepTool {
         let applied_offset = if offset > 0 { Some(offset) } else { None };
 
         if content_mode {
+            // 2.1.212: carry the full pre-pagination line count (`totalLines:A.length`)
+            // so that a page past the end (empty page with `appliedOffset` set and
+            // `totalLines > 0`) reports "No entries at this offset" instead of the
+            // bare "No matches found" — matching `mapToolResultToToolResultBlockParam`'s
+            // content branch `m = n || (c && (a ?? 0) > 0 ? "No entries at this offset"
+            // : "No matches found")` (c=appliedOffset, a=totalLines).
+            let total_lines = content_lines.len();
             let (limited, applied_limit) = apply_head_limit(content_lines, head_limit, offset);
             let num_lines = limited.len();
             let content_str = limited.join("\n");
             let limit_info = format_limit_info(applied_limit, offset);
             let result_content = if content_str.is_empty() {
-                "No matches found".to_string()
+                if applied_offset.is_some() && total_lines > 0 {
+                    "No entries at this offset".to_string()
+                } else {
+                    "No matches found".to_string()
+                }
             } else {
                 content_str
             };
@@ -839,12 +850,13 @@ impl Tool for GrepTool {
             } else {
                 format!("{result_content}\n\n[Showing results with pagination = {limit_info}]")
             };
-            // binary: {mode, numFiles, filenames:[], content, numLines, appliedLimit?, appliedOffset?}
+            // binary: {mode, numFiles, filenames:[], content, numLines, totalLines, appliedLimit?, appliedOffset?}
             data.insert("mode".to_string(), json!("content"));
             data.insert("numFiles".to_string(), json!(0));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
             data.insert("content".to_string(), json!(model));
             data.insert("numLines".to_string(), json!(num_lines));
+            data.insert("totalLines".to_string(), json!(total_lines));
             if let Some(l) = applied_limit {
                 data.insert("appliedLimit".to_string(), json!(l));
             }
@@ -1505,6 +1517,62 @@ mod tests {
         // limit 0 = unlimited, so no applied_limit even though offset applied.
         assert!(result.data.get("applied_limit").is_none());
         assert_eq!(result.data["appliedOffset"], 2);
+        // 2.1.212: the full pre-pagination line count rides on `totalLines`.
+        assert_eq!(result.data["totalLines"], 5);
+    }
+
+    /// 2.1.212: paging PAST the last match (empty page, offset>0, totalLines>0)
+    /// reports "No entries at this offset" instead of the bare "No matches found".
+    #[tokio::test]
+    async fn content_mode_offset_past_end_reports_no_entries() {
+        let tmp = TempDir::new().unwrap();
+        let body: String = (0..3).map(|i| format!("fn f{i}\n")).collect();
+        std::fs::write(tmp.path().join("a.rs"), body).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "fn", "output_mode": "content", "head_limit": 0, "offset": 10 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let c = content_str(&result);
+        assert!(
+            c.starts_with("No entries at this offset"),
+            "paged-past-end should report no entries: {c}"
+        );
+        assert!(!c.contains("No matches found"), "must not fall back: {c}");
+        assert!(
+            c.ends_with("\n\n[Showing results with pagination = offset: 10]"),
+            "offset note preserved: {c}"
+        );
+        assert_eq!(result.data["numLines"], 0);
+        assert_eq!(result.data["totalLines"], 3);
+        assert_eq!(result.data["appliedOffset"], 10);
+    }
+
+    /// A genuinely empty search (no offset) still reports "No matches found":
+    /// the "No entries at this offset" branch is gated on `appliedOffset` being
+    /// set AND `totalLines > 0`.
+    #[tokio::test]
+    async fn content_mode_no_matches_without_offset() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn foo\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "nonexistent_zzz", "output_mode": "content" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let c = content_str(&result);
+        assert_eq!(c, "No matches found");
+        assert_eq!(result.data["totalLines"], 0);
     }
 
     #[tokio::test]

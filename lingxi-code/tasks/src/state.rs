@@ -72,6 +72,8 @@ pub enum TaskState {
     LocalWorkflow(LocalWorkflowTaskState),
     /// MCP monitor.
     MonitorMcp(MonitorMcpTaskState),
+    /// Backgrounded MCP tool call (`mcp_task`).
+    McpTask(McpTaskState),
     /// Dream loop.
     Dream(DreamTaskState),
 }
@@ -87,6 +89,7 @@ impl TaskState {
             Self::InProcessTeammate(s) => &s.base,
             Self::LocalWorkflow(s) => &s.base,
             Self::MonitorMcp(s) => &s.base,
+            Self::McpTask(s) => &s.base,
             Self::Dream(s) => &s.base,
         }
     }
@@ -101,6 +104,7 @@ impl TaskState {
             Self::InProcessTeammate(s) => &mut s.base,
             Self::LocalWorkflow(s) => &mut s.base,
             Self::MonitorMcp(s) => &mut s.base,
+            Self::McpTask(s) => &mut s.base,
             Self::Dream(s) => &mut s.base,
         }
     }
@@ -209,6 +213,26 @@ pub struct MonitorMcpTaskState {
     pub server_name: String,
     /// Resource URIs watched.
     pub watch_resources: Vec<String>,
+}
+
+/// State specific to a backgrounded MCP tool call (claude-code `mcp_task`,
+/// minted by `callMcpToolWithAutoBackground`/`NZu`). Distinct from
+/// [`MonitorMcpTaskState`], which watches a whole server; this tracks one
+/// detached `tools/call`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpTaskState {
+    /// Shared base fields.
+    #[serde(flatten)]
+    pub base: TaskStateBase,
+    /// MCP server name (`serverName`).
+    pub server_name: String,
+    /// MCP tool name (`toolName`).
+    pub tool_name: String,
+    /// Coarse MCP task status (`mcpStatus`): `"working"` | `"input_required"`
+    /// | `"completed"` | `"cancelled"` | `"failed"`. Defaults to `"working"`.
+    pub mcp_status: String,
+    /// Latest human-readable status line (`statusMessage`), if any.
+    pub status_message: Option<String>,
 }
 
 /// State specific to a dream task.

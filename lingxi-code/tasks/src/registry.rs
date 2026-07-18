@@ -518,6 +518,7 @@ impl TaskRegistry {
                 TaskState::InProcessTeammate(t) => t.base.status = status,
                 TaskState::LocalWorkflow(w) => w.base.status = status,
                 TaskState::MonitorMcp(m) => m.base.status = status,
+                TaskState::McpTask(m) => m.base.status = status,
                 TaskState::Dream(d) => d.base.status = status,
             }
             entry.clone()
@@ -1022,6 +1023,23 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 base,
                 server_name: server_name.clone(),
                 watch_resources: watch.clone(),
+            })
+        }
+        TaskSpawnInput::McpTask {
+            server_name,
+            tool_name,
+            tool_use_id,
+        } => {
+            if base.tool_use_id.is_none() {
+                base.tool_use_id = tool_use_id.clone();
+            }
+            TaskState::McpTask(crate::state::McpTaskState {
+                base,
+                server_name: server_name.clone(),
+                tool_name: tool_name.clone(),
+                // `NZu` seeds `mcpStatus:"working"`.
+                mcp_status: "working".to_string(),
+                status_message: None,
             })
         }
         TaskSpawnInput::Dream { max_iterations, .. } => {

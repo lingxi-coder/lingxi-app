@@ -27,6 +27,7 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
         "in_process_teammate" => TaskType::InProcessTeammate,
         "local_workflow" => TaskType::LocalWorkflow,
         "monitor_mcp" => TaskType::MonitorMcp,
+        "mcp_task" => TaskType::McpTask,
         "dream" => TaskType::Dream,
         other => {
             return Err(TaskRegistryError::InvalidInput(format!(
@@ -44,6 +45,7 @@ pub(crate) fn task_type_to_wire(t: TaskType) -> &'static str {
         TaskType::InProcessTeammate => "in_process_teammate",
         TaskType::LocalWorkflow => "local_workflow",
         TaskType::MonitorMcp => "monitor_mcp",
+        TaskType::McpTask => "mcp_task",
         TaskType::Dream => "dream",
     }
 }
@@ -88,8 +90,9 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
     // `local_agent` carries `agent_type` (← the dispatched subagent type, sourced
     // from the agent id's prefix label) + `is_backgrounded` (the `wA` filter
     // field); `monitor_mcp` carries `server` (← `server_name`); `local_workflow`
-    // carries `name` (← `workflow_id`). The port has no `mcp_task` task type, and
-    // `MonitorMcpTaskState` carries no single tool name, so `tool` stays `None`.
+    // carries `name` (← `workflow_id`); `monitor_mcp` carries only `server`
+    // (`MonitorMcpTaskState` watches resources, not one tool), while `mcp_task`
+    // (`McpTaskState`) carries BOTH `server` and `tool`.
     let (agent_type, server, tool, name, is_backgrounded) = match s {
         TaskState::LocalAgent(a) => (
             Some(a.subagent_type.clone()),
@@ -99,6 +102,15 @@ fn state_to_record(s: &TaskState) -> TaskRecord {
             Some(a.is_backgrounded),
         ),
         TaskState::MonitorMcp(m) => (None, Some(m.server_name.clone()), None, None, None),
+        // `mcp_task` surfaces BOTH the server and the single tool it detached
+        // (claude-code `Lic` `switch(n.type)`), unlike `monitor_mcp`.
+        TaskState::McpTask(m) => (
+            None,
+            Some(m.server_name.clone()),
+            Some(m.tool_name.clone()),
+            None,
+            None,
+        ),
         TaskState::LocalWorkflow(w) => (None, None, None, Some(w.workflow_id.clone()), None),
         _ => (None, None, None, None, None),
     };
@@ -214,6 +226,11 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         TaskType::MonitorMcp => TaskSpawnInput::MonitorMcp {
             server_name: String::new(),
             watch: vec![],
+        },
+        TaskType::McpTask => TaskSpawnInput::McpTask {
+            server_name: String::new(),
+            tool_name: String::new(),
+            tool_use_id: None,
         },
         TaskType::Dream => TaskSpawnInput::Dream {
             prompt: String::new(),

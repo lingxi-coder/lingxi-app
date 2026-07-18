@@ -261,6 +261,13 @@ pub const TEAM_DELETE_FAILED: &str = "tengu_tool_team_delete_failed";
 /// `tengu_tool_mcp_started` — `MCPTool` (M4-07 dispatcher) began execution.
 pub const MCP_STARTED: &str = "tengu_tool_mcp_started";
 
+/// `tengu_mcp_tool_auto_backgrounded` — a long-running MCP `tools/call`
+/// exceeded `getMcpAutoBackgroundMs` and was moved to the background as an
+/// `mcp_task` (claude-code 2.1.212 `callMcpToolWithAutoBackground`/`Gc_`). Note
+/// the wire name is bare `tengu_mcp_tool_auto_backgrounded` — it does NOT carry
+/// the `tengu_tool_` prefix of the sibling MCP dispatcher events.
+pub const MCP_TOOL_AUTO_BACKGROUNDED: &str = "tengu_mcp_tool_auto_backgrounded";
+
 /// `tengu_tool_mcp_auth_started` — `McpAuthTool` began inspection (M4-07).
 pub const MCP_AUTH_STARTED: &str = "tengu_tool_mcp_auth_started";
 /// `tengu_tool_mcp_auth_completed` — `McpAuthTool` finished (M4-07).

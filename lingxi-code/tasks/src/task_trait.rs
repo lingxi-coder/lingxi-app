@@ -130,6 +130,17 @@ pub enum TaskSpawnInput {
         /// Resources to watch.
         watch: Vec<String>,
     },
+    /// Spawn a backgrounded MCP tool call (claude-code 2.1.212 `mcp_task`).
+    /// Created when a single `tools/call` exceeds `getMcpAutoBackgroundMs` and
+    /// is detached from the turn (`callMcpToolWithAutoBackground`/`NZu`).
+    McpTask {
+        /// MCP server name (`serverName`).
+        server_name: String,
+        /// MCP tool name (`toolName`).
+        tool_name: String,
+        /// Originating assistant `tool_use_id`, if any (`toolUseId`).
+        tool_use_id: Option<String>,
+    },
     /// Spawn a dream loop.
     Dream {
         /// Initial prompt.

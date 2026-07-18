@@ -22,6 +22,11 @@ pub enum TaskType {
     LocalWorkflow,
     /// MCP server monitor.
     MonitorMcp,
+    /// A single long-running MCP `tools/call` that exceeded
+    /// `getMcpAutoBackgroundMs` and was moved to the background (claude-code
+    /// 2.1.212 `mcp_task`). Distinct from [`Self::MonitorMcp`], which watches a
+    /// server rather than tracking one detached tool call.
+    McpTask,
     /// Background long-running "dream" loop.
     Dream,
 }
@@ -37,6 +42,7 @@ impl TaskType {
             Self::InProcessTeammate => 't',
             Self::LocalWorkflow => 'w',
             Self::MonitorMcp => 'm',
+            Self::McpTask => 'k',
             Self::Dream => 'd',
         }
     }

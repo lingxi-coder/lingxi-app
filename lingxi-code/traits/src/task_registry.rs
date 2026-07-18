@@ -63,8 +63,9 @@ pub struct TaskRecord {
     /// `monitor_mcp` / `mcp_task` only: the MCP tool name, surfaced as the
     /// `background_tasks[].tool` field (claude-code `Lic`'s `r.tool`). The port
     /// `MonitorMcpTaskState` carries no per-tool name (it watches resources, not
-    /// a single tool), so this stays `None` for `monitor_mcp`; `mcp_task` is not
-    /// a port task type. Additive default `None`.
+    /// a single tool), so this stays `None` for `monitor_mcp`; the `mcp_task`
+    /// type (`McpTaskState`) DOES carry a single `tool_name` and populates it.
+    /// Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     /// `local_workflow` only: the workflow name, surfaced as the

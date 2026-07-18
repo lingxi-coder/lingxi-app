@@ -91,9 +91,46 @@ fn get_mcp_auto_background_ms_inner(
     }
 }
 
+/// Build the byte-exact user-facing text returned when a long-running MCP
+/// tool call is moved to the background (claude-code 2.1.212
+/// `callMcpToolWithAutoBackground`'s final `{type:"text",text:…}`).
+///
+/// * `description` — the `mcp_task`'s description (`serverName/toolName`).
+/// * `task_id` — the minted `mcp_task` id (`k…`).
+/// * `elapsed_secs` — `Math.round((Date.now()-start)/1000)`, seconds since the
+///   call began.
+///
+/// The apostrophe in `you'll` is a straight ASCII `'` (verified against the
+/// oracle binary), not a typographic quote.
+#[must_use]
+pub fn background_message(description: &str, task_id: &str, elapsed_secs: u64) -> String {
+    format!(
+        "MCP tool \"{description}\" is still running after {elapsed_secs}s. It was moved to the \
+         background as task {task_id} and keeps running; you'll receive a notification with the \
+         result when it completes. You can keep working in the meantime. To stop it, use TaskStop \
+         with task_id \"{task_id}\". Note: it does not survive exiting this session."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The background message is byte-exact against the oracle template.
+    #[test]
+    fn background_message_is_byte_exact() {
+        let msg = background_message("git/status", "k1a2b3c4", 120);
+        assert_eq!(
+            msg,
+            "MCP tool \"git/status\" is still running after 120s. It was moved to the background \
+             as task k1a2b3c4 and keeps running; you'll receive a notification with the result \
+             when it completes. You can keep working in the meantime. To stop it, use TaskStop \
+             with task_id \"k1a2b3c4\". Note: it does not survive exiting this session."
+        );
+        // Straight ASCII apostrophe, not a typographic quote.
+        assert!(msg.contains("you'll"));
+        assert!(!msg.contains('\u{2019}'));
+    }
 
     // Default: interactive session, flag on, no env overrides → 120000.
     #[test]

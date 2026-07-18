@@ -339,16 +339,34 @@ pub fn register_core_batch_8(
     safe_mode: bool,
 ) {
     use crate::{
-        AutocompactHandler, ForkHandler, GoalHandler, RecapHandler, ReloadSkillsHandler,
-        SkillDoctorHandler, StopHandler, SubtaskHandler,
+        AutocompactHandler, ForkBackgroundHandler, ForkHandler, GoalHandler, RecapHandler,
+        ReloadSkillsHandler, SkillDoctorHandler, StopHandler, SubtaskHandler,
     };
 
     reg.register_builtin_handler(Arc::new(AutocompactHandler::new()));
-    reg.register_builtin_handler(Arc::new(ForkHandler::new(handle.clone())));
-    // cc2.1.212: `/subtask` (net-new, not in the locked name surface) is the
-    // renamed in-session subagent-spawn that `/fork` historically had. Reuses
-    // the same `fork_conversation` spawn seam; wired here beside `/fork`.
-    reg.register_builtin_handler(Arc::new(SubtaskHandler::new(handle.clone())));
+
+    // cc2.1.212: the fork/subtask surface is gated on the agent-view flag exactly
+    // like the binary command list `Blr`:
+    //
+    //   ...vO() && !IS_DEMO ? [vAd, RAd] : [SAd]
+    //
+    // where `vO()` = agent view enabled (the default; `traits::agent_view`).
+    //
+    //   * enabled  → `vAd` (the new background-session-copy `/fork`,
+    //                `ForkBackgroundHandler`) + `RAd` (`/subtask`, the renamed
+    //                in-session subagent-spawn).
+    //   * disabled → `SAd` (the legacy subagent-spawn `/fork`, `ForkHandler`);
+    //                NO `/subtask`.
+    //
+    // Only the env half of `vO()` (`CLAUDE_CODE_DISABLE_AGENT_VIEW`) is resolved
+    // here; the `disableAgentView` settings half is a documented composition-root
+    // seam (`traits::agent_view::is_enabled_with_setting`) — see that module.
+    if traits::agent_view::is_enabled() {
+        reg.register_builtin_handler(Arc::new(ForkBackgroundHandler::new(handle.clone())));
+        reg.register_builtin_handler(Arc::new(SubtaskHandler::new(handle.clone())));
+    } else {
+        reg.register_builtin_handler(Arc::new(ForkHandler::new(handle.clone())));
+    }
     reg.register_builtin_handler(Arc::new(GoalHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(RecapHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ReloadSkillsHandler::with_all_roots(
@@ -1041,10 +1059,21 @@ mod batch_8_tests {
         );
     }
 
-    /// cc2.1.212: `/subtask` (the renamed in-session subagent) resolves with a
-    /// real handler after batch-8, and both `/fork` and `/subtask` are present.
+    /// Serialize the two agent-view-env tests (they mutate the shared process
+    /// env `CLAUDE_CODE_DISABLE_AGENT_VIEW`).
+    fn agent_view_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
+        g
+    }
+
+    /// cc2.1.212 default (agent view ENABLED): batch-8 registers the redefined
+    /// background-session-copy `/fork` (`vAd`) plus `/subtask` (`RAd`), both with
+    /// their byte-exact descriptions.
     #[test]
-    fn subtask_and_fork_resolve_after_batch_8() {
+    fn fork_and_subtask_resolve_when_agent_view_enabled() {
+        let _g = agent_view_env_lock();
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));
@@ -1053,16 +1082,51 @@ mod batch_8_tests {
             assert!(reg.resolve(name).is_some(), "/{name} missing");
             assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
         }
-        let cmd = reg.resolve("subtask").expect("/subtask must resolve");
         assert_eq!(
-            cmd.description,
+            reg.resolve("subtask").expect("/subtask must resolve").description,
             "Send a subagent off with your full context; its result comes back here"
+        );
+        // The DEFAULT `/fork` is now the background-session-copy variant (`vAd`).
+        assert_eq!(
+            reg.resolve("fork").expect("/fork must resolve").description,
+            "Copy this conversation into a new background session and keep working here"
         );
     }
 
-    /// `/subtask` with no task renders the byte-exact usage string.
+    /// cc2.1.212 fallback (agent view DISABLED via the env half of `vO()`):
+    /// batch-8 registers the legacy subagent-spawn `/fork` (`SAd`) and NO
+    /// `/subtask`.
+    #[test]
+    fn legacy_fork_only_when_agent_view_disabled() {
+        let _g = agent_view_env_lock();
+        std::env::set_var("CLAUDE_CODE_DISABLE_AGENT_VIEW", "1");
+
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));
+
+        let fork_desc = reg.resolve("fork").expect("/fork must resolve").description.clone();
+        let subtask = reg.resolve("subtask").and_then(|_| reg.get_handler("subtask"));
+
+        // Restore the env before asserting so a failure never leaks the override.
+        std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
+
+        assert_eq!(
+            fork_desc,
+            "Spawn a background agent that inherits the full conversation"
+        );
+        assert!(
+            subtask.is_none(),
+            "/subtask must NOT be registered when agent view is disabled"
+        );
+    }
+
+    /// `/subtask` with no task renders the byte-exact usage string. Holds the
+    /// agent-view env lock so a concurrent `legacy_fork_only_*` test (which
+    /// disables agent view, hiding `/subtask`) cannot race the registration.
     #[tokio::test]
     async fn subtask_empty_renders_usage() {
+        let _g = agent_view_env_lock();
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));

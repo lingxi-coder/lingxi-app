@@ -81,7 +81,7 @@ pub use effort::EffortHandler;
 pub use exit::ExitHandler;
 pub use export::ExportHandler;
 pub use files::FilesHandler;
-pub use fork::ForkHandler;
+pub use fork::{ForkBackgroundHandler, ForkHandler};
 pub use goal::GoalHandler;
 pub use help::HelpHandler;
 pub use hooks::HooksHandler;

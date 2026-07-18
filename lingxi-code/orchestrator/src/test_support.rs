@@ -1017,6 +1017,14 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         })
     }
 
+    /// Deterministic background-session-copy line so the default (agent-view
+    /// enabled) `/fork` (`ForkBackgroundHandler`/`vAd`) renders a real result in
+    /// tests. The composition root owns the exact text in production; here we
+    /// return a fixed line regardless of the (optional) `prompt`.
+    async fn fork_to_background_session(&self, _prompt: &str) -> Result<String, HandleError> {
+        Ok("Copied conversation into a new background session (mock-bg-abcd).".to_string())
+    }
+
     /// Deterministic recap text so wired-success tests can assert real output.
     /// (`/recap`'s handler gates on a qualifying transcript turn before calling.)
     async fn generate_recap(&self) -> Result<traits::RecapOutcome, HandleError> {

@@ -124,10 +124,20 @@ async fn autocompact_with_no_env_reports_auto_window() {
     std::fs::remove_dir_all(root).ok();
 }
 
+/// cc2.1.212: the DEFAULT (agent-view enabled) `/fork` (`vAd`) copies the
+/// conversation into a new background session — the `[prompt]` argument is
+/// optional, so a bare `/fork` reaches the `fork_to_background_session` seam
+/// (no "Usage:" gate) and renders its system line. The mock returns a
+/// deterministic background-session-copy line.
 #[tokio::test]
-async fn fork_without_directive_renders_usage() {
+async fn fork_without_prompt_copies_to_background_session() {
+    // Ensure the default (agent-view enabled) surface regardless of ambient env.
+    std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
     let (d, _h, root) = fresh("fork");
-    assert_eq!(handled(&d, "/fork").await, "Usage: /fork \\<directive\\>");
+    assert_eq!(
+        handled(&d, "/fork").await,
+        "Copied conversation into a new background session (mock-bg-abcd)."
+    );
     std::fs::remove_dir_all(root).ok();
 }
 

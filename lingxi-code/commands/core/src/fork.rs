@@ -1,7 +1,22 @@
-//! `/fork` — spawn a background agent that inherits the full conversation.
+//! `/fork` — two variants, gated by the agent-view enablement flag (cc2.1.212).
 //!
-//! 1:1 port of the claude-code `type: 'local-jsx'` command `fork`, verified
-//! against the shipped `claude.exe` v2.1.198 (compiled names `xrc`/`Ptf`):
+//! * [`ForkBackgroundHandler`] (`vAd`) — the **default** (agent-view enabled):
+//!   copy the current conversation into a NEW BACKGROUND session and keep
+//!   working here. See that type's docs for the byte-exact command object.
+//! * [`ForkHandler`] (`SAd`, below) — the agent-view-**disabled** fallback:
+//!   spawn a background agent that inherits the full conversation. The
+//!   in-session subagent-spawn behaviour it historically carried by default
+//!   moved to [`crate::SubtaskHandler`] (`/subtask`, `RAd`).
+//!
+//! [`command_core::register_core_batch_8`](crate::register_core_batch_8) selects
+//! the surface with `traits::agent_view::is_enabled()` exactly like the binary
+//! command list `Blr` (`...vO()&&!IS_DEMO ? [vAd,RAd] : [SAd]`).
+//!
+//! ---
+//!
+//! `ForkHandler` (`SAd`) is a 1:1 port of the claude-code `type: 'local-jsx'`
+//! command `fork`, verified against the shipped `claude.exe` v2.1.198 (compiled
+//! names `xrc`/`Ptf`):
 //!
 //! ```text
 //! xrc={type:"local-jsx",name:"fork",description:"Spawn a background agent
@@ -173,6 +188,80 @@ impl BuiltinCommandHandler for ForkHandler {
     }
 }
 
+/// `/fork` handler — the **default** (agent-view-enabled) 2.1.212 behaviour
+/// (`vAd`): copy the current conversation into a NEW BACKGROUND session and keep
+/// working in the live/interactive session. Distinct from the legacy
+/// [`ForkHandler`] (`SAd`, subagent-spawn) which is the agent-view-**disabled**
+/// fallback.
+///
+/// Byte-exact command object (claude-code v2.1.212, binary `CAd`/`vAd`):
+///
+/// ```text
+/// vAd={type:"local-jsx",name:"fork",
+///   description:"Copy this conversation into a new background session and keep
+///   working here",argumentHint:"[prompt]",isEnabled:()=>!hb()}
+/// ```
+///
+/// Note `vAd` carries **no** `load`/`call` in the binary — upstream's special
+/// dispatcher intercepts `name === "fork"` and routes it through the background
+/// (`--bg`/daemon) session-copy path (`jobs/<short>/state.json` supervisor +
+/// `__bg-run` worker) while the foreground session stays interactive. The
+/// `[prompt]` argument is OPTIONAL (seeds the background session's next turn),
+/// so — unlike the legacy handler — there is no "Usage:" gate on empty input.
+///
+/// This handler drives that seam via
+/// [`traits::OrchestratorHandle::fork_to_background_session`], which returns the
+/// system line to display in the live session (the composition root owns the
+/// exact text, since it knows the newly-minted background session id). Until a
+/// composition root overrides that seam it returns `Unimplemented`, and this
+/// handler surfaces the established `Could not <verb>: {msg}` fallback (see
+/// `model.rs`).
+#[derive(Clone)]
+pub struct ForkBackgroundHandler {
+    handle: Arc<dyn OrchestratorHandle>,
+}
+
+impl ForkBackgroundHandler {
+    /// Construct a `ForkBackgroundHandler` bound to the given orchestrator handle.
+    #[must_use]
+    pub fn new(handle: Arc<dyn OrchestratorHandle>) -> Self {
+        Self { handle }
+    }
+}
+
+#[async_trait]
+impl BuiltinCommandHandler for ForkBackgroundHandler {
+    async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        // `argumentHint:"[prompt]"` — the prompt is OPTIONAL; a bare `/fork`
+        // copies the conversation into a background session with no seed turn.
+        let prompt = args.raw_args.trim();
+        match self.handle.fork_to_background_session(prompt).await {
+            Ok(display) => CommandResult::Done {
+                display: Some(display),
+            },
+            Err(e) => {
+                // No upstream call handler exists for `vAd` (special dispatcher),
+                // so no byte-exact failure string is recoverable; mirror the
+                // established `Could not <verb>: {msg}` prefix pattern instead of
+                // inventing an unverifiable claim.
+                let msg = e.to_string();
+                CommandResult::Done {
+                    display: Some(format!("Could not fork to background session: {msg}")),
+                }
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        "fork"
+    }
+
+    fn description(&self) -> &str {
+        // Verbatim claude-code v2.1.212 command-object description (`vAd`).
+        "Copy this conversation into a new background session and keep working here"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +323,50 @@ mod tests {
             h.description(),
             "Spawn a background agent that inherits the full conversation"
         );
+    }
+
+    // ── ForkBackgroundHandler (vAd — the default agent-view-enabled /fork) ──
+
+    fn bg_handler() -> ForkBackgroundHandler {
+        ForkBackgroundHandler::new(Arc::new(MockOrchestratorHandle::new()))
+    }
+
+    #[tokio::test]
+    async fn bg_name_and_byte_exact_description() {
+        let h = bg_handler();
+        assert_eq!(h.name(), "fork");
+        assert_eq!(
+            h.description(),
+            "Copy this conversation into a new background session and keep working here"
+        );
+    }
+
+    /// The `[prompt]` argument is optional — a bare `/fork` reaches the seam
+    /// (no "Usage:" gate) and renders whatever system line it returns. The mock
+    /// override returns a deterministic Ok line.
+    #[tokio::test]
+    async fn bg_empty_prompt_routes_to_background_seam() {
+        match bg_handler().handle(&args("")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(
+                    s,
+                    "Copied conversation into a new background session (mock-bg-abcd)."
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bg_with_prompt_routes_to_background_seam() {
+        match bg_handler().handle(&args("keep investigating the flake")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(
+                    s,
+                    "Copied conversation into a new background session (mock-bg-abcd)."
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }

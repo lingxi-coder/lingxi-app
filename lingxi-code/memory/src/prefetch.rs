@@ -185,8 +185,9 @@ impl MemoryPrefetch {
 /// AND `vbl` bytes — and, when truncated, the model-facing content gets a
 /// one-line notice pointing at the Read tool. These are DISTINCT from the
 /// MEMORY.md entrypoint caps ([`crate::MAX_ENTRYPOINT_LINES`] /
-/// [`crate::MAX_ENTRYPOINT_BYTES`] = binary `Mz`/`Jae`); the binary uses
-/// separate constants here (`xHo=200`, `vbl=4096`).
+/// [`crate::MAX_ENTRYPOINT_BYTES`] = binary `Mte`/`GCe`, enforced by
+/// [`crate::memory_index_cap_notice`]); the binary uses separate constants here
+/// (`xHo=200`, `vbl=4096`).
 const SURFACED_MEMORY_MAX_LINES: usize = 200;
 const SURFACED_MEMORY_MAX_BYTES: usize = 4096;
 

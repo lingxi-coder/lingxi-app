@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod file;
+pub mod index_cap;
 pub mod lingxi_md;
 pub mod memdir;
 pub mod prefetch;
@@ -23,6 +24,10 @@ pub mod tier;
 pub use file::{
     parse_markdown_with_frontmatter, MemoryError, MemoryFile, MemoryFrontmatter,
     MAX_ENTRYPOINT_BYTES, MAX_ENTRYPOINT_LINES,
+};
+pub use index_cap::{
+    human_bytes, measure, memory_index_cap_notice, memory_index_cap_notice_measured, IndexMeasure,
+    MemoryIndexNotice, TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP,
 };
 pub use tier::MemoryTier;
 

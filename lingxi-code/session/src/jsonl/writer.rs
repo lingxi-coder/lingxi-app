@@ -175,6 +175,33 @@ impl JsonlWriter {
         self.append_side_record(&value).await
     }
 
+    /// Append a `worktree-state` metadata line for `session_id` — the persisted
+    /// active-worktree record so a later `--continue`/`--resume` can rehydrate
+    /// the session's `EnterWorktree` state (making `ExitWorktree` operate instead
+    /// of no-oping). 1:1 with claude-code's `saveWorktreeState`
+    /// (`gne` → `appendEntryToFile(path, {type:'worktree-state', worktreeSession,
+    /// sessionId})`; read back by the `worktreeStates.set(N.sessionId,
+    /// N.worktreeSession)` routing).
+    ///
+    /// `worktree_session` is the serialized session payload for an active
+    /// worktree, or [`None`] for the `ExitWorktree` clear record (persisted as
+    /// JSON `null`, matching claude's `gne(null)`). `session_id` MUST be the BARE
+    /// session uuid (the `<uuid>.jsonl` file stem the loader keys the
+    /// `worktree_states` map by). Same lock / dir-mode / file-mode contract as
+    /// [`Self::append`].
+    pub async fn append_worktree_state(
+        &self,
+        session_id: &str,
+        worktree_session: Option<&serde_json::Value>,
+    ) -> Result<(), WriterError> {
+        let value = serde_json::json!({
+            "type": "worktree-state",
+            "worktreeSession": worktree_session.cloned().unwrap_or(serde_json::Value::Null),
+            "sessionId": session_id,
+        });
+        self.append_side_record(&value).await
+    }
+
     /// Shared body for the metadata side-record appenders ([`Self::append_custom_title`],
     /// [`Self::append_agent_setting`]): serialize one JSON object + `\n` and append
     /// it under the same lock / dir-mode (0o700) / file-mode (0o600) contract as
@@ -285,6 +312,67 @@ mod tests {
                 .get(session_id)
                 .and_then(serde_json::Value::as_str),
             Some("reviewer"),
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The `EnterWorktree` persist path emits a `worktree-state` line whose
+    /// `sessionId` is the BARE uuid and whose `worktreeSession` payload
+    /// round-trips; a subsequent `None` (ExitWorktree) writes an explicit
+    /// `null`. The loader routes both back into `worktree_states` keyed by
+    /// `sessionId`, last-write-wins.
+    #[tokio::test]
+    async fn append_worktree_state_writes_parseable_lines() {
+        let tmp = std::env::temp_dir().join(format!(
+            "lingxi-writer-wt-{}-{}",
+            std::process::id(),
+            "wt"
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let session_id = "33333333-4444-5555-6666-777777777777";
+        let session_path = tmp.join(format!("{session_id}.jsonl"));
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::fs::PosixFileSystem::new(tmp.clone()));
+        let writer = JsonlWriter::new(session_path.clone(), fs);
+
+        let payload = serde_json::json!({
+            "worktreePath": "/repo/.lingxi/worktrees/feat",
+            "originalCwd": "/repo",
+            "worktreeBranch": "worktree-feat",
+            "enteredExisting": false,
+        });
+        writer
+            .append_worktree_state(session_id, Some(&payload))
+            .await
+            .expect("append active worktree state");
+
+        let raw = std::fs::read_to_string(&session_path).expect("read back");
+        let value: serde_json::Value =
+            serde_json::from_str(raw.trim()).expect("line parses as json");
+        assert_eq!(value["type"], "worktree-state");
+        assert_eq!(value["sessionId"], session_id);
+        assert_eq!(
+            value["worktreeSession"]["worktreePath"],
+            "/repo/.lingxi/worktrees/feat"
+        );
+
+        // Clear record (ExitWorktree) → worktreeSession: null.
+        writer
+            .append_worktree_state(session_id, None)
+            .await
+            .expect("append clear worktree state");
+
+        let raw2 = std::fs::read_to_string(&session_path).expect("read back 2");
+        let loaded = crate::jsonl::reader::route_lines(&raw2);
+        // Last-write-wins: the clear record (null) supersedes the active one.
+        assert!(
+            loaded
+                .worktree_states
+                .get(session_id)
+                .expect("worktree state present")
+                .is_null(),
+            "the trailing clear record wins"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

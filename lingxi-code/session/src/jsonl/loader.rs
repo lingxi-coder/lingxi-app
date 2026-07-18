@@ -725,6 +725,44 @@ pub async fn read_agent_setting(
         .map(str::to_string)
 }
 
+/// (parity 2.1.212) Read the persisted `worktree-state` for `session_id` from
+/// its transcript, if present — the resume read side of claude's
+/// `worktreeStates.get(sessionId)` lookup that feeds `restoreWorktreeSession`
+/// on `--continue`/`--resume`. Returns the stored `worktreeSession` object (an
+/// active `EnterWorktree` session), or `None` when the transcript is
+/// absent/unreadable, carries no `worktree-state` record for this session, or
+/// the last such record cleared it (`worktreeSession: null`, the
+/// `ExitWorktree` clear).
+///
+/// Because the loader keeps only the LAST `worktree-state` per `sessionId`
+/// (last-write-wins), a session that entered then exited a worktree resolves to
+/// `None` here — so `ExitWorktree` correctly stays a no-op on resume. This is
+/// what makes `ExitWorktree` operate (instead of hitting "No-op: there is no
+/// active EnterWorktree session to exit") only when a worktree is still active.
+///
+/// `transcript_path` is the session's `<uuid>.jsonl` file; `session_id` MUST be
+/// the bare uuid stem the writer keyed the record by (see
+/// [`crate::jsonl::writer::JsonlWriter::append_worktree_state`]).
+pub async fn read_worktree_state(
+    transcript_path: &Path,
+    fs: Arc<dyn FileSystem>,
+    session_id: &str,
+) -> Option<Value> {
+    if !tokio::fs::try_exists(transcript_path)
+        .await
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let reader = JsonlReader::new(transcript_path.to_path_buf(), fs);
+    let loaded = reader.read_routed().await.ok()?;
+    match loaded.worktree_states.get(session_id) {
+        // An active worktree session (a JSON object); a cleared record is `null`.
+        Some(v) if !v.is_null() => Some(v.clone()),
+        _ => None,
+    }
+}
+
 /// (P2-10 cc2.1.208) Scan a loaded transcript for every compact boundary's
 /// `compactMetadata.preCompactDiscoveredTools`, returning the deduped, sorted
 /// union of tool names.
@@ -1899,5 +1937,51 @@ mod tests {
         v.sort();
         assert_eq!(v[0].title, "newer-created", "newer birthtime sorts first");
         assert_eq!(v[1].title, "older-created");
+    }
+
+    /// (parity 2.1.212) `read_worktree_state` returns the persisted active
+    /// worktree session on resume, and `None` once an `ExitWorktree` clear
+    /// record (`worktreeSession: null`) supersedes it — the read side that lets
+    /// `ExitWorktree` operate after `--continue`/`--resume` instead of no-oping.
+    #[tokio::test]
+    async fn read_worktree_state_returns_active_then_none_after_clear() {
+        let temp = TempDir::new().expect("tempdir");
+        let session_id = "44444444-5555-6666-7777-888888888888";
+        let path = temp.path().join(format!("{session_id}.jsonl"));
+        let fs = make_fs(temp.path());
+        let writer = crate::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone());
+
+        // Absent transcript → None.
+        assert!(
+            read_worktree_state(&path, fs.clone(), session_id)
+                .await
+                .is_none()
+        );
+
+        // After EnterWorktree persists an active session → Some(payload).
+        let payload = serde_json::json!({
+            "worktreePath": "/repo/.lingxi/worktrees/feat",
+            "originalCwd": "/repo",
+            "worktreeBranch": "worktree-feat",
+            "enteredExisting": false,
+        });
+        writer
+            .append_worktree_state(session_id, Some(&payload))
+            .await
+            .expect("persist active");
+        let got = read_worktree_state(&path, fs.clone(), session_id)
+            .await
+            .expect("active worktree restored");
+        assert_eq!(got["worktreePath"], "/repo/.lingxi/worktrees/feat");
+
+        // After ExitWorktree clears it (null) → None (last-write-wins).
+        writer
+            .append_worktree_state(session_id, None)
+            .await
+            .expect("persist clear");
+        assert!(
+            read_worktree_state(&path, fs, session_id).await.is_none(),
+            "cleared worktree state resolves to None"
+        );
     }
 }

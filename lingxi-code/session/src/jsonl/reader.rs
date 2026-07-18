@@ -104,8 +104,13 @@ pub struct LoadedTranscript {
     /// `permission-mode` entries: keyed by `sessionId` → permission-mode string,
     /// last-write-wins. Binary `Yle`: `permissionModes.set(N.sessionId, N.permissionMode)`.
     pub permission_modes: HashMap<String, String>,
-    /// `worktree-state` entries: keyed by `agentId` → raw JSON value.
-    /// Binary `Yle`: `worktreeStates.set(N.agentId, N)`.
+    /// `worktree-state` entries: keyed by `sessionId` → the inner
+    /// `worktreeSession` JSON value (an object for an active worktree, or `null`
+    /// after `ExitWorktree` clears it). Binary (2.1.212 `Yle`):
+    /// `worktreeStates.set(N.sessionId, N.worktreeSession)`. Read back on
+    /// `--continue`/`--resume` by [`crate::jsonl::loader::read_worktree_state`] to
+    /// rehydrate the session's active worktree so `ExitWorktree` operates instead
+    /// of no-oping ("No-op: there is no active EnterWorktree session to exit").
     pub worktree_states: HashMap<String, Value>,
 }
 
@@ -379,9 +384,17 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
                 out.permission_modes.insert(sid.to_string(), pm.to_string());
             }
         } else if ty == "worktree-state" {
-            // Binary `Yle`: `worktreeStates.set(N.agentId, N)`.
-            if let Some(agent_id) = value.get("agentId").and_then(Value::as_str) {
-                out.worktree_states.insert(agent_id.to_string(), value);
+            // Binary (2.1.212 `Yle`): `x.set(J.sessionId, J.worktreeSession)` —
+            // keyed by `sessionId` and stores the inner `worktreeSession` payload
+            // (write side `{type:"worktree-state",worktreeSession,sessionId}`),
+            // NOT `agentId`/whole-entry. The stored value may be JSON `null` (the
+            // ExitWorktree clear record) — last-write-wins, so a later `null`
+            // supersedes an earlier active session for the same `sessionId`.
+            if let (Some(sid), Some(ws)) = (
+                value.get("sessionId").and_then(Value::as_str),
+                value.get("worktreeSession"),
+            ) {
+                out.worktree_states.insert(sid.to_string(), ws.clone());
             }
         }
         // else: Tier-2 / unknown / deferred subsystem → ignored (no error).

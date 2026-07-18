@@ -271,6 +271,22 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .map_err(|e| HandleError::ActionFailed(e.to_string()))
     }
 
+    /// `/resume`-as-background (2.1.212, G06) — launch an EXISTING on-disk
+    /// session (one enumerated by [`Self::list_resumable_sessions`]) as a NEW
+    /// background session, via the same injected `BgSessionForker` seam. Unlike
+    /// [`Self::fork_to_background_session`] there is no live conversation to
+    /// snapshot — the session already exists, so the seam dispatches a detached
+    /// worker that resumes it directly. No forker wired ⇒ a clear `ActionFailed`.
+    async fn resume_to_background_session(&self, session_id: &str) -> Result<String, HandleError> {
+        let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
+            HandleError::ActionFailed("resume: no background-session forker wired".into())
+        })?;
+        forker
+            .resume_to_background(session_id)
+            .await
+            .map_err(|e| HandleError::ActionFailed(e.to_string()))
+    }
+
     /// `/recap` — delegate to the history-inert inherent
     /// [`ConversationOrchestrator::generate_recap_query`] with a fresh
     /// (un-cancelled) token. A cancel-carrying caller (future Ctrl-C wiring in

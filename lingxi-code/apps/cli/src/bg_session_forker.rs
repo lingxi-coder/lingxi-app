@@ -109,4 +109,25 @@ impl BgSessionForker for CliBgSessionForker {
             "Copied conversation into a new background session ({short})."
         ))
     }
+
+    async fn resume_to_background(&self, session_id: &str) -> Result<String, BgForkError> {
+        // The chosen session ALREADY exists on disk at its standard transcript
+        // path (`list_resumable_sessions` enumerated it), so — unlike the fork
+        // path — there is NO snapshot to write: dispatch a detached daemon that
+        // resumes `session_id` directly via the same `Launch::Resume` machinery.
+        let cwd_pb = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd = cwd_pb.display().to_string();
+        let short = crate::background_dispatch::dispatch_forked_session(
+            &self.config_home,
+            &self.runtime_dir,
+            &cwd,
+            session_id,
+            "",
+        )
+        .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
+        // Same grounding caveat as `fork_to_background`: the 2.1.212 resume-as-bg
+        // dispatch has no recoverable oracle line (the TUI special dispatcher
+        // renders it), so this is grounded on the minted short id, NOT byte-verified.
+        Ok(format!("Resumed session into a new background session ({short})."))
+    }
 }

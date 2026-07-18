@@ -60,4 +60,14 @@ pub trait BgSessionForker: Send + Sync {
         system_prompt: Option<Arc<str>>,
         prompt: &str,
     ) -> Result<String, BgForkError>;
+
+    /// Resume an EXISTING on-disk session as a NEW background session — the
+    /// 2.1.212 `/resume`-as-background behavior (G06). Unlike
+    /// [`Self::fork_to_background`], this does NOT snapshot a live conversation:
+    /// `session_id` already exists at its standard transcript path, so the impl
+    /// dispatches a detached daemon that RESUMES it directly (reusing the same
+    /// `Launch::Resume` dispatch, minus the snapshot write). Returns the system
+    /// line to display — again owned by the composition root (it mints the new
+    /// short id).
+    async fn resume_to_background(&self, session_id: &str) -> Result<String, BgForkError>;
 }

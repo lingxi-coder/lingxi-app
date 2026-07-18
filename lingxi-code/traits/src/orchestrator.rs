@@ -1134,6 +1134,22 @@ pub trait OrchestratorHandle: Send + Sync {
         ))
     }
 
+    /// `/resume`-as-background (2.1.212, G06) — launch an EXISTING session (one
+    /// from [`Self::list_resumable_sessions`]) as a NEW background session,
+    /// rather than resuming it in the foreground. Reuses the same
+    /// `BgSessionForker` seam as [`Self::fork_to_background_session`], minus the
+    /// live-conversation snapshot (the session already exists on disk).
+    ///
+    /// Default returns `Err(HandleError::Unimplemented(..))` so existing impls +
+    /// the test mock keep compiling; the composition roots override it against
+    /// the real background-session dispatch.
+    async fn resume_to_background_session(&self, session_id: &str) -> Result<String, HandleError> {
+        let _ = session_id;
+        Err(HandleError::Unimplemented(
+            "resume_to_background_session".into(),
+        ))
+    }
+
     /// Generate a one-line session recap via an isolated, read-only,
     /// tool-denied, single-turn side query, per `/recap`. Returns the trimmed
     /// recap text (or [`RecapOutcome::Cancelled`] if aborted mid-flight).
@@ -1212,6 +1228,15 @@ pub trait OrchestratorHandle: Send + Sync {
     /// `id` + `label` per line), built from `std` types only. The interactive
     /// picker and replaying a chosen session are handled elsewhere; this
     /// delivers only the enumeration half.
+    ///
+    /// (2.1.212 G06) claude-code also lists SOFT-DELETED sessions in the picker.
+    /// LingXi has NO soft-delete/trash model for conversation sessions — a
+    /// session is either a live `<uuid>.jsonl` on disk or hard-removed (the `rm`
+    /// command only deletes background *jobs*, not conversation transcripts).
+    /// There is therefore nothing "deleted" to surface, so the deleted-inclusion
+    /// half of G06 is structurally inert here rather than a wired flag; the
+    /// resume-AS-background half is delivered via
+    /// [`Self::resume_to_background_session`].
     ///
     /// Default returns an empty `Vec` when no on-disk store is present.
     async fn list_resumable_sessions(&self) -> Vec<(String, String)> {

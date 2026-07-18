@@ -514,6 +514,49 @@ mod tests {
         );
     }
 
+    /// (2.1.212 G06) resume-AS-background reuses `dispatch_forked_session` for an
+    /// EXISTING session id (no snapshot write): it must record a `Launch::Resume`
+    /// job pointing at that session's transcript and spawn the daemon — the exact
+    /// path `CliBgSessionForker::resume_to_background` drives.
+    #[test]
+    fn forked_dispatch_records_resume_job_for_existing_session() {
+        let home = tmpdir();
+        let mut spawner = CaptureSpawner::default();
+        let lockp = FakeLockProbe {
+            live: HashMap::new(),
+        };
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        // Empty prompt = resume-as-bg (no seed turn), unlike a fork with a `[prompt]`.
+        let short =
+            dispatch_forked_session_inner(&home, &home, "/tmp/proj", session_id, "", &lockp, &mut spawner)
+                .expect("forked dispatch should succeed");
+
+        // A job row exists for the resumed session.
+        let jobs = agents_registry::read_jobs(&agents_registry::jobs_dir(&home));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].1.session_id.as_deref(), Some(session_id));
+        assert_eq!(jobs[0].1.backend.as_deref(), Some("daemon"));
+        // No seed prompt ⇒ no intent/initial_prompt for a bare resume.
+        assert_eq!(jobs[0].1.initial_prompt.as_deref(), None);
+
+        // The roster carries a `Launch::Resume` pointing at that session id.
+        let roster = read_roster(&home, 0, false).into_roster();
+        let rec = &roster.workers[&short];
+        match &rec.dispatch.launch {
+            Launch::Resume {
+                session_id: rid,
+                fork,
+                ..
+            } => {
+                assert_eq!(rid, session_id, "resume targets the chosen session");
+                assert!(*fork, "seeded from the transcript (copy-style resume)");
+            }
+            other => panic!("expected Resume launch, got {other:?}"),
+        }
+        // The daemon is spawned.
+        assert_eq!(spawner.spawns.len(), 1);
+    }
+
     #[test]
     fn skips_spawn_when_a_live_daemon_holds_the_lock() {
         let home = tmpdir();

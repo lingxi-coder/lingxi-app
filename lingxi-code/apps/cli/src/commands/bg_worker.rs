@@ -187,6 +187,34 @@ async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(
 
     let argv = worker_argv(&spec);
 
+    // (G05 2.1.212 `/fork` `vAd`) FORK-COPY SEED: a `/fork`-to-background session
+    // is dispatched with its `<sessionId>.jsonl` transcript ALREADY snapshotted
+    // on disk by `CliBgSessionForker` before this worker starts. A FRESH `--bg`
+    // job has no transcript until this (single) worker's `build_runtime` creates
+    // it — and a crashed worker is failed-closed, never re-run — so a transcript
+    // that EXISTS with content at worker start unambiguously means "this is a
+    // forked copy". Load those lines NOW (before `build_runtime` appends the new
+    // turn's records) so they can seed the orchestrator's in-memory history after
+    // the build; without this the forked turn would run with EMPTY context.
+    let fork_seed: Vec<session::jsonl::JsonlMessage> = if spec.session_id.is_empty()
+        || spec.cwd.is_empty()
+    {
+        Vec::new()
+    } else if let Ok(session_uuid) = uuid::Uuid::parse_str(&spec.session_id) {
+        match crate::run::load_resume_session_from(
+            &config_home,
+            std::path::Path::new(&spec.cwd),
+            session_uuid,
+        )
+        .await
+        {
+            Ok(msgs) => msgs,
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let attach_hub = match crate::bg_attach::AttachHub::start_from_env() {
         Ok(hub) => hub,
         Err(e) => {
@@ -207,6 +235,18 @@ async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(
     let runtime = crate::init::build_runtime(&argv, adapter, permission_mode)
         .await
         .map_err(|e| e.to_string())?;
+
+    // (G05) Seed the forked copy's replayed history into the freshly-built
+    // orchestrator (mirrors `run::resume_resolved_session`'s engine-side seed) so
+    // the follow-up turn continues the copied conversation with full context. A
+    // fresh `--bg` job's `fork_seed` is empty ⇒ this is a no-op (byte-identical
+    // to the pre-G05 worker). Guarded on a parseable session id.
+    if !fork_seed.is_empty() {
+        if let Ok(session_uuid) = uuid::Uuid::parse_str(&spec.session_id) {
+            crate::run::seed_orchestrator_session(&runtime.orchestrator, session_uuid, &fork_seed)
+                .await;
+        }
+    }
 
     // Deliver replies queued while this job had no live worker (offline queue),
     // in enqueue order, ahead of any subsequent live-attach input.

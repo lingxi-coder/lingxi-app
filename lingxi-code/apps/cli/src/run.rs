@@ -1927,7 +1927,7 @@ fn recover_from_failed_switch(current: Option<uuid::Uuid>) -> SwitchRecovery {
 /// then overwrite the live session through its public `session()` accessor (an
 /// `Arc<Mutex<SessionState>>`). We copy `history` + `session_id` so the resumed
 /// id is reported and a follow-up turn appends onto the prior history.
-async fn seed_orchestrator_session(
+pub(crate) async fn seed_orchestrator_session(
     orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
     session_id: uuid::Uuid,
     messages: &[JsonlMessage],
@@ -2148,7 +2148,7 @@ async fn load_resume_session(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>
 /// M5-07/M5-08 [`load_session`] loader for the session, which returns
 /// [`LoaderError::SessionNotFound`] when no `<uuid>.jsonl` exists under the
 /// cwd's project dir.
-async fn load_resume_session_from(
+pub(crate) async fn load_resume_session_from(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
     session_id: uuid::Uuid,

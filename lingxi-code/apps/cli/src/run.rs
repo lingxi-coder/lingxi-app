@@ -2264,7 +2264,13 @@ mod tests {
     #[test]
     fn set_model_default_is_case_insensitive_and_trimmed() {
         // CC `or.trim().toLowerCase() === "default"`.
-        for s in ["default", "DEFAULT", "Default", "  default  ", "\tdefault\n"] {
+        for s in [
+            "default",
+            "DEFAULT",
+            "Default",
+            "  default  ",
+            "\tdefault\n",
+        ] {
             assert_eq!(
                 apply(Some(serde_json::Value::String(s.into()))).as_deref(),
                 Some("session-default"),

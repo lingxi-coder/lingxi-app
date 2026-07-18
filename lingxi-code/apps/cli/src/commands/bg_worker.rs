@@ -83,7 +83,10 @@ pub struct JobSpec {
 pub async fn run(cli: &Cli) -> i32 {
     let config_home = crate::run::daemon_runtime_dir();
     let exec_home = config_home.clone();
-    run_worker_core(&config_home, &cli.short, move |spec| execute_job(exec_home, spec)).await
+    run_worker_core(&config_home, &cli.short, move |spec| {
+        execute_job(exec_home, spec)
+    })
+    .await
 }
 
 /// Testable worker core: the `execute` seam stands in for the real
@@ -207,10 +210,11 @@ async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(
 
     // Deliver replies queued while this job had no live worker (offline queue),
     // in enqueue order, ahead of any subsequent live-attach input.
-    let mut queued: VecDeque<String> = crate::bg_reply_queue::drain_replies(&config_home, &spec.short)
-        .into_iter()
-        .map(|reply| reply.text)
-        .collect();
+    let mut queued: VecDeque<String> =
+        crate::bg_reply_queue::drain_replies(&config_home, &spec.short)
+            .into_iter()
+            .map(|reply| reply.text)
+            .collect();
 
     run_attached_turn(&runtime, &spec.prompt, attach_rx.as_mut(), &mut queued).await?;
     if let (Some(hub), Some(rx)) = (attach_hub.as_ref(), attach_rx.as_mut()) {

@@ -1000,6 +1000,39 @@ mod tests {
     }
 
     #[test]
+    fn forward_subagent_text_parses() {
+        let a = Argv::from_iter(["lingxi-cli", "--forward-subagent-text", "hi"]).unwrap();
+        assert!(a.forward_subagent_text);
+        // Absent by default.
+        let b = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(!b.forward_subagent_text);
+    }
+
+    #[test]
+    fn forward_subagent_text_effective_flag_or_env() {
+        // Flag alone → effective true (env absent).
+        let a = Argv::from_iter(["lingxi-cli", "--forward-subagent-text", "hi"]).unwrap();
+        assert!(a.forward_subagent_text_effective());
+
+        // No flag, no env → effective false. Save/restore the process env so a
+        // stray value from another test doesn't flake this assertion.
+        let b = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        let prev = std::env::var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT").ok();
+        std::env::remove_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT");
+        assert!(!b.forward_subagent_text_effective());
+
+        // No flag, truthy env → effective true (binary `xe = k || env`).
+        std::env::set_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", "1");
+        assert!(b.forward_subagent_text_effective());
+
+        // Restore.
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT", v),
+            None => std::env::remove_var("CLAUDE_CODE_FORWARD_SUBAGENT_TEXT"),
+        }
+    }
+
+    #[test]
     fn replay_user_messages_parses() {
         let a = Argv::from_iter(["lingxi-cli", "--replay-user-messages", "hi"]).unwrap();
         assert!(a.replay_user_messages);

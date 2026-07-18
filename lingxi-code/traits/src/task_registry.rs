@@ -351,14 +351,20 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// terminal (e.g. killed via `TaskStop`) is left untouched (the binary's
     /// `if(O.notified) return O` guard). Default no-op so existing mock handles
     /// compile unchanged.
+    ///
+    /// Returns `Ok(true)` when this call won the terminal transition and
+    /// `Ok(false)` when the task was already terminal (the no-op path) — callers
+    /// gate the `mcp_auto_background` outcome counter on this so a killed /
+    /// already-settled task never re-emits it. Default returns `Ok(false)`
+    /// (the no-op mock never settles anything).
     async fn settle_mcp_task(
         &self,
         id: &str,
         result_text: &str,
         failed: bool,
-    ) -> Result<(), TaskRegistryError> {
+    ) -> Result<bool, TaskRegistryError> {
         let _ = (id, result_text, failed);
-        Ok(())
+        Ok(false)
     }
 
     /// Read the task's spool starting at `offset` (or from 0 if `None`).

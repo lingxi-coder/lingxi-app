@@ -391,7 +391,7 @@ impl TaskRegistryHandle for TaskRegistry {
         id: &str,
         result_text: &str,
         failed: bool,
-    ) -> Result<(), TaskRegistryError> {
+    ) -> Result<bool, TaskRegistryError> {
         TaskRegistry::settle_mcp_task(self, id, result_text, failed)
             .await
             .map_err(task_err_to_registry_err)

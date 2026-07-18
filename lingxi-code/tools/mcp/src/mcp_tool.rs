@@ -227,6 +227,73 @@ async fn emit(bus: &Arc<AnalyticsBus>, event: &'static str, fields: &[(&str, Ana
     bus.log_event(event, md).await;
 }
 
+// `tengu_feature_ok` / `tengu_feature_sad` / `tengu_feature_bad` — the generic
+// feature success / soft-error / hard-error counters the binary's `ve`/`Ue`/`me`
+// telemetry helpers emit:
+//   `ve(e)   = M("tengu_feature_ok",  {feature_name: e})`
+//   `Ue(e,t) = M("tengu_feature_sad", {feature_name: e, error_code: t})`
+//   `me(e,t) = M("tengu_feature_bad", {feature_name: e, error_code: t})`
+const TENGU_FEATURE_OK: &str = "tengu_feature_ok";
+const TENGU_FEATURE_SAD: &str = "tengu_feature_sad";
+const TENGU_FEATURE_BAD: &str = "tengu_feature_bad";
+
+/// `feature_name` value for the auto-background outcome counter — the bare
+/// `"mcp_auto_background"` string the binary's settle callback `E` passes to
+/// `ve`/`Ue`/`me`. Distinct from BOTH the `tengu_mcp_auto_background` feature
+/// flag (`getMcpAutoBackgroundMs`) AND the `tengu_mcp_tool_auto_backgrounded`
+/// background-TIME event already emitted at `M("tengu_mcp_tool_auto_backgrounded",{})`.
+const MCP_AUTO_BACKGROUND_FEATURE: &str = "mcp_auto_background";
+
+/// Terminal outcome of an auto-backgrounded MCP call, mirroring the discriminant
+/// the binary's settle callback `E` feeds into `ve`/`Ue`/`me`
+/// (`p.then(completed, err => E("failed", …, BZu(err) ? "tool_error" : "call_failed"))`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoBackgroundOutcome {
+    /// The detached call resolved — `ve("mcp_auto_background")`.
+    Completed,
+    /// The call produced a recognized MCP failure (an `isError` tool result, a
+    /// timeout, or an rpc/protocol error — every `process_mcp_call_result` `Err`
+    /// falls in `BZu`'s tool-error set) — `Ue("mcp_auto_background","tool_error")`.
+    ToolError,
+    /// The call failed unexpectedly (the settle-waiter's spawned task panicked —
+    /// `BZu` false fallback) — `me("mcp_auto_background","call_failed")`.
+    CallFailed,
+}
+
+/// Emit the `mcp_auto_background` outcome counter for a settled auto-backgrounded
+/// call — the binary's `E` callback firing `ve`/`Ue`/`me` (gated on the terminal
+/// transition actually happening; see [`settle_mcp_task`]'s `Ok(true)`).
+async fn emit_auto_background_outcome(bus: &Arc<AnalyticsBus>, outcome: AutoBackgroundOutcome) {
+    let feature = verified_str(MCP_AUTO_BACKGROUND_FEATURE);
+    match outcome {
+        AutoBackgroundOutcome::Completed => {
+            emit(bus, TENGU_FEATURE_OK, &[("feature_name", feature)]).await;
+        }
+        AutoBackgroundOutcome::ToolError => {
+            emit(
+                bus,
+                TENGU_FEATURE_SAD,
+                &[
+                    ("feature_name", feature),
+                    ("error_code", verified_str("tool_error")),
+                ],
+            )
+            .await;
+        }
+        AutoBackgroundOutcome::CallFailed => {
+            emit(
+                bus,
+                TENGU_FEATURE_BAD,
+                &[
+                    ("feature_name", feature),
+                    ("error_code", verified_str("call_failed")),
+                ],
+            )
+            .await;
+        }
+    }
+}
+
 /// Produce the `(now_millis, rand_tag)` seed for a blob `persistId`, mirroring
 /// the TS `Date.now()` + `Math.random().toString(36).slice(2, 8)` pair that
 /// `persistBlobToTextBlock` feeds into its persistId template
@@ -1030,26 +1097,46 @@ impl Tool for MCPTool {
         {
             let task_registry = task_registry.clone();
             let task_id = task_id.clone();
+            let bus = bus.clone();
             tokio::spawn(async move {
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => {}
                     joined = &mut call_task => {
-                        let (text, failed) = match joined {
+                        // Outcome discriminant mirrors the binary's settle
+                        // callback `E`: resolve → completed; a recognized MCP
+                        // failure (`Ok(Err)` — every `process_mcp_call_result`
+                        // `Err` is an `isError` tool result / timeout / rpc
+                        // error, all inside `BZu`'s tool-error set) → tool_error;
+                        // an unexpected task panic (`Err(join_err)`, `BZu` false)
+                        // → call_failed.
+                        let (text, failed, outcome) = match joined {
                             Ok(Ok(result)) => (
                                 result
                                     .model_content
                                     .clone()
                                     .unwrap_or_else(|| result.data.to_string()),
                                 result.is_error,
+                                AutoBackgroundOutcome::Completed,
                             ),
-                            Ok(Err(e)) => (e.to_string(), true),
+                            Ok(Err(e)) => {
+                                (e.to_string(), true, AutoBackgroundOutcome::ToolError)
+                            }
                             Err(join_err) => (
                                 format!("background task join error: {join_err}"),
                                 true,
+                                AutoBackgroundOutcome::CallFailed,
                             ),
                         };
-                        let _ = task_registry.settle_mcp_task(&task_id, &text, failed).await;
+                        // Emit the `mcp_auto_background` outcome counter ONLY when
+                        // this settle won the terminal transition (the binary's
+                        // `!k` guard — a killed / already-settled task never
+                        // re-emits). `settle_mcp_task` reports that via `Ok(true)`.
+                        if let Ok(true) =
+                            task_registry.settle_mcp_task(&task_id, &text, failed).await
+                        {
+                            emit_auto_background_outcome(&bus, outcome).await;
+                        }
                     }
                 }
             });
@@ -2284,12 +2371,15 @@ mod auto_background_race_tests {
             id: &str,
             result_text: &str,
             failed: bool,
-        ) -> Result<(), TaskRegistryError> {
+        ) -> Result<bool, TaskRegistryError> {
             self.settled
                 .lock()
                 .unwrap()
                 .push((id.to_string(), result_text.to_string(), failed));
-            Ok(())
+            // The mock always "wins" the terminal transition (it has no prior
+            // state), so the caller emits the `mcp_auto_background` outcome — the
+            // real registry returns `Ok(false)` for an already-terminal task.
+            Ok(true)
         }
     }
 

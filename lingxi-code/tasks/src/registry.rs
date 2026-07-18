@@ -385,18 +385,25 @@ impl TaskRegistry {
     /// A task already terminal (e.g. killed via `TaskStop`, or already settled)
     /// is left untouched — the binary's `if(O.notified) return O` guard — so a
     /// race between kill and settle never resurrects a killed task.
+    ///
+    /// Returns `Ok(true)` when THIS call won the terminal transition (the
+    /// binary's `E` callback observing `k = true` after `i.update`), and
+    /// `Ok(false)` when the task was already terminal so the update no-op'd
+    /// (`if (O.notified) return O`). Callers use this to gate the
+    /// `mcp_auto_background` outcome counter — a killed / already-settled task
+    /// must never re-emit it.
     pub async fn settle_mcp_task(
         &self,
         task_id: &str,
         result_text: &str,
         failed: bool,
-    ) -> Result<(), TaskError> {
+    ) -> Result<bool, TaskError> {
         let task_id = self.canonical_or_raw(task_id).await;
         // Guard + recover the spool path under a read lock.
         let output_file = {
             let map = self.tasks.read().await;
             match map.get(&task_id) {
-                Some(s) if s.base().status.is_terminal() => return Ok(()),
+                Some(s) if s.base().status.is_terminal() => return Ok(false),
                 Some(s) => s.base().output_file.clone(),
                 None => return Err(TaskError::NotFound(task_id)),
             }
@@ -433,7 +440,7 @@ impl TaskRegistry {
             // above. If so, leave it untouched — the `if (O.notified) return O`
             // no-op — so a killed task is never resurrected as `Completed`.
             if state.base().status.is_terminal() {
-                return Ok(());
+                return Ok(false);
             }
             state.base_mut().end_time = Some(SystemTime::now());
             if let TaskState::McpTask(m) = state {
@@ -467,7 +474,7 @@ impl TaskRegistry {
                 })
                 .await;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Spawn a task by dispatching to its registered per-type handler.

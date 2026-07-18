@@ -31,9 +31,48 @@ use traits::{
     FileSystem, McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
 };
 
+/// Install the print/SDK-mode process-tree cleanup (parity 2.1.212 — "Fixed
+/// SIGTERM during Bash tool orphaning process trees in print/SDK mode").
+///
+/// Enables the posix runner to spawn foreground Bash children in their own
+/// process group (`setsid`) and track them, then spawns a task that — on
+/// `SIGTERM`/`SIGHUP`/`SIGINT` (claude-code's signal-exit `[SIGHUP, SIGINT,
+/// SIGTERM]`) — `killpg`s every live Bash subtree before the process exits. Tokio
+/// `kill_on_drop` only fires on a graceful future drop, so an abrupt signal to
+/// `-p`/SDK mode would otherwise orphan the subtree. Installed once per process
+/// (idempotent); a no-op in interactive TUI/REPL mode, which never calls it.
+fn install_print_mode_process_cleanup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    platform_posix::process::enable_print_mode_child_cleanup();
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (Ok(mut term), Ok(mut hup), Ok(mut intr)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            return;
+        };
+        let signum = tokio::select! {
+            _ = term.recv() => nix::libc::SIGTERM,
+            _ = hup.recv() => nix::libc::SIGHUP,
+            _ = intr.recv() => nix::libc::SIGINT,
+        };
+        // Tree-kill every still-running foreground Bash child, then exit with the
+        // conventional 128+signal status so the subtree never outlives us.
+        platform_posix::process::kill_all_active_children();
+        std::process::exit(128 + signum);
+    });
+}
+
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
 pub async fn run_oneshot(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
+    install_print_mode_process_cleanup();
     let prompt = argv.prompt.clone().unwrap_or_default();
     if prompt.trim().is_empty() {
         // Byte-parity with claude-code print.ts: the empty-input error in print
@@ -86,6 +125,7 @@ pub async fn run_stream_json_print(
     stream: Arc<StreamJsonStream>,
     permission_mode: permission::PermissionMode,
 ) -> i32 {
+    install_print_mode_process_cleanup();
     let prompt = argv.prompt.clone().unwrap_or_default();
     if prompt.trim().is_empty() {
         // Byte-parity with claude-code print.ts (see run_oneshot).
@@ -680,6 +720,7 @@ pub async fn run_stream_json_input_loop(
     permission_mode: permission::PermissionMode,
     control_plane: Arc<StdioControlPlane>,
 ) -> i32 {
+    install_print_mode_process_cleanup();
     // Collect the real session_id and model from the orchestrator after build.
     let (session_id_str, model_str) = {
         let session_handle = runtime.orchestrator.session();

@@ -10,6 +10,7 @@
 //! `kill_tree_force(handle.pid)` — immediate SIGKILL with no grace period,
 //! matching `treeKill(pid, 'SIGKILL')` in `src/utils/ShellCommand.ts:337-343`.
 
+use crate::process::active_children;
 use crate::process::kill_tree::kill_tree_force;
 use crate::process::spawn_unsafe::attach_setsid;
 use crate::process::wrap::{
@@ -116,6 +117,18 @@ const GHA_SUBPROCESS_SCRUB: &[&str] = &[
     "DEFAULT_WORKFLOW_TOKEN",
     "SSH_SIGNING_KEY",
 ];
+
+/// RAII guard that drops a foreground child's pgid from the print/SDK-mode
+/// [`active_children`] registry when its `run` completes or its future is dropped
+/// (cancel). Paired with a `setsid` spawn + [`active_children::register`] so the
+/// print/SDK signal handler tree-kills only children that are still running.
+struct ChildRegistration(u32);
+
+impl Drop for ChildRegistration {
+    fn drop(&mut self) {
+        active_children::unregister(self.0);
+    }
+}
 
 /// Production [`ProcessRunner`] using `tokio::process`.
 #[derive(Default)]
@@ -260,7 +273,28 @@ impl ProcessRunner for PosixProcess {
             // foreground capture path.)
             .kill_on_drop(true);
 
+        // PARITY 2.1.212 (print/SDK SIGTERM cleanup): in print/SDK mode, spawn the
+        // foreground child in its OWN process group (`setsid`, like claude-code's
+        // `detached: true`) and register its pgid so a process-level
+        // SIGTERM/SIGHUP/SIGINT handler can `killpg` the whole subtree before exit
+        // — `kill_on_drop` alone never fires on an abrupt signal. Interactive mode
+        // leaves this off, so its spawn path is byte-identical to before.
+        let print_mode_cleanup = active_children::print_mode_child_cleanup_enabled();
+        if print_mode_cleanup {
+            attach_setsid(&mut tcmd);
+        }
+
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        // Register the setsid child's pgid (== pid) for the duration of this run;
+        // the guard unregisters it on completion OR on future-drop (cancel).
+        let _child_registration = if print_mode_cleanup {
+            child.id().map(|pid| {
+                active_children::register(pid);
+                ChildRegistration(pid)
+            })
+        } else {
+            None
+        };
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin

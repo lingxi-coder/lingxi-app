@@ -136,11 +136,26 @@ struct PermissionsBlock {
 /// (`mwo`), `"managed policy settings"` for `policySettings`, `--allowed-tools` /
 /// `--disallowed-tools` for `cliArg`, and `--settings` for `flagSettings`. The
 /// `ruleBehavior` token is the lowercase wire name (`allow` / `deny` / `ask`).
+///
+/// Mirrors the per-rule guard the binary's startup loop (`sks`) applies BEFORE
+/// running `validatePermissionRule`: a rule whose content is an
+/// `identifier:...`-shaped prefix (a colon at index > 0 whose leading segment is
+/// a bare identifier) is skipped — UNLESS the trimmed content is a Windows drive
+/// path (`C:\…` / `C:/…`), which is a real file path and so still warns. This
+/// suppresses the file-matcher warning for prefix-shaped contents such as
+/// `Write(scheme:foo)` exactly as the binary does. (The narrower `:*` Bash-prefix
+/// case is already handled inside [`permission_rule_file_warning`].)
 #[must_use]
 pub fn permission_rule_startup_warning(
     rule: &PermissionRule,
     source_display: &str,
 ) -> Option<String> {
+    // `sks` loop guard: skip `identifier:`-prefixed contents (non-Windows-drive).
+    if let Some(content) = rule.value.rule_content.as_deref() {
+        if is_identifier_colon_prefix(content) {
+            return None;
+        }
+    }
     let warning = permission_rule_file_warning(&rule.value)?;
     let behavior = match rule.behavior {
         PermissionBehavior::Allow => "allow",
@@ -150,6 +165,41 @@ pub fn permission_rule_startup_warning(
     Some(format!(
         "Permission {behavior} rule ({source_display}): {warning}"
     ))
+}
+
+/// `true` when `content` is an `identifier:...`-shaped prefix that the binary's
+/// startup loop skips before warning — 1:1 with the `sks` guard
+/// `X>0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(G.slice(0,X).trim()) &&
+/// !/^[A-Za-z]:[\\/]/.test(G.trim())`, where `X = G.indexOf(":")`. A Windows
+/// drive path (`C:\…` / `C:/…`) is a real path, so it is NOT skipped (returns
+/// `false`) and still warns.
+fn is_identifier_colon_prefix(content: &str) -> bool {
+    // `X = G.indexOf(":")`, then require `X > 0`.
+    let Some(colon) = content.find(':') else {
+        return false;
+    };
+    if colon == 0 {
+        return false;
+    }
+    // `G.slice(0, X).trim()` must be a bare identifier `[A-Za-z_][A-Za-z0-9_]*`.
+    let prefix = content[..colon].trim();
+    let mut chars = prefix.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    // …unless `G.trim()` is a Windows drive path `^[A-Za-z]:[\\/]` (still a path).
+    let trimmed = content.trim().as_bytes();
+    let is_windows_drive = trimmed.len() >= 3
+        && trimmed[0].is_ascii_alphabetic()
+        && trimmed[1] == b':'
+        && (trimmed[2] == b'\\' || trimmed[2] == b'/');
+    !is_windows_drive
 }
 
 /// Parse one settings file's raw JSON into permission rules tagged with
@@ -706,6 +756,29 @@ mod tests {
             source: PermissionRuleSource::UserSettings,
         };
         assert!(permission_rule_startup_warning(&ok, "settings.json").is_none());
+    }
+
+    #[test]
+    fn startup_warning_skips_identifier_colon_prefix_like_binary() {
+        let line = |spec: &str| {
+            let rule = PermissionRule {
+                value: PermissionRuleValue::from_rule_string(spec),
+                behavior: PermissionBehavior::Allow,
+                source: PermissionRuleSource::ProjectSettings,
+            };
+            permission_rule_startup_warning(&rule, "settings.json")
+        };
+        // `sks` loop guard: `identifier:...` (non-`:*`, non-drive) content is
+        // skipped BEFORE the file-matcher warning — the binary stays silent.
+        assert!(line("Write(scheme:foo)").is_none());
+        assert!(line("Glob(node:fs)").is_none());
+        // A Windows drive path is a real path → NOT skipped, still warns.
+        assert!(line(r"Write(C:\Users\x)").is_some());
+        assert!(line("Write(C:/Users/x)").is_some());
+        // A non-identifier prefix before the colon does NOT match the guard.
+        assert!(line("Write(a-b:c)").is_some());
+        // No colon → warns as before (unaffected by the guard).
+        assert!(line("Write(src/**)").is_some());
     }
 
     #[test]

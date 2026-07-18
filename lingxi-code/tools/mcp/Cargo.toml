@@ -24,6 +24,9 @@ thiserror.workspace = true
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 engine = { path = "../../engine" }
+jsonrpc = { path = "../../jsonrpc" }
+bytes.workspace = true
+futures = "0.3"
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 

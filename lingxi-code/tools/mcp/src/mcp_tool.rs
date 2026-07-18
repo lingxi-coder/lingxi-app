@@ -2051,3 +2051,337 @@ mod tests {
         assert_eq!(out, json!(r#"{"rows":[{"id":7}],"total":1}"#));
     }
 }
+
+// ===== G07/G08: MCP tool-call auto-background race integration ===============
+
+#[cfg(test)]
+mod auto_background_race_tests {
+    use super::*;
+    use bytes::Bytes;
+    use jsonrpc::{Connection, Mode};
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::mpsc;
+    use traits::task_registry::{
+        McpTaskRegistration, TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
+    use traits::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
+        McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
+
+    /// Minimal transport — the registry needs one to construct, but these tests
+    /// drive a directly-`register_client`ed [`mcp::McpClient`], so nothing here
+    /// is ever called.
+    struct StubTransport;
+
+    #[async_trait]
+    impl McpTransport for StubTransport {
+        async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            unreachable!()
+        }
+        async fn initialize(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!()
+        }
+        async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_resources(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+            unreachable!()
+        }
+        async fn call_tool(
+            &self,
+            _c: &McpRawConnection,
+            _t: &str,
+            _i: Value,
+        ) -> Result<traits::McpToolResultDto, McpError> {
+            unreachable!()
+        }
+        async fn read_resource(
+            &self,
+            _c: &McpRawConnection,
+            _u: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!()
+        }
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        async fn notifications(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!()
+        }
+        async fn handle_elicitation(
+            &self,
+            _c: &McpRawConnection,
+            _r: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio]
+        }
+    }
+
+    /// A paired in-memory `jsonrpc::Connection`: `peer_tx` sends frames TO the
+    /// client, `peer_rx` receives the frames the client emits (its requests).
+    fn paired() -> (Arc<Connection>, mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
+        let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        let conn = Arc::new(Connection::new_streams(
+            peer_to_us_rx,
+            us_to_peer_tx,
+            Mode::Lines,
+        ));
+        (conn, peer_to_us_tx, us_to_peer_rx)
+    }
+
+    /// Like [`paired`] but sets a large per-call router timeout so the jsonrpc
+    /// layer's own 60s default does NOT fire before the 120s auto-background
+    /// deadline under `start_paused` — the timeout race being tested is the
+    /// tool's, not the transport's.
+    fn paired_with_timeout(
+        d: std::time::Duration,
+    ) -> (Arc<Connection>, mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
+        use futures::stream::unfold;
+        let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        let inbound = Box::pin(unfold(peer_to_us_rx, |mut rx| async move {
+            rx.recv()
+                .await
+                .map(|v| (Ok::<Bytes, std::io::Error>(v), rx))
+        }));
+        let outbound = Box::pin(futures::sink::unfold(
+            us_to_peer_tx.clone(),
+            |tx, item: Bytes| async move {
+                tx.send(item)
+                    .await
+                    .map_err(|_| std::io::Error::other("writer closed"))?;
+                Ok::<_, std::io::Error>(tx)
+            },
+        ));
+        let conn = Arc::new(
+            Connection::builder(jsonrpc::LineCodec::default())
+                .default_timeout(d)
+                .build(inbound, outbound),
+        );
+        (conn, peer_to_us_tx, us_to_peer_rx)
+    }
+
+    /// Records every `register_mcp_task` call so a test can assert the timeout
+    /// branch fired with the right server/tool. All other CRUD is unused here.
+    #[derive(Default)]
+    struct RecordingRegistry {
+        registered: StdMutex<Vec<McpTaskRegistration>>,
+        settled: StdMutex<Vec<(String, String, bool)>>,
+    }
+
+    #[async_trait]
+    impl TaskRegistryHandle for RecordingRegistry {
+        async fn create(&self, _i: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+        async fn list(&self, _f: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(vec![])
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _o: Option<u64>,
+        ) -> Result<traits::task_registry::TaskOutputChunk, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn register_mcp_task(
+            &self,
+            reg: McpTaskRegistration,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<String, TaskRegistryError> {
+            self.registered.lock().unwrap().push(reg);
+            Ok("ktest0001".to_string())
+        }
+        async fn settle_mcp_task(
+            &self,
+            id: &str,
+            result_text: &str,
+            failed: bool,
+        ) -> Result<(), TaskRegistryError> {
+            self.settled
+                .lock()
+                .unwrap()
+                .push((id.to_string(), result_text.to_string(), failed));
+            Ok(())
+        }
+    }
+
+    fn ctx_with(
+        registry: Arc<McpRegistry>,
+        task_registry: Option<Arc<dyn TaskRegistryHandle>>,
+    ) -> tool_api::BuiltinToolContext {
+        let fs = tool_api::test_support::make_dummy_fs();
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let mut ctx =
+            tool_api::test_support::ctx_for_file_tools(fs, bus, vec![std::env::temp_dir()]);
+        ctx.mcp_registry = Some(registry);
+        ctx.task_registry = task_registry;
+        ctx
+    }
+
+    fn call_input() -> Value {
+        json!({ "full_name": "mcp__slow__slowtool", "arguments": {} })
+    }
+
+    // Drive the peer: read the client's `tools/call` request frame and answer it
+    // with a canned text result so the awaiting call resolves.
+    fn spawn_responder(mut peer_rx: mpsc::Receiver<Bytes>, peer_tx: mpsc::Sender<Bytes>) {
+        tokio::spawn(async move {
+            let frame = peer_rx.recv().await.expect("client sent a request frame");
+            let req: Value = serde_json::from_slice(&frame).expect("json request");
+            let id = req["id"].clone();
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "content": [{ "type": "text", "text": "ok" }], "isError": false },
+            });
+            let mut bytes = serde_json::to_vec(&resp).unwrap();
+            bytes.push(b'\n');
+            let _ = peer_tx.send(Bytes::from(bytes)).await;
+        });
+    }
+
+    // A slow call (peer never responds) auto-backgrounds after the threshold:
+    // registers an mcp_task and returns the byte-exact background message. Uses
+    // `start_paused` so the tokio runtime auto-advances to the 120s auto-bg
+    // timer once the in-flight call parks on the never-answered request.
+    #[tokio::test(start_paused = true)]
+    async fn slow_call_auto_backgrounds_after_threshold() {
+        // Peer never responds; the router timeout is set well above the 120s
+        // auto-background deadline so the tool's race — not the transport's —
+        // decides the outcome.
+        let (conn, _peer_tx, _peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-slow"));
+        // Interactive session → default 120000ms threshold (flag default on).
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message), never an error");
+
+        let text = result.model_content.expect("background message present");
+        assert!(
+            text.contains("It was moved to the background as task ktest0001"),
+            "returns the byte-exact background message: {text}"
+        );
+        assert!(
+            text.starts_with("MCP tool \"slow/slowtool\" is still running after"),
+            "message names the server/tool: {text}"
+        );
+
+        let regd = recorder.registered.lock().unwrap();
+        assert_eq!(regd.len(), 1, "exactly one mcp_task registered");
+        assert_eq!(regd[0].server_name, "slow");
+        assert_eq!(regd[0].tool_name, "slowtool");
+        assert_eq!(regd[0].tool_use_id.as_deref(), Some("tu-slow"));
+    }
+
+    // Auto-background disabled (`auto_bg_ms == 0`, here via the non-interactive
+    // gate with no CLAUDE_AUTO_BACKGROUND_TASKS opt-in) → the call awaits
+    // directly and returns the real result; NOTHING is backgrounded.
+    #[tokio::test]
+    async fn disabled_threshold_awaits_directly() {
+        let (conn, peer_tx, peer_rx) = paired();
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+        spawn_responder(peer_rx, peer_tx);
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-x"));
+        // Non-interactive with no opt-in → getMcpAutoBackgroundMs == 0.
+        use_ctx.options.is_non_interactive_session = true;
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("direct await returns the real result");
+        assert_eq!(result.model_content.as_deref(), Some("ok"));
+        assert!(
+            recorder.registered.lock().unwrap().is_empty(),
+            "auto_bg_ms == 0 never backgrounds"
+        );
+    }
+
+    // Threshold enabled but NO task registry wired on the context → the seam is
+    // unavailable, so the call falls back to a direct await (no regression).
+    #[tokio::test]
+    async fn unwired_registry_awaits_directly() {
+        let (conn, peer_tx, peer_rx) = paired();
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+        spawn_responder(peer_rx, peer_tx);
+
+        // task_registry = None → unwired seam.
+        let ctx = ctx_with(registry, None);
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-y"));
+        // Interactive → threshold WOULD be 120000, but the unwired seam forces
+        // the direct-await path regardless.
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("unwired seam falls back to a direct await");
+        assert_eq!(result.model_content.as_deref(), Some("ok"));
+    }
+}

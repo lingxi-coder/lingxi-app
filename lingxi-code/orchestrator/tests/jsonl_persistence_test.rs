@@ -219,3 +219,120 @@ async fn batched_run_turn_persists_the_real_model_and_usage_not_synthetic() {
         "batched assistant line must carry `usage` (cost is derived from it): {inner}"
     );
 }
+
+#[tokio::test]
+async fn assistant_line_records_session_effort_level_2_1_212() {
+    // 2.1.212: with a session effort configured (CLI `--effort`), every REAL
+    // assistant transcript line records it as a top-level `effort` LEVEL string
+    // — 1:1 with claude's `...effort!==void 0&&{effort}` spread. USER lines never
+    // carry it, and a session with NO effort omits the field entirely.
+    let dir = tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
+
+    let r1 = mock_message_response(
+        vec![LlmContentBlock::Text {
+            text: "reply".into(),
+            cache_control: None,
+        }],
+        Some("end_turn"),
+    );
+    let api = Arc::new(MockApiClient::new(vec![r1]));
+    let output = Arc::new(MockOutputStream::new());
+    let hooks = orchestrator::test_support::noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+
+    let cfg = OrchestratorConfig {
+        effort: Some("high".into()),
+        ..OrchestratorConfig::default()
+    };
+    let orch = ConversationOrchestrator::new(
+        cfg,
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_jsonl_writer(writer);
+
+    let _ = orch.run_turn("hi").await.expect("turn");
+
+    let body = std::fs::read_to_string(&session_path).expect("read session file");
+    let lines: Vec<serde_json::Value> = body
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .collect();
+
+    let assistant = lines
+        .iter()
+        .find(|v| v["type"] == "assistant")
+        .expect("an assistant line on disk");
+    assert_eq!(
+        assistant.get("effort").and_then(|v| v.as_str()),
+        Some("high"),
+        "assistant line must record the session effort level: {assistant}"
+    );
+
+    let user = lines
+        .iter()
+        .find(|v| v["type"] == "user")
+        .expect("a user line on disk");
+    assert!(
+        user.get("effort").is_none(),
+        "user lines must NOT carry effort: {user}"
+    );
+}
+
+#[tokio::test]
+async fn assistant_line_omits_effort_when_session_has_none_2_1_212() {
+    // Parity default: no `--effort` ⟹ NO `effort` field on any line (claude's
+    // `!==void 0` guard), so default-session transcripts stay byte-identical.
+    let dir = tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
+
+    let r1 = mock_message_response(
+        vec![LlmContentBlock::Text {
+            text: "reply".into(),
+            cache_control: None,
+        }],
+        Some("end_turn"),
+    );
+    let api = Arc::new(MockApiClient::new(vec![r1]));
+    let output = Arc::new(MockOutputStream::new());
+    let hooks = orchestrator::test_support::noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_jsonl_writer(writer);
+
+    let _ = orch.run_turn("hi").await.expect("turn");
+
+    let body = std::fs::read_to_string(&session_path).expect("read session file");
+    for line in body.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        assert!(
+            v.get("effort").is_none(),
+            "no line may carry effort when the session has none: {v}"
+        );
+    }
+}

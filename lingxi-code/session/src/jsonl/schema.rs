@@ -184,6 +184,7 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "errorDetails",
     "isApiErrorMessage",
     "apiErrorStatus",
+    "effort",
 ];
 
 /// `extra` keys the USER head consumes (between `message` and `uuid`): the
@@ -284,7 +285,12 @@ impl Serialize for JsonlMessage {
             }
         } else if is_assistant {
             // (e2) assistant normal head: message, requestId?, type, uuid,
-            //      timestamp.
+            //      timestamp, effort?. `effort` (2.1.212) is the last field of
+            //      the in-memory assistant message object `d` (after
+            //      `advisorModel`), spread into the transcript record before the
+            //      `userType`/`cwd`/`version`/`gitBranch` trailer — the level
+            //      string from `Y4n(effort).level`, emitted only when present
+            //      (claude's `...effort!==void 0&&{effort}` guard).
             map.serialize_entry("message", &self.message)?;
             if let Some(v) = self.extra.get("requestId") {
                 map.serialize_entry("requestId", v)?;
@@ -292,6 +298,9 @@ impl Serialize for JsonlMessage {
             map.serialize_entry("type", &self.message_type)?;
             map.serialize_entry("uuid", &self.uuid)?;
             map.serialize_entry("timestamp", &self.timestamp)?;
+            if let Some(v) = self.extra.get("effort") {
+                map.serialize_entry("effort", v)?;
+            }
         } else if is_compact_boundary {
             // (f1) compact-boundary system head — claude's flattened envelope
             //      (real 2.1.207 transcripts): type, subtype, content,

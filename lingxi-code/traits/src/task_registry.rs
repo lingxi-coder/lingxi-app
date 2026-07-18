@@ -17,6 +17,20 @@ pub struct TaskCreateInput {
     pub description: String,
 }
 
+/// Registration input for a backgrounded MCP tool call (claude-code 2.1.212
+/// `callMcpToolWithAutoBackground`'s `NZu` register-input builder). Minted when
+/// a single `tools/call` exceeds `getMcpAutoBackgroundMs` and is detached from
+/// the turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpTaskRegistration {
+    /// MCP server name (`serverName`).
+    pub server_name: String,
+    /// MCP tool name (`toolName`).
+    pub tool_name: String,
+    /// Originating assistant `tool_use_id`, if any (`toolUseId`).
+    pub tool_use_id: Option<String>,
+}
+
 /// Filter for [`TaskRegistryHandle::list`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskListFilter {
@@ -304,6 +318,48 @@ pub trait TaskRegistryHandle: Send + Sync {
 
     /// Kill the task (cancels any background handle, marks status `killed`).
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError>;
+
+    /// Register a backgrounded MCP tool call and return the minted `k…` task id
+    /// (claude-code 2.1.212 `callMcpToolWithAutoBackground`'s `i.register(g)`,
+    /// where `g = NZu({serverName, toolName, toolUseId, abortController})`). The
+    /// task is inserted `running` with `mcpStatus:"working"`; `cancel` is fired
+    /// when the task is later killed (`TaskStop`), aborting the still-running
+    /// in-flight call — the port equivalent of the state's `abortController` +
+    /// the poll loop's `cancelTask` on `status==="killed"`.
+    ///
+    /// Default impl returns [`TaskRegistryError::Internal`] so a host that has
+    /// not wired a real registry never auto-backgrounds — the [`crate`] MCP tool
+    /// falls back to the direct await. Frozen-trait defaulted-method idiom so
+    /// existing mock handles compile unchanged.
+    async fn register_mcp_task(
+        &self,
+        reg: McpTaskRegistration,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, TaskRegistryError> {
+        let _ = (reg, cancel);
+        Err(TaskRegistryError::Internal(
+            "mcp_task registration unwired".into(),
+        ))
+    }
+
+    /// Settle a backgrounded MCP tool call once the detached `tools/call`
+    /// resolves (claude-code `callMcpToolWithAutoBackground`'s inner `E`
+    /// callback + `p.then(…)`): write `result_text` into the task spool so the
+    /// drained `<task-notification>`'s `output-file` carries the real result,
+    /// then mark the task terminal — `completed` on success, `failed` otherwise
+    /// (`{...O, status:S, mcpStatus:S, endTime, notified:true}`). A task already
+    /// terminal (e.g. killed via `TaskStop`) is left untouched (the binary's
+    /// `if(O.notified) return O` guard). Default no-op so existing mock handles
+    /// compile unchanged.
+    async fn settle_mcp_task(
+        &self,
+        id: &str,
+        result_text: &str,
+        failed: bool,
+    ) -> Result<(), TaskRegistryError> {
+        let _ = (id, result_text, failed);
+        Ok(())
+    }
 
     /// Read the task's spool starting at `offset` (or from 0 if `None`).
     async fn output(

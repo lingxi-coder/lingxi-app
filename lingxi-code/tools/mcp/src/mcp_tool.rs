@@ -30,6 +30,7 @@ use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
     LIST_MCP_RESOURCES_COMPLETED, LIST_MCP_RESOURCES_FAILED, LIST_MCP_RESOURCES_STARTED,
     MCP_AUTH_COMPLETED, MCP_AUTH_FAILED, MCP_AUTH_STARTED, MCP_COMPLETED, MCP_FAILED, MCP_STARTED,
+    MCP_TOOL_AUTO_BACKGROUNDED,
     READ_MCP_RESOURCE_COMPLETED, READ_MCP_RESOURCE_FAILED, READ_MCP_RESOURCE_STARTED,
 };
 use telemetry::AnalyticsBus;
@@ -427,6 +428,221 @@ static READ_MCP_RESOURCE_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// Transform a settled `tools/call` result into the model-facing
+/// [`ToolCallResult`] (or [`ToolError`]).
+///
+/// This is the whole post-`call_tool_with_progress` body extracted so it can run
+/// in EITHER place: inline on the foreground path, or on a detached
+/// `tokio::spawn` when the call is auto-backgrounded (G07/G08). Every ambient
+/// input the body needs is an owned argument (`bus`/`cwd` cloned off the
+/// `BuiltinToolContext`) so the future is `'static + Send` and can outlive the
+/// turn. Byte-identical to the previous inline logic — only the `self.bus()` /
+/// `self.ctx.cwd()` reads became the `bus` / `cwd` parameters.
+#[allow(clippy::too_many_arguments)]
+async fn process_mcp_call_result(
+    bus: Arc<AnalyticsBus>,
+    cwd: std::path::PathBuf,
+    server: String,
+    tool: String,
+    tool_use_id: Option<protocol::ToolUseId>,
+    progress: ToolProgressSender,
+    started: Instant,
+    res: Result<traits::McpToolResultDto, McpClientError>,
+) -> Result<ToolCallResult, ToolError> {
+    match res {
+        Ok(dto) => {
+            // MCP.1: a server-flagged error result (`isError: true`) is mapped
+            // to a tool ERROR before the success path, mirroring the TS throw
+            // (`client.ts:3124-3148`) which fires BEFORE COMPLETED telemetry /
+            // result transform. We lift the first content block's `text` (else
+            // `"Unknown error"`) into the error message and emit MCP_FAILED.
+            // The orchestrator derives block-level is_error purely from Ok/Err,
+            // so returning `Err` renders the model "Error: <text>" — matching
+            // the TS throw — instead of silently embedding `is_error` as data.
+            if dto.is_error {
+                let error_details = first_content_block_text(&dto.content)
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                emit(
+                    &bus,
+                    MCP_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&server)),
+                        ("_PROTO_tool_name", pii(&tool)),
+                        ("error_kind", verified_str("tool_error")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::Io(error_details));
+            }
+
+            emit(
+                &bus,
+                MCP_COMPLETED,
+                &[
+                    ("_PROTO_server_name", pii(&server)),
+                    ("_PROTO_tool_name", pii(&tool)),
+                    (
+                        "duration_ms",
+                        verified_int(started.elapsed().as_millis() as u64),
+                    ),
+                    ("is_error", AnalyticsValue::Bool(dto.is_error)),
+                ],
+            )
+            .await;
+
+            // `completed` progress event (`client.ts:1883-1895`). Emitted
+            // only on a non-error result (the TS `callMCPTool` throws on
+            // `isError` before reaching this point — handled above by the
+            // MCP.1 mapping).
+            if let Some(tuid) = tool_use_id {
+                let _ = progress.try_send(ToolProgress {
+                    tool_use_id: tuid,
+                    data: json!({
+                        "type": "mcp_progress",
+                        "status": "completed",
+                        "serverName": server,
+                        "toolName": tool,
+                        "elapsedTimeMs": started.elapsed().as_millis() as u64,
+                    }),
+                });
+            }
+
+            let output_dir = cwd.join(branding::DOT_DIR).join("tool-results");
+            let (now_millis, rand_tag) = persist_id_seed();
+            // MCP.2: structuredContent takes PRIORITY over `content` for the
+            // model (transformMCPResult, `client.ts:2675-2684`): when the
+            // server returns `structuredContent` we hand the model
+            // `jsonStringify(structuredContent)` (compact JSON) instead of
+            // walking `content` — so a structured-only result no longer
+            // surfaces as `content:null`, and a both-present result shows the
+            // structured JSON. When it is absent we reshape the raw `content`
+            // blocks into their model-facing form (text passthrough, image →
+            // base64 image block, audio + non-image resource-blob → persisted
+            // text block, resource-text prefixing, resource-image-blob →
+            // prefix + image block, resource_link), mirroring
+            // `transformResultContent` (`client.ts:2478-2697`). Only ARRAY
+            // `content` is walked — a bare value is forwarded verbatim (MCP-5e).
+            let persist_ctx = crate::transform_result::PersistContext {
+                output_dir: &output_dir,
+                now_millis,
+                rand_tag: &rand_tag,
+            };
+            let model_content = match &dto.structured_content {
+                Some(sc) => {
+                    let sc_json = serde_json::to_string(sc).unwrap_or_default();
+                    // jqd (binary @198966347): when the result ALSO carries
+                    // non-`text` content blocks (images, audio, resources),
+                    // those survive ALONGSIDE the structured JSON as a
+                    // contentArray `[...transformed-non-text, {text:<json>}]`.
+                    // Original `text` blocks are dropped (the JSON represents
+                    // them). Only a structured-only result collapses to the
+                    // bare JSON string. Previously the non-text blocks (e.g.
+                    // images) were silently dropped.
+                    let non_text: Vec<Value> = dto
+                        .content
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter(|b| {
+                                    b.get("type")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|t| t != "text")
+                                })
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if non_text.is_empty() {
+                        Value::String(sc_json)
+                    } else {
+                        let transformed = crate::transform_result::transform_result_content(
+                            &Value::Array(non_text),
+                            &server,
+                            persist_ctx,
+                        );
+                        let mut arr = transformed.as_array().cloned().unwrap_or_default();
+                        arr.push(json!({ "type": "text", "text": sc_json }));
+                        Value::Array(arr)
+                    }
+                }
+                None => crate::transform_result::transform_result_content(
+                    &dto.content,
+                    &server,
+                    persist_ctx,
+                ),
+            };
+            // MCP large-output guard (claude-code `processMCPResult`): over-
+            // threshold non-image content is persisted to disk and replaced
+            // with read-it-from-file instructions; images / a falsy
+            // ENABLE_MCP_LARGE_OUTPUT_FILES / a failed write fall back to
+            // truncation. Under-threshold content is forwarded verbatim.
+            let content = crate::large_output::process_mcp_result(
+                &model_content,
+                &server,
+                &tool,
+                &output_dir,
+                now_millis,
+            );
+            // 1:1 with the binary's MCPTool result `data`: claude-code sets
+            // `data = mcpResult.content` DIRECTLY (the content-block ARRAY, a
+            // bare string, or a large-output file replacement) — there is NO
+            // `{server_name, tool_name, is_error}` wrapper. The egress sends
+            // `data` VERBATIM as the `tool_result` content blocks when it is an
+            // array. `dto.is_error` rides the analytics path only (the dispatch
+            // sets the block's `is_error` separately — it never read this key).
+            let data = content;
+            // Model-facing render: claude-code passes the MCP content directly
+            // as the `tool_result` content (`MCPTool.ts:70-76`). The dispatch's
+            // `tool_result_to_model_text` would JSON-dump an ARRAY/string `data`
+            // (which `data` now IS), so hand it the joined text (all-text
+            // result) or the bare string here via `ToolCallResult.model_content`
+            // (a non-text array carries its structure via the egress
+            // `content_blocks` instead, leaving `model_content` as `None`).
+            let model_content = mcp_all_text_content_to_string(&data)
+                .or_else(|| data.as_str().map(str::to_string));
+            Ok(ToolCallResult {
+                data,
+                model_content,
+                new_messages: vec![],
+                context_modifier: None,
+                // claude-code flags the tool_result block with the MCP server's
+                // `isError` (a logical-error RESULT, not a transport failure).
+                // The dispatch reads this onto the block's is_error.
+                is_error: dto.is_error,
+                mcp_meta: build_mcp_meta(dto.meta, dto.structured_content),
+            })
+        }
+        Err(e) => {
+            let kind = match &e {
+                // Both the overall (`BHs`) and idle (`GLd`) timeouts are
+                // timeout-family aborts (parity 2.1.207 P2-01 remainder).
+                McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => "timeout",
+                _ => "rpc",
+            };
+            emit(
+                &bus,
+                MCP_FAILED,
+                &[
+                    ("_PROTO_server_name", pii(&server)),
+                    ("_PROTO_tool_name", pii(&tool)),
+                    ("error_kind", verified_str(kind)),
+                ],
+            )
+            .await;
+            // For Timeout, the Display string IS the wire-locked literal
+            // (M2-02b lock); propagate verbatim. For other errors, wrap
+            // with a clear MCPTool prefix.
+            Err(match &e {
+                McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => {
+                    ToolError::Io(e.to_string())
+                }
+                _ => ToolError::Io(format!("MCPTool: server {server:?} rpc error: {e}")),
+            })
+        }
+    }
+}
+
 // -- impl Tool for MCPTool ---------------------------------------------------
 
 #[async_trait]
@@ -631,208 +847,191 @@ impl Tool for MCPTool {
         // The wire form of a `ToolUseId` is its bare (serde-transparent) string.
         let tool_use_id_str = tool_use_id.as_ref().map(|tuid| tuid.to_string());
 
-        match client
-            .call_tool_with_progress(
-                &dispatch_full_name,
-                arguments,
-                tool_use_id_str.as_deref(),
-                on_progress,
+        // -- G07/G08: MCP tool-call auto-background race ---------------------
+        // Resolve the transport kind for `getMcpAutoBackgroundMs` (`Wc_`) from
+        // the registry's connection kind (`"stdio"`/`"sse"`/`"ws"`/`"http"`).
+        // lingxi has no `"sse-ide"`/`"ws-ide"` IDE variants, so that IDE
+        // exclusion is inert here but PRESERVED inside the helper. A missing
+        // config falls back to an empty kind (never IDE) — the default gate.
+        let transport_kind = match registry.get_config(&server).await {
+            Some(cfg) => auth_kind_from_spec(&cfg.spec).0.to_string(),
+            None => String::new(),
+        };
+        let auto_bg_ms = crate::auto_background::get_mcp_auto_background_ms(
+            &transport_kind,
+            ctx.options.is_non_interactive_session,
+        );
+
+        // Owned handles for the post-call processing (bus/cwd off the shared
+        // `BuiltinToolContext`), cloned so the future is `'static + Send` and
+        // can be detached on the background path.
+        let bus = self.ctx.bus.clone();
+        let cwd = self.ctx.cwd();
+
+        // Direct-await path: auto-background disabled (`auto_bg_ms == 0`) OR no
+        // task registry wired (nothing to detach into). This is the pre-G08
+        // behavior — the call awaits inline with no regression.
+        let bg_registry = if auto_bg_ms > 0 {
+            self.ctx.task_registry.clone()
+        } else {
+            None
+        };
+        let Some(task_registry) = bg_registry else {
+            let res = client
+                .call_tool_with_progress(
+                    &dispatch_full_name,
+                    arguments,
+                    tool_use_id_str.as_deref(),
+                    on_progress,
+                )
+                .await;
+            return process_mcp_call_result(
+                bus,
+                cwd,
+                server,
+                tool,
+                tool_use_id,
+                progress,
+                started,
+                res,
             )
-            .await
-        {
-            Ok(dto) => {
-                // MCP.1: a server-flagged error result (`isError: true`) is mapped
-                // to a tool ERROR before the success path, mirroring the TS throw
-                // (`client.ts:3124-3148`) which fires BEFORE COMPLETED telemetry /
-                // result transform. We lift the first content block's `text` (else
-                // `"Unknown error"`) into the error message and emit MCP_FAILED.
-                // The orchestrator derives block-level is_error purely from Ok/Err,
-                // so returning `Err` renders the model "Error: <text>" — matching
-                // the TS throw — instead of silently embedding `is_error` as data.
-                if dto.is_error {
-                    let error_details = first_content_block_text(&dto.content)
-                        .unwrap_or_else(|| "Unknown error".to_string());
-                    emit(
-                        self.bus(),
-                        MCP_FAILED,
-                        &[
-                            ("_PROTO_server_name", pii(&server)),
-                            ("_PROTO_tool_name", pii(&tool)),
-                            ("error_kind", verified_str("tool_error")),
-                        ],
+            .await;
+        };
+
+        // Race path (`callMcpToolWithAutoBackground`/`Gc_`): spawn the call +
+        // its post-processing onto a task so it can outlive the turn, then race
+        // that against the auto-background timeout.
+        let mut call_task = {
+            let client = client.clone();
+            let bus = bus.clone();
+            let cwd = cwd.clone();
+            let server = server.clone();
+            let tool = tool.clone();
+            let tool_use_id = tool_use_id.clone();
+            let progress = progress.clone();
+            let dispatch_full_name = dispatch_full_name.clone();
+            let tool_use_id_str = tool_use_id_str.clone();
+            tokio::spawn(async move {
+                let res = client
+                    .call_tool_with_progress(
+                        &dispatch_full_name,
+                        arguments,
+                        tool_use_id_str.as_deref(),
+                        on_progress,
                     )
                     .await;
-                    return Err(ToolError::Io(error_details));
-                }
-
-                emit(
-                    self.bus(),
-                    MCP_COMPLETED,
-                    &[
-                        ("_PROTO_server_name", pii(&server)),
-                        ("_PROTO_tool_name", pii(&tool)),
-                        (
-                            "duration_ms",
-                            verified_int(started.elapsed().as_millis() as u64),
-                        ),
-                        ("is_error", AnalyticsValue::Bool(dto.is_error)),
-                    ],
+                process_mcp_call_result(
+                    bus,
+                    cwd,
+                    server,
+                    tool,
+                    tool_use_id,
+                    progress,
+                    started,
+                    res,
                 )
-                .await;
+                .await
+            })
+        };
 
-                // `completed` progress event (`client.ts:1883-1895`). Emitted
-                // only on a non-error result (the TS `callMCPTool` throws on
-                // `isError` before reaching this point — handled above by the
-                // MCP.1 mapping).
-                if let Some(tuid) = tool_use_id {
-                    let _ = progress.try_send(ToolProgress {
-                        tool_use_id: tuid,
-                        data: json!({
-                            "type": "mcp_progress",
-                            "status": "completed",
-                            "serverName": server,
-                            "toolName": tool,
-                            "elapsedTimeMs": started.elapsed().as_millis() as u64,
-                        }),
-                    });
-                }
-
-                let output_dir = self.ctx.cwd().join(branding::DOT_DIR).join("tool-results");
-                let (now_millis, rand_tag) = persist_id_seed();
-                // MCP.2: structuredContent takes PRIORITY over `content` for the
-                // model (transformMCPResult, `client.ts:2675-2684`): when the
-                // server returns `structuredContent` we hand the model
-                // `jsonStringify(structuredContent)` (compact JSON) instead of
-                // walking `content` — so a structured-only result no longer
-                // surfaces as `content:null`, and a both-present result shows the
-                // structured JSON. When it is absent we reshape the raw `content`
-                // blocks into their model-facing form (text passthrough, image →
-                // base64 image block, audio + non-image resource-blob → persisted
-                // text block, resource-text prefixing, resource-image-blob →
-                // prefix + image block, resource_link), mirroring
-                // `transformResultContent` (`client.ts:2478-2697`). Only ARRAY
-                // `content` is walked — a bare value is forwarded verbatim (MCP-5e).
-                let persist_ctx = crate::transform_result::PersistContext {
-                    output_dir: &output_dir,
-                    now_millis,
-                    rand_tag: &rand_tag,
+        // `Promise.race([f, xr(s)])`: settled-first returns the result directly;
+        // timeout-first breaks out to the background path. `biased` polls the
+        // call before the timer so a call that finishes exactly at the deadline
+        // still returns inline (matching the binary's `==="settled"` check).
+        tokio::select! {
+            biased;
+            joined = &mut call_task => {
+                return match joined {
+                    Ok(result) => result,
+                    Err(join_err) => Err(ToolError::Internal(format!(
+                        "MCPTool: background task join error: {join_err}"
+                    ))),
                 };
-                let model_content = match &dto.structured_content {
-                    Some(sc) => {
-                        let sc_json = serde_json::to_string(sc).unwrap_or_default();
-                        // jqd (binary @198966347): when the result ALSO carries
-                        // non-`text` content blocks (images, audio, resources),
-                        // those survive ALONGSIDE the structured JSON as a
-                        // contentArray `[...transformed-non-text, {text:<json>}]`.
-                        // Original `text` blocks are dropped (the JSON represents
-                        // them). Only a structured-only result collapses to the
-                        // bare JSON string. Previously the non-text blocks (e.g.
-                        // images) were silently dropped.
-                        let non_text: Vec<Value> = dto
-                            .content
-                            .as_array()
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter(|b| {
-                                        b.get("type")
-                                            .and_then(Value::as_str)
-                                            .is_some_and(|t| t != "text")
-                                    })
-                                    .cloned()
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if non_text.is_empty() {
-                            Value::String(sc_json)
-                        } else {
-                            let transformed = crate::transform_result::transform_result_content(
-                                &Value::Array(non_text),
-                                &server,
-                                persist_ctx,
-                            );
-                            let mut arr = transformed.as_array().cloned().unwrap_or_default();
-                            arr.push(json!({ "type": "text", "text": sc_json }));
-                            Value::Array(arr)
-                        }
-                    }
-                    None => crate::transform_result::transform_result_content(
-                        &dto.content,
-                        &server,
-                        persist_ctx,
-                    ),
-                };
-                // MCP large-output guard (claude-code `processMCPResult`): over-
-                // threshold non-image content is persisted to disk and replaced
-                // with read-it-from-file instructions; images / a falsy
-                // ENABLE_MCP_LARGE_OUTPUT_FILES / a failed write fall back to
-                // truncation. Under-threshold content is forwarded verbatim.
-                let content = crate::large_output::process_mcp_result(
-                    &model_content,
-                    &server,
-                    &tool,
-                    &output_dir,
-                    now_millis,
-                );
-                // 1:1 with the binary's MCPTool result `data`: claude-code sets
-                // `data = mcpResult.content` DIRECTLY (the content-block ARRAY, a
-                // bare string, or a large-output file replacement) — there is NO
-                // `{server_name, tool_name, is_error}` wrapper. The egress sends
-                // `data` VERBATIM as the `tool_result` content blocks when it is an
-                // array. `dto.is_error` rides the analytics path only (the dispatch
-                // sets the block's `is_error` separately — it never read this key).
-                let data = content;
-                // Model-facing render: claude-code passes the MCP content directly
-                // as the `tool_result` content (`MCPTool.ts:70-76`). The dispatch's
-                // `tool_result_to_model_text` would JSON-dump an ARRAY/string `data`
-                // (which `data` now IS), so hand it the joined text (all-text
-                // result) or the bare string here via `ToolCallResult.model_content`
-                // (a non-text array carries its structure via the egress
-                // `content_blocks` instead, leaving `model_content` as `None`).
-                let model_content = mcp_all_text_content_to_string(&data)
-                    .or_else(|| data.as_str().map(str::to_string));
-                Ok(ToolCallResult {
-                    data,
-                    model_content,
-                    new_messages: vec![],
-                    context_modifier: None,
-                    // claude-code flags the tool_result block with the MCP server's
-                    // `isError` (a logical-error RESULT, not a transport failure).
-                    // The dispatch reads this onto the block's is_error.
-                    is_error: dto.is_error,
-                    mcp_meta: build_mcp_meta(dto.meta, dto.structured_content),
-                })
             }
-            Err(e) => {
-                let kind = match &e {
-                    // Both the overall (`BHs`) and idle (`GLd`) timeouts are
-                    // timeout-family aborts (parity 2.1.207 P2-01 remainder).
-                    McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => {
-                        "timeout"
-                    }
-                    _ => "rpc",
-                };
-                emit(
-                    self.bus(),
-                    MCP_FAILED,
-                    &[
-                        ("_PROTO_server_name", pii(&server)),
-                        ("_PROTO_tool_name", pii(&tool)),
-                        ("error_kind", verified_str(kind)),
-                    ],
-                )
-                .await;
-                // For Timeout, the Display string IS the wire-locked literal
-                // (M2-02b lock); propagate verbatim. For other errors, wrap
-                // with a clear MCPTool prefix.
-                Err(match &e {
-                    McpClientError::Timeout { .. } | McpClientError::IdleTimeout { .. } => {
-                        ToolError::Io(e.to_string())
-                    }
-                    _ => ToolError::Io(format!("MCPTool: server {server:?} rpc error: {e}")),
-                })
-            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(auto_bg_ms as u64)) => {}
         }
+
+        // Timeout — move the still-running call to the background as an
+        // `mcp_task`. `NZu`/`i.register(g)`: a cancel token fires on `TaskStop`
+        // (the port equivalent of the state's `abortController`).
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let registration = traits::task_registry::McpTaskRegistration {
+            server_name: server.clone(),
+            tool_name: tool.clone(),
+            tool_use_id: tool_use_id_str.clone(),
+        };
+        let task_id = match task_registry
+            .register_mcp_task(registration, cancel.clone())
+            .await
+        {
+            Ok(id) => id,
+            // Registration unavailable (unwired / registry error) → fall back to
+            // awaiting the call inline, so the turn still gets a real result.
+            Err(_) => {
+                return match call_task.await {
+                    Ok(result) => result,
+                    Err(join_err) => Err(ToolError::Internal(format!(
+                        "MCPTool: background task join error: {join_err}"
+                    ))),
+                };
+            }
+        };
+
+        // `M("tengu_mcp_tool_auto_backgrounded", {})` — empty payload.
+        emit(&bus, MCP_TOOL_AUTO_BACKGROUNDED, &[]).await;
+
+        // Detached settle waiter (`p.then(E)`): when the call finishes, write its
+        // model-facing text into the `mcp_task` spool + mark it terminal, so the
+        // next turn-boundary `take_pending_task_notifications` drain surfaces a
+        // `<task-notification>` whose `output-file` carries the real result.
+        // `TaskStop` fires `cancel`, which abandons the wait (the registry's
+        // `kill` already marked the task killed, so a late settle no-ops).
+        {
+            let task_registry = task_registry.clone();
+            let task_id = task_id.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {}
+                    joined = &mut call_task => {
+                        let (text, failed) = match joined {
+                            Ok(Ok(result)) => (
+                                result
+                                    .model_content
+                                    .clone()
+                                    .unwrap_or_else(|| result.data.to_string()),
+                                result.is_error,
+                            ),
+                            Ok(Err(e)) => (e.to_string(), true),
+                            Err(join_err) => (
+                                format!("background task join error: {join_err}"),
+                                true,
+                            ),
+                        };
+                        let _ = task_registry.settle_mcp_task(&task_id, &text, failed).await;
+                    }
+                }
+            });
+        }
+
+        // Return the byte-exact background message to the model
+        // (`{data:[{type:"text",text:…}]}`). Elapsed is `Math.round`ed seconds
+        // since the call began (`Math.round((Date.now()-d)/1000)`).
+        let elapsed_ms = started.elapsed().as_millis();
+        let elapsed_secs = ((elapsed_ms + 500) / 1000) as u64;
+        let message = crate::auto_background::background_message(
+            &format!("{server}/{tool}"),
+            &task_id,
+            elapsed_secs,
+        );
+        Ok(ToolCallResult {
+            data: json!([{ "type": "text", "text": message }]),
+            model_content: Some(message),
+            new_messages: vec![],
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+        })
     }
 }
 
@@ -1850,5 +2049,339 @@ mod tests {
         );
         // The model sees the JSON string (NOT content:null, NOT pretty-printed).
         assert_eq!(out, json!(r#"{"rows":[{"id":7}],"total":1}"#));
+    }
+}
+
+// ===== G07/G08: MCP tool-call auto-background race integration ===============
+
+#[cfg(test)]
+mod auto_background_race_tests {
+    use super::*;
+    use bytes::Bytes;
+    use jsonrpc::{Connection, Mode};
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::mpsc;
+    use traits::task_registry::{
+        McpTaskRegistration, TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
+    use traits::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
+        McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
+
+    /// Minimal transport — the registry needs one to construct, but these tests
+    /// drive a directly-`register_client`ed [`mcp::McpClient`], so nothing here
+    /// is ever called.
+    struct StubTransport;
+
+    #[async_trait]
+    impl McpTransport for StubTransport {
+        async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            unreachable!()
+        }
+        async fn initialize(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!()
+        }
+        async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_resources(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+            unreachable!()
+        }
+        async fn call_tool(
+            &self,
+            _c: &McpRawConnection,
+            _t: &str,
+            _i: Value,
+        ) -> Result<traits::McpToolResultDto, McpError> {
+            unreachable!()
+        }
+        async fn read_resource(
+            &self,
+            _c: &McpRawConnection,
+            _u: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!()
+        }
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        async fn notifications(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!()
+        }
+        async fn handle_elicitation(
+            &self,
+            _c: &McpRawConnection,
+            _r: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio]
+        }
+    }
+
+    /// A paired in-memory `jsonrpc::Connection`: `peer_tx` sends frames TO the
+    /// client, `peer_rx` receives the frames the client emits (its requests).
+    fn paired() -> (Arc<Connection>, mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
+        let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        let conn = Arc::new(Connection::new_streams(
+            peer_to_us_rx,
+            us_to_peer_tx,
+            Mode::Lines,
+        ));
+        (conn, peer_to_us_tx, us_to_peer_rx)
+    }
+
+    /// Like [`paired`] but sets a large per-call router timeout so the jsonrpc
+    /// layer's own 60s default does NOT fire before the 120s auto-background
+    /// deadline under `start_paused` — the timeout race being tested is the
+    /// tool's, not the transport's.
+    fn paired_with_timeout(
+        d: std::time::Duration,
+    ) -> (Arc<Connection>, mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>) {
+        use futures::stream::unfold;
+        let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        let inbound = Box::pin(unfold(peer_to_us_rx, |mut rx| async move {
+            rx.recv()
+                .await
+                .map(|v| (Ok::<Bytes, std::io::Error>(v), rx))
+        }));
+        let outbound = Box::pin(futures::sink::unfold(
+            us_to_peer_tx.clone(),
+            |tx, item: Bytes| async move {
+                tx.send(item)
+                    .await
+                    .map_err(|_| std::io::Error::other("writer closed"))?;
+                Ok::<_, std::io::Error>(tx)
+            },
+        ));
+        let conn = Arc::new(
+            Connection::builder(jsonrpc::LineCodec::default())
+                .default_timeout(d)
+                .build(inbound, outbound),
+        );
+        (conn, peer_to_us_tx, us_to_peer_rx)
+    }
+
+    /// Records every `register_mcp_task` call so a test can assert the timeout
+    /// branch fired with the right server/tool. All other CRUD is unused here.
+    #[derive(Default)]
+    struct RecordingRegistry {
+        registered: StdMutex<Vec<McpTaskRegistration>>,
+        settled: StdMutex<Vec<(String, String, bool)>>,
+    }
+
+    #[async_trait]
+    impl TaskRegistryHandle for RecordingRegistry {
+        async fn create(&self, _i: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            Ok(None)
+        }
+        async fn list(&self, _f: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(vec![])
+        }
+        async fn update(
+            &self,
+            _id: &str,
+            _p: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn set_status(
+            &self,
+            _id: &str,
+            _s: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn output(
+            &self,
+            _id: &str,
+            _o: Option<u64>,
+        ) -> Result<traits::task_registry::TaskOutputChunk, TaskRegistryError> {
+            unreachable!()
+        }
+        async fn register_mcp_task(
+            &self,
+            reg: McpTaskRegistration,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<String, TaskRegistryError> {
+            self.registered.lock().unwrap().push(reg);
+            Ok("ktest0001".to_string())
+        }
+        async fn settle_mcp_task(
+            &self,
+            id: &str,
+            result_text: &str,
+            failed: bool,
+        ) -> Result<(), TaskRegistryError> {
+            self.settled
+                .lock()
+                .unwrap()
+                .push((id.to_string(), result_text.to_string(), failed));
+            Ok(())
+        }
+    }
+
+    fn ctx_with(
+        registry: Arc<McpRegistry>,
+        task_registry: Option<Arc<dyn TaskRegistryHandle>>,
+    ) -> tool_api::BuiltinToolContext {
+        let fs = tool_api::test_support::make_dummy_fs();
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let mut ctx =
+            tool_api::test_support::ctx_for_file_tools(fs, bus, vec![std::env::temp_dir()]);
+        ctx.mcp_registry = Some(registry);
+        ctx.task_registry = task_registry;
+        ctx
+    }
+
+    fn call_input() -> Value {
+        json!({ "full_name": "mcp__slow__slowtool", "arguments": {} })
+    }
+
+    // Drive the peer: read the client's `tools/call` request frame and answer it
+    // with a canned text result so the awaiting call resolves.
+    fn spawn_responder(mut peer_rx: mpsc::Receiver<Bytes>, peer_tx: mpsc::Sender<Bytes>) {
+        tokio::spawn(async move {
+            let frame = peer_rx.recv().await.expect("client sent a request frame");
+            let req: Value = serde_json::from_slice(&frame).expect("json request");
+            let id = req["id"].clone();
+            let resp = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "content": [{ "type": "text", "text": "ok" }], "isError": false },
+            });
+            let mut bytes = serde_json::to_vec(&resp).unwrap();
+            bytes.push(b'\n');
+            let _ = peer_tx.send(Bytes::from(bytes)).await;
+        });
+    }
+
+    // A slow call (peer never responds) auto-backgrounds after the threshold:
+    // registers an mcp_task and returns the byte-exact background message. Uses
+    // `start_paused` so the tokio runtime auto-advances to the 120s auto-bg
+    // timer once the in-flight call parks on the never-answered request.
+    #[tokio::test(start_paused = true)]
+    async fn slow_call_auto_backgrounds_after_threshold() {
+        // Peer never responds; the router timeout is set well above the 120s
+        // auto-background deadline so the tool's race — not the transport's —
+        // decides the outcome.
+        let (conn, _peer_tx, _peer_rx) =
+            paired_with_timeout(std::time::Duration::from_secs(600));
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-slow"));
+        // Interactive session → default 120000ms threshold (flag default on).
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("auto-background returns Ok(message), never an error");
+
+        let text = result.model_content.expect("background message present");
+        assert!(
+            text.contains("It was moved to the background as task ktest0001"),
+            "returns the byte-exact background message: {text}"
+        );
+        assert!(
+            text.starts_with("MCP tool \"slow/slowtool\" is still running after"),
+            "message names the server/tool: {text}"
+        );
+
+        let regd = recorder.registered.lock().unwrap();
+        assert_eq!(regd.len(), 1, "exactly one mcp_task registered");
+        assert_eq!(regd[0].server_name, "slow");
+        assert_eq!(regd[0].tool_name, "slowtool");
+        assert_eq!(regd[0].tool_use_id.as_deref(), Some("tu-slow"));
+    }
+
+    // Auto-background disabled (`auto_bg_ms == 0`, here via the non-interactive
+    // gate with no CLAUDE_AUTO_BACKGROUND_TASKS opt-in) → the call awaits
+    // directly and returns the real result; NOTHING is backgrounded.
+    #[tokio::test]
+    async fn disabled_threshold_awaits_directly() {
+        let (conn, peer_tx, peer_rx) = paired();
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+        spawn_responder(peer_rx, peer_tx);
+
+        let recorder = Arc::new(RecordingRegistry::default());
+        let ctx = ctx_with(registry, Some(recorder.clone() as Arc<dyn TaskRegistryHandle>));
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-x"));
+        // Non-interactive with no opt-in → getMcpAutoBackgroundMs == 0.
+        use_ctx.options.is_non_interactive_session = true;
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("direct await returns the real result");
+        assert_eq!(result.model_content.as_deref(), Some("ok"));
+        assert!(
+            recorder.registered.lock().unwrap().is_empty(),
+            "auto_bg_ms == 0 never backgrounds"
+        );
+    }
+
+    // Threshold enabled but NO task registry wired on the context → the seam is
+    // unavailable, so the call falls back to a direct await (no regression).
+    #[tokio::test]
+    async fn unwired_registry_awaits_directly() {
+        let (conn, peer_tx, peer_rx) = paired();
+        let client = Arc::new(mcp::McpClient::new("slow", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("slow", client).await;
+        spawn_responder(peer_rx, peer_tx);
+
+        // task_registry = None → unwired seam.
+        let ctx = ctx_with(registry, None);
+        let tool = MCPTool::new(ctx);
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-y"));
+        // Interactive → threshold WOULD be 120000, but the unwired seam forces
+        // the direct-await path regardless.
+
+        let result = tool
+            .call(call_input(), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("unwired seam falls back to a direct await");
+        assert_eq!(result.model_content.as_deref(), Some("ok"));
     }
 }

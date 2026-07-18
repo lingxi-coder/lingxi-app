@@ -370,6 +370,33 @@ impl TaskRegistryHandle for TaskRegistry {
         }
     }
 
+    async fn register_mcp_task(
+        &self,
+        reg: traits::task_registry::McpTaskRegistration,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, TaskRegistryError> {
+        TaskRegistry::register_mcp_task(
+            self,
+            reg.server_name,
+            reg.tool_name,
+            reg.tool_use_id,
+            cancel,
+        )
+        .await
+        .map_err(task_err_to_registry_err)
+    }
+
+    async fn settle_mcp_task(
+        &self,
+        id: &str,
+        result_text: &str,
+        failed: bool,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::settle_mcp_task(self, id, result_text, failed)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn output(
         &self,
         id: &str,

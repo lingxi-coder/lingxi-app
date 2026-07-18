@@ -5003,6 +5003,7 @@ dependencies = [
  "test-harness",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "traits",
  "workflow",
@@ -5586,7 +5587,10 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "bytes",
  "engine",
+ "futures",
+ "jsonrpc",
  "mcp",
  "once_cell",
  "permission",
@@ -5597,6 +5601,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tool-api",
  "traits",
 ]

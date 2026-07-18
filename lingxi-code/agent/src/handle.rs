@@ -954,12 +954,15 @@ impl PoolSubagentSpawner {
         let effective_permission_mode = if is_fork_spawn {
             None
         } else {
-            let requested = request
-                .mode
-                .as_deref()
-                .and_then(crate::permission_mode::parse_wire_mode);
+            // (parity 2.1.212) The Agent/Task `mode` call param is DEPRECATED and
+            // ignored: claude reads the PARENT's live mode (`_=yn(l),y=_.mode`)
+            // and never consults the spawn param. The child therefore inherits the
+            // parent's live permission mode (`self.permission_mode`), with the
+            // agent-definition frontmatter as the ONLY override source. Pass `None`
+            // for the requested spawn mode so `request.mode` — carried for
+            // back-compat — is never applied.
             crate::permission_mode::effective_child_mode(
-                requested,
+                None,
                 self.permission_mode,
                 def.permission_mode,
             )
@@ -1040,14 +1043,15 @@ impl PoolSubagentSpawner {
         // `request.cwd`. Set it on the context so the runner threads it into every
         // dispatched tool's `cwd`. `None` ⇒ the shared session workspace (legacy).
         ctx.cwd = request.cwd.as_ref().map(std::path::PathBuf::from);
-        // Per-spawn permission mode (claude-code 2.1.207 Agent `mode` → `wKe`/`ve`):
-        // clamp the requested spawn mode against the parent's live mode anchor and
-        // fall back to the agent definition's own permission mode, then thread the
-        // resulting override into the child's tool-dispatch permission checks (via
+        // Per-spawn permission mode (claude-code 2.1.212): the Agent `mode` call
+        // param is DEPRECATED and ignored — the child inherits the parent's live
+        // permission-mode anchor (claude `_=yn(l),y=_.mode`), and ONLY the agent
+        // definition's own permission mode may override it. The resulting override
+        // (or `None`, meaning "inherit the live mode unchanged") is threaded into
+        // the child's tool-dispatch permission checks (via
         // `SubagentContext::permission_mode_override` → `SubagentInvocationContext`
         // → the gate's `PermissionCheckContext`). The fork path replays the parent's
-        // rendered context verbatim, so it never applies a spawn-mode override
-        // (mirrors `AgentTool` sending `mode: None` on fork).
+        // rendered context verbatim, so it never applies a mode override.
         ctx.permission_mode_override =
             effective_permission_mode.map(|m| crate::permission_mode::wire_mode_str(m).to_string());
         // A persistent (background/resumable) agent parks after each turn-set;
@@ -2819,14 +2823,14 @@ mod tests {
         assert!(Arc::ptr_eq(&inherit.budget, &cloned.budget));
     }
 
-    /// 2.1.207 Agent `mode`: `build_subagent_context` clamps the spawn `mode`
-    /// against the parent's live mode (`wKe`/`ve`) and threads the resulting
-    /// override into `SubagentContext.permission_mode_override`, which the runner
-    /// maps into every dispatched tool's permission check. An explicit `plan` is
-    /// honored under any parent (rank 0); an escalating mode is dropped; the fork
-    /// path never applies a spawn-mode override.
+    /// (parity 2.1.212) The Agent/Task `mode` call param is DEPRECATED and
+    /// ignored: `build_subagent_context` no longer clamps or applies it. A spawned
+    /// subagent inherits the parent's live permission mode, so a Bubble-default
+    /// agent under a Default parent gets NO override regardless of the `mode`
+    /// value the caller passed. (The agent-definition frontmatter override path is
+    /// covered by `build_subagent_context_definition_plan_mode_overrides`.)
     #[tokio::test]
-    async fn build_subagent_context_threads_spawn_mode_override() {
+    async fn build_subagent_context_ignores_deprecated_mode_param() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         // Parent live mode = Default (the common case).
@@ -2861,7 +2865,8 @@ mod tests {
             parent_model_override: None,
         };
 
-        // Explicit `plan` (rank 0) is honored under the Default parent.
+        // An explicit mode:"plan" call param is IGNORED — a Bubble-default agent
+        // under a Default parent inherits the live mode (no override applied).
         let mut plan_req = base_req();
         plan_req.mode = Some("plan".to_string());
         let plan_ctx = spawner
@@ -2869,13 +2874,12 @@ mod tests {
             .await
             .expect("plan-mode context should build");
         assert_eq!(
-            plan_ctx.permission_mode_override.as_deref(),
-            Some("plan"),
-            "an explicit mode:\"plan\" spawn must gate the child under Plan"
+            plan_ctx.permission_mode_override, None,
+            "the deprecated mode:\"plan\" call param must be ignored (inherit the live mode)"
         );
 
         // No spawn mode + a Bubble-default definition ⇒ no override (inherit the
-        // live/boot gate mode; byte-identical to pre-2.1.207).
+        // live/boot gate mode).
         let none_ctx = spawner
             .build_subagent_context(&base_req(), mk_inherit(), false)
             .await
@@ -2885,8 +2889,7 @@ mod tests {
             "a mode-less spawn of a Bubble-default agent inherits the live mode"
         );
 
-        // An escalating mode (bypassPermissions, rank 4) under a Default parent
-        // (rank 1) is dropped by the clamp — the child cannot escalate.
+        // An 'escalating' call param (bypassPermissions) is likewise ignored.
         let mut escalate_req = base_req();
         escalate_req.mode = Some("bypassPermissions".to_string());
         let escalate_ctx = spawner
@@ -2895,11 +2898,10 @@ mod tests {
             .expect("escalating context should still build");
         assert_eq!(
             escalate_ctx.permission_mode_override, None,
-            "a child may not escalate to bypassPermissions above a Default parent"
+            "the deprecated mode call param cannot escalate the child's mode"
         );
 
-        // The fork path replays the parent context verbatim → mode ignored even
-        // when a spawn mode is present.
+        // The fork path replays the parent context verbatim → mode ignored.
         let mut fork_req = base_req();
         fork_req.mode = Some("plan".to_string());
         fork_req.fork_parent_system_prompt = Some("parent prompt".to_string());
@@ -2909,17 +2911,88 @@ mod tests {
             .expect("fork context should build");
         assert_eq!(
             fork_ctx.permission_mode_override, None,
-            "the fork path never applies a spawn-mode override"
+            "the fork path never applies a mode override"
         );
     }
 
+    /// (parity 2.1.212) The agent-definition frontmatter mode override still
+    /// applies even though the `mode` call param is deprecated: a `general-purpose`
+    /// definition with `permission_mode: Plan` gates the child under Plan (threaded
+    /// into `permission_mode_override`) under a non-permissive parent — the ONLY
+    /// remaining override source.
+    #[tokio::test]
+    async fn build_subagent_context_definition_plan_mode_overrides() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // Register a general-purpose agent whose FRONTMATTER selects Plan mode.
+        let plan_def = AgentDefinition {
+            agent_type: "general-purpose".to_string(),
+            ..agent_def_plan(AgentToolPolicy::Except(vec![]))
+        };
+        let catalog = Arc::new(RwLock::new(vec![plan_def]));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_permission_mode(PermissionMode::Default)
+            .with_agent_catalog(catalog);
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(DummyInvoker),
+            budget: Arc::new(DummyBudget),
+        };
+        // No `mode` call param — the override must come purely from frontmatter.
+        let req = SubagentSpawnRequest {
+            subagent_type: "general-purpose".to_string(),
+            prompt: "go".to_string(),
+            context_paths: vec![],
+            description: None,
+            model: None,
+            model_profile: None,
+            run_in_background: false,
+            name: None,
+            team_name: None,
+            mode: None,
+            isolation: None,
+            cwd: None,
+            worktree: None,
+            fork_context_messages: None,
+            fork_parent_system_prompt: None,
+            schema: None,
+            effort: None,
+            tool_use_id: None,
+            system_prompt_override: None,
+            system_prompt_addendum: None,
+            additional_disallowed_tools: Vec::new(),
+            depth: 0,
+            parent_model_override: None,
+        };
+        let ctx = spawner
+            .build_subagent_context(&req, inherit, false)
+            .await
+            .expect("definition-plan context should build");
+        assert_eq!(
+            ctx.permission_mode_override.as_deref(),
+            Some("plan"),
+            "an agent-definition frontmatter Plan mode must override to Plan"
+        );
+    }
+
+    /// (parity 2.1.212) Plan-mode schema narrowing now flows from the agent
+    /// definition's FRONTMATTER (the `mode` call param is deprecated/ignored): a
+    /// general-purpose agent whose frontmatter selects Plan drops `Bash` from its
+    /// advertised schemas + dispatch allow-list under a Default parent. (Pre-2.1.212
+    /// this was reachable via a `mode:"plan"` spawn param, which is now inert.)
     #[tokio::test]
     async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // Frontmatter Plan on a general-purpose agent (Except(vec![]) = all tools).
+        let plan_def = AgentDefinition {
+            agent_type: "general-purpose".to_string(),
+            ..agent_def_plan(AgentToolPolicy::Except(vec![]))
+        };
+        let catalog = Arc::new(RwLock::new(vec![plan_def]));
         let spawner = PoolSubagentSpawner::new(pool)
             .with_permission_mode(PermissionMode::Default)
-            .with_tool_registry(registry_with(&["Read", "Bash", "Grep"]));
+            .with_tool_registry(registry_with(&["Read", "Bash", "Grep"]))
+            .with_agent_catalog(catalog);
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
             budget: Arc::new(DummyBudget),
@@ -2934,7 +3007,8 @@ mod tests {
             run_in_background: false,
             name: None,
             team_name: None,
-            mode: Some("plan".to_string()),
+            // Deprecated call param — ignored; Plan comes from frontmatter above.
+            mode: None,
             isolation: None,
             cwd: None,
             worktree: None,

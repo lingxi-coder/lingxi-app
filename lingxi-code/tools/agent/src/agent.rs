@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::agent::{
-    CACHE_EVICTION_HINT, TOOL_COMPLETED, TOOL_SELECTED, TOOL_TERMINATED,
+    CACHE_EVICTION_HINT, SUBAGENT_OUTPUT_FLAGGED, TOOL_COMPLETED, TOOL_SELECTED, TOOL_TERMINATED,
 };
 use telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use telemetry::AnalyticsBus;
@@ -870,6 +870,47 @@ Reach for this when the task matches an available agent type, when you have inde
             ),
         );
         bus.log_event(CACHE_EVICTION_HINT, md).await;
+    }
+
+    /// (2.1.212) Emit claude `tengu_subagent_output_flagged` (`tHu`): the output
+    /// guard neutralized control tags and/or flagged escalation patterns in a
+    /// completed subagent's returned text (`surface:'finalize'`). Only called
+    /// when at least one *reportable* pattern matched.
+    async fn emit_subagent_output_flagged(
+        bus: &Arc<AnalyticsBus>,
+        agent_id: &str,
+        result: &traits::subagent_output_guard::SanitizeResult,
+    ) {
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert(
+            "agent_id".into(),
+            AnalyticsValue::String(
+                PiiTagged::assert_pii_tagged_column(agent_id.to_string()).into_inner(),
+            ),
+        );
+        md.insert(
+            "surface".into(),
+            AnalyticsValue::String(Verified::assert_safe("finalize".to_string()).into_inner()),
+        );
+        // `D5(Oo(…))`: sorted-unique reportable pattern / category names, joined
+        // with `,`. The names are a fixed vocabulary (not user data).
+        md.insert(
+            "patterns".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(result.reportable_patterns_sorted().join(",")).into_inner(),
+            ),
+        );
+        md.insert(
+            "categories".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(result.reportable_categories_sorted().join(",")).into_inner(),
+            ),
+        );
+        md.insert(
+            "match_count".into(),
+            AnalyticsValue::Int(result.reportable_match_count() as i64),
+        );
+        bus.log_event(SUBAGENT_OUTPUT_FLAGGED, md).await;
     }
 
     /// (G11) Emit claude `tengu_agent_tool_terminated` (agentToolUtils.ts:646-656):
@@ -1944,13 +1985,26 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // the agent's final text blocks (backward-scan applied in the
                 // runner). Re-materialize the `{type:'text', text}` blocks for the
                 // result's `content` array.
-                let content_texts = extract_content_texts(&content);
+                let raw_content_texts = extract_content_texts(&content);
+
+                let agent_id_str = agent_id.to_string();
+
+                // (2.1.212) Indirect-prompt-injection hardening (claude
+                // `ZDu`/`tHu`): run the output guard over the subagent's returned
+                // text before it reaches the parent model — neutralize control /
+                // model-layer tags, flag escalation patterns, and (when anything
+                // reportable matched) prepend a warning block. The sanitized
+                // blocks feed BOTH the result `content` array and the model-facing
+                // string, and a `tengu_subagent_output_flagged` event is emitted.
+                let sanitized = traits::subagent_output_guard::sanitize_blocks(&raw_content_texts);
+                if sanitized.any_reportable() {
+                    Self::emit_subagent_output_flagged(&bus, &agent_id_str, &sanitized).await;
+                }
+                let content_texts = sanitized.content;
                 let content_blocks: Vec<Value> = content_texts
                     .iter()
                     .map(|t| json!({ "type": "text", "text": t }))
                     .collect();
-
-                let agent_id_str = agent_id.to_string();
 
                 // The model-facing string (claude `mapToolResultToToolResultBlockParam`,
                 // AgentTool.tsx:1340-1373) — consumed by orchestrator

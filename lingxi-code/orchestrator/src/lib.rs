@@ -13,6 +13,7 @@
 //! See spec §2.2 (data flow diagram) and §4.2 (turn loop limits).
 #![forbid(unsafe_code)]
 
+pub mod bg_snapshot;
 pub mod config;
 pub mod conversation;
 pub(crate) mod cost_lines;

@@ -243,6 +243,34 @@ impl OrchestratorHandle for ConversationOrchestrator {
         })
     }
 
+    /// `/fork` (2.1.212 `vAd`) — copy the CURRENT conversation into a NEW
+    /// BACKGROUND session and keep the interactive session live. Reads the live
+    /// history + the parent's rendered system prompt and hands them to the
+    /// injected [`traits::bg_session_forker::BgSessionForker`] seam (the CLI
+    /// composition root's `CliBgSessionForker`), which snapshots the copy into
+    /// the new session's transcript and dispatches a detached daemon worker that
+    /// resumes it. Returns the system line for the live session (the seam owns
+    /// the exact text — it mints the new short id). No forker wired (tests /
+    /// non-desktop roots) ⇒ a clear `ActionFailed`.
+    async fn fork_to_background_session(&self, prompt: &str) -> Result<String, HandleError> {
+        let forker = self.bg_session_forker.as_ref().ok_or_else(|| {
+            HandleError::ActionFailed("fork: no background-session forker wired".into())
+        })?;
+        // Snapshot the live conversation. The clone releases the session lock
+        // before the (potentially slow) dispatch.
+        let history = self.session.lock().await.history.clone();
+        // The parent's rendered system-prompt bytes (`None` until the first
+        // successful turn) so the copy carries a cache-identical prefix.
+        let system_prompt = self
+            .current_turn_system_prompt()
+            .await
+            .map(|s| Arc::from(s.as_str()));
+        forker
+            .fork_to_background(&history, system_prompt, prompt)
+            .await
+            .map_err(|e| HandleError::ActionFailed(e.to_string()))
+    }
+
     /// `/recap` — delegate to the history-inert inherent
     /// [`ConversationOrchestrator::generate_recap_query`] with a fresh
     /// (un-cancelled) token. A cancel-carrying caller (future Ctrl-C wiring in

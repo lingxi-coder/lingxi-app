@@ -105,6 +105,13 @@ pub const TOOL_TERMINATED: &str = "tengu_agent_tool_terminated";
 /// `last_request_id`. (Not `tengu_agent_*`-prefixed, but belongs to the
 /// AgentTool flow — placed here per the design.)
 pub const CACHE_EVICTION_HINT: &str = "tengu_cache_eviction_hint";
+/// `tengu_subagent_output_flagged` — the Agent-tool output guard neutralized
+/// control/model-layer tags and/or flagged escalation patterns in a completed
+/// subagent's returned text (claude 2.1.212 `tHu`, indirect-prompt-injection
+/// hardening). Fields: `agent_id`, `surface:'finalize'`, `patterns` (sorted-
+/// unique reportable pattern names, comma-joined), `categories` (sorted-unique),
+/// `match_count`. Emitted only when at least one reportable pattern matched.
+pub const SUBAGENT_OUTPUT_FLAGGED: &str = "tengu_subagent_output_flagged";
 /// `tengu_auto_mode_decision` — the handoff safety classifier's verdict on a
 /// subagent's work (claude `agentToolUtils.ts:431`). 13 fields incl. `decision`,
 /// `toolName`, `agentType`, `isHandoff:true`, the classifier-stage ids. (Not

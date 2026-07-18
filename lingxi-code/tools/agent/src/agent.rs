@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::agent::{
-    CACHE_EVICTION_HINT, TOOL_COMPLETED, TOOL_SELECTED, TOOL_TERMINATED,
+    CACHE_EVICTION_HINT, SUBAGENT_OUTPUT_FLAGGED, TOOL_COMPLETED, TOOL_SELECTED, TOOL_TERMINATED,
 };
 use telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use telemetry::AnalyticsBus;
@@ -422,6 +422,30 @@ pub struct AgentTool {
 /// JS `\s` for the typical ASCII description.)
 fn normalize_description_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Default per-session subagent spawn cap (claude 2.1.212 `ofg = 200`).
+const MAX_SUBAGENTS_PER_SESSION_DEFAULT: u64 = 200;
+
+/// Resolve the per-session subagent spawn cap from a raw
+/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` value (claude 2.1.212 `xtu()` =
+/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`). Split from the env read for
+/// testability. An unset OR unparseable value falls back to the default 200 (the
+/// binary keeps a non-numeric env string, whose numeric comparison never trips
+/// the cap; treating garbage as "default 200" is the faithful common-case
+/// behavior and avoids a silently-disabled cap).
+fn max_subagents_per_session_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(MAX_SUBAGENTS_PER_SESSION_DEFAULT)
+}
+
+/// The live per-session subagent spawn cap (claude 2.1.212 `xtu()`).
+fn max_subagents_per_session() -> u64 {
+    max_subagents_per_session_from(
+        std::env::var("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// The parent / main-loop model a spawn's `AgentModel::Inherit` + bare family
@@ -846,6 +870,47 @@ Reach for this when the task matches an available agent type, when you have inde
             ),
         );
         bus.log_event(CACHE_EVICTION_HINT, md).await;
+    }
+
+    /// (2.1.212) Emit claude `tengu_subagent_output_flagged` (`tHu`): the output
+    /// guard neutralized control tags and/or flagged escalation patterns in a
+    /// completed subagent's returned text (`surface:'finalize'`). Only called
+    /// when at least one *reportable* pattern matched.
+    async fn emit_subagent_output_flagged(
+        bus: &Arc<AnalyticsBus>,
+        agent_id: &str,
+        result: &traits::subagent_output_guard::SanitizeResult,
+    ) {
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert(
+            "agent_id".into(),
+            AnalyticsValue::String(
+                PiiTagged::assert_pii_tagged_column(agent_id.to_string()).into_inner(),
+            ),
+        );
+        md.insert(
+            "surface".into(),
+            AnalyticsValue::String(Verified::assert_safe("finalize".to_string()).into_inner()),
+        );
+        // `D5(Oo(…))`: sorted-unique reportable pattern / category names, joined
+        // with `,`. The names are a fixed vocabulary (not user data).
+        md.insert(
+            "patterns".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(result.reportable_patterns_sorted().join(",")).into_inner(),
+            ),
+        );
+        md.insert(
+            "categories".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(result.reportable_categories_sorted().join(",")).into_inner(),
+            ),
+        );
+        md.insert(
+            "match_count".into(),
+            AnalyticsValue::Int(result.reportable_match_count() as i64),
+        );
+        bus.log_event(SUBAGENT_OUTPUT_FLAGGED, md).await;
     }
 
     /// (G11) Emit claude `tengu_agent_tool_terminated` (agentToolUtils.ts:646-656):
@@ -1442,6 +1507,36 @@ impl Tool for AgentTool {
             }
         };
 
+        // Per-session subagent spawn cap (claude 2.1.212 `AgentTool.call` `N()`):
+        // before every spawn, reject the launch once the session has already
+        // spawned `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` agents (default 200),
+        // otherwise bump the counter. The counter lives on the session
+        // `taskRegistry` (`getTotalAgentSpawns` / `incrementTotalAgentSpawns`) so
+        // it is shared across every `AgentTool::call` in the session and across
+        // the fork / regular / teammate spawn paths. Matches the binary's
+        // placement: after type resolution, before the required-MCP gate and the
+        // sync/async dispatch. When no registry is wired (defaulted seam) the cap
+        // is inert.
+        if let Some(registry) = &self.ctx.task_registry {
+            let cap = max_subagents_per_session();
+            let spawned = registry.get_total_agent_spawns();
+            if spawned >= cap {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "subagent_count_cap",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
+Complete the remaining work directly with your tools instead of spawning more agents. \
+If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
+                )));
+            }
+            registry.increment_total_agent_spawns();
+        }
+
         // 4. (G3) Required-MCP-servers gate (claude AgentTool.tsx:367-409): if the
         // resolved agent declares `required_mcp_servers`, every required pattern
         // must match an MCP server that currently exposes tools (connected AND
@@ -1890,13 +1985,26 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // the agent's final text blocks (backward-scan applied in the
                 // runner). Re-materialize the `{type:'text', text}` blocks for the
                 // result's `content` array.
-                let content_texts = extract_content_texts(&content);
+                let raw_content_texts = extract_content_texts(&content);
+
+                let agent_id_str = agent_id.to_string();
+
+                // (2.1.212) Indirect-prompt-injection hardening (claude
+                // `ZDu`/`tHu`): run the output guard over the subagent's returned
+                // text before it reaches the parent model — neutralize control /
+                // model-layer tags, flag escalation patterns, and (when anything
+                // reportable matched) prepend a warning block. The sanitized
+                // blocks feed BOTH the result `content` array and the model-facing
+                // string, and a `tengu_subagent_output_flagged` event is emitted.
+                let sanitized = traits::subagent_output_guard::sanitize_blocks(&raw_content_texts);
+                if sanitized.any_reportable() {
+                    Self::emit_subagent_output_flagged(&bus, &agent_id_str, &sanitized).await;
+                }
+                let content_texts = sanitized.content;
                 let content_blocks: Vec<Value> = content_texts
                     .iter()
                     .map(|t| json!({ "type": "text", "text": t }))
                     .collect();
-
-                let agent_id_str = agent_id.to_string();
 
                 // The model-facing string (claude `mapToolResultToToolResultBlockParam`,
                 // AgentTool.tsx:1340-1373) — consumed by orchestrator

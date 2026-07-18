@@ -302,6 +302,13 @@ pub struct StreamJsonStream {
     /// ALWAYS emit (even without this flag) — all others only with this flag.
     /// AtomicBool so it can be set after Arc construction.
     include_hook_events: AtomicBool,
+    /// `--forward-subagent-text` (or `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`): forward
+    /// subagent text/thinking blocks as assistant/user frames with a non-null
+    /// `parent_tool_use_id`. Carried onto the stream so the emitter can consult
+    /// it once the subagent→parent forwarding pipeline lands (currently inert —
+    /// subagent blocks are not yet re-emitted here). AtomicBool so it can be set
+    /// after Arc construction.
+    forward_subagent_text: AtomicBool,
 }
 
 impl StreamJsonStream {
@@ -325,6 +332,7 @@ impl StreamJsonStream {
             last_result_text: Mutex::new(String::new()),
             include_partial_messages: AtomicBool::new(false),
             include_hook_events: AtomicBool::new(false),
+            forward_subagent_text: AtomicBool::new(false),
         }
     }
 
@@ -427,6 +435,22 @@ impl StreamJsonStream {
             .store(include_partial_messages, Ordering::Relaxed);
         self.include_hook_events
             .store(include_hook_events, Ordering::Relaxed);
+    }
+
+    /// Set the effective `--forward-subagent-text` state (flag OR truthy
+    /// `CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`, gated to `--print` + stream-json by
+    /// the caller). Separate setter so existing `set_flags` call sites are
+    /// unchanged. `false` by default so all constructors stay behavior-neutral.
+    pub fn set_forward_subagent_text(&self, forward_subagent_text: bool) {
+        self.forward_subagent_text
+            .store(forward_subagent_text, Ordering::Relaxed);
+    }
+
+    /// Whether subagent text/thinking blocks should be forwarded onto this
+    /// stream (consulted by the subagent→parent forwarding path once wired).
+    #[must_use]
+    pub fn forward_subagent_text(&self) -> bool {
+        self.forward_subagent_text.load(Ordering::Relaxed)
     }
 
     /// Fill in the init parameters after `build_runtime` has given us
@@ -1589,6 +1613,18 @@ mod tests {
             .emit_stream_event(r#"{"type":"message_stop"}"#, false)
             .await;
         // No panic = pass.
+    }
+
+    /// (2.1.211) `set_forward_subagent_text` toggles the plumbed state without
+    /// disturbing the include-partial/hook flags (separate setter).
+    #[test]
+    fn forward_subagent_text_flag_roundtrips() {
+        let stream = StreamJsonStream::new_json_mode(make_params("sess-fwd"));
+        assert!(!stream.forward_subagent_text());
+        stream.set_forward_subagent_text(true);
+        assert!(stream.forward_subagent_text());
+        stream.set_forward_subagent_text(false);
+        assert!(!stream.forward_subagent_text());
     }
 
     /// Verify that `emit_stream_event` is suppressed in suppress_frames mode

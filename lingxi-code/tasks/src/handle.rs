@@ -224,6 +224,17 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
 
 #[async_trait]
 impl TaskRegistryHandle for TaskRegistry {
+    // Per-session subagent-spawn counter (claude 2.1.212 `getTotalAgentSpawns` /
+    // `incrementTotalAgentSpawns`) — delegate the trait surface the `Agent` tool
+    // reads to the concrete registry's atomic counter.
+    fn get_total_agent_spawns(&self) -> u64 {
+        TaskRegistry::total_agent_spawns(self)
+    }
+
+    fn increment_total_agent_spawns(&self) {
+        TaskRegistry::increment_total_agent_spawns(self);
+    }
+
     async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
         let task_type = task_type_from_wire(&input.task_type)?;
         let id = self

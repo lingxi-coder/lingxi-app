@@ -13,6 +13,7 @@ use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput
 use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -68,6 +69,13 @@ pub struct TaskRegistry {
     /// out of [`TaskStateBase`] to avoid a workspace-wide exhaustive-initializer
     /// churn for a field only this path reads.
     pending_rest: Arc<RwLock<std::collections::HashMap<String, RestPayload>>>,
+    /// Per-session running total of subagents spawned through the `Agent` tool
+    /// (claude 2.1.212 `taskRegistry` `getTotalAgentSpawns` /
+    /// `incrementTotalAgentSpawns`). The tool reads this before every spawn and
+    /// rejects the launch once it reaches `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`
+    /// (default 200), then bumps it on a cleared spawn. Interior-mutable so the
+    /// shared `Arc<TaskRegistry>` the tool holds can count without a write lock.
+    total_agent_spawns: AtomicU64,
 }
 
 /// The optional `<result>` / `<usage>` payload an agent carries when it comes to
@@ -105,7 +113,22 @@ impl TaskRegistry {
             task_completed_firer: None,
             task_created_firer: None,
             pending_rest: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            total_agent_spawns: AtomicU64::new(0),
         }
+    }
+
+    /// Session running total of `Agent`-tool subagent spawns (claude 2.1.212
+    /// `getTotalAgentSpawns`). Read before every spawn to enforce the
+    /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` cap.
+    #[must_use]
+    pub fn total_agent_spawns(&self) -> u64 {
+        self.total_agent_spawns.load(Ordering::SeqCst)
+    }
+
+    /// Bump the session subagent-spawn counter by one (claude 2.1.212
+    /// `incrementTotalAgentSpawns`), called once a spawn clears the cap gate.
+    pub fn increment_total_agent_spawns(&self) {
+        self.total_agent_spawns.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Inject the best-effort `TaskCompleted` hook firer. Default-`None`

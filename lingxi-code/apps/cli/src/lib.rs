@@ -504,6 +504,20 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::ARGV_ERROR;
     }
 
+    // (2.1.211) `--forward-subagent-text` (binary `xe = k ||
+    // CLAUDE_CODE_FORWARD_SUBAGENT_TEXT`) forwards subagent text/thinking blocks
+    // as assistant/user messages with a non-null `parent_tool_use_id`. Requires
+    // BOTH --print and --output-format=stream-json. The binary places this gate
+    // immediately AFTER the include-partial-messages gate: an EXPLICIT flag in
+    // the wrong context is a fatal error, while an env-only opt-in silently
+    // disables. Byte-exact message + exit 1.
+    if parsed.forward_subagent_text && !(parsed.print && parsed.is_stream_json()) {
+        eprintln!(
+            "Error: --forward-subagent-text requires --print and --output-format=stream-json."
+        );
+        return exit_codes::ARGV_ERROR;
+    }
+
     // (M3 cc2.1.198) `--no-session-persistence` requires `--print`. Binary
     // order: this gate runs immediately AFTER the include-partial-messages
     // gate (@223929381, next statement). Byte-exact message + exit 1.
@@ -537,6 +551,13 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         // before build_runtime so the stream is fully configured before any
         // hook or SSE events flow through it.
         stream.set_flags(parsed.include_partial_messages, parsed.include_hook_events);
+        // (2.1.211) Carry the effective `--forward-subagent-text` state (flag OR
+        // truthy CLAUDE_CODE_FORWARD_SUBAGENT_TEXT), gated to the valid --print +
+        // stream-json context — an explicit flag in the wrong context already
+        // errored above; an env-only opt-in in the wrong context stays disabled.
+        stream.set_forward_subagent_text(
+            parsed.forward_subagent_text_effective() && parsed.print && parsed.is_stream_json(),
+        );
         let adapter: Arc<dyn traits::OutputStream> = stream.clone();
 
         // P5 Phase 2: for the bidirectional `--input-format stream-json` path,

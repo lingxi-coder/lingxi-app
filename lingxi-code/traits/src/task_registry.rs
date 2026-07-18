@@ -362,6 +362,26 @@ pub trait TaskRegistryHandle: Send + Sync {
     ) -> Result<Vec<TaskNotification>, TaskRegistryError> {
         Ok(Vec::new())
     }
+
+    /// Total number of subagents spawned so far this session (claude 2.1.212
+    /// `taskRegistry.getTotalAgentSpawns()`). The `Agent` tool reads this before
+    /// every spawn and rejects the launch once it reaches
+    /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` (default 200). Default impl returns
+    /// `0` so existing mock handles compile unchanged and stay uncapped
+    /// (frozen-trait defaulted-method idiom); the concrete `TaskRegistry`
+    /// overrides both this and [`increment_total_agent_spawns`] with a real
+    /// per-session counter.
+    ///
+    /// [`increment_total_agent_spawns`]: Self::increment_total_agent_spawns
+    fn get_total_agent_spawns(&self) -> u64 {
+        0
+    }
+
+    /// Increment the per-session subagent-spawn counter (claude 2.1.212
+    /// `taskRegistry.incrementTotalAgentSpawns()`), called by the `Agent` tool
+    /// once a spawn clears the cap gate. Default impl is a no-op so existing mock
+    /// handles compile unchanged.
+    fn increment_total_agent_spawns(&self) {}
 }
 
 #[cfg(test)]

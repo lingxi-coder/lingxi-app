@@ -48,6 +48,7 @@ pub mod session_flags;
 pub mod share;
 pub mod skill_loader;
 pub mod stt;
+pub mod subagent_output_guard;
 pub mod subagent_spawn;
 pub mod subscription;
 pub mod swarm;

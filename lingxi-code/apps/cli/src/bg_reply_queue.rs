@@ -195,7 +195,10 @@ mod tests {
         enqueue_reply(&home, "j", "b").unwrap();
         // Simulate a restart: nothing cached, enqueue continues.
         enqueue_reply(&home, "j", "c").unwrap();
-        let texts: Vec<String> = peek_replies(&home, "j").into_iter().map(|r| r.text).collect();
+        let texts: Vec<String> = peek_replies(&home, "j")
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
         assert_eq!(texts, vec!["a", "b", "c"]);
     }
 

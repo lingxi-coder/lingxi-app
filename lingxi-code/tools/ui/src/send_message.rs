@@ -68,6 +68,36 @@ const DESCRIPTION: &str = "Send a message to another agent";
 /// `maxResultSizeChars` in the TS tool is `100_000`.
 const MAX_RESULT_SIZE_CHARS: usize = 100_000;
 
+/// Preview width for the `routing.content` field (claude-code `Us(t, 50)`).
+///
+/// 2.1.212 stopped duplicating the full message body in the sender's transcript:
+/// the body rides the mailbox delivery, and the tool result only carries a
+/// 50-char preview. See [`truncate_preview`].
+const ROUTING_CONTENT_PREVIEW_CHARS: usize = 50;
+
+/// Truncate `s` to `max_width` columns, appending `…` if it was longer.
+///
+/// Port of claude-code `utils/truncate.ts` `truncate(str, maxWidth)` (the
+/// two-arg / non-single-line form, `Us(t, 50)`): return the string unchanged
+/// when it fits, otherwise take the first `max_width - 1` chars and append the
+/// ellipsis.
+///
+/// PARITY-GAP: the TS uses `stringWidth` (terminal cell width — CJK glyphs
+/// count as 2) plus a grapheme segmenter; this seam has no `stringWidth`
+/// dependency, so we count Unicode scalar values (chars). Equivalent for the
+/// ASCII teammate notes carried in practice.
+fn truncate_preview(s: &str, max_width: usize) -> String {
+    if s.chars().count() <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut result: String = s.chars().take(max_width - 1).collect();
+    result.push('\u{2026}');
+    result
+}
+
 static SEND_MESSAGE_SCHEMA: Lazy<Value> = Lazy::new(build_input_schema);
 
 /// Build the JSON Schema for `SendMessage` inputs.
@@ -285,6 +315,11 @@ impl SendMessageTool {
     }
 
     /// `handleMessage` — a plain-text note to a single teammate.
+    ///
+    /// The full body rides the mailbox delivery ([`Self::deliver`]); the tool
+    /// result only carries a 50-char `routing.content` preview
+    /// (claude-code 2.1.212 `content: Us(t, 50)`), so the body is not duplicated
+    /// in the sender's transcript.
     async fn handle_message(
         router: &Arc<dyn MailboxRouterHandle>,
         from: &str,
@@ -295,6 +330,7 @@ impl SendMessageTool {
         sender: &str,
     ) -> Value {
         Self::deliver(router, from, recipient.route_target(), content.to_string()).await;
+        let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
         json!({
             "success": true,
             "message": format!("Message sent to {to_display}'s inbox"),
@@ -302,7 +338,7 @@ impl SendMessageTool {
                 sender,
                 &format!("@{to_display}"),
                 summary,
-                Some(content),
+                Some(&preview),
             ),
         })
     }
@@ -1215,6 +1251,49 @@ mod tests {
         // Resolved by NAME — the recipient string is the bare teammate name.
         assert_eq!(routed[0].1, "researcher");
         assert_eq!(routed[0].2, "start on task #1");
+    }
+
+    #[tokio::test]
+    async fn routing_content_is_truncated_to_50_char_preview() {
+        // 2.1.212: the sender's tool result carries only a 50-char preview of
+        // the body (`Us(t, 50)`); the full body rides the mailbox delivery and
+        // is not duplicated in the transcript.
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let body = "a".repeat(100);
+        let res = tool
+            .call(
+                json!({ "to": "researcher", "summary": "long note", "message": body.clone() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("send must succeed");
+
+        // routing.content = first 49 chars + ellipsis (width-50 truncation).
+        let expected_preview = format!("{}\u{2026}", "a".repeat(49));
+        assert_eq!(res.data["routing"]["content"], expected_preview);
+        assert_eq!(
+            res.data["routing"]["content"].as_str().unwrap().chars().count(),
+            50
+        );
+
+        // The mailbox still receives the FULL body — nothing is truncated on the
+        // delivery path.
+        let routed = router.routed.lock().unwrap();
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].2, body);
+    }
+
+    #[test]
+    fn truncate_preview_leaves_short_bodies_intact() {
+        // At or under the width the body is returned verbatim (no ellipsis).
+        assert_eq!(truncate_preview("start on task #1", 50), "start on task #1");
+        assert_eq!(truncate_preview(&"a".repeat(50), 50), "a".repeat(50));
+        assert_eq!(
+            truncate_preview(&"a".repeat(51), 50),
+            format!("{}\u{2026}", "a".repeat(49))
+        );
     }
 
     #[tokio::test]

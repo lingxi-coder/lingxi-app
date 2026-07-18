@@ -121,11 +121,34 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 
 /// Read-state staleness guard shared by Edit / Write / NotebookEdit (Batch F).
 ///
-/// Mirrors claude-code's read-before-write check
-/// (`FileEditTool.ts:275-311`, `FileWriteTool.ts:198-219`,
-/// `NotebookEditTool.ts:221-237`): for an EXISTING file, require a prior
-/// full `Read`, and reject if the file's mtime advanced since that read unless
-/// a full-read content-equality fallback proves the bytes are unchanged.
+/// 1:1 port of claude-code's read-before-write guard `FOg`
+/// (`FileEditTool.ts`, offset-verified in the 2.1.212 binary):
+///   * no recorded `Read` at all → refuse with [`FILE_NOT_READ_ERROR`]
+///     (`if(!r) throw PWn`);
+///   * mtime not advanced past the recorded read (`bY(e) <= r.timestamp`) →
+///     proceed;
+///   * mtime advanced, but the read covered the WHOLE file
+///     ([`read_covers_full_file`] = `wMe`) and its recorded content still
+///     equals the current on-disk content (`RMe`) → proceed (cloud sync /
+///     antivirus touched the mtime without changing bytes);
+///   * otherwise → [`FILE_CONTENT_CHANGED_LINTER_MESSAGE`] (claude-code `LWn`).
+///
+/// ## 2.1.212 fix — offset/limit reads are no longer rejected
+/// Before 2.1.212 (and in LingXi's prior guard) a read done WITH `offset`/
+/// `limit` was treated as "not read" and rejected outright, *before* even
+/// checking the mtime. 2.1.212 gives the `wMe` full-read helper a new
+/// `limit===void 0 → true` branch and — crucially — the guard now raises
+/// "File has not been read yet" ONLY when NO read-state entry exists. A ranged
+/// read still HAS an entry, so it falls through to the mtime / content checks:
+/// editing a file previously read with offset/limit now succeeds when the file
+/// is unchanged on disk.
+///
+/// ## Edit-applies recovery (`zQi`) lives in the caller
+/// claude-code's Edit path additionally recovers a stale read when the edit
+/// still applies cleanly to the current content. LingXi keeps that in
+/// `edit.rs` (`stale_edit_applies`, gated on the CONTENT-CHANGED error), so
+/// this shared guard — reused verbatim by Write / NotebookEdit, which have no
+/// such recovery — stays limited to the entry / mtime / full-read checks.
 ///
 /// Arguments:
 /// - `map`: the shared `read_file_state` registry (`ctx.read_file_state`).
@@ -143,11 +166,12 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 /// exists" (TS `ENOENT → result:true` / `meta === null` skips the guard).
 ///
 /// # Divergence (flagged)
-/// claude-code tracks a dedicated `isPartialView` flag set on partial reads.
-/// We approximate it via `entry.offset.is_some() || entry.limit.is_some()`,
-/// since the Rust `Read` records the verbatim `offset`/`limit` it read with.
-/// A full read records both as `None`; any range read records at least one as
-/// `Some`, so the approximation matches in practice for the parity fixtures.
+/// claude-code's `wMe` also short-circuits on a dedicated `isPartialView` flag
+/// (set only when a full read is token-cap-truncated for very-long-line
+/// files). LingXi's `ReadFileEntry` does not track it; it is treated as
+/// `false`. Such a read records a *truncated* slice, so the content-equality
+/// gate (`current_full_content == entry.content`) already fails for it — the
+/// outcome (stale, not full-read) is unchanged.
 pub fn check_read_before_write(
     map: &tool_api::read_file_state::ReadFileStateMap,
     canon: &std::path::Path,
@@ -158,39 +182,63 @@ pub fn check_read_before_write(
 
     let entry = match tool_api::read_file_state::get(map, canon) {
         Some(e) => e,
-        // Never read (or no recorded read) → refuse. (TS:
-        // `!readTimestamp` / `!lastRead` → "File has not been read yet…".)
+        // No recorded read at all → refuse. (claude-code `FOg`: `if(!r) throw
+        // PWn`.) A ranged / offset read still HAS an entry, so it is NOT
+        // rejected here — it falls through to the mtime / content checks below.
         None => return Err(ToolError::InvalidInput(FILE_NOT_READ_ERROR.into())),
     };
 
-    // `isPartialView` approximation: a range read (offset/limit present) does
-    // not count as having "read" the whole file. (TS: `readTimestamp.isPartialView`.)
-    let is_full_read = entry.offset.is_none() && entry.limit.is_none();
-    if !is_full_read {
-        return Err(ToolError::InvalidInput(FILE_NOT_READ_ERROR.into()));
+    // mtime not advanced past the recorded read → not stale. (claude-code:
+    // `if(bY(e) <= r.timestamp) return false` — an equal floored mtime proceeds.)
+    if current_mtime_ms <= entry.mtime_ms {
+        return Ok(());
     }
 
-    // Staleness: mtime advanced past the recorded read timestamp.
-    if current_mtime_ms > entry.mtime_ms {
-        // Windows-timestamp content-equality fallback (TS:294-300 / 457-463):
-        // a full read whose on-disk content still matches the recorded content
-        // is safe to proceed despite the bumped mtime (cloud sync / antivirus
-        // can touch mtime without changing bytes). `is_full_read` is already
-        // guaranteed true here.
-        if current_full_content == entry.content {
-            return Ok(());
-        }
-        // Use `Vbn` (the richer, linter-context message) as the primary
-        // stale-content error — byte-locked to claude-code's `m5p()` /
-        // `FileStateError(Vbn)` call-time throw path. This is the message
-        // most often seen by the model when a formatter/linter rewrites the
-        // file between the model's Read and its Edit.
-        return Err(ToolError::InvalidInput(
-            FILE_CONTENT_CHANGED_LINTER_MESSAGE.into(),
-        ));
+    // mtime advanced: a full-file read (`wMe`) whose recorded content still
+    // equals the current on-disk content is safe to proceed despite the bumped
+    // mtime (cloud sync / antivirus can touch mtime without changing bytes).
+    // (claude-code: `if(wMe(r) && RMe(r,t)) return false`.)
+    if read_covers_full_file(&entry) && current_full_content == entry.content {
+        return Ok(());
     }
 
-    Ok(())
+    // The file changed on disk since the read → stale. claude-code throws
+    // `gPe(LWn)`, and in 2.1.212 `LWn` is exactly the linter/formatter-context
+    // message — byte-locked to [`FILE_CONTENT_CHANGED_LINTER_MESSAGE`].
+    Err(ToolError::InvalidInput(
+        FILE_CONTENT_CHANGED_LINTER_MESSAGE.into(),
+    ))
+}
+
+/// claude-code `wMe(e)` (2.1.212) — whether a recorded read captured the
+/// ENTIRE file, so its content may be compared against the current on-disk
+/// bytes in the [`check_read_before_write`] staleness fallback.
+///
+/// ```text
+/// wMe(e){
+///   if((e.offset??1)>1||e.isPartialView) return false;      // ranged / truncated view
+///   if(e.limit===void 0) return true;                        // unbounded read → whole file
+///   return e.content!=="" && Cu(e.content,"\n")+1 < e.limit;  // limit not reached → EOF
+/// }
+/// ```
+///
+/// The `limit===void 0 → true` short-circuit is the 2.1.212 delta (absent in
+/// 2.1.211). `isPartialView` (see the guard's Divergence note) is treated as
+/// `false`. `Cu(content,"\n")+1` is claude-code's line count; a bounded read
+/// whose line count is strictly below its `limit` reached EOF before the cap,
+/// so it holds the whole file.
+fn read_covers_full_file(entry: &tool_api::read_file_state::ReadFileEntry) -> bool {
+    // (e.offset ?? 1) > 1 → a read that skipped leading lines is not full.
+    if entry.offset.unwrap_or(1) > 1 {
+        return false;
+    }
+    // e.limit === void 0 → unbounded read → whole file. (2.1.212 delta.)
+    let Some(limit) = entry.limit else {
+        return true;
+    };
+    // Bounded read: full iff the limit was never reached (line count strictly
+    // below the cap ⇒ EOF hit first). Empty content never counts as full.
+    !entry.content.is_empty() && (entry.content.matches('\n').count() as u64 + 1) < limit
 }
 
 /// Register all seven file/search tools against `reg`.
@@ -327,10 +375,13 @@ mod staleness_guard_tests {
     }
 
     #[test]
-    fn guard_partial_view_is_not_read() {
+    fn guard_offset_or_limit_read_unchanged_mtime_proceeds() {
+        // 2.1.212: an offset/limit read is NOT rejected as "not read" just for
+        // being ranged — with the mtime unchanged, the edit proceeds. (Before
+        // 2.1.212 this raised FILE_NOT_READ_ERROR before the mtime check.)
         let map = new_read_file_state_map();
         let p = PathBuf::from("/x");
-        // offset present ⇒ partial view ⇒ not-read.
+        // offset present, mtime unchanged ⇒ proceed.
         set(
             &map,
             p.clone(),
@@ -342,11 +393,8 @@ mod staleness_guard_tests {
                 from_read: true,
             },
         );
-        assert_err_msg(
-            check_read_before_write(&map, &p, 100, "c"),
-            FILE_NOT_READ_ERROR,
-        );
-        // limit present (offset None) ⇒ also partial.
+        assert!(check_read_before_write(&map, &p, 100, "c").is_ok());
+        // limit present (offset None), mtime unchanged ⇒ proceed.
         set(
             &map,
             p.clone(),
@@ -358,9 +406,80 @@ mod staleness_guard_tests {
                 from_read: true,
             },
         );
+        assert!(check_read_before_write(&map, &p, 100, "c").is_ok());
+    }
+
+    #[test]
+    fn guard_ranged_stale_read_is_content_changed_not_not_read() {
+        // A genuinely-partial (offset-skipped) read whose file changed on disk
+        // yields the CONTENT-CHANGED (linter) message, NOT "not read" — so the
+        // Edit tool's stale-recovery path can still apply. (claude-code `FOg`
+        // has no entry ⇒ throw PWn; otherwise mtime-advanced ⇒ throw LWn.)
+        let map = new_read_file_state_map();
+        let p = PathBuf::from("/x");
+        set(
+            &map,
+            p.clone(),
+            ReadFileEntry {
+                content: "line6\nline7".into(),
+                mtime_ms: 100,
+                offset: Some(6),
+                limit: Some(2),
+                from_read: true,
+            },
+        );
         assert_err_msg(
-            check_read_before_write(&map, &p, 100, "c"),
-            FILE_NOT_READ_ERROR,
+            check_read_before_write(&map, &p, 200, "whole new file"),
+            FILE_CONTENT_CHANGED_LINTER_MESSAGE,
+        );
+    }
+
+    #[test]
+    fn read_covers_full_file_matches_wme() {
+        let mk = |offset, limit, content: &str| ReadFileEntry {
+            content: content.into(),
+            mtime_ms: 0,
+            offset,
+            limit,
+            from_read: true,
+        };
+        // Full read (no offset/limit) → whole file.
+        assert!(read_covers_full_file(&mk(None, None, "a\nb")));
+        // offset==1 with no limit → whole file ((offset??1)>1 is false).
+        assert!(read_covers_full_file(&mk(Some(1), None, "a\nb")));
+        // 2.1.212 delta: any unbounded read (limit==None) → whole file.
+        assert!(read_covers_full_file(&mk(None, None, "")));
+        // offset>1 → ranged, not full.
+        assert!(!read_covers_full_file(&mk(Some(2), None, "a\nb")));
+        // limit not reached (2 lines < limit 5) → EOF captured → full.
+        assert!(read_covers_full_file(&mk(None, Some(5), "a\nb")));
+        // limit reached exactly (3 lines, limit 3) → maybe more below → not full.
+        assert!(!read_covers_full_file(&mk(None, Some(3), "a\nb\nc")));
+        // empty content with a limit → not full.
+        assert!(!read_covers_full_file(&mk(None, Some(5), "")));
+    }
+
+    #[test]
+    fn regression_offset_limit_full_read_unchanged_proceeds() {
+        // 2.1.212 gap: a read done WITH offset/limit that captured the whole
+        // file (e.g. `Read(offset=1, limit=2000)` on a small file) must NOT be
+        // rejected as "not read". With mtime unchanged, the edit proceeds.
+        let map = new_read_file_state_map();
+        let p = PathBuf::from("/x");
+        set(
+            &map,
+            p.clone(),
+            ReadFileEntry {
+                content: "a\nb\nc".into(),
+                mtime_ms: 100,
+                offset: Some(1),
+                limit: Some(2000),
+                from_read: true,
+            },
+        );
+        assert!(
+            check_read_before_write(&map, &p, 100, "a\nb\nc").is_ok(),
+            "offset/limit full-read + unchanged mtime must proceed"
         );
     }
 

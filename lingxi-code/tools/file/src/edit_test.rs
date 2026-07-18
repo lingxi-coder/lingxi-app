@@ -1295,9 +1295,12 @@ that bypasses Perforce tracking."
     }
 
     #[tokio::test]
-    async fn partial_read_then_edit_errors_not_read() {
-        // A partial (offset/limit) read does not count as having read the file:
-        // Edit → FILE_NOT_READ_ERROR (isPartialView approximation).
+    async fn partial_read_then_edit_unchanged_mtime_succeeds() {
+        // 2.1.212: a partial (offset/limit) read is NOT rejected as "not read".
+        // claude-code's guard (`FOg`) throws "File has not been read yet" only
+        // when NO read-state entry exists; a ranged read still has an entry, so
+        // with the mtime unchanged the edit proceeds. (Before 2.1.212 this
+        // raised FILE_NOT_READ_ERROR before even checking the mtime.)
         use filetime::{set_file_mtime, FileTime};
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("partial.txt");
@@ -1309,7 +1312,7 @@ that bypasses Perforce tracking."
             .ok()
             .and_then(|m| m.modified().ok())
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        // Seed a PARTIAL read (offset set) — not a full view.
+        // Seed a PARTIAL read (offset/limit set) — a ranged view, not a full one.
         tool_api::read_file_state::set(
             &ctx.read_file_state,
             canon,
@@ -1323,7 +1326,7 @@ that bypasses Perforce tracking."
             },
         );
         let tool = FileEditTool::new(ctx);
-        let err = tool
+        let res = tool
             .call(
                 json!({
                     "file_path": target.to_str().unwrap(),
@@ -1334,14 +1337,9 @@ that bypasses Perforce tracking."
                 fresh_tx(),
             )
             .await
-            .unwrap_err();
-        // ToolError::Display prefixes "invalid input: "; assert the exact
-        // byte-locked message on the InvalidInput payload.
-        match err {
-            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\nb\nc\n");
+            .expect("ranged read + unchanged mtime must let the edit proceed");
+        assert!(!res.is_error);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\nB\nc\n");
     }
 
     #[tokio::test]

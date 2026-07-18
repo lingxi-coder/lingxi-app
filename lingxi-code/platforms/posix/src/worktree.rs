@@ -165,6 +165,18 @@ impl WorktreeManager for PosixWorktreeManager {
             .join("worktrees")
             .join(&flat);
 
+        // Refuse a repository-committed symlink at the managed dot-dir chain
+        // before we `mkdir` through it or spawn `git worktree add` — a symlink
+        // at `.lingxi`, `.lingxi/worktrees`, or the target could redirect the
+        // checkout outside the repo. Byte-faithful port of CC 2.1.212 `yWi`,
+        // called immediately before the worktree-add spawn.
+        platform_common::reject_worktree_create_symlinks(
+            &self.repo_root,
+            branding::DOT_DIR,
+            &worktree_path,
+        )
+        .await?;
+
         // git worktree add creates the leaf; the `.lingxi/worktrees/` parent
         // may not exist yet.
         if let Some(parent) = worktree_path.parent() {
@@ -764,6 +776,47 @@ mod create_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WorktreeError::Git(_)));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_symlinked_worktrees_dir_before_running_git() {
+        // A repository-committed symlink at `.lingxi/worktrees` (pointing
+        // outside the repo) must be refused with the byte-faithful message
+        // before `git worktree add` runs — CC 2.1.212 `yWi`.
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        let outside = TempDir::new().unwrap();
+        tokio::fs::create_dir_all(repo.join(".lingxi"))
+            .await
+            .unwrap();
+        tokio::fs::symlink(outside.path(), repo.join(".lingxi/worktrees"))
+            .await
+            .unwrap();
+
+        let err = PosixWorktreeManager::new(repo.clone())
+            .create_worktree("feat", None, &[])
+            .await
+            .unwrap_err();
+        match err {
+            WorktreeError::SymlinkRejected(msg) => {
+                assert!(msg.starts_with("Cannot create worktree: "), "{msg}");
+                assert!(
+                    msg.contains(
+                        "is a symlink. A repository-committed symlink at .lingxi, .lingxi/worktrees, or .lingxi/worktrees/<name> could redirect worktree creation outside the repository. Remove the symlink and retry."
+                    ),
+                    "byte-faithful message: {msg}"
+                );
+            }
+            other => panic!("expected SymlinkRejected, got {other:?}"),
+        }
+        // The symlink target must be untouched — no worktree was checked out
+        // through the redirect.
+        let mut entries = tokio::fs::read_dir(outside.path()).await.unwrap();
+        assert!(
+            entries.next_entry().await.unwrap().is_none(),
+            "no checkout should have been written through the symlink"
+        );
     }
 
     #[tokio::test]

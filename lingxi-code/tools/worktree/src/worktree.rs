@@ -754,6 +754,15 @@ impl EnterWorktreeTool {
                 self.emit_failed(invocation_id, "io", duration_ms).await;
                 Err(ToolError::Io(format!("EnterWorktree: io error: {msg}")))
             }
+            // The pre-flight symlink guard already carries the full
+            // byte-faithful "Cannot create worktree: … is a symlink. …" text
+            // (CC surfaces its `ev(...)` directly, unprefixed), so pass it
+            // through verbatim rather than reframing it as a git/io error.
+            WorktreeError::SymlinkRejected(msg) => {
+                self.emit_failed(invocation_id, "symlink_rejected", duration_ms)
+                    .await;
+                Err(ToolError::Internal(msg))
+            }
         }
     }
 }

@@ -85,7 +85,16 @@ fn parse_max_web_searches(raw: Option<&str>) -> u32 {
         // non-digit / `-` / decimal-point input — the same set the binary's
         // `^[+-]?\d+$` digitsOnly regex + `parseInt` admits (a `-N` value fails
         // the `min: 1` check there and fails u64 parse here; both ⇒ default).
-        .and_then(|s| s.parse::<u64>().ok())
+        .and_then(|s| match s.parse::<u64>() {
+            Ok(n) => Some(n),
+            // A positive integer literal too large for `u64` (a 20+-digit
+            // "effectively unlimited" value) still matches CC's `digitsOnly`
+            // regex and yields a huge finite `parseInt` >= 1, so CC never caps.
+            // Saturate to `u64::MAX` (→ `u32::MAX` below) rather than failing the
+            // parse and regressing to the 200 default.
+            Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => Some(u64::MAX),
+            Err(_) => None,
+        })
         .filter(|&n| n >= 1)
         .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
         .unwrap_or(DEFAULT_MAX_WEB_SEARCHES_PER_SESSION)
@@ -3164,6 +3173,25 @@ mod tests {
         assert_eq!(parse_max_web_searches(Some("3.5")), 200);
         assert_eq!(parse_max_web_searches(Some("200abc")), 200);
         assert_eq!(parse_max_web_searches(Some("")), 200);
+        // Over-`u32` (but within `u64`) clamps to `u32::MAX` (effectively
+        // unlimited) — CC's `parseInt` yields a huge finite number, never caps.
+        assert_eq!(parse_max_web_searches(Some("5000000000")), u32::MAX);
+        // Over-`u64`: a 25-digit "unlimited" value overflows `u64` but still
+        // matches CC's digitsOnly regex ⇒ must saturate to `u32::MAX`, NOT
+        // regress to the 200 default.
+        assert_eq!(
+            parse_max_web_searches(Some("1000000000000000000000000")),
+            u32::MAX
+        );
+        assert_eq!(
+            parse_max_web_searches(Some("  +1000000000000000000000000  ")),
+            u32::MAX
+        );
+        // A huge but *negative* / non-digit literal still ⇒ default.
+        assert_eq!(
+            parse_max_web_searches(Some("-1000000000000000000000000")),
+            200
+        );
     }
 
     #[test]

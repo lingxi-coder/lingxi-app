@@ -1993,6 +1993,12 @@ mod tests {
             ApiService::error_kind(&LlmError::ContextOverflow { token_gap: 0 }),
             "prompt_too_long"
         );
+        // 2.1.212 413 split: RequestTooLarge → "request_too_large" (distinct
+        // from the context-window "prompt_too_long").
+        assert_eq!(
+            ApiService::error_kind(&LlmError::RequestTooLarge),
+            "request_too_large"
+        );
     }
 
     // ── Task 8: subscriber 429 gate end-to-end through the adapter ───────────

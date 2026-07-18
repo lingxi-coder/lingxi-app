@@ -1318,6 +1318,10 @@ impl ApiService {
             LlmError::RateLimited { .. } => "rate_limited",
             // "prompt_too_long" — api-client `PromptTooLong { .. } => "prompt_too_long"` (:1147)
             LlmError::ContextOverflow { .. } => "prompt_too_long",
+            // "request_too_large" — 2.1.212 error classifier: a 413 whose message
+            // lacks "context window" → `"request_too_large"` (distinct from the
+            // context-window `"prompt_too_long"` above).
+            LlmError::RequestTooLarge => "request_too_large",
             // llm-client-only classes — no api-client analogue; use descriptive names.
             LlmError::InvalidRequest { .. } => "invalid_request",
             LlmError::QuotaExceeded => "quota_exceeded",
@@ -1674,6 +1678,7 @@ impl ApiService {
         match err {
             LlmError::Authentication | LlmError::PermissionDenied => Some(401),
             LlmError::InvalidRequest { .. } | LlmError::ContextOverflow { .. } => Some(400),
+            LlmError::RequestTooLarge => Some(413),
             LlmError::RateLimited { .. } | LlmError::QuotaExceeded => Some(429),
             LlmError::ModelUnavailable => Some(404),
             LlmError::ProviderInternal => Some(500),

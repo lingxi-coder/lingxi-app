@@ -664,6 +664,7 @@ pub fn next_step_with_backoff(
         | LlmError::Authentication
         | LlmError::PermissionDenied
         | LlmError::ContextOverflow { .. }
+        | LlmError::RequestTooLarge
         | LlmError::QuotaExceeded
         | LlmError::ModelUnavailable
         | LlmError::StreamInterrupted { .. }

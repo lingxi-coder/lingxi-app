@@ -37,6 +37,18 @@ pub enum LlmError {
         /// How many tokens over the limit the prompt was, or `0` when unknown.
         token_gap: u64,
     },
+    /// Request body exceeded the provider's maximum size — a 413 whose message
+    /// does NOT mention the context window (accumulated images/attachments
+    /// pushed the raw request over the byte limit, not token overflow).
+    ///
+    /// Parity: claude-code 2.1.212 splits status 413 — a message containing
+    /// `"context window"` stays prompt-too-long ([`LlmError::ContextOverflow`],
+    /// which drives compaction); everything else becomes this DISTINCT variant,
+    /// surfaced with the byte-exact `"Request too large (max 32MB). Accumulated
+    /// images and attachments…"` notice. Terminal: compaction cannot shed image
+    /// bytes, so it is never retried and never triggers the PTL recovery loop.
+    #[error("request too large")]
+    RequestTooLarge,
     /// Requested model is unavailable.
     #[error("model unavailable")]
     ModelUnavailable,

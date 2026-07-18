@@ -52,7 +52,13 @@ pub(crate) fn map_error_status(
         401 => LlmError::Authentication,
         403 => LlmError::PermissionDenied,
         404 => LlmError::ModelUnavailable,
-        413 => LlmError::ContextOverflow { token_gap: 0 },
+        // 413 split (parity 2.1.212): "context window" in the message means a
+        // token overflow (prompt-too-long / compaction path); anything else is
+        // an oversized request body (accumulated images/attachments).
+        413 if message.to_ascii_lowercase().contains("context window") => {
+            LlmError::ContextOverflow { token_gap: 0 }
+        }
+        413 => LlmError::RequestTooLarge,
         429 => LlmError::RateLimited {
             retry_after,
             scope: None,
@@ -60,5 +66,28 @@ pub(crate) fn map_error_status(
         400 | 422 => LlmError::InvalidRequest { message },
         529 => LlmError::Overloaded { repeated: false },
         _ => LlmError::ProviderInternal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_error_status, LlmError};
+
+    #[test]
+    fn status_413_splits_on_context_window() {
+        // 413 without "context window" → RequestTooLarge (images/attachments).
+        assert!(matches!(
+            map_error_status(413, "request entity too large".to_string(), None),
+            LlmError::RequestTooLarge
+        ));
+        // 413 mentioning the context window → ContextOverflow (prompt-too-long).
+        assert!(matches!(
+            map_error_status(
+                413,
+                "input length exceeds the CONTEXT WINDOW".to_string(),
+                None
+            ),
+            LlmError::ContextOverflow { token_gap: 0 }
+        ));
     }
 }

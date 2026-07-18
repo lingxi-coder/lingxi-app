@@ -540,6 +540,11 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             // with NO status set; the port decodes ContextOverflow from the
             // message, so no `APIError` status is available → omit.
             LlmError::ContextOverflow { .. } => (Some("invalid_request"), None),
+            // 413 request-too-large (`su({content:$Vi(),error:"invalid_request",
+            // errorDetails:`request_too_large: …`})`, 2.1.212) → the SAME
+            // `invalid_request` category as the context-window branch; the
+            // handler passes no `apiErrorStatus` on this `su` call → omit.
+            LlmError::RequestTooLarge => (Some("invalid_request"), None),
             // 400 invalid-request family → "invalid_request" (status 400).
             LlmError::InvalidRequest { .. } => (Some("invalid_request"), Some(400)),
             // 404 / bedrock model-id → "model_not_found".
@@ -575,6 +580,27 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         error,
         api_error_status,
         inner_stop_reason: None,
+    }
+}
+
+/// claude-code 2.1.212 `Sji` — the maximum request body size (32 MiB). A 413
+/// whose message does NOT mention the context window means accumulated
+/// image/attachment bytes pushed the raw request past this limit.
+pub(crate) const MAX_REQUEST_BYTES: u64 = 33_554_432;
+
+/// The byte-exact `$Vi()` "Request too large" notice claude-code 2.1.212 renders
+/// for a 413 that is NOT a context-window overflow. `Ua(Sji)` formats
+/// [`MAX_REQUEST_BYTES`] (32 MiB) as `32MB` (`toFixed(1)` then trailing `.0`
+/// stripped). The tail differs by interactivity (`un()===!Ht.isInteractive`):
+/// a non-interactive (print) session gets the generic advice; an interactive
+/// (TUI) session gets the `/compact` + double-esc actions.
+pub(crate) fn request_too_large_notice() -> String {
+    debug_assert_eq!(MAX_REQUEST_BYTES, 32 * 1024 * 1024);
+    let head = "Request too large (max 32MB). Accumulated images and attachments in the conversation pushed the request over the limit.";
+    if traits::session_flags::is_non_interactive_session() {
+        format!("{head} Remove older images or compact the conversation.")
+    } else {
+        format!("{head} Run /compact, or double press esc to go back and remove attachments.")
     }
 }
 
@@ -4700,6 +4726,9 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     "model unavailable: the provider does not serve '{model}' (HTTP 404). Pick another model with /model."
                 )
             }
+            // 413 request-too-large (accumulated images/attachments): render the
+            // byte-exact `$Vi()` notice instead of the opaque "request too large".
+            LlmError::RequestTooLarge => request_too_large_notice(),
             other => other.to_string(),
         }
     }
@@ -14162,6 +14191,9 @@ mod persist_with_parent_tests {
                 Some("invalid_request"),
                 None,
             ),
+            // 2.1.212 413 request-too-large: SAME `invalid_request` category as
+            // the context-window branch, no `apiErrorStatus` on the `su` call.
+            (LlmError::RequestTooLarge, Some("invalid_request"), None),
             (
                 LlmError::InvalidRequest {
                     message: "bad".into(),
@@ -14222,6 +14254,29 @@ mod persist_with_parent_tests {
                 );
             }
         }
+    }
+
+    /// The 2.1.212 `$Vi()` request-too-large notice is byte-exact and its tail
+    /// switches on interactivity (`un()===!Ht.isInteractive`).
+    #[test]
+    fn request_too_large_notice_is_byte_exact() {
+        let prior = traits::session_flags::is_non_interactive_session();
+
+        // Non-interactive (print) session: generic advice.
+        traits::session_flags::set_non_interactive_session(true);
+        assert_eq!(
+            super::request_too_large_notice(),
+            "Request too large (max 32MB). Accumulated images and attachments in the conversation pushed the request over the limit. Remove older images or compact the conversation."
+        );
+
+        // Interactive (TUI) session: `/compact` + double-esc actions.
+        traits::session_flags::set_non_interactive_session(false);
+        assert_eq!(
+            super::request_too_large_notice(),
+            "Request too large (max 32MB). Accumulated images and attachments in the conversation pushed the request over the limit. Run /compact, or double press esc to go back and remove attachments."
+        );
+
+        traits::session_flags::set_non_interactive_session(prior);
     }
 
     /// Orchestrator-internal / generic-Error variants fall through to `unknown`

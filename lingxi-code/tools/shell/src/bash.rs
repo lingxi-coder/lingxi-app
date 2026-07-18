@@ -479,6 +479,13 @@ fn bash_model_content(
 /// telemetry-only fields LingXi used to carry here (`exit_code`, `is_error`,
 /// `timed_out`, `truncated`) are NOT part of the result data — they live in the
 /// `tengu`/`BASH_COMPLETED` analytics payload only.
+///
+/// `timed_out_after_ms` is set only when the command hit its timeout and was
+/// auto-moved to the background (claude-code 2.1.210+ `timedOutAfterMs`); it
+/// carries the exceeded timeout in ms and is placed right after
+/// `backgroundTaskId` to match the binary's `return{data:{…}}` field order
+/// (`…,backgroundTaskId,backgroundedByUser,timedOutAfterMs,…`; the omitted
+/// `backgroundedByUser` sits between). Omitted (undefined ⇒ dropped) otherwise.
 fn bash_result_data(
     stdout: &str,
     stderr: &str,
@@ -487,6 +494,7 @@ fn bash_result_data(
     return_code_interpretation: Option<&str>,
     no_output_expected: bool,
     background_task_id: Option<&str>,
+    timed_out_after_ms: Option<u64>,
 ) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert(
@@ -513,6 +521,12 @@ fn bash_result_data(
         m.insert(
             "backgroundTaskId".into(),
             serde_json::Value::String(bid.to_string()),
+        );
+    }
+    if let Some(ms) = timed_out_after_ms {
+        m.insert(
+            "timedOutAfterMs".into(),
+            serde_json::Value::Number(ms.into()),
         );
     }
     serde_json::Value::Object(m)
@@ -617,6 +631,7 @@ fn build_interrupted_result(
             false,
             None,
             crate::silent::is_silent_bash_command(cmd_str),
+            None,
             None,
         ),
         model_content: Some(model_content),
@@ -1337,10 +1352,21 @@ impl Tool for BashTool {
                     // Model-facing background note (`d` in the binary's mapper):
                     // `Command running in background with ID: … Output is being
                     // written to: … use Read on that file path.` (offset 183106320).
-                    let note = format!(
+                    let mut note = format!(
                         "Command running in background with ID: {}. Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
                         handle.task_id, out_path
                     );
+                    // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
+                    // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
+                    // (`ror`), the binary appends this hint on a new line so the
+                    // model does not assume the directory change took effect for
+                    // subsequent commands (the bg run never mutates the session cwd).
+                    if crate::read_only::command_has_statement_level_cd(&cmd_str) {
+                        note.push_str(&format!(
+                            "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
+                            workspace.display()
+                        ));
+                    }
                     let model_content = bash_model_content("", "", false, Some(&note));
                     Ok(ToolCallResult {
                         // Backgrounded launch: the binary's result data is the
@@ -1354,6 +1380,7 @@ impl Tool for BashTool {
                             None,
                             crate::silent::is_silent_bash_command(&cmd_str),
                             Some(&handle.task_id),
+                            None,
                         ),
                         model_content: Some(model_content),
                         new_messages: vec![],
@@ -1437,7 +1464,11 @@ impl Tool for BashTool {
         // `kill_on_drop(true)`, so the child is SIGKILLed — and we return
         // `Aborted`; the streaming executor substitutes the synthetic
         // sibling-cancel result. With no token, await the run directly.
-        let run_fut = self.ctx.process.run(&sandboxed);
+        // PARITY 2.1.210: `run_foreground` moves a timed-out command to the
+        // background (returning `MovedToBackground`) rather than killing it; the
+        // default trait impl still maps a normal finish to `Completed` and a
+        // timeout to `Err(Timeout)`, preserving the interrupted-result fallback.
+        let run_fut = self.ctx.process.run_foreground(&sandboxed);
         let run_result = match &cancel {
             Some(token) => {
                 tokio::select! {
@@ -1461,7 +1492,61 @@ impl Tool for BashTool {
         // `format_timeout_error` / `BASH_TIMEOUT_ERROR_TEMPLATE` are retained
         // (still referenced by the locked-constant test) but no longer returned.
         match run_result {
-            Ok(out) if out.timed_out => {
+            // PARITY 2.1.210: the command exceeded its timeout and the runner
+            // moved it to the background instead of killing it. Surface the
+            // distinct "…did not complete within its Ns timeout and was moved to
+            // the background" note + `backgroundTaskId`/`timedOutAfterMs` (the
+            // binary's `l !== void 0` mapper branch), exactly like an explicit
+            // background launch except for the message and the extra field.
+            Ok(traits::ForegroundOutcome::MovedToBackground(handle)) => {
+                let mut meta: LogEventMetadata = HashMap::new();
+                meta.insert(
+                    "request_id".into(),
+                    AnalyticsValue::String(request_id.clone()),
+                );
+                meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
+                self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
+                let out_path = task_output_path(&handle.task_id).display().to_string();
+                // Seconds shown = `Math.max(1, Math.round(timeoutMs / 1000))`
+                // (the binary's `${Math.max(1,Math.round(l/1000))}s`).
+                let secs = (((timeout_ms as f64) / 1000.0).round() as i64).max(1);
+                let mut note = format!(
+                    "Command did not complete within its {secs}s timeout and was moved to the background (ID: {}). Output is being written to: {}. You will be notified when it completes. To check interim output, use Read on that file path.",
+                    handle.task_id, out_path
+                );
+                // PARITY 2.1.210 (`backgroundCwdHint`): same hint as an explicit
+                // background launch — a timed-out-and-backgrounded command whose
+                // text contains a statement-level `cd` never mutates the session
+                // cwd, so tell the model it remains unchanged (`ror` + mapper's
+                // `if(a)_+="\n"+a`).
+                if crate::read_only::command_has_statement_level_cd(&cmd_str) {
+                    note.push_str(&format!(
+                        "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
+                        workspace.display()
+                    ));
+                }
+                let model_content = bash_model_content("", "", false, Some(&note));
+                Ok(ToolCallResult {
+                    // Same empty main shape as an explicit background launch,
+                    // plus `timedOutAfterMs` = the exceeded timeout in ms.
+                    data: bash_result_data(
+                        "",
+                        "",
+                        false,
+                        false,
+                        None,
+                        crate::silent::is_silent_bash_command(&cmd_str),
+                        Some(&handle.task_id),
+                        Some(timeout_ms),
+                    ),
+                    model_content: Some(model_content),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                })
+            }
+            Ok(traits::ForegroundOutcome::Completed(out)) if out.timed_out => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -1479,7 +1564,7 @@ impl Tool for BashTool {
                     Some(timeout_ms),
                 ))
             }
-            Ok(out) => {
+            Ok(traits::ForegroundOutcome::Completed(out)) => {
                 // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
                 // mutate the shared cwd — TS `preventCwdChanges = !isMainThread`.
                 // The main thread has no `agent_id`; a subagent call carries one.
@@ -1694,6 +1779,7 @@ impl Tool for BashTool {
                                 interp.message.as_deref(),
                                 crate::silent::is_silent_bash_command(&cmd_str),
                                 None,
+                                None,
                             ),
                             // Display-only (egress ignores it when content_blocks
                             // is Some); claude's wire form has no text.
@@ -1759,6 +1845,7 @@ impl Tool for BashTool {
                         false,
                         interp.message.as_deref(),
                         crate::silent::is_silent_bash_command(&cmd_str),
+                        None,
                         None,
                     ),
                     model_content: Some(model_content),
@@ -2440,6 +2527,92 @@ mod tests {
         assert!(res.data.get("is_error").is_none());
     }
 
+    #[tokio::test]
+    async fn foreground_timeout_moved_to_background_gets_distinct_note() {
+        // PARITY 2.1.210: when the runner MOVES a timed-out foreground command to
+        // the background (rather than killing it), the model sees the distinct
+        // "…did not complete within its Ns timeout and was moved to the
+        // background (ID: …)" note and the result carries `backgroundTaskId` +
+        // `timedOutAfterMs` — NOT the interrupted/abort shape.
+        struct MovedStub;
+        #[async_trait]
+        impl traits::process::ProcessRunner for MovedStub {
+            async fn run(
+                &self,
+                _: &traits::sandbox::SandboxedCommand,
+            ) -> Result<ProcessOutput, traits::process::ProcessError> {
+                unreachable!("bash foreground uses run_foreground")
+            }
+            async fn run_foreground(
+                &self,
+                _: &traits::sandbox::SandboxedCommand,
+            ) -> Result<traits::ForegroundOutcome, traits::process::ProcessError> {
+                Ok(traits::ForegroundOutcome::MovedToBackground(
+                    traits::process::ProcessHandle {
+                        task_id: "local_bash_dead".into(),
+                        pid: 4242,
+                    },
+                ))
+            }
+            async fn spawn_background(
+                &self,
+                _: &traits::sandbox::SandboxedCommand,
+            ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
+                unreachable!()
+            }
+            async fn kill(
+                &self,
+                _: &traits::process::ProcessHandle,
+            ) -> Result<(), traits::process::ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = std::sync::Arc::new(MovedStub);
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(
+                json!({"command": "do-work", "timeout": 5000}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("moved-to-background is an Ok result");
+        // Result data: empty output, not interrupted, carries the task id +
+        // the exceeded timeout in ms (`timedOutAfterMs`).
+        assert_eq!(res.data["interrupted"], false);
+        assert_eq!(res.data["stdout"], "");
+        assert_eq!(res.data["stderr"], "");
+        assert_eq!(res.data["backgroundTaskId"], "local_bash_dead");
+        assert_eq!(res.data["timedOutAfterMs"], 5000);
+        assert!(res.data.get("timed_out").is_none());
+        // Model note: the distinct timeout→background message (seconds =
+        // round(5000/1000) = 5), NOT the abort marker.
+        let mc = res.model_content.expect("model content present");
+        assert!(
+            mc.contains(
+                "Command did not complete within its 5s timeout and was moved to the background (ID: local_bash_dead)."
+            ),
+            "expected timeout→background note, got: {mc}"
+        );
+        assert!(
+            mc.contains("To check interim output, use Read on that file path."),
+            "expected the shared background suffix, got: {mc}"
+        );
+        assert!(
+            !mc.contains("Command was aborted before completion"),
+            "must NOT surface the interrupted/abort marker: {mc}"
+        );
+    }
+
     /// Serializes every test that mutates the process-global
     /// `tengu_amber_sentinel` gate env (the sleep-block opt-in). A tokio mutex
     /// keeps the guard `Send` across the `.await` in these async tests.
@@ -2857,6 +3030,50 @@ mod tests {
         assert!(
             note.contains("task-abc123") && note.contains("Command running in background"),
             "note must carry the task id + path, got: {note}",
+        );
+        // A `cd`-free command gets NO `backgroundCwdHint` (`ror` is false).
+        assert!(
+            !note.contains("Session cwd remains"),
+            "non-cd bg command must not carry the cwd hint, got: {note}",
+        );
+    }
+
+    #[tokio::test]
+    async fn background_cd_command_appends_session_cwd_hint() {
+        // PARITY 2.1.210 (`backgroundCwdHint`): a backgrounded command containing
+        // a statement-level `cd` gets the "Session cwd remains …" hint appended on
+        // a new line so the model does not assume the `cd` took effect.
+        let mut ctx = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.process = Arc::new(BgStub);
+        let tool = BashTool::new(ctx);
+        let res = tool
+            .call(
+                json!({"command": "cd /tmp && sleep 5", "run_in_background": true}),
+                use_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let note = res.model_content.as_deref().expect("background model note");
+        assert!(
+            note.contains("Command running in background"),
+            "base bg note missing, got: {note}",
+        );
+        assert!(
+            note.contains(
+                "; directory changes made by the backgrounded command do not apply to subsequent commands."
+            ),
+            "cd bg command must carry the session-cwd hint, got: {note}",
+        );
+        // The hint rides on its own line after the base note (mapper `_+="\n"+a`).
+        assert!(
+            note.contains("\nSession cwd remains "),
+            "hint must be appended on a new line, got: {note}",
         );
     }
 

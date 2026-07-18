@@ -462,7 +462,20 @@ async fn load_boot_permission_tiers(
         }
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
             match permission::permission_rules_from_settings_json(&raw, source) {
-                Ok(mut r) => rules.append(&mut r),
+                Ok(mut r) => {
+                    // parity 2.1.210: warn when a `Write`/`NotebookEdit`/
+                    // `MultiEdit`/`Glob` rule carries a path that no file-permission
+                    // matcher will ever see (those tools share `Edit`/`Read` rules).
+                    let display = path.display().to_string();
+                    for rule in &r {
+                        if let Some(line) =
+                            permission::permission_rule_startup_warning(rule, &display)
+                        {
+                            tracing::warn!("{line}");
+                        }
+                    }
+                    rules.append(&mut r);
+                }
                 Err(e) => tracing::warn!(
                     error = %e,
                     path = %path.display(),
@@ -509,7 +522,18 @@ async fn load_boot_permission_tiers(
             raw,
             permission::PermissionRuleSource::PolicySettings,
         ) {
-            Ok(mut r) => rules.append(&mut r),
+            Ok(mut r) => {
+                // parity 2.1.210: same file-matcher warning for managed rules.
+                for rule in &r {
+                    if let Some(line) = permission::permission_rule_startup_warning(
+                        rule,
+                        "managed policy settings",
+                    ) {
+                        tracing::warn!("{line}");
+                    }
+                }
+                rules.append(&mut r);
+            }
             Err(e) => tracing::warn!(
                 error = %e,
                 "skipping malformed managed settings permissions"

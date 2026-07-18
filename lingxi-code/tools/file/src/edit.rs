@@ -638,11 +638,14 @@ impl Tool for FileEditTool {
                 ) {
                     // Stale-recovery (claude `xTg`'s `TEu(ZVi(...))` branch,
                     // flag-gated `tengu_cedar_sundial`, default-OFF): only the
-                    // CONTENT-CHANGED error is recoverable — a never-read /
-                    // partial-read failure always propagates (`xTg` throws Y2n
-                    // before the recovery check). When the edit still applies
-                    // cleanly to the CURRENT content, proceed and mark the
-                    // result `staleRecovered`.
+                    // CONTENT-CHANGED error is recoverable — a never-read
+                    // failure (no read-state entry at all) always propagates
+                    // (`xTg` throws Y2n before the recovery check). Since
+                    // 2.1.212 a ranged offset/limit read is NOT a distinct
+                    // failure: it either passes the guard or surfaces as the
+                    // recoverable CONTENT-CHANGED error. When the edit still
+                    // applies cleanly to the CURRENT content, proceed and mark
+                    // the result `staleRecovered`.
                     let is_stale_error = matches!(
                         &e,
                         tool_api::tool_trait::ToolError::InvalidInput(m)

@@ -7,11 +7,15 @@
 //! `BashShell` relies on. `spawn_unsafe` is the only module in the crate
 //! that allows `unsafe` (single `libc::setsid` call from `pre_exec`).
 
+pub mod active_children;
 pub mod kill_tree;
 pub mod runner;
 pub mod spawn_unsafe;
 pub mod wrap;
 
+pub use active_children::{
+    enable_print_mode_child_cleanup, kill_all_active_children, print_mode_child_cleanup_enabled,
+};
 pub use runner::PosixProcess;
 pub use wrap::{
     task_output_path, wrap_command_for_cwd_tracking, DEFAULT_TIMEOUT, ENV_GIT_EDITOR,

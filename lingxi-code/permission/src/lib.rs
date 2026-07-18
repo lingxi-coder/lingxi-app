@@ -83,6 +83,7 @@ pub use loader::{
     additional_directories_from_settings_json,
     allow_managed_permission_rules_only_from_settings_json, auto_mode_disabled_from_settings_json,
     bypass_permissions_disabled_from_settings_json, default_mode_from_settings_json,
+    permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
 };
 pub use mode::{next_permission_mode, PermissionMode};

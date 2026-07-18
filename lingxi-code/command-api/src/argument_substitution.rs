@@ -188,16 +188,31 @@ pub fn substitute_arguments_faithful(
         content = replace_named_arg(&content, name, replacement)?;
     }
 
-    // (2) Indexed: $ARGUMENTS[<digits>].
-    content = replace_arguments_indexed(&content, &parsed_args);
+    // (2) Indexed: $ARGUMENTS[<digits>]. An out-of-range index is preserved
+    // verbatim (not stripped): the match is re-emitted with its leading `$`
+    // swapped for the U+FFFF sentinel so step 4's `$ARGUMENTS` replaceAll cannot
+    // see it; the sentinel is restored to `$` after step 4 (parity 2.1.212).
+    let (next, had_unmatched_indexed) = replace_arguments_indexed(&content, &parsed_args);
+    content = next;
 
-    // (3) Shorthand: $<digits> not followed by a word char (greedy digits).
+    // (3) Shorthand: $<digits> not followed by a word char (greedy digits). An
+    // out-of-range index is left verbatim (parity 2.1.212).
     content = replace_shorthand_indexed(&content, &parsed_args);
 
     // (4) Full arguments string.
     content = content.replace("$ARGUMENTS", args);
 
-    // (5) Tail append when nothing was substituted.
+    // Restore the sentinel emitted for out-of-range `$ARGUMENTS[N]` back to `$`
+    // (TS `if (u || p) e = e.replaceAll(QQn, "$")`). Only runs when such a
+    // placeholder was preserved, matching the `p` guard.
+    if had_unmatched_indexed {
+        content = content.replace('\u{FFFF}', "$");
+    }
+
+    // (5) Tail append when nothing was substituted. A preserved (out-of-range)
+    // placeholder does not count as a substitution: after the sentinel restore
+    // the content is byte-identical to the original, so this fires exactly as
+    // TS's `!d` guard would (parity 2.1.212).
     if content == original_content && append_if_no_placeholder && !args.is_empty() {
         content = format!("{content}\n\nARGUMENTS: {args}");
     }
@@ -309,12 +324,19 @@ fn validate_argument_name_regex(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Replace `$ARGUMENTS[<digits>]` (regex `\$ARGUMENTS\[(\d+)\]`). Out-of-range
-/// indices become the empty string (TS `parsedArgs[index] ?? ''`).
-fn replace_arguments_indexed(content: &str, parsed_args: &[String]) -> String {
+/// Replace `$ARGUMENTS[<digits>]` (regex `\$ARGUMENTS\[(\d+)\]`).
+///
+/// A matched index substitutes the argument. An out-of-range index is preserved
+/// verbatim instead of being stripped (TS 2.1.212 `p=!0, QQn + f.slice(1)`): the
+/// match is re-emitted as `<U+FFFF>ARGUMENTS[N]` — the leading `$` replaced by
+/// the sentinel so the later `replaceAll("$ARGUMENTS", …)` cannot match inside
+/// it. The caller restores the sentinel to `$` afterwards. Returns whether any
+/// such placeholder was preserved (TS's `p` flag), which gates that restore.
+fn replace_arguments_indexed(content: &str, parsed_args: &[String]) -> (String, bool) {
     const PREFIX: &[u8] = b"$ARGUMENTS[";
     let bytes = content.as_bytes();
     let mut out = String::with_capacity(content.len());
+    let mut had_unmatched = false;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'$'
@@ -329,8 +351,17 @@ fn replace_arguments_indexed(content: &str, parsed_args: &[String]) -> String {
             }
             if j > digits_start && j < bytes.len() && bytes[j] == b']' {
                 let index: usize = content[digits_start..j].parse().unwrap_or(usize::MAX);
-                let replacement = parsed_args.get(index).map_or("", String::as_str);
-                out.push_str(replacement);
+                match parsed_args.get(index) {
+                    Some(replacement) => out.push_str(replacement),
+                    None => {
+                        // Preserve verbatim, shielded by the sentinel (TS
+                        // `QQn + f.slice(1)`, where `f` is the whole `$…]` match
+                        // and `slice(1)` drops the leading `$`).
+                        had_unmatched = true;
+                        out.push('\u{FFFF}');
+                        out.push_str(&content[i + 1..=j]);
+                    }
+                }
                 i = j + 1; // skip past ']'
                 continue;
             }
@@ -339,7 +370,7 @@ fn replace_arguments_indexed(content: &str, parsed_args: &[String]) -> String {
         out.push_str(&content[i..i + ch_len]);
         i += ch_len;
     }
-    out
+    (out, had_unmatched)
 }
 
 /// Replace `$<digits>` shorthand (regex `\$(\d+)(?!\w)`). `\d+` is greedy; the
@@ -378,8 +409,13 @@ fn replace_shorthand_indexed(content: &str, parsed_args: &[String]) -> String {
                     let index: usize = content[digits_start..match_end]
                         .parse()
                         .unwrap_or(usize::MAX);
-                    let replacement = parsed_args.get(index).map_or("", String::as_str);
-                    out.push_str(replacement);
+                    match parsed_args.get(index) {
+                        Some(replacement) => out.push_str(replacement),
+                        // Out-of-range index is preserved verbatim, not stripped
+                        // (TS 2.1.212 `if (s[g] === void 0) return f`): re-emit
+                        // the whole `$<digits>` match unchanged.
+                        None => out.push_str(&content[i..match_end]),
+                    }
                     i = match_end;
                     continue;
                 }
@@ -542,8 +578,40 @@ mod tests {
         // $ARGUMENTS[0] and $1 select the same token classes.
         assert_eq!(sub("[$ARGUMENTS[0]]", Some("a b c"), true, &[]), "[a]");
         assert_eq!(sub("[$1]", Some("a b c"), true, &[]), "[b]");
-        // Out of range -> empty.
-        assert_eq!(sub("[$ARGUMENTS[9]]", Some("a b"), true, &[]), "[]");
+        // Out of range -> preserved verbatim (parity 2.1.212); with nothing
+        // substituted, the appendIfNoPlaceholder tail is added.
+        assert_eq!(
+            sub("[$ARGUMENTS[9]]", Some("a b"), true, &[]),
+            "[$ARGUMENTS[9]]\n\nARGUMENTS: a b"
+        );
+    }
+
+    #[test]
+    fn out_of_range_placeholders_preserved_verbatim() {
+        // parity 2.1.212: unmatched $ARGUMENTS[N] / $N are kept verbatim, not
+        // stripped to empty. append off isolates the substitution result.
+        assert_eq!(
+            sub("[$ARGUMENTS[9]]", Some("a b"), false, &[]),
+            "[$ARGUMENTS[9]]"
+        );
+        assert_eq!(sub("[$9]", Some("a b"), false, &[]), "[$9]");
+        // Mixed: matched index expands, out-of-range index preserved.
+        assert_eq!(
+            sub("$ARGUMENTS[0] $ARGUMENTS[9]", Some("a"), false, &[]),
+            "a $ARGUMENTS[9]"
+        );
+        assert_eq!(sub("$0 $9", Some("a"), false, &[]), "a $9");
+    }
+
+    #[test]
+    fn preserved_indexed_shielded_from_full_arguments_replace() {
+        // The sentinel shields the preserved `$ARGUMENTS[9]` from step 4's
+        // `$ARGUMENTS` replaceAll, while a bare `$ARGUMENTS` still expands
+        // (parity 2.1.212 `p` sentinel).
+        assert_eq!(
+            sub("$ARGUMENTS[9] $ARGUMENTS", Some("a"), false, &[]),
+            "$ARGUMENTS[9] a"
+        );
     }
 
     #[test]

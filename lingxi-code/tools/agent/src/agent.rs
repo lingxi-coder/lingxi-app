@@ -162,6 +162,18 @@ fn normalize_agent_type(s: &str) -> String {
         .collect()
 }
 
+/// Decode a forwarded-subagent-message progress line (`--forward-subagent-text`,
+/// 2.1.212). Returns the inner subagent message `Value` when `line` is a JSON
+/// object carrying [`traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`]
+/// (the pool spawner's sentinel wrapper); `None` for a plain nested-activity
+/// line, which never parses as such an object.
+fn decode_forward_subagent_message(line: &str) -> Option<Value> {
+    let parsed: Value = serde_json::from_str(line).ok()?;
+    parsed
+        .get(traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL)
+        .cloned()
+}
+
 /// Unicode `Pd` (dash punctuation) membership test for [`normalize_agent_type`].
 fn is_pd_dash(c: char) -> bool {
     matches!(
@@ -1928,10 +1940,20 @@ Use /mcp to configure and authenticate the required MCP servers.",
         let forward_progress = progress.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(line) = prog_rx.recv().await {
+                // (2.1.212 `--forward-subagent-text`) A forwarded subagent
+                // assistant message arrives sentinel-wrapped as a JSON line; hand
+                // its inner message through as a structured `forward_subagent_message`
+                // payload so the turn loop's stream-json sink can re-emit it with
+                // `parent_tool_use_id` set. Everything else is a plain nested
+                // activity line.
+                let data = decode_forward_subagent_message(&line).map_or_else(
+                    || serde_json::json!({ "subagent_activity": line }),
+                    |message| serde_json::json!({ "forward_subagent_message": message }),
+                );
                 let _ = forward_progress
                     .send(tool_api::progress::ToolProgress {
                         tool_use_id: protocol::ToolUseId::new(),
-                        data: serde_json::json!({ "subagent_activity": line }),
+                        data,
                     })
                     .await;
             }

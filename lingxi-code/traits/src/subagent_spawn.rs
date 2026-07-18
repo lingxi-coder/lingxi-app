@@ -444,6 +444,18 @@ pub fn should_inject_agent_list_in_messages() -> bool {
     true
 }
 
+/// Sentinel key wrapping a forwarded subagent assistant message on the
+/// [`SubagentSpawner::spawn_with_progress`] `String` channel
+/// (`--forward-subagent-text`, 2.1.212).
+///
+/// The `spawn_with_progress` progress channel is `String`-typed (a `traits →
+/// tool-api` cycle blocks a richer type), so the pool spawner JSON-encodes a
+/// forwarded assistant message as `{"<KEY>": <message>}` and the Agent tool
+/// decodes it back into a structured `ToolProgress` for the stream-json sink.
+/// Plain activity lines (`"Read(foo)"`) never parse as a JSON object carrying
+/// this key, so the two payload kinds never collide.
+pub const FORWARD_SUBAGENT_MESSAGE_SENTINEL: &str = "__forward_subagent_message__";
+
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {

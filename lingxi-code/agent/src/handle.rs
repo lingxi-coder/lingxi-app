@@ -1372,6 +1372,20 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         for line in subagent_tool_call_lines(&message) {
                             let _ = sink.try_send(line);
                         }
+                        // (2.1.212 `--forward-subagent-text`) Also forward the
+                        // raw ASSISTANT message so the Agent tool can re-emit its
+                        // text/thinking blocks onto the parent stream-json output
+                        // with `parent_tool_use_id` set. The gate lives at the
+                        // stream-json sink, so this ships the message
+                        // unconditionally (a no-op sink drops it) but only for
+                        // assistant turns — tool_use/tool_result rides the
+                        // activity path above. Encoded as a sentinel JSON line on
+                        // the `String` progress channel (`traits` cannot carry a
+                        // richer type without a channel-type change); the Agent
+                        // tool decodes it back into a structured `ToolProgress`.
+                        if let Some(line) = forward_subagent_message_line(&message) {
+                            let _ = sink.try_send(line);
+                        }
                     }
                 }
                 Some(_) => continue,
@@ -1498,6 +1512,25 @@ fn subagent_tool_call_lines(message: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
     collect_tool_calls(message, &mut out);
     out
+}
+
+/// Encode a subagent ASSISTANT message as a sentinel-wrapped JSON line for the
+/// `spawn_with_progress` `String` channel (`--forward-subagent-text`, 2.1.212).
+///
+/// Returns `None` for non-assistant messages (user/tool_result rides the
+/// always-on activity path). The Agent tool decodes the returned line via
+/// [`traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL`] and forwards
+/// the inner message to the stream-json sink, which re-emits its text/thinking
+/// blocks with `parent_tool_use_id` set. The final text/thinking gate lives at
+/// the sink, so this stays cheap and unconditional for assistant turns.
+fn forward_subagent_message_line(message: &serde_json::Value) -> Option<String> {
+    if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+        return None;
+    }
+    serde_json::to_string(&serde_json::json!({
+        traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL: message,
+    }))
+    .ok()
 }
 
 fn collect_tool_calls(value: &serde_json::Value, out: &mut Vec<String>) {

@@ -1476,6 +1476,23 @@ pub trait OutputStream: Send + Sync {
     /// mocks) keep compiling unchanged; the TUI bridge overrides it.
     async fn emit_subagent_activity(&self, _text: &str) {}
 
+    /// Emit a spawned subagent's assistant TEXT + THINKING as an `assistant`
+    /// frame whose `parent_tool_use_id` is the spawning `Task`/`Agent`
+    /// tool_use_id — the `--forward-subagent-text` (2.1.212) deep-forwarding
+    /// path. `message` is the serialized subagent `ConversationMessage`
+    /// (`agent::SubagentEvent::Message`); `parent_tool_use_id` is the parent
+    /// turn's Task tool_use_id (`ToolUseId::as_str`).
+    ///
+    /// **Default no-op**: only the stream-json sink overrides this (and only
+    /// re-emits when its `--forward-subagent-text` gate is on); every other sink
+    /// (TUI, mocks) ignores it, so they compile unchanged.
+    async fn emit_forwarded_subagent_message(
+        &self,
+        _message: &serde_json::Value,
+        _parent_tool_use_id: &str,
+    ) {
+    }
+
     /// Emit a retry-backoff status while an API request is being retried, so the
     /// UI can show Claude Code's `SystemAPIErrorMessage` line —
     /// `"<error> · Retrying in Ns… (attempt X/Y)"` — during an otherwise-silent

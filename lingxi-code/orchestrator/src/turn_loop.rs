@@ -2917,6 +2917,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::channel::<tool_api::progress::ToolProgress>(64);
         let progress_output = orch.output.clone();
+        // The spawning Task tool_use_id — stamped as `parent_tool_use_id` on any
+        // forwarded subagent assistant frame (`--forward-subagent-text`). Uses
+        // the same `ToolUseId::as_str` form the stream-json tool_use block id
+        // carries, so a forwarded child frame correlates to its parent Task call.
+        let progress_parent_tool_use_id = tool_use_id.as_str().to_string();
         let progress_consumer = tokio::spawn(async move {
             while let Some(p) = progress_rx.recv().await {
                 if let Some(text) = p
@@ -2925,6 +2930,15 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     .and_then(serde_json::Value::as_str)
                 {
                     progress_output.emit_subagent_activity(text).await;
+                } else if let Some(message) = p.data.get("forward_subagent_message") {
+                    // (2.1.212 `--forward-subagent-text`) A spawned subagent's
+                    // raw assistant message, forwarded by the Agent tool. The
+                    // stream-json sink re-emits its text/thinking blocks as an
+                    // `assistant` frame with this parent Task tool_use_id; every
+                    // other sink ignores it (default no-op).
+                    progress_output
+                        .emit_forwarded_subagent_message(message, &progress_parent_tool_use_id)
+                        .await;
                 }
             }
         });

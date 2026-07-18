@@ -901,6 +901,23 @@ impl Tool for MCPTool {
         // Race path (`callMcpToolWithAutoBackground`/`Gc_`): spawn the call +
         // its post-processing onto a task so it can outlive the turn, then race
         // that against the auto-background timeout.
+        //
+        // F3-2: the cancel token is minted BEFORE the spawn and threaded INTO
+        // the call task (the oracle passes the abort signal into the call,
+        // `p=e(c.signal)`), and the parent turn/abort token (`ctx.cancel`, the
+        // oracle's `cUr(o,c)` link) is observed alongside it. On cancel the
+        // in-flight call future is DROPPED (cancel-on-drop, restoring the
+        // pre-G08 direct-await semantics) and the completed-side-effects
+        // (`process_mcp_call_result` — MCP_COMPLETED telemetry, large-output
+        // persistence) are SKIPPED, mirroring the oracle's `notified` guard
+        // (`if(O.notified)return O`). Without this, on `TaskStop` the token
+        // merely woke the settle-waiter's `select!`, dropping the JoinHandle
+        // (which DETACHES, not aborts) — the RPC kept running and still emitted
+        // COMPLETED telemetry / persisted result files for a killed task, and an
+        // Esc during the pre-background window leaked an untracked in-flight
+        // task with no cancel path at all.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let parent_cancel = ctx.cancel.clone();
         let mut call_task = {
             let client = client.clone();
             let bus = bus.clone();
@@ -911,26 +928,49 @@ impl Tool for MCPTool {
             let progress = progress.clone();
             let dispatch_full_name = dispatch_full_name.clone();
             let tool_use_id_str = tool_use_id_str.clone();
+            let cancel = cancel.clone();
+            let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
-                let res = client
-                    .call_tool_with_progress(
-                        &dispatch_full_name,
-                        arguments,
-                        tool_use_id_str.as_deref(),
-                        on_progress,
-                    )
-                    .await;
-                process_mcp_call_result(
-                    bus,
-                    cwd,
-                    server,
-                    tool,
-                    tool_use_id,
-                    progress,
-                    started,
-                    res,
-                )
-                .await
+                let call_fut = client.call_tool_with_progress(
+                    &dispatch_full_name,
+                    arguments,
+                    tool_use_id_str.as_deref(),
+                    on_progress,
+                );
+                tokio::pin!(call_fut);
+                // Fires on the mcp_task cancel token (`TaskStop`, once
+                // registered) OR the parent turn/abort token (`ctx.cancel`).
+                let cancelled = async {
+                    match &parent_cancel {
+                        Some(pc) => {
+                            tokio::select! {
+                                () = cancel.cancelled() => {}
+                                () = pc.cancelled() => {}
+                            }
+                        }
+                        None => cancel.cancelled().await,
+                    }
+                };
+                // `biased` toward cancellation: a cancelled call must NOT run the
+                // completed-side-effects even if it resolves at the same instant
+                // (the oracle's `notified` guard suppresses post-processing).
+                tokio::select! {
+                    biased;
+                    () = cancelled => Err(ToolError::Aborted),
+                    res = &mut call_fut => {
+                        process_mcp_call_result(
+                            bus,
+                            cwd,
+                            server,
+                            tool,
+                            tool_use_id,
+                            progress,
+                            started,
+                            res,
+                        )
+                        .await
+                    }
+                }
             })
         };
 
@@ -952,9 +992,10 @@ impl Tool for MCPTool {
         }
 
         // Timeout — move the still-running call to the background as an
-        // `mcp_task`. `NZu`/`i.register(g)`: a cancel token fires on `TaskStop`
-        // (the port equivalent of the state's `abortController`).
-        let cancel = tokio_util::sync::CancellationToken::new();
+        // `mcp_task`. `NZu`/`i.register(g)`: the pre-minted `cancel` token
+        // (already threaded into the call task above) is handed to the registry
+        // so `TaskStop` fires it (the port equivalent of the state's
+        // `abortController`), which now genuinely cancels the in-flight call.
         let registration = traits::task_registry::McpTaskRegistration {
             server_name: server.clone(),
             tool_name: tool.clone(),

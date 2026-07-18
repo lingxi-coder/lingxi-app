@@ -1,6 +1,6 @@
-//! `lingxi-cli auto-mode` — Inspect auto mode classifier configuration.
+//! `lingxi-cli auto-mode` — Inspect or reset auto mode classifier configuration.
 //!
-//! Byte-parity with claude-code 2.1.191 `claude auto-mode`. Three children:
+//! Byte-parity with claude-code `claude auto-mode`. Four children:
 //!
 //! * `defaults` — print the default auto mode `allow` / `soft_deny` /
 //!   `hard_deny` / `environment` rules as JSON (REAL: the rule set is embedded
@@ -17,8 +17,20 @@
 //! * `critique` — local structural feedback on the effective auto-mode rules.
 //!   Claude's command labels this as AI feedback; LingXi keeps the command
 //!   offline in the CLI layer and reports deterministic issues instead.
+//! * `reset` — strip the `autoMode` section from the user `settings.json`
+//!   (2.1.212 `autoModeResetHandler`/`FbT`). Byte-faithful confirmation and
+//!   status messages; `-y`/`--yes` skips the prompt. lingxi's settings writer
+//!   preserves every unknown key verbatim (`migrations::settings_update`), so
+//!   CC's lossy-write guard — which warns that the schema-validated rewrite
+//!   would drop entries "this version of Claude Code cannot parse" — has no
+//!   lingxi analog and is intentionally omitted, as is the managed/`--settings`
+//!   residual-source note (lingxi does not merge `autoMode` from those sources).
+
+use std::path::Path;
 
 use clap::{Args, Subcommand};
+use migrations::settings_update::update_settings;
+use serde_json::Value;
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 
@@ -109,6 +121,17 @@ pub enum Sub {
     /// Print the default auto mode environment, allow, soft_deny, and hard_deny
     /// rules as JSON
     Defaults,
+    /// Reset auto mode configuration to the shipped defaults by removing the
+    /// autoMode section from your user settings file
+    Reset(ResetArgs),
+}
+
+/// Options for `auto-mode reset`.
+#[derive(Debug, Clone, Args)]
+pub struct ResetArgs {
+    /// Skip the confirmation prompt
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 /// Options for `auto-mode critique`.
@@ -132,7 +155,147 @@ pub async fn run(cli: &Cli) -> i32 {
         Some(Sub::Defaults) => print_rules(),
         Some(Sub::Config) => print_rules(),
         Some(Sub::Critique(args)) => critique_rules(args),
+        Some(Sub::Reset(args)) => {
+            let path = crate::run::lingxi_home_dir().join("settings.json");
+            reset_auto_mode(&path, args.yes, || {
+                confirm("Reset auto mode configuration to defaults?")
+            })
+        }
     }
+}
+
+/// `auto-mode reset` — remove the `autoMode` section from the user
+/// `settings.json`, restoring the shipped-default classifier rules.
+///
+/// Mirrors 2.1.212 `FbT`: a missing / empty / autoMode-free settings file is
+/// reported as already-default (exit 0); a file with an `autoMode` section is
+/// listed, confirmed (unless `yes`), and rewritten with the section removed —
+/// every other key preserved by the JSON-faithful settings writer. Broken JSON
+/// and write failures are surfaced with the byte-faithful error lines and exit
+/// non-zero, matching `im(...)`.
+///
+/// `confirm` is only invoked when `!yes`; it is injected so tests can drive the
+/// accept / decline branches without a tty.
+fn reset_auto_mode(path: &Path, yes: bool, confirm: impl FnOnce() -> bool) -> i32 {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!("Could not read {}: {e}", path.display());
+            return RUNTIME_ERROR;
+        }
+    };
+
+    // Empty / whitespace-only file behaves like "no settings" (autoMode absent).
+    let parsed: Option<Value> = if content.trim().is_empty() {
+        None
+    } else {
+        match serde_json::from_str::<Value>(&content) {
+            Ok(v) if v.is_object() => Some(v),
+            // Broken JSON, or a top-level non-object, is unusable — matches CC's
+            // `n && !yYa(o)` invalid-settings branch (`cbs`).
+            _ => {
+                eprintln!(
+                    "The settings file at {} contains invalid JSON — fix or remove it, \
+                     then re-run reset.",
+                    path.display()
+                );
+                return RUNTIME_ERROR;
+            }
+        }
+    };
+
+    let section = parsed.as_ref().and_then(|v| v.get("autoMode"));
+    let Some(section) = section else {
+        println!(
+            "Auto mode configuration is already at defaults — {} has no autoMode section.",
+            path.display()
+        );
+        return SUCCESS;
+    };
+
+    println!(
+        "This resets auto mode to the shipped defaults by removing the autoMode section from {}:",
+        path.display()
+    );
+    for entry in describe_auto_mode_entries(section) {
+        println!("  - {entry}");
+    }
+
+    if !yes && !confirm() {
+        eprintln!("Aborted.");
+        return RUNTIME_ERROR;
+    }
+
+    match update_settings(path, vec![("autoMode".to_string(), None)]) {
+        Ok(()) => {
+            println!(
+                "Auto mode configuration reset to defaults — autoMode section removed from {}.",
+                path.display()
+            );
+            println!("Run `lingxi-cli auto-mode config` to see the effective rules.");
+            SUCCESS
+        }
+        Err(_) => {
+            eprintln!(
+                "Could not write {} — check file permissions and disk space \
+                 (run with --debug for the underlying error).",
+                path.display()
+            );
+            RUNTIME_ERROR
+        }
+    }
+}
+
+/// One human-readable line per `autoMode` sub-key (2.1.212 `kKf`): an
+/// array-valued rule bucket is `"<key> (<n> entry|entries)"`, any other value
+/// is the bare key. A non-object `autoMode` value collapses to the single
+/// `"autoMode (unrecognized value)"` line.
+fn describe_auto_mode_entries(section: &Value) -> Vec<String> {
+    match section.as_object() {
+        Some(map) => map
+            .iter()
+            .map(|(key, value)| match value.as_array() {
+                Some(arr) => format!(
+                    "{key} ({} {})",
+                    arr.len(),
+                    plural(arr.len(), "entry", "entries")
+                ),
+                None => key.clone(),
+            })
+            .collect(),
+        None => vec!["autoMode (unrecognized value)".to_string()],
+    }
+}
+
+/// `n === 1 ? singular : plural` (2.1.212 `It`).
+fn plural(n: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if n == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
+/// Read a `y`/`n` confirmation from stdin. Returns false when stdin is not a
+/// tty or on any read failure (fail-closed → the reset is treated as declined,
+/// matching CC's `--yes`-required behaviour under a non-interactive stream).
+fn confirm(prompt: &str) -> bool {
+    use std::io::{IsTerminal as _, Write as _};
+    if !std::io::stdin().is_terminal() {
+        eprintln!("{prompt} [refusing without a tty; pass --yes to confirm]");
+        return false;
+    }
+    print!("{prompt} [y/N] ");
+    if std::io::stdout().flush().is_err() {
+        return false;
+    }
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    let answer = line.trim().to_ascii_lowercase();
+    answer == "y" || answer == "yes"
 }
 
 /// Print the (currently override-free) effective rules as canonical pretty JSON.
@@ -185,12 +348,13 @@ fn critique_rules(args: &CritiqueArgs) -> i32 {
 /// One-line hint for a bare `auto-mode` invocation (defensive — clap normally
 /// prints full help first).
 fn print_help_hint() {
-    eprintln!("Inspect auto mode classifier configuration");
+    eprintln!("Inspect or reset auto mode classifier configuration");
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  config     Print the effective auto mode config as JSON");
     eprintln!("  critique   Get AI feedback on your custom auto mode rules");
     eprintln!("  defaults   Print the default auto mode rules as JSON");
+    eprintln!("  reset      Reset auto mode configuration to the shipped defaults");
 }
 
 #[cfg(test)]
@@ -221,5 +385,101 @@ mod tests {
         })
         .await;
         assert_eq!(code, SUCCESS);
+    }
+
+    fn settings_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        (tmp, path)
+    }
+
+    #[test]
+    fn reset_missing_settings_is_already_default() {
+        let (_tmp, path) = settings_path();
+        // No file on disk → already at defaults, success, no file created.
+        let code = reset_auto_mode(&path, true, || panic!("confirm must not run"));
+        assert_eq!(code, SUCCESS);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn reset_settings_without_automode_is_already_default() {
+        let (_tmp, path) = settings_path();
+        std::fs::write(&path, r#"{"model":"opus"}"#).unwrap();
+        let code = reset_auto_mode(&path, true, || panic!("confirm must not run"));
+        assert_eq!(code, SUCCESS);
+        // File untouched (still exactly what we wrote — no rewrite).
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"model":"opus"}"#
+        );
+    }
+
+    #[test]
+    fn reset_removes_automode_and_preserves_other_keys() {
+        let (_tmp, path) = settings_path();
+        std::fs::write(
+            &path,
+            r#"{"model":"opus","autoMode":{"allow":["x"],"soft_deny":[]}}"#,
+        )
+        .unwrap();
+        let code = reset_auto_mode(&path, true, || panic!("confirm skipped by --yes"));
+        assert_eq!(code, SUCCESS);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v.get("autoMode").is_none());
+        assert_eq!(v["model"], serde_json::json!("opus"));
+    }
+
+    #[test]
+    fn reset_declined_leaves_automode_intact() {
+        let (_tmp, path) = settings_path();
+        let original = r#"{"autoMode":{"allow":["x"]}}"#;
+        std::fs::write(&path, original).unwrap();
+        // Not --yes, confirm returns false → aborts, file untouched.
+        let code = reset_auto_mode(&path, false, || false);
+        assert_eq!(code, RUNTIME_ERROR);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn reset_confirmed_removes_automode() {
+        let (_tmp, path) = settings_path();
+        std::fs::write(&path, r#"{"autoMode":{"allow":["x"]}}"#).unwrap();
+        let code = reset_auto_mode(&path, false, || true);
+        assert_eq!(code, SUCCESS);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v.get("autoMode").is_none());
+    }
+
+    #[test]
+    fn reset_invalid_json_errors_without_overwrite() {
+        let (_tmp, path) = settings_path();
+        std::fs::write(&path, "{ broken").unwrap();
+        let code = reset_auto_mode(&path, true, || panic!("confirm must not run"));
+        assert_eq!(code, RUNTIME_ERROR);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+    }
+
+    #[test]
+    fn describe_entries_arrays_and_scalars_and_unrecognized() {
+        let section = serde_json::json!({
+            "allow": ["a", "b"],
+            "soft_deny": ["c"],
+            "useAutoModeDuringPlan": true,
+        });
+        let mut lines = describe_auto_mode_entries(&section);
+        lines.sort();
+        assert_eq!(
+            lines,
+            vec![
+                "allow (2 entries)".to_string(),
+                "soft_deny (1 entry)".to_string(),
+                "useAutoModeDuringPlan".to_string(),
+            ]
+        );
+        assert_eq!(
+            describe_auto_mode_entries(&serde_json::json!("nope")),
+            vec!["autoMode (unrecognized value)".to_string()]
+        );
     }
 }

@@ -1,0 +1,133 @@
+//! `CliBgSessionForker` — the CLI composition root's concrete
+//! [`traits::bg_session_forker::BgSessionForker`] (2.1.212 `/fork` `vAd`).
+//!
+//! Copies the live conversation into a NEW background session and keeps the
+//! interactive session running:
+//!
+//! 1. Mint a fresh session uuid.
+//! 2. SNAPSHOT the passed history into that session's
+//!    `<config-home>/projects/<sanitize(cwd)>/<uuid>.jsonl` transcript — the
+//!    same on-disk shape the resume loader reads — via the session
+//!    [`JsonlWriter`], the SAME writer the live session persists through.
+//! 3. Dispatch a detached daemon worker that RESUMES that copy
+//!    ([`crate::background_dispatch::dispatch_forked_session`], a
+//!    `Launch::Resume` job) so the backgrounded turn carries the conversation.
+//! 4. Return the live-session system line (owning the minted short id).
+//!
+//! Layering: this lives in `apps/cli` (which owns the `--bg`/daemon dispatch
+//! machinery); it is injected into the orchestrator via
+//! `DesktopConfig.bg_session_forker`, so the leaf `orchestrator` crate never
+//! depends on `apps/cli`.
+
+use async_trait::async_trait;
+use std::path::PathBuf;
+use std::sync::Arc;
+use traits::bg_session_forker::{BgForkError, BgSessionForker};
+use traits::FileSystem;
+
+/// Concrete `/fork`-to-background forker bound to the resolved config/runtime
+/// dirs. Constructed in `init::resolve_desktop_config` and set on
+/// `DesktopConfig.bg_session_forker`.
+pub struct CliBgSessionForker {
+    /// `<config-home>` (`~/.lingxi`) — anchors `projects/<cwd>/<uuid>.jsonl` and
+    /// the `jobs/<short>/state.json` writes.
+    config_home: PathBuf,
+    /// Daemon runtime dir (roster + lock).
+    runtime_dir: PathBuf,
+    /// Engine version string stamped on every snapshotted transcript line.
+    version: String,
+}
+
+impl CliBgSessionForker {
+    /// Construct a forker over the resolved config-home + daemon runtime dir.
+    #[must_use]
+    pub fn new(config_home: PathBuf, runtime_dir: PathBuf) -> Self {
+        Self {
+            config_home,
+            runtime_dir,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl BgSessionForker for CliBgSessionForker {
+    async fn fork_to_background(
+        &self,
+        history: &[protocol::ConversationMessage],
+        system_prompt: Option<Arc<str>>,
+        prompt: &str,
+    ) -> Result<String, BgForkError> {
+        // The copied session RE-DERIVES its own system prompt on resume from its
+        // cwd/LINGXI.md hierarchy (the resume loader rebuilds it), so the parent's
+        // rendered prompt is not written into the snapshot transcript. Accepted
+        // via the seam for forward-compat (a future cache-identical seed).
+        let _ = system_prompt;
+
+        // Resolve the LIVE cwd at fork time (a Bash `cd` may have moved it since
+        // boot) so the snapshot path and the recorded job cwd agree.
+        let cwd_pb = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd = cwd_pb.display().to_string();
+
+        // 1. Mint the new background session id.
+        let new_session_id = uuid::Uuid::new_v4().to_string();
+
+        // 2. SNAPSHOT the conversation into the new session's transcript.
+        let session_path =
+            session::jsonl::path::session_path(&self.config_home, &cwd, &new_session_id);
+        let lines = orchestrator::bg_snapshot::history_to_jsonl_lines(
+            history,
+            &new_session_id,
+            &cwd,
+            &self.version,
+        );
+        let fs: Arc<dyn FileSystem> =
+            Arc::new(platform_posix::PosixFileSystem::new(cwd_pb.clone()));
+        let writer = session::jsonl::writer::JsonlWriter::new(session_path, fs);
+        for line in &lines {
+            writer
+                .append(line)
+                .await
+                .map_err(|e| BgForkError::Snapshot(e.to_string()))?;
+        }
+
+        // 3. Dispatch a detached daemon worker that resumes the copied session.
+        let short = crate::background_dispatch::dispatch_forked_session(
+            &self.config_home,
+            &self.runtime_dir,
+            &cwd,
+            &new_session_id,
+            prompt,
+        )
+        .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
+
+        // 4. The live-session system line. No oracle string is recoverable — the
+        //    2.1.212 `vAd` command has no `load` handler (the TUI special
+        //    dispatcher renders this), so this is grounded on the minted short id,
+        //    NOT byte-verified.
+        Ok(format!(
+            "Copied conversation into a new background session ({short})."
+        ))
+    }
+
+    async fn resume_to_background(&self, session_id: &str) -> Result<String, BgForkError> {
+        // The chosen session ALREADY exists on disk at its standard transcript
+        // path (`list_resumable_sessions` enumerated it), so — unlike the fork
+        // path — there is NO snapshot to write: dispatch a detached daemon that
+        // resumes `session_id` directly via the same `Launch::Resume` machinery.
+        let cwd_pb = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let cwd = cwd_pb.display().to_string();
+        let short = crate::background_dispatch::dispatch_forked_session(
+            &self.config_home,
+            &self.runtime_dir,
+            &cwd,
+            session_id,
+            "",
+        )
+        .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
+        // Same grounding caveat as `fork_to_background`: the 2.1.212 resume-as-bg
+        // dispatch has no recoverable oracle line (the TUI special dispatcher
+        // renders it), so this is grounded on the minted short id, NOT byte-verified.
+        Ok(format!("Resumed session into a new background session ({short})."))
+    }
+}

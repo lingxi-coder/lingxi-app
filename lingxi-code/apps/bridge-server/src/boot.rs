@@ -235,6 +235,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         deny_unresolved_ask: false,
         // Transport host: no injected interactive gate (that is the TUI's path).
         injected_permission_gate: None,
+        // The headless bridge has no interactive /fork or /resume-as-background
+        // surface, so it wires no background-session forker seam.
+        bg_session_forker: None,
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
@@ -661,6 +664,7 @@ mod tests {
             initial_effort: None,
             default_model_env_pinned: false,
             session_thinking: Default::default(),
+            bg_session_forker: None,
             worktree_launch: None,
             tmux_launch: None,
         };

@@ -1025,6 +1025,16 @@ pub struct ConversationOrchestrator {
     /// (`SubagentInheritance::budget`). Wired via [`Self::with_fork_budget`].
     /// `None` ⇒ `fork_conversation` fails gracefully.
     pub(crate) fork_budget: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
+    /// 2.1.212 `/fork` (`vAd`) background-session forker. When wired (via
+    /// [`Self::with_bg_session_forker`], the CLI composition root's
+    /// `CliBgSessionForker`), [`OrchestratorHandle::fork_to_background_session`]
+    /// snapshots the live conversation into a NEW background session (the
+    /// `--bg`/daemon session-copy path) and returns the system line for the live
+    /// session. `None` (tests / non-desktop roots) ⇒ that handle method fails
+    /// with a clear `ActionFailed`. Mirrors the `fork_spawner`/`fork_budget`
+    /// optional-seam pattern above.
+    pub(crate) bg_session_forker:
+        Option<Arc<dyn traits::bg_session_forker::BgSessionForker>>,
     /// `/recap` side-query runner — the SAME single-turn
     /// [`sidequery::ForkedAgentRunner`] the autocompact summarizer uses (cloned
     /// from the composition root's `forked_runner` before it moves into the
@@ -1397,6 +1407,7 @@ impl ConversationOrchestrator {
             current_turn_system_prompt: Mutex::new(None),
             fork_spawner: None,
             fork_budget: None,
+            bg_session_forker: None,
             recap_runner: None,
             file_history: None,
             orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
@@ -2013,6 +2024,20 @@ impl ConversationOrchestrator {
         budget: Arc<dyn traits::budget::BudgetEnforcerHandle>,
     ) -> Self {
         self.fork_budget = Some(budget);
+        self
+    }
+
+    /// Attach the 2.1.212 `/fork` (`vAd`) background-session forker (the CLI
+    /// composition root's `CliBgSessionForker`), so
+    /// [`OrchestratorHandle::fork_to_background_session`] can copy the live
+    /// conversation into a new background session. Without it, that `/fork`
+    /// variant fails with a clear `ActionFailed`.
+    #[must_use]
+    pub fn with_bg_session_forker(
+        mut self,
+        forker: Arc<dyn traits::bg_session_forker::BgSessionForker>,
+    ) -> Self {
+        self.bg_session_forker = Some(forker);
         self
     }
 

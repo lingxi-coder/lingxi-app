@@ -19,6 +19,7 @@ pub const CLAUDE_CODE_VERSION: &str = "2.1.208";
 pub mod agent_name_registry;
 pub mod agent_view;
 pub mod auth;
+pub mod bg_session_forker;
 pub mod bridge;
 pub mod budget;
 pub mod camera;

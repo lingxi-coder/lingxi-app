@@ -116,6 +116,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         plans_directory: None,
         default_model_env_pinned: false,
         session_thinking: Default::default(),
+        bg_session_forker: None,
         worktree_launch: None,
         tmux_launch: None,
     };

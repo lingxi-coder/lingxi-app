@@ -848,6 +848,20 @@ pub(crate) fn resolve_desktop_config(
         // hard-errors if this is `Some` while `worktree_launch` is `None`
         // (the CLI's own `--tmux` doc: "requires --worktree").
         tmux_launch: argv.tmux.clone(),
+        // (G05 2.1.212 `/fork` `vAd`) BgSessionForker seam: the composition-root
+        // impl copies the live conversation into a NEW background session (mints a
+        // uuid, SNAPSHOTs the transcript, dispatches a `Launch::Resume` daemon)
+        // while the interactive session stays live. Anchored to the SAME
+        // config-home + daemon runtime dir the `--bg` dispatch uses so the snapshot
+        // write and the resume dispatch agree. Injected here into the orchestrator
+        // (via `build()`), preserving the crate-layering rule (orchestrator never
+        // depends on apps/cli).
+        bg_session_forker: Some(std::sync::Arc::new(
+            crate::bg_session_forker::CliBgSessionForker::new(
+                crate::run::lingxi_home_dir(),
+                crate::run::daemon_runtime_dir(),
+            ),
+        )),
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It

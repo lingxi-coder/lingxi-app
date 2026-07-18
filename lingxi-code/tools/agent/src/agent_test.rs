@@ -25,6 +25,33 @@ mod tests {
         assert_eq!(normalize_agent_type("a—b"), "ab");
     }
 
+    // (2.1.212 `--forward-subagent-text`) The nested-progress forwarder decodes
+    // a sentinel-wrapped assistant message back into the inner `Value`; a plain
+    // activity line decodes to `None` (rides the `subagent_activity` path).
+    #[test]
+    fn decode_forward_subagent_message_round_trips_sentinel() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "id": "msg_1",
+            "content": [{ "type": "text", "text": "hi" }],
+            "stop_reason": "end_turn",
+        });
+        let line = serde_json::to_string(&serde_json::json!({
+            traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL: message,
+        }))
+        .unwrap();
+        assert_eq!(decode_forward_subagent_message(&line), Some(message));
+    }
+
+    #[test]
+    fn decode_forward_subagent_message_ignores_activity_line() {
+        // A plain nested-activity line ("Name(hint)") is not a JSON object
+        // carrying the sentinel key.
+        assert_eq!(decode_forward_subagent_message("Read(/etc/hosts)"), None);
+        // A JSON object WITHOUT the sentinel key is also ignored.
+        assert_eq!(decode_forward_subagent_message(r#"{"other":1}"#), None);
+    }
+
     // Binary description normalization `replace(/\s+/g," ").trim()`.
     #[test]
     fn normalize_description_ws_collapses_and_trims() {

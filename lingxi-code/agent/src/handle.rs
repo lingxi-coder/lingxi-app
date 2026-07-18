@@ -3295,6 +3295,35 @@ mod tests {
     }
 
     #[test]
+    fn forward_subagent_message_line_wraps_assistant_message() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "id": "msg_1",
+            "content": [{ "type": "text", "text": "hi" }],
+            "stop_reason": "end_turn",
+        });
+        let line = forward_subagent_message_line(&message).expect("assistant message wrapped");
+        // Sentinel-wrapped JSON object carrying the inner message verbatim.
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            parsed[traits::subagent_spawn::FORWARD_SUBAGENT_MESSAGE_SENTINEL],
+            message
+        );
+    }
+
+    #[test]
+    fn forward_subagent_message_line_skips_non_assistant() {
+        // User/tool_result messages ride the always-on activity path, not the
+        // forward path.
+        let user = serde_json::json!({
+            "role": "user",
+            "id": "msg_2",
+            "content": [{ "type": "tool_result", "tool_use_id": "t", "content": "ok" }],
+        });
+        assert!(forward_subagent_message_line(&user).is_none());
+    }
+
+    #[test]
     fn short_input_hint_truncates_long_first_string() {
         let long = "a".repeat(60);
         let hint = short_input_hint(&serde_json::json!({ "command": long }));

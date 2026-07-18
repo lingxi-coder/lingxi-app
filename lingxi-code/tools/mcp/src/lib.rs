@@ -16,6 +16,7 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+pub mod auto_background;
 pub mod large_output;
 pub mod mcp_tool;
 pub mod transform_result;

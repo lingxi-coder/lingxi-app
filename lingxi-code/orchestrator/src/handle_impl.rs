@@ -52,6 +52,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // session id; downstream appends should not chain to the prior
         // session's last entry.
         *self.last_jsonl_uuid.lock().await = None;
+        drop(s);
+        // (parity 2.1.212) claude-code's clearConversation calls resetCostState
+        // (yJe): a freshly-cleared session starts the cost footer/status line at
+        // zero instead of carrying the prior conversation's accumulated total
+        // ("Fixed /clear not resetting session cost counter"). Reset the wired
+        // tracker (no-op when unwired) and the orchestrator's api-call counter —
+        // claude-code zeroes `modelUsage`, from which the api-call count derives.
+        if let Some(tracker) = self.cost_tracker.as_ref() {
+            tracker.reset().await;
+        }
+        self.api_calls_recorded
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 

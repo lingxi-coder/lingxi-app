@@ -130,6 +130,30 @@ async fn two_turns_accumulate() {
 }
 
 #[tokio::test]
+async fn clear_session_resets_cost_snapshot() {
+    // parity 2.1.212: claude-code's clearConversation calls resetCostState, so
+    // `/clear` must zero the session cost counter instead of carrying the prior
+    // conversation's accumulated total into the fresh session.
+    let (orch, _rx) = make_orch_with_n_responses(1).await;
+    orch.run_turn("hi").await.unwrap();
+    let before = orch.snapshot_cost().await;
+    assert!(before.total_nano_usd > 0, "turn accrued cost");
+    assert_eq!(before.api_calls, 1);
+
+    <ConversationOrchestrator as OrchestratorHandle>::clear_session(&*orch)
+        .await
+        .expect("clear session");
+
+    let after = orch.snapshot_cost().await;
+    assert_eq!(after.total_nano_usd, 0, "cost total reset by /clear");
+    assert_eq!(after.total_usd, 0.0);
+    assert_eq!(after.input_tokens, 0);
+    assert_eq!(after.output_tokens, 0);
+    assert_eq!(after.api_calls, 0, "api-call counter reset by /clear");
+    assert!(after.by_model.is_empty(), "per-model breakdown cleared");
+}
+
+#[tokio::test]
 async fn emit_end_turn_carries_real_cost() {
     // Build a fresh wiring where we can inspect the captured events.
     let response = end_turn_response_with_usage(1_000, 500);

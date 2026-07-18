@@ -2428,6 +2428,14 @@ impl ChatWidget {
         // paths would silently attach them to a later unrelated message.
         self.pending_images.clear();
         self.bottom_pane.set_attached_image_labels(Vec::new());
+        // (parity 2.1.212) `/clear` resets the session cost counter — claude-code's
+        // clearConversation calls resetCostState. Drop the cached status-row cost
+        // string so a freshly-cleared session shows no accumulated cost (matching
+        // the boot state, `cost: None`) instead of the prior conversation's running
+        // total; the next turn's `CostUpdated` repopulates it from the now-reset
+        // backend tracker.
+        self.cost = None;
+        self.with_status_line(|s| s.data.cost = String::new());
     }
 
     /// `/image <path>`: record an image message for `path` so a graphics
@@ -6298,6 +6306,31 @@ mod tests {
             .expect("running status row");
         assert!(status.contains("$0.0456"), "running status row: {status}");
         assert!(!status.contains("$0.0123"), "stale cost replaced: {status}");
+    }
+
+    #[test]
+    fn clear_resets_the_status_row_cost() {
+        // parity 2.1.212: `/clear` resets the session cost counter (claude-code
+        // clearConversation → resetCostState), so the cached status-row cost
+        // string must not survive a clear.
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::CostUpdated("$0.0123".to_string()));
+        assert_eq!(widget.cost.as_deref(), Some("$0.0123"));
+        let rows = rendered_rows(&mut widget, 90);
+        assert!(
+            rows.last().expect("footer row").contains("$0.0123"),
+            "cost shows before clear"
+        );
+
+        widget.cmd_clear("");
+
+        assert_eq!(widget.cost, None, "clear drops the cached cost");
+        let rows = rendered_rows(&mut widget, 90);
+        assert!(
+            !rows.iter().any(|r| r.contains("$0.0123")),
+            "stale cost gone after /clear:\n{}",
+            rows.join("\n")
+        );
     }
 
     #[test]

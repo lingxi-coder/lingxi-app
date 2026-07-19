@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use protocol::SessionId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// Snapshot of the latest provider rate-limit headers seen on the live path.
@@ -88,6 +89,17 @@ pub struct CostSnapshot {
     /// "(costs may be inaccurate due to usage of unknown models)" note (`Cqo`).
     #[serde(default)]
     pub unknown_models: bool,
+}
+
+/// Session-scoped `/goal` state surfaced through [`OrchestratorHandle`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveGoalSnapshot {
+    /// User-supplied goal condition.
+    pub condition: String,
+    /// When the goal became active.
+    pub set_at: SystemTime,
+    /// Most recent stop-time evaluation reason, when available.
+    pub last_reason: Option<String>,
 }
 
 /// One model's cumulative usage for the `/usage` "Usage by model" block
@@ -860,6 +872,32 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Snapshot the cumulative cost.
     async fn snapshot_cost(&self) -> CostSnapshot;
 
+    /// Current session-scoped `/goal`, if any.
+    async fn get_active_goal(&self) -> Option<ActiveGoalSnapshot> {
+        None
+    }
+
+    /// Activate or replace the current session-scoped `/goal`.
+    async fn set_active_goal(&self, _condition: &str) {}
+
+    /// Clear the current session-scoped `/goal`, returning the removed value.
+    async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
+        None
+    }
+
+    /// Update the active goal's most recent stop-time evaluation reason.
+    async fn set_active_goal_last_reason(&self, _reason: Option<String>) {}
+
+    /// Whether the current workspace is trusted for `/goal`.
+    async fn workspace_trusted(&self) -> bool {
+        true
+    }
+
+    /// Whether hook policy currently restricts `/goal`.
+    async fn hooks_restricted(&self) -> bool {
+        false
+    }
+
     /// Switch the active model (and optional provider profile). Subsequent
     /// turns use the new model; the profile disambiguates shared model ids
     /// across providers (e.g. `"gpt-5.2"` on `"github-copilot"` vs `"openai"`).
@@ -1305,6 +1343,15 @@ pub enum OutputEvent {
         /// JSON input passed to the tool.
         input: serde_json::Value,
     },
+    /// Periodic heartbeat for a still-running tool call.
+    ToolHeartbeat {
+        /// Correlator with the matching `ToolCall` / `ToolResult`.
+        id: protocol::ToolUseId,
+        /// Name of the tool still running.
+        tool: String,
+        /// Milliseconds elapsed since the tool dispatch began.
+        elapsed_ms: u64,
+    },
     /// A tool result returning to the conversation.
     ToolResult {
         /// Correlator with the matching `ToolCall`.
@@ -1478,6 +1525,22 @@ pub trait OutputStream: Send + Sync {
         model_text: &str,
         result: &serde_json::Value,
     );
+
+    /// Emit a heartbeat for a tool call that is still running.
+    ///
+    /// Long-running tools can otherwise leave transport clients silent between
+    /// `emit_tool_call` and `emit_tool_result`. `elapsed_ms` is the wall-clock
+    /// age of the tool call, in milliseconds, from the dispatch point.
+    ///
+    /// **Default no-op**: sinks that do not surface tool heartbeats keep
+    /// compiling unchanged.
+    async fn emit_tool_heartbeat(
+        &self,
+        _id: &protocol::ToolUseId,
+        _tool: &str,
+        _elapsed_ms: u64,
+    ) {
+    }
 
     /// Emit the end-of-turn marker with the cost snapshot.
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot);

@@ -29,7 +29,7 @@ use outputstyles::{OutputStyle, OutputStyleFrontmatter, OutputStyleRegistry, Out
 use protocol::PluginId;
 use secret::CredentialManager;
 use skill_api::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -89,10 +89,14 @@ pub struct PluginManager {
     blocklist: Arc<PluginBlocklist>,
     strict: Arc<StrictPluginOnlyPolicy>,
     /// Persisted non-sensitive `userConfig` state, keyed by plugin identity
-    /// (matching `manifest.name`). Read from the settings `pluginConfigs` scope
-    /// at construction (via [`Self::with_plugin_configs`]); empty otherwise.
-    /// Sensitive values are NOT here — they come from [`CredentialManager`].
-    plugin_configs: HashMap<String, PluginUserConfig>,
+    /// (`name@marketplace` for cache-installed plugins, bare `name` for local
+    /// ones). Read from the settings `pluginConfigs` scope at construction (via
+    /// [`Self::with_plugin_configs`]); empty otherwise. Sensitive values are
+    /// NOT here — they come from [`CredentialManager`].
+    plugin_configs: RwLock<HashMap<String, PluginUserConfig>>,
+    /// Managed marketplace names blocked from add/install/enable. Later
+    /// composition-root refreshes replace this set in place.
+    blocked_marketplaces: RwLock<HashSet<String>>,
 
     // The 8 registries we materialize into:
     command_registry: Arc<RwLock<CommandRegistry>>,
@@ -138,7 +142,8 @@ impl PluginManager {
             credentials,
             blocklist,
             strict,
-            plugin_configs: HashMap::new(),
+            plugin_configs: RwLock::new(HashMap::new()),
+            blocked_marketplaces: RwLock::new(HashSet::new()),
             command_registry,
             skill_registry,
             hook_registry,
@@ -157,8 +162,34 @@ impl PluginManager {
     /// callers with no persisted config leave it empty.
     #[must_use]
     pub fn with_plugin_configs(mut self, configs: HashMap<String, PluginUserConfig>) -> Self {
-        self.plugin_configs = configs;
+        self.plugin_configs = RwLock::new(configs);
         self
+    }
+
+    /// Seed the managed marketplace blocklist.
+    #[must_use]
+    pub fn with_blocked_marketplaces<I, S>(mut self, blocked: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.blocked_marketplaces = RwLock::new(blocked.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Replace the persisted plugin config map used by future loads/reloads.
+    pub async fn replace_plugin_configs(&self, configs: HashMap<String, PluginUserConfig>) {
+        *self.plugin_configs.write().await = configs;
+    }
+
+    /// Replace the managed blocked-marketplaces set used by future loads.
+    pub async fn replace_blocked_marketplaces<I, S>(&self, blocked: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.blocked_marketplaces.write().await =
+            blocked.into_iter().map(Into::into).collect();
     }
 
     /// Install a plugin from `source`.
@@ -439,6 +470,13 @@ impl PluginManager {
         if let Some(reason) = self.blocklist.is_blocked(id).await {
             return Err(PluginManagerError::Blocked(reason));
         }
+        if let Some(marketplace) = cache_marketplace_name(&install_dir) {
+            if self.blocked_marketplaces.read().await.contains(&marketplace) {
+                return Err(PluginManagerError::Marketplace(format!(
+                    "Marketplace '{marketplace}' is blocked by managed settings"
+                )));
+            }
+        }
         self.load_plugin(&manifest, &install_dir).await?;
         self.plugins.write().await.insert(
             *id,
@@ -504,16 +542,17 @@ impl PluginManager {
         // below (substituted into the plugin's MCP server configs), not dropped.
         //
         // The plugin identity used for both the secret namespace and the
-        // pluginConfigs lookup is `manifest.name`. (Follow-up: the composition
-        // root should key `pluginConfigs` by the installed `name@marketplace`
-        // id; `with_plugin_configs` supplies a map matching this key.)
-        let plugin_key = manifest.name.as_str();
+        // pluginConfigs lookup is the installed `name@marketplace` id for
+        // cache-installed plugins, else the bare manifest name.
+        let plugin_key = installed_plugin_identity(manifest, install_dir);
         let options = self
             .plugin_configs
-            .get(plugin_key)
+            .read()
+            .await
+            .get(&plugin_key)
             .map(|c| c.options.clone())
             .unwrap_or_default();
-        let user_config = resolve_user_config(manifest, plugin_key, &options, &self.credentials)
+        let user_config = resolve_user_config(manifest, &plugin_key, &options, &self.credentials)
             .await
             .map_err(|e| PluginManagerError::Loader(e.to_string()))?;
         // The substitution context keyed by the bare field name.
@@ -952,6 +991,28 @@ fn extract_frontmatter(raw: &str) -> Option<&str> {
     // Find the closing fence at the start of a line.
     let end = rest.find("\n---").or_else(|| rest.find("\r\n---"))?;
     Some(&rest[..end])
+}
+
+/// Installed plugin identity used for `pluginConfigs` and plugin-secret
+/// namespaces: `name@marketplace` for cache-installed plugins, else bare
+/// `manifest.name`.
+fn installed_plugin_identity(manifest: &PluginManifest, install_dir: &Path) -> String {
+    match cache_marketplace_name(install_dir) {
+        Some(marketplace) => format!("{}@{marketplace}", manifest.name),
+        None => manifest.name.clone(),
+    }
+}
+
+/// When `install_dir` is the versioned cache layout
+/// `.../cache/<marketplace>/<plugin>/<version>/`, return the `<marketplace>`
+/// segment. Local/session plugins that do not live in the cache return `None`.
+fn cache_marketplace_name(install_dir: &Path) -> Option<String> {
+    let plugin_dir = install_dir.parent()?;
+    let marketplace_dir = plugin_dir.parent()?;
+    let cache_dir = marketplace_dir.parent()?;
+    (cache_dir.file_name()?.to_str()? == "cache")
+        .then(|| marketplace_dir.file_name()?.to_str().map(ToOwned::to_owned))
+        .flatten()
 }
 
 /// Derive a stable, sanitized `host/owner/repo` sub-path from a git URL, used as

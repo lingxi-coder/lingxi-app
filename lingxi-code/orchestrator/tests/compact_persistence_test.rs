@@ -368,9 +368,8 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
     assert_eq!(recovered, vec!["Task".to_string(), "WebFetch".to_string()]);
 }
 
-/// `isCompactSummary` user lines replay into resumed history as NORMAL user
-/// messages (not meta, not skipped) — the cold-resume twin of the hot
-/// in-memory summary message.
+/// `isCompactSummary` user lines replay into model history while retaining both
+/// independent JSONL visibility flags in the session side tables.
 #[test]
 fn compact_summary_line_replays_as_user_history() {
     let mut extra = serde_json::Map::new();
@@ -403,4 +402,7 @@ fn compact_summary_line_replays_as_user_history() {
         other => panic!("expected a user message, got {other:?}"),
     }
     assert_eq!(state.history[0].text_content(), "Summary:\nS");
+    let id = state.history[0].id();
+    assert!(state.transcript_only_messages.contains(&id));
+    assert!(state.compact_summary_messages.contains(&id));
 }

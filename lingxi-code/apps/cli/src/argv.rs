@@ -306,6 +306,16 @@ pub struct Argv {
     #[arg(long = "plugin-dir", value_name = "path", action = clap::ArgAction::Append)]
     pub plugin_dir: Vec<PathBuf>,
 
+    /// Load a plugin zip from a URL for this session only
+    /// (repeatable: --plugin-url A --plugin-url B)
+    //
+    // WIRED: repeatable, downloaded at runtime into the same session-only temp
+    // area the inline `--plugin-dir` zip loader uses, then threaded through
+    // `DesktopConfig.cli_plugin_dirs` so the existing session-plugin path loads
+    // it exactly like a local zip.
+    #[arg(long = "plugin-url", value_name = "url", action = clap::ArgAction::Append)]
+    pub plugin_url: Vec<String>,
+
     /// Disable session persistence - sessions will not be saved to disk and cannot be resumed (only works with --print)
     //
     // WIRED: non-print use hard-errors in `run_cli` (binary

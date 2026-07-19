@@ -363,6 +363,18 @@ impl OutputStream for MockOutputStream {
             input: input.clone(),
         });
     }
+    async fn emit_tool_heartbeat(
+        &self,
+        id: &protocol::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) {
+        self.events.lock().await.push(OutputEvent::ToolHeartbeat {
+            id: id.clone(),
+            tool: tool.to_string(),
+            elapsed_ms,
+        });
+    }
     async fn emit_tool_result(
         &self,
         id: &protocol::ToolUseId,
@@ -639,8 +651,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use traits::{
-    AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo, McpServerInfo,
-    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
+    ActiveGoalSnapshot, AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo,
+    McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
 };
 
 /// Test double for `OrchestratorHandle`.
@@ -693,6 +705,12 @@ pub struct MockOrchestratorHandle {
     mcp_servers: StdMutex<Vec<McpServerInfo>>,
     /// Pre-loaded hooks list returned by `list_hooks`.
     hooks_list: StdMutex<Vec<HookInfo>>,
+    /// Session-scoped `/goal` state returned through the handle.
+    active_goal: StdMutex<Option<ActiveGoalSnapshot>>,
+    /// `/goal` trust gate.
+    workspace_trusted: AtomicBool,
+    /// `/goal` hooks-restricted gate.
+    hooks_restricted: AtomicBool,
     /// Pre-loaded agents list returned by `list_agents`.
     agents_list: StdMutex<Vec<AgentInfo>>,
     /// Pre-loaded doctor report returned by `run_doctor_checks`.
@@ -735,6 +753,9 @@ impl MockOrchestratorHandle {
             cost_snapshot: StdMutex::new(None),
             mcp_servers: StdMutex::new(Vec::new()),
             hooks_list: StdMutex::new(Vec::new()),
+            active_goal: StdMutex::new(None),
+            workspace_trusted: AtomicBool::new(true),
+            hooks_restricted: AtomicBool::new(false),
             agents_list: StdMutex::new(Vec::new()),
             doctor_report: StdMutex::new(DoctorReport::default()),
             status_snapshot: StdMutex::new(StatusSnapshot::default()),
@@ -820,6 +841,18 @@ impl MockOrchestratorHandle {
     /// Pre-load the hooks list returned by `list_hooks`.
     pub fn set_hooks(&self, v: Vec<HookInfo>) {
         *self.hooks_list.lock().unwrap() = v;
+    }
+    /// Pre-load the active `/goal` state returned by `get_active_goal`.
+    pub fn set_active_goal_snapshot(&self, goal: Option<ActiveGoalSnapshot>) {
+        *self.active_goal.lock().unwrap() = goal;
+    }
+    /// Configure the `/goal` workspace-trust gate.
+    pub fn set_workspace_trusted(&self, trusted: bool) {
+        self.workspace_trusted.store(trusted, Ordering::SeqCst);
+    }
+    /// Configure the `/goal` hooks-restricted gate.
+    pub fn set_hooks_restricted(&self, restricted: bool) {
+        self.hooks_restricted.store(restricted, Ordering::SeqCst);
     }
     /// Pre-load the agents list returned by `list_agents`.
     pub fn set_agents(&self, v: Vec<AgentInfo>) {
@@ -914,6 +947,36 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             total_tokens: self.cost_tokens.load(Ordering::SeqCst),
             ..traits::CostSnapshot::default()
         }
+    }
+
+    async fn get_active_goal(&self) -> Option<ActiveGoalSnapshot> {
+        self.active_goal.lock().unwrap().clone()
+    }
+
+    async fn set_active_goal(&self, condition: &str) {
+        *self.active_goal.lock().unwrap() = Some(ActiveGoalSnapshot {
+            condition: condition.to_string(),
+            set_at: std::time::SystemTime::now(),
+            last_reason: None,
+        });
+    }
+
+    async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
+        self.active_goal.lock().unwrap().take()
+    }
+
+    async fn set_active_goal_last_reason(&self, reason: Option<String>) {
+        if let Some(goal) = self.active_goal.lock().unwrap().as_mut() {
+            goal.last_reason = reason;
+        }
+    }
+
+    async fn workspace_trusted(&self) -> bool {
+        self.workspace_trusted.load(Ordering::SeqCst)
+    }
+
+    async fn hooks_restricted(&self) -> bool {
+        self.hooks_restricted.load(Ordering::SeqCst)
     }
 
     async fn switch_model(&self, model: &str, profile: Option<&str>) -> Result<(), HandleError> {
@@ -1123,11 +1186,20 @@ mod tests {
         let input = serde_json::json!({"file_path": "/tmp/x"});
         let result = serde_json::json!({"content": "ok"});
         m.emit_tool_call(&id, "Read", &input).await;
+        m.emit_tool_heartbeat(&id, "Read", 1_250).await;
         m.emit_tool_result(&id, "Read", "ok", &result).await;
         let snap = m.snapshot().await;
-        assert_eq!(snap.len(), 2);
+        assert_eq!(snap.len(), 3);
         assert!(matches!(&snap[0], OutputEvent::ToolCall { id: gid, .. } if *gid == id));
-        assert!(matches!(&snap[1], OutputEvent::ToolResult { id: gid, .. } if *gid == id));
+        assert!(matches!(
+            &snap[1],
+            OutputEvent::ToolHeartbeat {
+                id: gid,
+                elapsed_ms: 1_250,
+                ..
+            } if *gid == id
+        ));
+        assert!(matches!(&snap[2], OutputEvent::ToolResult { id: gid, .. } if *gid == id));
     }
 
     #[tokio::test]

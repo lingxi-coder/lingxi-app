@@ -776,17 +776,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // path is honored. `--continue --resume <id>` is rejected upstream
     // (lib.rs:315 cross-flag rule), so the two never collide here.
     if parsed.continue_session {
+        let mut resumed_argv = parsed.clone();
+        if let Some(effort) = run::inherited_resume_effort(&parsed).await {
+            resumed_argv.effort = Some(effort);
+        }
         let sink = make_sink();
         let adapter: Arc<dyn traits::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("lingxi-cli: {e}");
                 return exit_codes::RUNTIME_ERROR;
             }
         };
-        return run::run_continue(&parsed, &runtime, sink.as_ref()).await;
+        return run::run_continue(&resumed_argv, &runtime, sink.as_ref()).await;
     }
 
     // --resume routes through run::run_resume, which itself splits (M7-12):
@@ -794,17 +798,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     //   (none) + TTY      → iocraft Resume screen
     //   (none) + --no-tui → M5-08 stdio picker (unchanged fallback)
     if parsed.resume.is_some() {
+        let mut resumed_argv = parsed.clone();
+        if let Some(effort) = run::inherited_resume_effort(&parsed).await {
+            resumed_argv.effort = Some(effort);
+        }
         let sink = make_sink();
         let adapter: Arc<dyn traits::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("lingxi-cli: {e}");
                 return exit_codes::RUNTIME_ERROR;
             }
         };
-        return run::run_resume(&parsed, &runtime, sink.as_ref()).await;
+        return run::run_resume(&resumed_argv, &runtime, sink.as_ref()).await;
     }
 
     // (M4 cc2.1.198) `--from-pr [value]` — the binary opens the SAME resume

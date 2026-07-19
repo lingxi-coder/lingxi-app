@@ -177,7 +177,7 @@ impl PermissionPolicy {
         let parser = self.pwsh_parser.as_ref()?;
         let parse = parser.parse(command);
         if !parse.valid {
-            return None;
+            return parse.invalid_reason.map(ask_powershell_invalid_parse);
         }
         let ctx = crate::powershell_containment::PsCtx {
             roots,
@@ -550,6 +550,12 @@ impl PermissionPolicy {
             && self.edit_covered_by_read_deny(tool_name, input)
         {
             return ask_edit_read_deny_covered(tool_name);
+        }
+        // Over-length bash input cannot be statically validated by the 10k-char
+        // parser path, so it must force an Ask before any allow-like shortcut
+        // (tool-wide/exact allow, sandbox auto-allow, read-only, mode auto-allow).
+        if let Some(ask) = Self::shell_overlength_bash_ask(tool_name, input) {
+            return ask;
         }
         // BYPASS-01 / ALLOWOVER-01: every guard ASK below is routed through
         // `resolve_guard_ask`, which (1) lets bypassPermissions suppress a
@@ -1777,6 +1783,24 @@ impl PermissionPolicy {
         None
     }
 
+    fn shell_overlength_bash_ask(
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Option<PermissionResult> {
+        if !matches!(tool_name, "Bash" | "Shell") {
+            return None;
+        }
+        let command = shell_command::command_from_input(input)?;
+        if command.chars().count() <= 10_000 {
+            return None;
+        }
+        Some(ask_bash_safety(
+            tool_name,
+            "Command exceeds maximum length of 10000 characters and cannot be statically analyzed"
+                .to_string(),
+        ))
+    }
+
     /// Shell-only read-only inference (the 3c layer). `true` iff this is a shell
     /// tool whose command is wholly read-only
     /// ([`crate::read_only_command::command_is_read_only`]).
@@ -2441,6 +2465,20 @@ fn ask_dangerous_removal(
 fn ask_powershell_containment(message: String, reason: String) -> PermissionResult {
     PermissionResult::Ask {
         reason: PermissionDecisionReason::Other { reason },
+        prompt: PermissionPrompt {
+            title: "Allow PowerShell?".to_string(),
+            message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+fn ask_powershell_invalid_parse(signal: String) -> PermissionResult {
+    let message = format!("PowerShell command could not be statically validated: {signal}");
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::Other { reason: signal },
         prompt: PermissionPrompt {
             title: "Allow PowerShell?".to_string(),
             message,

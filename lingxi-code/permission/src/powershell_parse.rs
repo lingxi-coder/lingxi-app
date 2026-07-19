@@ -96,6 +96,20 @@ pub struct ParseResult {
     pub valid: bool,
     /// The transformed statements to validate.
     pub statements: Vec<PsStatement>,
+    /// Optional explicit invalid/error signal from the parser/precheck. When
+    /// present, callers can fail closed to an Ask instead of silently passing
+    /// through on an otherwise-invalid parse.
+    pub invalid_reason: Option<String>,
+}
+
+impl ParseResult {
+    fn invalid(reason: impl Into<String>) -> Self {
+        Self {
+            valid: false,
+            statements: Vec::new(),
+            invalid_reason: Some(reason.into()),
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -323,14 +337,26 @@ fn transform_statement(raw: &Value) -> PsStatement {
 #[must_use]
 pub fn parse_ps_ast_json(json: &str) -> ParseResult {
     let Ok(root) = serde_json::from_str::<Value>(json) else {
-        return ParseResult::default();
+        return ParseResult::invalid("PowerShell parser returned malformed JSON");
     };
     let valid = root.get("valid").and_then(Value::as_bool).unwrap_or(false);
     if !valid {
-        return ParseResult {
-            valid: false,
-            statements: Vec::new(),
-        };
+        let signal = root
+            .get("errors")
+            .and_then(Value::as_array)
+            .and_then(|errors| errors.first())
+            .map(|error| {
+                let error_id = error.get("errorId").and_then(Value::as_str).unwrap_or("");
+                let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+                match (error_id.is_empty(), message.is_empty()) {
+                    (false, false) => format!("PowerShell parser reported {error_id}: {message}"),
+                    (false, true) => format!("PowerShell parser reported {error_id}"),
+                    (true, false) => format!("PowerShell parser reported: {message}"),
+                    (true, true) => "PowerShell parser reported an invalid parse".to_string(),
+                }
+            })
+            .unwrap_or_else(|| "PowerShell parser reported an invalid parse".to_string());
+        return ParseResult::invalid(signal);
     }
     let statements = cae(root.get("statements"))
         .iter()
@@ -339,6 +365,7 @@ pub fn parse_ps_ast_json(json: &str) -> ParseResult {
     ParseResult {
         valid: true,
         statements,
+        invalid_reason: None,
     }
 }
 
@@ -385,10 +412,14 @@ pub fn has_unicode_codepoint_escape(command: &str) -> bool {
 #[must_use]
 pub fn parse_precheck(command: &str) -> Option<ParseResult> {
     if command.len() > PWSH_MAX_COMMAND_BYTES {
-        return Some(ParseResult::default());
+        return Some(ParseResult::invalid(format!(
+            "PowerShell parser precheck rejected command longer than {PWSH_MAX_COMMAND_BYTES} bytes"
+        )));
     }
     if has_unicode_codepoint_escape(command) {
-        return Some(ParseResult::default());
+        return Some(ParseResult::invalid(
+            "PowerShell parser precheck rejected unsupported `u{...}` escape",
+        ));
     }
     None
 }
@@ -508,8 +539,11 @@ impl PwshParser for SystemPwshParser {
                 PwshRun::Success(stdout) => {
                     return parse_ps_ast_json(&String::from_utf8_lossy(&stdout));
                 }
-                // Resolved but failed/timed out after all attempts → passthrough.
-                PwshRun::Failed => return ParseResult::default(),
+                // Resolved but failed/timed out after all attempts. Surface an
+                // explicit invalid signal so the permission gate can fail closed.
+                PwshRun::Failed => {
+                    return ParseResult::invalid("PowerShell parser execution failed");
+                }
                 // Executable not found → try the next name.
                 PwshRun::NotFound => {}
             }

@@ -1,9 +1,7 @@
-//! M3-01 — 4-layer settings loader (env > user > project > defaults).
+//! Settings loader and merge orchestration.
 //!
 //! Entry point: [`Settings::load`]. Per-field merge rules live in
 //! [`merger`]; provenance for `/doctor` (M6) lives in [`tracer`].
-//!
-//! See spec §4 Flow D for the full data flow.
 
 use std::path::PathBuf;
 
@@ -84,6 +82,50 @@ pub struct LoadInputs<'a> {
     pub defaults: SettingsJson,
 }
 
+/// Which on-disk settings files are allowed to contribute to the merged view.
+///
+/// This matches Claude Code's three file-backed setting sources:
+/// - user: `~/.lingxi/settings.json`
+/// - project: `<project>/.lingxi/settings.json`
+/// - local: `<project>/.lingxi/settings.local.json`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileLayerScope {
+    /// Whether `~/.lingxi/settings.json` contributes.
+    pub include_user: bool,
+    /// Whether `<project>/.lingxi/settings.json` contributes.
+    pub include_project: bool,
+    /// Whether `<project>/.lingxi/settings.local.json` contributes.
+    pub include_local: bool,
+}
+
+impl FileLayerScope {
+    /// Enable all three file-backed settings sources.
+    pub const ALL: Self = Self {
+        include_user: true,
+        include_project: true,
+        include_local: true,
+    };
+}
+
+impl Default for FileLayerScope {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+/// Optional non-file settings layers that sit above local/project/user.
+///
+/// `cli_layer` is the parsed `--settings` / `flagSettings` payload.
+/// `managed_layers` are the managed `policySettings` tiers in ASCENDING
+/// priority, so later entries override earlier ones.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SupplementalLayers<'a> {
+    /// Parsed CLI `--settings` / `flagSettings` layer.
+    pub cli_layer: Option<&'a SettingsJson>,
+    /// Managed `policySettings` tiers in ascending priority order.
+    pub managed_layers: &'a [SettingsJson],
+}
+
 /// Result of [`Settings::load`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveSettings {
@@ -110,18 +152,36 @@ impl EffectiveSettings {
 pub struct Settings;
 
 impl Settings {
-    /// Load the 4-layer merged settings.
+    /// Load the merged defaults + user + project + local + env settings.
     ///
-    /// Priority (highest first): env → user → project → defaults.
-    /// Merge order (call order in code): defaults → project → user → env,
-    /// because [`merger::merge`] is `(prev, next)` where `next` overrides.
+    /// Priority (highest first): env → local → project → user → defaults.
+    /// Merge order (call order in code): defaults → user → project → local
+    /// → env, because [`merger::merge`] is `(prev, next)` where `next`
+    /// overrides.
     ///
     /// # Errors
     ///
-    /// Any [`SettingsError`] from a sub-layer bubbles up. Missing files at
-    /// the user or project layers are NOT errors — they just contribute
-    /// an empty layer.
+    /// Any [`SettingsError`] from a sub-layer bubbles up. Missing settings
+    /// files are NOT errors — they just contribute an empty layer.
     pub fn load(inputs: LoadInputs<'_>) -> Result<EffectiveSettings, SettingsError> {
+        Self::load_with_layers(inputs, FileLayerScope::ALL, SupplementalLayers::default())
+    }
+
+    /// Load settings with explicit file-source gating plus optional CLI and
+    /// managed layers.
+    ///
+    /// Priority (highest first): env → managed → cli → local → project
+    /// → user → defaults. `managed_layers` must already be sorted in ASCENDING
+    /// priority so later tiers override earlier ones.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Settings::load`].
+    pub fn load_with_layers(
+        inputs: LoadInputs<'_>,
+        file_scope: FileLayerScope,
+        supplemental: SupplementalLayers<'_>,
+    ) -> Result<EffectiveSettings, SettingsError> {
         let LoadInputs {
             env,
             project_dir,
@@ -134,22 +194,51 @@ impl Settings {
         trace.record_layer(tracer::Source::Defaults, &defaults);
         let mut acc = defaults;
 
-        // Layer 2: project
-        let project_path = loader::project_settings_path(project_dir);
-        if let Some(proj) = loader::read_settings_file(&project_path)? {
-            trace.record_layer(tracer::Source::Project, &proj);
-            acc = merger::merge(acc, proj);
-        }
-
-        // Layer 3: user
-        if let Some(user_path) = loader::user_settings_path() {
-            if let Some(usr) = loader::read_settings_file(&user_path)? {
-                trace.record_layer(tracer::Source::User, &usr);
-                acc = merger::merge(acc, usr);
+        // Layer 2: user
+        if file_scope.include_user {
+            if let Some(user_path) = loader::user_settings_path() {
+                if let Some(usr) = loader::read_settings_file(&user_path)? {
+                    trace.record_layer(tracer::Source::User, &usr);
+                    acc = merger::merge(acc, usr);
+                }
             }
         }
 
-        // Layer 4 (highest): env
+        // Layer 3: project
+        if file_scope.include_project {
+            let project_path = loader::project_settings_path(project_dir);
+            if let Some(proj) = loader::read_settings_file(&project_path)? {
+                trace.record_layer(tracer::Source::Project, &proj);
+                acc = merger::merge(acc, proj);
+            }
+        }
+
+        // Layer 4: project-local
+        if file_scope.include_local {
+            let local_path = loader::local_settings_path(project_dir);
+            if let Some(local) = loader::read_settings_file(&local_path)? {
+                trace.record_layer(tracer::Source::Local, &local);
+                acc = merger::merge(acc, local);
+            }
+        }
+
+        // Layer 5: CLI / flagSettings
+        if let Some(cli) = supplemental.cli_layer {
+            if *cli != SettingsJson::default() {
+                trace.record_layer(tracer::Source::Cli, cli);
+                acc = merger::merge(acc, cli.clone());
+            }
+        }
+
+        // Layer 6: managed / policySettings
+        for managed in supplemental.managed_layers {
+            if *managed != SettingsJson::default() {
+                trace.record_layer(tracer::Source::Managed, managed);
+                acc = merger::merge(acc, managed.clone());
+            }
+        }
+
+        // Layer 7 (highest): env
         let (env_layer, _invalid_env) = env_parser::parse_env(env)?;
         trace.record_layer(tracer::Source::Env, &env_layer);
         acc = merger::merge(acc, env_layer);
@@ -162,15 +251,11 @@ impl Settings {
 
     /// Like [`Settings::load`] but GATES the user / project file layers — the
     /// substrate for claude-code's `--setting-sources <user,project,local>`
-    /// (scope which setting sources load). `include_user` / `include_project`
-    /// select whether the `~/.lingxi/settings.json` and
-    /// `<project>/.lingxi/settings.json` layers contribute; `defaults` and the
-    /// `env` layer ALWAYS apply (env vars are not a "setting source" claude
-    /// scopes off). Both `true` is identical to [`Settings::load`].
-    ///
-    /// NOTE: lingxi has no separate "local" (`settings.local.json`) layer, so
-    /// claude's `local` source is not modeled here — callers map it onto the
-    /// project layer or ignore it.
+    /// (scope which setting sources load). `include_user` selects whether the
+    /// user settings layer contributes. `include_project` gates BOTH the shared
+    /// project settings file and the project-local `settings.local.json` layer,
+    /// preserving the existing two-flag API surface. Callers that need a
+    /// distinct local toggle should use [`Settings::load_with_layers`].
     ///
     /// # Errors
     /// Same as [`Settings::load`].
@@ -179,46 +264,15 @@ impl Settings {
         include_user: bool,
         include_project: bool,
     ) -> Result<EffectiveSettings, SettingsError> {
-        let LoadInputs {
-            env,
-            project_dir,
-            defaults,
-        } = inputs;
-
-        let mut trace = tracer::ProvenanceTrace::default();
-
-        // Layer 1 (lowest): defaults (always).
-        trace.record_layer(tracer::Source::Defaults, &defaults);
-        let mut acc = defaults;
-
-        // Layer 2: project (gated).
-        if include_project {
-            let project_path = loader::project_settings_path(project_dir);
-            if let Some(proj) = loader::read_settings_file(&project_path)? {
-                trace.record_layer(tracer::Source::Project, &proj);
-                acc = merger::merge(acc, proj);
-            }
-        }
-
-        // Layer 3: user (gated).
-        if include_user {
-            if let Some(user_path) = loader::user_settings_path() {
-                if let Some(usr) = loader::read_settings_file(&user_path)? {
-                    trace.record_layer(tracer::Source::User, &usr);
-                    acc = merger::merge(acc, usr);
-                }
-            }
-        }
-
-        // Layer 4 (highest): env (always — not a file "setting source").
-        let (env_layer, _invalid_env) = env_parser::parse_env(env)?;
-        trace.record_layer(tracer::Source::Env, &env_layer);
-        acc = merger::merge(acc, env_layer);
-
-        Ok(EffectiveSettings {
-            settings: acc,
-            trace,
-        })
+        Self::load_with_layers(
+            inputs,
+            FileLayerScope {
+                include_user,
+                include_project,
+                include_local: include_project,
+            },
+            SupplementalLayers::default(),
+        )
     }
 
     /// Same as [`Settings::load`] but emits telemetry through the supplied bus.
@@ -245,6 +299,23 @@ impl Settings {
         inputs: LoadInputs<'_>,
         bus: Option<&std::sync::Arc<telemetry::AnalyticsBus>>,
     ) -> Result<EffectiveSettings, SettingsError> {
+        Self::load_with_telemetry_layers(
+            inputs,
+            FileLayerScope::ALL,
+            SupplementalLayers::default(),
+            bus,
+        )
+        .await
+    }
+
+    /// Async telemetry variant of [`Settings::load_with_layers`].
+    #[allow(clippy::too_many_lines)]
+    pub async fn load_with_telemetry_layers(
+        inputs: LoadInputs<'_>,
+        file_scope: FileLayerScope,
+        supplemental: SupplementalLayers<'_>,
+        bus: Option<&std::sync::Arc<telemetry::AnalyticsBus>>,
+    ) -> Result<EffectiveSettings, SettingsError> {
         let LoadInputs {
             env,
             project_dir,
@@ -260,45 +331,79 @@ impl Settings {
         let mut acc = defaults;
         layers_present += 1;
 
-        // Layer 2: project
-        let project_path = loader::project_settings_path(project_dir);
-        match loader::read_settings_file(&project_path) {
-            Ok(Some(proj)) => {
-                trace.record_layer(tracer::Source::Project, &proj);
-                acc = merger::merge(acc, proj);
-                layers_present += 1;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                emit_parse_error(bus, &project_path, &e).await;
-                return Err(e);
+        // Layer 2: user
+        if file_scope.include_user {
+            if let Some(ref up) = user_path {
+                match loader::read_settings_file(up) {
+                    Ok(Some(usr)) => {
+                        trace.record_layer(tracer::Source::User, &usr);
+                        acc = merger::merge(acc, usr);
+                        layers_present += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        emit_parse_error(bus, up, &e).await;
+                        return Err(e);
+                    }
+                }
             }
         }
 
-        // Layer 3: user
-        if let Some(ref up) = user_path {
-            match loader::read_settings_file(up) {
-                Ok(Some(usr)) => {
-                    trace.record_layer(tracer::Source::User, &usr);
-                    acc = merger::merge(acc, usr);
+        // Layer 3: project
+        if file_scope.include_project {
+            let project_path = loader::project_settings_path(project_dir);
+            match loader::read_settings_file(&project_path) {
+                Ok(Some(proj)) => {
+                    trace.record_layer(tracer::Source::Project, &proj);
+                    acc = merger::merge(acc, proj);
                     layers_present += 1;
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    emit_parse_error(bus, up, &e).await;
+                    emit_parse_error(bus, &project_path, &e).await;
                     return Err(e);
                 }
             }
         }
 
-        // Layer 4 (highest): env
+        // Layer 4: project-local
+        if file_scope.include_local {
+            let local_path = loader::local_settings_path(project_dir);
+            match loader::read_settings_file(&local_path) {
+                Ok(Some(local)) => {
+                    trace.record_layer(tracer::Source::Local, &local);
+                    acc = merger::merge(acc, local);
+                    layers_present += 1;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    emit_parse_error(bus, &local_path, &e).await;
+                    return Err(e);
+                }
+            }
+        }
+
+        // Layer 5: CLI / flagSettings
+        if let Some(cli) = supplemental.cli_layer {
+            if *cli != SettingsJson::default() {
+                trace.record_layer(tracer::Source::Cli, cli);
+                acc = merger::merge(acc, cli.clone());
+                layers_present += 1;
+            }
+        }
+
+        // Layer 6: managed / policySettings
+        for managed in supplemental.managed_layers {
+            if *managed != SettingsJson::default() {
+                trace.record_layer(tracer::Source::Managed, managed);
+                acc = merger::merge(acc, managed.clone());
+                layers_present += 1;
+            }
+        }
+
+        // Layer 7 (highest): env
         let (env_layer, invalid_env) = env_parser::parse_env(env)?;
-        let env_was_nonempty = env_layer.model.is_some()
-            || env_layer.telemetry_enabled.is_some()
-            || env_layer.trusted_directories.is_some()
-            || env_layer.additional_directories.is_some()
-            || env_layer.enabled_tools.is_some()
-            || env_layer.additional_includes.is_some();
+        let env_was_nonempty = env_layer != SettingsJson::default();
         if env_was_nonempty {
             had_env_override = true;
             layers_present += 1;
@@ -401,7 +506,7 @@ mod load_tests {
     use std::io::Write;
 
     #[test]
-    fn env_beats_user_beats_project_beats_defaults() {
+    fn env_beats_local_beats_project_beats_user_beats_defaults() {
         let _guard = HOME_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -411,12 +516,15 @@ mod load_tests {
         std::fs::create_dir_all(&user_dir).unwrap();
         let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
+        let local_path = project_subdir.join("settings.local.json");
 
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();
         writeln!(pf, r#"{{"model": "project-model"}}"#).unwrap();
 
         let mut uf = std::fs::File::create(user_dir.join("settings.json")).unwrap();
         writeln!(uf, r#"{{"model": "user-model"}}"#).unwrap();
+        let mut lf = std::fs::File::create(local_path).unwrap();
+        writeln!(lf, r#"{{"model": "local-model"}}"#).unwrap();
 
         // Stand in for $HOME so user_settings_path() points to our tempdir.
         std::env::set_var("HOME", tmp.path().join("home"));
@@ -439,7 +547,7 @@ mod load_tests {
     }
 
     #[test]
-    fn user_beats_project_when_no_env() {
+    fn project_beats_user_when_no_local_or_env() {
         let _guard = HOME_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -463,11 +571,11 @@ mod load_tests {
             defaults: schema::SettingsJson::default(),
         })
         .unwrap();
-        assert_eq!(eff.settings.model.as_deref(), Some("user-model"));
+        assert_eq!(eff.settings.model.as_deref(), Some("project-model"));
     }
 
     #[test]
-    fn array_concat_dedup_runs_through_4_layers() {
+    fn array_concat_dedup_runs_through_defaults_user_project_local_env_layers() {
         let _guard = HOME_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -477,11 +585,14 @@ mod load_tests {
         std::fs::create_dir_all(&user_dir).unwrap();
         let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
+        let local_path = project_subdir.join("settings.local.json");
 
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();
         writeln!(pf, r#"{{"trustedDirectories": ["/project"]}}"#).unwrap();
         let mut uf = std::fs::File::create(user_dir.join("settings.json")).unwrap();
         writeln!(uf, r#"{{"trustedDirectories": ["/user"]}}"#).unwrap();
+        let mut lf = std::fs::File::create(local_path).unwrap();
+        writeln!(lf, r#"{{"trustedDirectories": ["/local", "/project"]}}"#).unwrap();
         std::env::set_var("HOME", tmp.path().join("home3"));
 
         let mut env = BTreeMap::new();
@@ -503,12 +614,136 @@ mod load_tests {
             Some(
                 &[
                     "/default".to_string(),
-                    "/project".to_string(),
                     "/user".to_string(),
+                    "/project".to_string(),
+                    "/local".to_string(),
                     "/env".to_string()
                 ][..]
             ),
-            "all four layers contribute in low-to-high priority order"
+            "all file layers plus env contribute in low-to-high priority order"
+        );
+    }
+
+    #[test]
+    fn load_with_layers_honors_local_only_scope() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let user_dir = tmp.path().join("home_scope").join(".lingxi");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let project_subdir = project_dir.join(".lingxi");
+        std::fs::create_dir_all(&project_subdir).unwrap();
+
+        std::fs::write(user_dir.join("settings.json"), r#"{"model": "user-model"}"#).unwrap();
+        std::fs::write(
+            project_subdir.join("settings.json"),
+            r#"{"model": "project-model"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_subdir.join("settings.local.json"),
+            r#"{"model": "local-model"}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", tmp.path().join("home_scope"));
+
+        let eff = Settings::load_with_layers(
+            LoadInputs {
+                env: &BTreeMap::new(),
+                project_dir,
+                defaults: schema::SettingsJson::default(),
+            },
+            FileLayerScope {
+                include_user: false,
+                include_project: false,
+                include_local: true,
+            },
+            SupplementalLayers::default(),
+        )
+        .unwrap();
+        assert_eq!(eff.settings.model.as_deref(), Some("local-model"));
+    }
+
+    #[test]
+    fn load_with_layers_gives_managed_precedence_without_dropping_project_provider_extensions() {
+        use serde_json::json;
+        use std::collections::BTreeMap as Map;
+
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let user_dir = tmp.path().join("home_layers").join(".lingxi");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let project_subdir = project_dir.join(".lingxi");
+        std::fs::create_dir_all(&project_subdir).unwrap();
+
+        std::fs::write(
+            user_dir.join("settings.json"),
+            r#"{"model":"user-model","providers":{"userOnly":{"type":"openai"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_subdir.join("settings.json"),
+            r#"{"model":"project-model","providers":{"projectOnly":{"baseUrl":"https://project.example"},"shared":{"baseUrl":"https://project.example"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_subdir.join("settings.local.json"),
+            r#"{"model":"local-model","providers":{"localOnly":{"apiKeyEnv":"LOCAL_KEY"},"shared":{"apiKeyEnv":"LOCAL_KEY"}}}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", tmp.path().join("home_layers"));
+
+        let cli_layer: SettingsJson = serde_json::from_value(json!({
+            "model": "cli-model",
+            "providers": {
+                "cliOnly": { "type": "openai" },
+                "shared": { "timeout": 30 }
+            }
+        }))
+        .unwrap();
+        let managed_layer: SettingsJson = serde_json::from_value(json!({
+            "model": "managed-model",
+            "providers": {
+                "managedOnly": { "region": "managed" },
+                "shared": { "region": "managed" }
+            }
+        }))
+        .unwrap();
+
+        let eff = Settings::load_with_layers(
+            LoadInputs {
+                env: &BTreeMap::new(),
+                project_dir,
+                defaults: schema::SettingsJson::default(),
+            },
+            FileLayerScope::ALL,
+            SupplementalLayers {
+                cli_layer: Some(&cli_layer),
+                managed_layers: std::slice::from_ref(&managed_layer),
+            },
+        )
+        .unwrap();
+        assert_eq!(eff.settings.model.as_deref(), Some("managed-model"));
+
+        let providers = eff.settings.providers.unwrap_or_else(Map::new);
+        assert!(providers.contains_key("userOnly"));
+        assert!(providers.contains_key("projectOnly"));
+        assert!(providers.contains_key("localOnly"));
+        assert!(providers.contains_key("cliOnly"));
+        assert!(providers.contains_key("managedOnly"));
+        assert_eq!(
+            providers.get("shared"),
+            Some(&json!({
+                "baseUrl": "https://project.example",
+                "apiKeyEnv": "LOCAL_KEY",
+                "timeout": 30,
+                "region": "managed"
+            }))
         );
     }
 

@@ -31,10 +31,16 @@ pub struct ReplyFallback {
 /// Input/control frames received from an attached terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachInput {
-    /// A complete user input line, without trailing CR/LF.
-    Line(String),
+    /// Raw terminal input bytes from the attached client.
+    Bytes(Vec<u8>),
+    /// Terminal resize (`SIGWINCH`) from the attached client.
+    Resize { cols: u16, rows: u16 },
     /// User interrupt (`Ctrl-C`).
     Interrupt,
+    /// Client-requested detach.
+    Detach,
+    /// Client EOF (`Ctrl-D`).
+    Eof,
     /// One attach client disconnected.
     ClientDetached,
 }
@@ -66,6 +72,13 @@ mod unix {
     use tokio::sync::mpsc;
 
     const MAX_REPLAY_BYTES: usize = 1024 * 1024;
+    const MAX_FRAME_BYTES: usize = 1024 * 1024;
+    const FRAME_OUTPUT: u8 = 1;
+    const FRAME_INPUT_BYTES: u8 = 2;
+    const FRAME_RESIZE: u8 = 3;
+    const FRAME_INTERRUPT: u8 = 4;
+    const FRAME_DETACH: u8 = 5;
+    const FRAME_EOF: u8 = 6;
 
     struct Client {
         id: u64,
@@ -174,9 +187,7 @@ mod unix {
             let mut clients = self.inner.clients.lock().unwrap();
             let mut i = 0;
             while i < clients.len() {
-                let ok = clients[i]
-                    .stream
-                    .write_all(bytes)
+                let ok = write_frame(&mut clients[i].stream, FRAME_OUTPUT, bytes)
                     .and_then(|()| clients[i].stream.flush())
                     .is_ok();
                 if ok {
@@ -236,7 +247,7 @@ mod unix {
         let _ = stream.set_read_timeout(None);
 
         let transcript = hub.transcript.lock().unwrap().clone();
-        if !transcript.is_empty() && stream.write_all(&transcript).is_err() {
+        if !transcript.is_empty() && write_frame(&mut stream, FRAME_OUTPUT, &transcript).is_err() {
             return;
         }
         let _ = stream.flush();
@@ -269,43 +280,50 @@ mod unix {
     }
 
     fn client_input_loop(hub: Weak<AttachHubInner>, id: u64, mut stream: UnixStream) {
-        let mut line = Vec::new();
-        let mut buf = [0_u8; 1024];
         loop {
-            match stream.read(&mut buf) {
-                Ok(0) => {
+            match read_frame(&mut stream) {
+                Ok(Some((FRAME_INPUT_BYTES, payload))) => {
+                    let Some(hub) = hub.upgrade() else {
+                        return;
+                    };
+                    hub.send_input(AttachInput::Bytes(payload));
+                }
+                Ok(Some((FRAME_RESIZE, payload))) => {
+                    if payload.len() != 4 {
+                        continue;
+                    }
+                    let Some(hub) = hub.upgrade() else {
+                        return;
+                    };
+                    hub.send_input(AttachInput::Resize {
+                        cols: u16::from_be_bytes([payload[0], payload[1]]),
+                        rows: u16::from_be_bytes([payload[2], payload[3]]),
+                    });
+                }
+                Ok(Some((FRAME_INTERRUPT, _))) => {
+                    let Some(hub) = hub.upgrade() else {
+                        return;
+                    };
+                    hub.send_input(AttachInput::Interrupt);
+                }
+                Ok(Some((FRAME_DETACH, _))) => {
                     if let Some(hub) = hub.upgrade() {
                         hub.remove_client(id);
+                        hub.send_input(AttachInput::Detach);
                         hub.send_input(AttachInput::ClientDetached);
                     }
                     return;
                 }
-                Ok(n) => {
-                    let Some(hub) = hub.upgrade() else {
-                        return;
-                    };
-                    for byte in &buf[..n] {
-                        match *byte {
-                            b'\n' => {
-                                let input = String::from_utf8_lossy(&line).into_owned();
-                                line.clear();
-                                hub.send_input(AttachInput::Line(input));
-                            }
-                            b'\r' => {}
-                            0x03 => hub.send_input(AttachInput::Interrupt), // Ctrl-C
-                            0x04 => {
-                                hub.remove_client(id);
-                                hub.send_input(AttachInput::ClientDetached);
-                                return;
-                            }
-                            0x08 | 0x7f => {
-                                line.pop();
-                            }
-                            b => line.push(b),
-                        }
+                Ok(Some((FRAME_EOF, _))) => {
+                    if let Some(hub) = hub.upgrade() {
+                        hub.remove_client(id);
+                        hub.send_input(AttachInput::Eof);
+                        hub.send_input(AttachInput::ClientDetached);
                     }
+                    return;
                 }
-                Err(_) => {
+                Ok(Some((_other, _payload))) => {}
+                Ok(None) | Err(_) => {
                     if let Some(hub) = hub.upgrade() {
                         hub.remove_client(id);
                         hub.send_input(AttachInput::ClientDetached);
@@ -314,6 +332,43 @@ mod unix {
                 }
             }
         }
+    }
+
+    fn write_frame(stream: &mut UnixStream, kind: u8, payload: &[u8]) -> io::Result<()> {
+        let len = u32::try_from(payload.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "attach frame exceeds u32 length")
+        })?;
+        stream.write_all(&[kind])?;
+        stream.write_all(&len.to_be_bytes())?;
+        stream.write_all(payload)
+    }
+
+    fn read_frame(stream: &mut UnixStream) -> io::Result<Option<(u8, Vec<u8>)>> {
+        let mut header = [0_u8; 5];
+        match stream.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        }
+        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+        if len > MAX_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "attach frame too large",
+            ));
+        }
+        let mut payload = vec![0_u8; len];
+        stream.read_exact(&mut payload)?;
+        Ok(Some((header[0], payload)))
     }
 
     /// Sink that mirrors plain CLI output to the live attach hub.
@@ -386,29 +441,86 @@ mod unix {
         let _ = stdout.flush();
     }
 
-    fn echo_char(stdout: &mut io::StdoutLock<'_>, c: char) {
-        let mut buf = [0_u8; 4];
-        let _ = stdout.write_all(c.encode_utf8(&mut buf).as_bytes());
-        let _ = stdout.flush();
-    }
-
-    fn echo_backspace(stdout: &mut io::StdoutLock<'_>) {
-        let _ = stdout.write_all(b"\x08 \x08");
-        let _ = stdout.flush();
-    }
-
-    fn echo_newline(stdout: &mut io::StdoutLock<'_>) {
-        let _ = stdout.write_all(b"\r\n");
-        let _ = stdout.flush();
-    }
-
     fn is_detach_command(line: &str) -> bool {
         matches!(line.trim(), "/exit" | "/quit")
     }
 
-    /// Connect to a live background worker and run a small PTY-like pump: worker
-    /// output is copied to stdout, while local key events are line-edited and
-    /// forwarded as input/control frames over the same socket.
+    #[derive(Default)]
+    struct PendingLine {
+        bytes: Vec<u8>,
+    }
+
+    impl PendingLine {
+        fn push_bytes(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                match *byte {
+                    b'\r' | b'\n' => self.bytes.clear(),
+                    0x08 | 0x7f => {
+                        self.bytes.pop();
+                    }
+                    b if b >= 0x20 || b == b'\t' => self.bytes.push(b),
+                    _ => {}
+                }
+            }
+        }
+
+        fn as_string(&self) -> String {
+            String::from_utf8_lossy(&self.bytes).into_owned()
+        }
+    }
+
+    fn resize_payload(cols: u16, rows: u16) -> [u8; 4] {
+        let [c0, c1] = cols.to_be_bytes();
+        let [r0, r1] = rows.to_be_bytes();
+        [c0, c1, r0, r1]
+    }
+
+    fn encode_key_bytes(key: &crossterm::event::KeyEvent) -> Option<Vec<u8>> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let mut out = Vec::new();
+        match key.code {
+            KeyCode::Char('c') if ctrl => return None,
+            KeyCode::Char('d') if ctrl => return None,
+            KeyCode::Char(c) => {
+                if alt {
+                    out.push(0x1b);
+                }
+                if ctrl && c.is_ascii() {
+                    let lower = c.to_ascii_lowercase() as u8;
+                    if (b'a'..=b'z').contains(&lower) {
+                        out.push(lower - b'a' + 1);
+                    } else {
+                        out.push(lower);
+                    }
+                } else {
+                    let mut buf = [0_u8; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+            KeyCode::Enter => out.push(b'\n'),
+            KeyCode::Tab => out.push(b'\t'),
+            KeyCode::BackTab => out.extend_from_slice(b"\x1b[Z"),
+            KeyCode::Backspace => out.push(0x7f),
+            KeyCode::Left => out.extend_from_slice(b"\x1b[D"),
+            KeyCode::Right => out.extend_from_slice(b"\x1b[C"),
+            KeyCode::Up => out.extend_from_slice(b"\x1b[A"),
+            KeyCode::Down => out.extend_from_slice(b"\x1b[B"),
+            KeyCode::Home => out.extend_from_slice(b"\x1b[H"),
+            KeyCode::End => out.extend_from_slice(b"\x1b[F"),
+            KeyCode::Delete => out.extend_from_slice(b"\x1b[3~"),
+            KeyCode::Insert => out.extend_from_slice(b"\x1b[2~"),
+            KeyCode::PageUp => out.extend_from_slice(b"\x1b[5~"),
+            KeyCode::PageDown => out.extend_from_slice(b"\x1b[6~"),
+            KeyCode::Esc => out.push(0x1b),
+            _ => return None,
+        }
+        Some(out)
+    }
+
+    /// Connect to a live background worker and run a framed PTY-like pump:
+    /// worker output is copied to stdout, while local terminal bytes/control are
+    /// forwarded over the same socket.
     ///
     /// If the worker vanishes mid-attach and a pending input line therefore fails
     /// to deliver, that line is persisted to the durable offline reply queue
@@ -426,20 +538,24 @@ mod unix {
         stream.flush()?;
         stream.set_read_timeout(Some(Duration::from_millis(10)))?;
         let _raw = RawModeGuard::enable()?;
+        if let Ok((cols, rows)) = crossterm::terminal::size() {
+            let payload = resize_payload(cols, rows);
+            let _ = write_frame(&mut stream, FRAME_RESIZE, &payload).and_then(|()| stream.flush());
+        }
 
         let mut stdout = io::stdout().lock();
-        let mut socket_buf = [0_u8; 8192];
-        let mut line = String::new();
         let mut prev_output = 0_u8;
+        let mut pending_line = PendingLine::default();
         loop {
-            match stream.read(&mut socket_buf) {
-                // Worker closed the socket. If a line was mid-edit, persist it so
-                // it is not lost.
-                Ok(0) => {
-                    persist_pending_line(&line, fallback);
+            match read_frame(&mut stream) {
+                Ok(None) => {
+                    persist_pending_line(&pending_line.as_string(), fallback);
                     return Ok(());
                 }
-                Ok(n) => write_terminal_output(&mut stdout, &socket_buf[..n], &mut prev_output),
+                Ok(Some((FRAME_OUTPUT, payload))) => {
+                    write_terminal_output(&mut stdout, &payload, &mut prev_output);
+                }
+                Ok(Some((_other, _payload))) => {}
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -449,53 +565,77 @@ mod unix {
             }
 
             if event::poll(Duration::from_millis(10))? {
-                let Event::Key(key) = event::read()? else {
-                    continue;
-                };
-                if key.kind == KeyEventKind::Release {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        stream.write_all(&[0x03])?;
-                        stream.flush()?;
-                    }
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let _ = stream.shutdown(Shutdown::Both);
-                        return Ok(());
-                    }
-                    KeyCode::Char(c) => {
-                        line.push(c);
-                        echo_char(&mut stdout, c);
-                    }
-                    KeyCode::Backspace => {
-                        if !line.is_empty() {
-                            line.pop();
-                            echo_backspace(&mut stdout);
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.kind == KeyEventKind::Release {
+                            continue;
+                        }
+                        match key.code {
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                write_frame(&mut stream, FRAME_INTERRUPT, &[])?;
+                                stream.flush()?;
+                            }
+                            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                let _ = write_frame(&mut stream, FRAME_EOF, &[]);
+                                let _ = stream.flush();
+                                let _ = stream.shutdown(Shutdown::Both);
+                                return Ok(());
+                            }
+                            KeyCode::Esc => {
+                                let _ = write_frame(&mut stream, FRAME_DETACH, &[]);
+                                let _ = stream.flush();
+                                let _ = stream.shutdown(Shutdown::Both);
+                                return Ok(());
+                            }
+                            KeyCode::Enter => {
+                                if is_detach_command(&pending_line.as_string()) {
+                                    let _ = write_frame(&mut stream, FRAME_DETACH, &[]);
+                                    let _ = stream.flush();
+                                    let _ = stream.shutdown(Shutdown::Both);
+                                    return Ok(());
+                                }
+                                if let Some(bytes) = encode_key_bytes(&key) {
+                                    let submitted = pending_line.as_string();
+                                    pending_line.push_bytes(&bytes);
+                                    if write_frame(&mut stream, FRAME_INPUT_BYTES, &bytes)
+                                        .and_then(|()| stream.flush())
+                                        .is_err()
+                                    {
+                                        persist_pending_line(&submitted, fallback);
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            _ => {
+                                let Some(bytes) = encode_key_bytes(&key) else {
+                                    continue;
+                                };
+                                pending_line.push_bytes(&bytes);
+                                if write_frame(&mut stream, FRAME_INPUT_BYTES, &bytes)
+                                    .and_then(|()| stream.flush())
+                                    .is_err()
+                                {
+                                    persist_pending_line(&pending_line.as_string(), fallback);
+                                    return Ok(());
+                                }
+                            }
                         }
                     }
-                    KeyCode::Enter => {
-                        echo_newline(&mut stdout);
-                        if is_detach_command(&line) {
-                            let _ = stream.shutdown(Shutdown::Both);
+                    Event::Paste(data) => {
+                        let bytes = data.into_bytes();
+                        pending_line.push_bytes(&bytes);
+                        if write_frame(&mut stream, FRAME_INPUT_BYTES, &bytes)
+                            .and_then(|()| stream.flush())
+                            .is_err()
+                        {
+                            persist_pending_line(&pending_line.as_string(), fallback);
                             return Ok(());
                         }
-                        // A failed live delivery (BrokenPipe → the worker
-                        // vanished) is persisted to the offline queue instead of
-                        // aborting the attach with an error.
-                        let sent = stream
-                            .write_all(line.as_bytes())
-                            .and_then(|()| stream.write_all(b"\n"))
+                    }
+                    Event::Resize(cols, rows) => {
+                        let payload = resize_payload(cols, rows);
+                        let _ = write_frame(&mut stream, FRAME_RESIZE, &payload)
                             .and_then(|()| stream.flush());
-                        if sent.is_err() {
-                            persist_pending_line(&line, fallback);
-                            return Ok(());
-                        }
-                        line.clear();
-                    }
-                    KeyCode::Esc => {
-                        let _ = stream.shutdown(Shutdown::Both);
-                        return Ok(());
                     }
                     _ => {}
                 }
@@ -552,32 +692,40 @@ mod unix {
             client
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
-            let mut buf = [0_u8; 7];
-            client.read_exact(&mut buf).unwrap();
-            assert_eq!(&buf, b"before\n");
+            let (kind, payload) = read_frame(&mut client).unwrap().unwrap();
+            assert_eq!(kind, FRAME_OUTPUT);
+            assert_eq!(payload, b"before\n");
 
             hub.broadcast(b"after\n");
-            let mut buf = [0_u8; 6];
-            client.read_exact(&mut buf).unwrap();
-            assert_eq!(&buf, b"after\n");
+            let (kind, payload) = read_frame(&mut client).unwrap().unwrap();
+            assert_eq!(kind, FRAME_OUTPUT);
+            assert_eq!(payload, b"after\n");
         }
 
         #[test]
-        fn attach_socket_forwards_input_lines_and_interrupts() {
+        fn attach_socket_forwards_raw_input_and_controls() {
             let path = short_socket_path();
             let hub = AttachHub::start(path.clone(), "token-1".to_string()).unwrap();
             let mut rx = hub.take_input_rx().unwrap();
 
             let mut client = UnixStream::connect(&path).unwrap();
             client.write_all(b"token-1\n").unwrap();
-            client.write_all(b"hello worker\n").unwrap();
-            client.write_all(&[0x03]).unwrap();
+            write_frame(&mut client, FRAME_INPUT_BYTES, b"hello worker\n").unwrap();
+            write_frame(&mut client, FRAME_RESIZE, &resize_payload(120, 40)).unwrap();
+            write_frame(&mut client, FRAME_INTERRUPT, &[]).unwrap();
+            write_frame(&mut client, FRAME_DETACH, &[]).unwrap();
 
             assert_eq!(
                 rx.blocking_recv(),
-                Some(AttachInput::Line("hello worker".to_string()))
+                Some(AttachInput::Bytes(b"hello worker\n".to_vec()))
+            );
+            assert_eq!(
+                rx.blocking_recv(),
+                Some(AttachInput::Resize { cols: 120, rows: 40 })
             );
             assert_eq!(rx.blocking_recv(), Some(AttachInput::Interrupt));
+            assert_eq!(rx.blocking_recv(), Some(AttachInput::Detach));
+            assert_eq!(rx.blocking_recv(), Some(AttachInput::ClientDetached));
         }
     }
 }

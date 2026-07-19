@@ -46,6 +46,21 @@ pub struct ReplayedSession {
     pub last_message_uuid: Option<Uuid>,
     /// Raw replayed messages (file-order), for callers that need them.
     pub messages: Vec<JsonlMessage>,
+    /// Runtime-only state reconstructed from transcript envelope metadata.
+    /// This is not representable in `SessionState.history`, but must survive a
+    /// cold resume for effort and compaction behavior to remain continuous.
+    pub runtime_metadata: ResumeRuntimeMetadata,
+}
+
+/// Runtime state recoverable from a persisted JSONL transcript.
+#[derive(Debug, Clone)]
+pub struct ResumeRuntimeMetadata {
+    /// Last real assistant response's top-level `effort` value.
+    pub effort: Option<String>,
+    /// Latest compact boundary's `cumulativeDroppedTokens` value.
+    pub cumulative_dropped_tokens: u64,
+    /// Reconstructed rapid-refill/autocompact tracking state.
+    pub compaction_tracking: compaction::AutoCompactTrackingState,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -62,7 +77,7 @@ pub async fn replay_session_state(
 ) -> Result<ReplayedSession, ResumeError> {
     let sid_str = session_id.to_string();
     let messages = load_session(lingxi_home, cwd, session_id, fs).await?;
-    let (state, last_uuid) = build_state_from_jsonl(session_id, &messages);
+    let (state, last_uuid, runtime_metadata) = build_state_from_jsonl(session_id, &messages);
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -74,6 +89,7 @@ pub async fn replay_session_state(
         state,
         last_message_uuid: last_uuid,
         messages,
+        runtime_metadata,
     })
 }
 
@@ -95,6 +111,14 @@ pub fn state_from_messages(session_id: Uuid, messages: &[JsonlMessage]) -> Sessi
     build_state_from_jsonl(session_id, messages).0
 }
 
+/// Recover the runtime-only resume metadata without rebuilding the session
+/// history. CLI remount paths use this before constructing a replacement
+/// runtime so the saved effort can seed the provider adapter.
+#[must_use]
+pub fn runtime_metadata_from_messages(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
+    resume_runtime_metadata(messages)
+}
+
 /// Convert the replayed JSONL into a fresh [`SessionState`] + the UUID of
 /// the tail message. `type: "user" | "assistant"` lines are appended to
 /// `history`; `type: "system"` / `compact_boundary` / sidechain entries
@@ -103,7 +127,7 @@ pub fn state_from_messages(session_id: Uuid, messages: &[JsonlMessage]) -> Sessi
 fn build_state_from_jsonl(
     session_id: Uuid,
     messages: &[JsonlMessage],
-) -> (SessionState, Option<Uuid>) {
+) -> (SessionState, Option<Uuid>, ResumeRuntimeMetadata) {
     let mut state = SessionState::empty(
         SessionId::from_uuid(session_id),
         crate::config::DEFAULT_MODEL.to_string(),
@@ -122,6 +146,22 @@ fn build_state_from_jsonl(
                     .get("isMeta")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
+                if m
+                    .extra
+                    .get("isVisibleInTranscriptOnly")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    state.transcript_only_messages.insert(MessageId::from_uuid(msg_uuid));
+                }
+                if m
+                    .extra
+                    .get("isCompactSummary")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    state.compact_summary_messages.insert(MessageId::from_uuid(msg_uuid));
+                }
                 state.history.push(ConversationMessage::User {
                     id: MessageId::from_uuid(msg_uuid),
                     content: content_blocks,
@@ -171,7 +211,95 @@ fn build_state_from_jsonl(
             }
         }
     }
-    (state, last_uuid)
+    (state, last_uuid, resume_runtime_metadata(messages))
+}
+
+fn is_compact_boundary(message: &JsonlMessage) -> bool {
+    message.message_type == "system"
+        && message.extra.get("subtype").and_then(serde_json::Value::as_str)
+            == Some("compact_boundary")
+}
+
+/// Reconstruct state Claude keeps adjacent to the message array. Boundaries
+/// persist the cumulative counter directly; the rapid-refill window is derived
+/// from the number of completed assistant iterations between adjacent
+/// boundaries and after the latest boundary.
+fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
+    let effort = messages.iter().rev().find_map(|m| {
+        if m.message_type != "assistant"
+            || m
+                .extra
+                .get("isApiErrorMessage")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        m.extra
+            .get("effort")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| matches!(*value, "low" | "medium" | "high" | "xhigh" | "max"))
+            .map(str::to_owned)
+    });
+
+    let boundary_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| is_compact_boundary(message).then_some(index))
+        .collect();
+
+    let mut cumulative_dropped_tokens = 0;
+    let mut tracking = compaction::AutoCompactTrackingState::default();
+    if let Some(&last_boundary) = boundary_indices.last() {
+        let compact_metadata = messages[last_boundary].extra.get("compactMetadata");
+        cumulative_dropped_tokens = compact_metadata
+            .and_then(|metadata| metadata.get("cumulativeDroppedTokens"))
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                let metadata = compact_metadata?;
+                let pre = metadata.get("preTokens")?.as_u64()?;
+                let post = metadata.get("postTokens")?.as_u64()?;
+                Some(pre.saturating_sub(post))
+            })
+            .unwrap_or(0);
+
+        tracking.compacted = true;
+        tracking.turn_counter = u32::try_from(
+            messages[last_boundary + 1..]
+                .iter()
+                .filter(|message| message.message_type == "assistant")
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        tracking.turn_id = messages[last_boundary + 1..]
+            .iter()
+            .rev()
+            .find(|message| message.message_type == "assistant")
+            .map_or_else(|| messages[last_boundary].uuid.clone(), |message| message.uuid.clone());
+
+        // A first compact stores zero rapid refills. Each later compact whose
+        // predecessor is fewer than the configured turn window away increments
+        // the consecutive count; a wider interval resets it.
+        let mut consecutive = 0_u32;
+        for pair in boundary_indices.windows(2) {
+            let turns = messages[pair[0] + 1..pair[1]]
+                .iter()
+                .filter(|message| message.message_type == "assistant")
+                .count();
+            if turns < compaction::RAPID_REFILL_TURN_WINDOW as usize {
+                consecutive = consecutive.saturating_add(1);
+            } else {
+                consecutive = 0;
+            }
+        }
+        tracking.consecutive_rapid_refills = consecutive;
+    }
+
+    ResumeRuntimeMetadata {
+        effort,
+        cumulative_dropped_tokens,
+        compaction_tracking: tracking,
+    }
 }
 
 /// Best-effort extraction of `content` from a JSONL `message` payload.
@@ -202,6 +330,18 @@ fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
 }
 
 impl ConversationOrchestrator {
+    /// Restore transcript-derived compaction state on an already-built runtime.
+    /// Used by the CLI's remount path, which intentionally constructs the
+    /// writer for the target session before adopting its history.
+    pub async fn restore_resume_runtime_metadata(&self, messages: &[JsonlMessage]) {
+        let metadata = resume_runtime_metadata(messages);
+        self.compaction_cumulative_dropped_tokens.store(
+            metadata.cumulative_dropped_tokens,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        *self.compaction_tracking.lock().await = metadata.compaction_tracking;
+    }
+
     /// Construct an orchestrator pre-populated with a replayed session.
     ///
     /// 1. Calls [`replay_session_state`] to load + validate the JSONL.
@@ -231,6 +371,9 @@ impl ConversationOrchestrator {
     ) -> Result<Self, ResumeError> {
         config.resume_session_id = Some(session_id);
         let replayed = replay_session_state(&lingxi_home, &cwd_str, session_id, fs).await?;
+        if config.effort.is_none() {
+            config.effort.clone_from(&replayed.runtime_metadata.effort);
+        }
 
         // P2-10 (parity 2.1.208): re-seed the Tool-Search deferred-tool loaded-set
         // from the transcript's compact boundaries, so a tool the model loaded via
@@ -259,6 +402,11 @@ impl ConversationOrchestrator {
         // from a sibling module in the same crate.
         orch.session = Arc::new(Mutex::new(replayed.state));
         orch.last_jsonl_uuid = Mutex::new(replayed.last_message_uuid.map(|u| u.to_string()));
+        orch.compaction_cumulative_dropped_tokens.store(
+            replayed.runtime_metadata.cumulative_dropped_tokens,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        orch.compaction_tracking = Mutex::new(replayed.runtime_metadata.compaction_tracking);
         if let Some(writer) = jsonl_writer {
             orch.jsonl_writer = Some(writer);
         }

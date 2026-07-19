@@ -41,12 +41,13 @@
 
 use crate::agents_registry::{self, SessionRegistration};
 use crate::argv::Argv;
+use crate::daemon_roster::Launch;
 use crate::exit_codes;
 use crate::output::{OutputSink, PlainSink};
 use crate::output_adapter::SinkAdapter;
 use orchestrator::TurnOutcome;
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -65,14 +66,26 @@ pub struct Cli {
 pub struct JobSpec {
     /// The job short id (`jobs/<short>/`).
     pub short: String,
-    /// The task to run — the persisted `initialPrompt`.
-    pub prompt: String,
+    /// Optional initial turn prompt for this spawn.
+    pub prompt: Option<String>,
     /// The directory the turn should run in (the persisted `cwd`).
     pub cwd: String,
     /// The worker's session UUID (persisted `sessionId`).
     pub session_id: String,
     /// Display label for the live session record (name → intent fallback).
     pub name: Option<String>,
+    /// How the worker should seed/open the session before any follow-up input.
+    pub launch: WorkerLaunch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerLaunch {
+    Prompt,
+    Resume {
+        transcript_path: Option<PathBuf>,
+        fork: bool,
+        flag_args: Vec<String>,
+    },
 }
 
 /// Production entrypoint: resolve the shared config home and drive
@@ -109,8 +122,12 @@ where
     if agents_registry::job_is_terminal(&job) {
         return exit_codes::SUCCESS;
     }
-    let prompt = job.initial_prompt.clone().unwrap_or_default();
-    if prompt.trim().is_empty() {
+    let launch = job_launch_for(config_home, short, &job);
+    let prompt = job
+        .initial_prompt
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    if prompt.is_none() && matches!(launch, WorkerLaunch::Prompt) {
         // A prompt-less job can never run a turn; mark it done so it doesn't
         // linger as a perpetual "working" phantom.
         let _ = agents_registry::update_job_state(config_home, short, "done", None);
@@ -123,6 +140,7 @@ where
         cwd: job.cwd.clone().unwrap_or_default(),
         session_id: job.session_id.clone().unwrap_or_default(),
         name: job.name.clone().or_else(|| job.intent.clone()),
+        launch,
     };
 
     // 2. Register a LIVE bg session (unlinked on drop / explicit deregister).
@@ -150,6 +168,42 @@ where
     exit_codes::SUCCESS
 }
 
+fn job_launch_for(config_home: &Path, short: &str, job: &agents_registry::JobState) -> WorkerLaunch {
+    let roster = crate::daemon_roster::read_roster(
+        config_home,
+        i32::try_from(std::process::id()).unwrap_or(0),
+        false,
+    )
+    .into_roster();
+    let Some(record) = roster.workers.get(short) else {
+        return WorkerLaunch::Prompt;
+    };
+    match &record.dispatch.launch {
+        Launch::Resume {
+            transcript_path,
+            fork,
+            flag_args,
+            ..
+        } => WorkerLaunch::Resume {
+            transcript_path: transcript_path.as_ref().map(PathBuf::from),
+            fork: *fork,
+            flag_args: flag_args.clone(),
+        },
+        Launch::Prompt { .. } => WorkerLaunch::Prompt,
+        _ => {
+            if job.initial_prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty()) {
+                WorkerLaunch::Prompt
+            } else {
+                WorkerLaunch::Resume {
+                    transcript_path: None,
+                    fork: false,
+                    flag_args: Vec::new(),
+                }
+            }
+        }
+    }
+}
+
 /// Synthesize the print-shaped [`Argv`] the worker runs the turn with.
 /// `--print`-shaped so the headless deny-on-ask permission default applies (no
 /// interactive prompt is reachable from a detached worker); `background:false`
@@ -159,13 +213,14 @@ where
 /// `register_bg` advertise. Omitting it (the earlier bug) minted a fresh id, so
 /// resuming the job's session found no transcript.
 fn worker_argv(spec: &JobSpec) -> Argv {
-    Argv {
-        prompt: Some(spec.prompt.clone()),
+    let argv = Argv {
+        prompt: spec.prompt.clone(),
         print: true,
         background: false,
         session_id: (!spec.session_id.is_empty()).then(|| spec.session_id.clone()),
         ..Argv::default()
-    }
+    };
+    argv
 }
 
 /// The production executor: chdir into the job cwd, synthesize a print-shaped

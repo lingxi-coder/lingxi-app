@@ -2790,6 +2790,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn overlong_bash_asks_before_exact_allow_and_read_only() {
+        let command = format!("echo {}", "a".repeat(10_001));
+        let p = PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            [allow_rule("Bash", Some(&command))],
+        )
+        .with_roots(roots());
+        match p.authorize("Bash", &bash(&command)) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { reason },
+                ..
+            } => assert!(reason.contains("10000 characters"), "reason was: {reason}"),
+            other => panic!("expected overlong Bash Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overlong_bash_asks_before_sandbox_auto_allow() {
+        let command = format!("echo {}", "a".repeat(10_001));
+        let p = PermissionPolicy::new(PermissionMode::Default)
+            .with_roots(roots())
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash(&command)),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
     /// An explicit DENY rule still wins over the safety chain (deny walk runs
     /// first) — the safety check must NOT downgrade a deny.
     #[test]

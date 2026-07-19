@@ -26,10 +26,12 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::process::Command;
 use traits::{
-    AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome, HandleError, HookInfo,
-    McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome, StatusSnapshot,
+    ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
+    HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
+    StatusSnapshot,
 };
 
 #[async_trait]
@@ -45,6 +47,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
         let mut s = self.session.lock().await;
         s.history.clear();
+        s.transcript_only_messages.clear();
+        s.compact_summary_messages.clear();
+        s.active_goal = None;
         s.session_id = protocol::SessionId::new();
         self.compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -93,6 +98,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
         let mut s = self.session.lock().await;
         s.history = history;
+        // The trait-level transport currently carries protocol messages only,
+        // not JSONL envelope flags. Never leak the previous session's compact
+        // visibility metadata into newly adopted message ids.
+        s.transcript_only_messages.clear();
+        s.compact_summary_messages.clear();
+        s.active_goal = None;
         // Adopt the NAMED id (clear_session mints a fresh one; resume does NOT).
         s.session_id = session_id;
         drop(s);
@@ -138,6 +149,48 @@ impl OrchestratorHandle for ConversationOrchestrator {
             cancel,
         )
         .await
+    }
+
+    async fn get_active_goal(&self) -> Option<ActiveGoalSnapshot> {
+        let s = self.session.lock().await;
+        s.active_goal.as_ref().map(|goal| ActiveGoalSnapshot {
+            condition: goal.condition.clone(),
+            set_at: goal.set_at,
+            last_reason: goal.last_reason.clone(),
+        })
+    }
+
+    async fn set_active_goal(&self, condition: &str) {
+        let mut s = self.session.lock().await;
+        s.active_goal = Some(engine::session::ActiveGoalState {
+            condition: condition.to_string(),
+            set_at: SystemTime::now(),
+            last_reason: None,
+        });
+    }
+
+    async fn clear_active_goal(&self) -> Option<ActiveGoalSnapshot> {
+        let mut s = self.session.lock().await;
+        s.active_goal.take().map(|goal| ActiveGoalSnapshot {
+            condition: goal.condition,
+            set_at: goal.set_at,
+            last_reason: goal.last_reason,
+        })
+    }
+
+    async fn set_active_goal_last_reason(&self, reason: Option<String>) {
+        let mut s = self.session.lock().await;
+        if let Some(goal) = s.active_goal.as_mut() {
+            goal.last_reason = reason;
+        }
+    }
+
+    async fn workspace_trusted(&self) -> bool {
+        self.workspace_trusted
+    }
+
+    async fn hooks_restricted(&self) -> bool {
+        self.hooks_restricted
     }
 
     /// `/fork` — spawn a DETACHED background agent that inherits the

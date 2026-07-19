@@ -64,6 +64,19 @@ pub enum ClientEvent {
         input_json: String,
     },
 
+    /// Periodic heartbeat for a still-running tool call. Additive over
+    /// [`ClientEvent::ToolUseStarted`] / [`ClientEvent::ToolUseResult`]: long
+    /// tool executions can now surface liveness without inventing a second
+    /// result event shape.
+    ToolHeartbeat {
+        /// Correlator with the matching [`ClientEvent::ToolUseStarted`].
+        id: String,
+        /// Name of the tool still running.
+        tool: String,
+        /// Milliseconds elapsed since the tool dispatch began.
+        elapsed_ms: u64,
+    },
+
     /// A tool result returning to the conversation. 1:1 `emit_tool_result`;
     /// fires in COMPLETION order — clients key by `id`.
     ToolUseResult {
@@ -283,6 +296,13 @@ pub enum ClientEvent {
         status: TaskStatusDto,
     },
 
+    /// The slash-command catalog changed in-place (for example after a
+    /// `/reload-skills` or plugin refresh path mutated the live registry).
+    CommandsChanged {
+        /// The full updated slash-command catalog snapshot.
+        commands: Vec<SlashCommandDto>,
+    },
+
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────
     /// Coordinator/team status. **LIVE-FED** (§0.9 coordinator-activation):
     /// a coordinator-mode desktop session constructs one `TeamRegistry` per
@@ -336,6 +356,19 @@ pub enum ClientEvent {
         cache_read_tokens: u64,
         /// Cache-creation tokens in the latest API call.
         cache_creation_tokens: u64,
+    },
+
+    /// The live API retry/backoff status: a request failed with a retry-worthy
+    /// error and is sleeping before the next attempt.
+    ApiRetry {
+        /// User-facing error text.
+        message: String,
+        /// 1-based attempt number about to be retried.
+        attempt: u32,
+        /// Configured retry cap.
+        max_retries: u32,
+        /// Backoff before the next attempt, in ms.
+        delay_ms: u64,
     },
 }
 

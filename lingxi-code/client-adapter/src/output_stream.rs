@@ -15,11 +15,13 @@
 //! |-----------------------------|-------------------------------------|
 //! | `emit_text`                 | `TextDelta`                         |
 //! | `emit_tool_call`            | `ToolUseStarted`                    |
+//! | `emit_tool_heartbeat`       | `ToolHeartbeat`                     |
 //! | `emit_tool_result`          | `ToolUseResult`                     |
 //! | `emit_end_turn`             | `CostUpdate` **then** `TurnEnded`   |
 //! | `emit_compaction_completed` | `CompactionCompleted`               |
 //! | `emit_thinking` (§0.7)      | `ThinkingDelta`                     |
 //! | `emit_usage` (§0.7)         | `UsageUpdate`                       |
+//! | `emit_api_retry`            | `ApiRetry`                          |
 //!
 //! All `serde_json::Value` lowering goes through the pure F1-11 fns in
 //! [`crate::lowering`] so the wire form is identical to every other surface and
@@ -119,6 +121,16 @@ impl OutputStream for AdapterOutputStream {
                 id: id.to_string(),
                 tool: tool.to_string(),
                 input_json: value_to_json_string(input),
+            })
+            .await;
+    }
+
+    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+        self.sink
+            .emit(ClientEvent::ToolHeartbeat {
+                id: id.to_string(),
+                tool: tool.to_string(),
+                elapsed_ms,
             })
             .await;
     }
@@ -234,6 +246,17 @@ impl OutputStream for AdapterOutputStream {
             .emit(ClientEvent::CoordinatorStatus {
                 active_workers,
                 team: team.map(str::to_string),
+            })
+            .await;
+    }
+
+    async fn emit_api_retry(&self, message: &str, attempt: u32, max_retries: u32, delay_ms: u64) {
+        self.sink
+            .emit(ClientEvent::ApiRetry {
+                message: message.to_string(),
+                attempt,
+                max_retries,
+                delay_ms,
             })
             .await;
     }

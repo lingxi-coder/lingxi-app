@@ -681,6 +681,16 @@ mod tests {
         assert!(b.background);
     }
 
+    // (M-01 cc2.1.215) `--brief` enables the SendUserMessage (Brief) tool. It is
+    // a plain bool flag, default-off (absent = tool invisible to the model).
+    #[test]
+    fn brief_flag_parses_and_defaults_off() {
+        let off = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(!off.brief, "--brief defaults off");
+        let on = Argv::from_iter(["lingxi-cli", "--brief", "hi"]).unwrap();
+        assert!(on.brief);
+    }
+
     #[test]
     fn optional_value_flag_consumes_next_token_like_commander() {
         // Parity (review P1): an optional-value global flag (`--debug`, `--from-pr`,

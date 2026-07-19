@@ -201,7 +201,19 @@ impl AgentToolResolver {
         // `Write`/`Edit` (keeping `Read`). The tools are pulled from the parent
         // pool (the memory agent's parent always exposes them); if the parent
         // pool lacks one, that tool is simply not injected.
-        if agent_def.memory.is_some() {
+        // (review #13) Match claude's full condition `fm() && n.memory &&
+        // o!==void 0`, not just `n.memory`: (a) honor the global auto-memory
+        // killswitch via `auto_memory_enabled()`, so `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
+        // / `CLAUDE_CODE_SIMPLE` suppress injection as claude does — otherwise a
+        // restricted agent would be granted Read/Write/Edit the user's killswitch
+        // meant to withhold; and (b) inject ONLY for an EXPLICIT tools list
+        // (`o!==void 0`). For `All` the tools are already present (no-op); for
+        // `Except` claude does NOT inject, so an `Except`-excluded memory tool
+        // must stay excluded.
+        if agent_def.memory.is_some()
+            && auto_memory_enabled()
+            && matches!(agent_def.tools, AgentToolPolicy::Explicit(_))
+        {
             for want in ["Read", "Write", "Edit"] {
                 if !tools.iter().any(|t| t.name() == want) {
                     if let Some(injected) = parent_tools.iter().find(|t| t.name() == want) {
@@ -270,6 +282,31 @@ impl AgentToolResolver {
 /// case (`"Bash"`) is returned unchanged (trimmed).
 fn tool_name_from_spec(spec: &str) -> &str {
     spec.split('(').next().unwrap_or(spec).trim()
+}
+
+/// Mirror of claude `fm()` / `isAutoMemoryEnabled` for the auto-memory tool
+/// injection gate (review #13). Auto-memory is DISABLED — and so the Read/Write/
+/// Edit injection is suppressed — when the killswitch env is set:
+/// `CLAUDE_CODE_DISABLE_AUTO_MEMORY` / `LINGXI_DISABLE_AUTO_MEMORY` truthy, or
+/// `CLAUDE_CODE_SIMPLE` / `LINGXI_SIMPLE` set. The remaining `fm()` arms
+/// (settings-level `autoMemoryEnabled:false`, non-interactive `Rl()`, and the
+/// remote-without-memdir case) are not yet threaded into the resolver — a
+/// documented follow-up; the env killswitch is the user-facing control CC
+/// documents and is honored here.
+fn auto_memory_enabled() -> bool {
+    fn truthy(name: &str) -> bool {
+        std::env::var(name).ok().is_some_and(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+    }
+    fn is_set(name: &str) -> bool {
+        std::env::var(name).ok().is_some_and(|v| !v.trim().is_empty())
+    }
+    !(truthy("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+        || truthy("LINGXI_DISABLE_AUTO_MEMORY")
+        || is_set("CLAUDE_CODE_SIMPLE")
+        || is_set("LINGXI_SIMPLE"))
 }
 
 /// Resolve a subagent spawn's advertised tool SCHEMAS + dispatch allow-list from
@@ -807,6 +844,26 @@ mod tests {
         assert!(got.contains(&"Write".to_string()), "Write injected for memory");
         assert!(got.contains(&"Edit".to_string()), "Edit injected for memory");
         assert!(!got.contains(&"Grep".to_string()), "Grep not part of memory set");
+    }
+
+    #[test]
+    fn memory_scope_does_not_inject_for_except_policy() {
+        // (review #13) claude injects auto-memory tools only for an EXPLICIT
+        // tools list (`o!==void 0`). An `Except` agent that excludes Write must
+        // NOT have Write re-added by the memory scope — the exclusion wins.
+        let parent = pool(&["Read", "Write", "Edit", "Bash"]);
+        let def = agent_def_with_memory(
+            AgentToolPolicy::Except(vec!["Write".to_string()]),
+            AgentMemoryScope::Project,
+        );
+        let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
+        let got = names(&resolved);
+        assert!(
+            !got.contains(&"Write".to_string()),
+            "Except-excluded Write must not be re-injected by memory scope"
+        );
+        // The non-excluded parent tools remain.
+        assert!(got.contains(&"Read".to_string()) && got.contains(&"Bash".to_string()));
     }
 
     #[test]

@@ -58,6 +58,16 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // session's last entry.
         *self.last_jsonl_uuid.lock().await = None;
         drop(s);
+        // (review #8) Reset the autocompact circuit-breaker / rapid-refill
+        // tracking. claude-code's clearConversation restarts the query loop with
+        // a fresh autoCompactTracking accumulator; LingXi's long-lived
+        // orchestrator field would otherwise leak a TRIPPED breaker (>=3
+        // consecutive summarizer failures) or a stale rapid-refill counter into
+        // the freshly-cleared session — permanently disabling autocompact there
+        // (a tripped breaker only clears on a successful compact, which can then
+        // never run). Zero it alongside the cumulative-dropped-tokens reset.
+        *self.compaction_tracking.lock().await =
+            compaction::AutoCompactTrackingState::default();
         // (parity 2.1.212) claude-code's clearConversation calls resetCostState
         // (yJe): a freshly-cleared session starts the cost footer/status line at
         // zero instead of carrying the prior conversation's accumulated total
@@ -113,6 +123,13 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // latest persisted boundary instead of starting the live counter at 0.
         self.compaction_cumulative_dropped_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        // (review #8) Reset the autocompact circuit-breaker / rapid-refill
+        // tracking so an adopted session does not inherit the prior live
+        // session's tripped breaker or stale counters (the full-replay
+        // `with_resume` path seeds this from persisted metadata; this in-place
+        // trait adopt has no such seed, so a clean default is correct).
+        *self.compaction_tracking.lock().await =
+            compaction::AutoCompactTrackingState::default();
         // Seed the parent-uuid chain so any future append chains off the
         // resumed tail (matching the M5-07 writer's chain semantics).
         *self.last_jsonl_uuid.lock().await = last_jsonl_uuid;

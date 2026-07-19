@@ -45,32 +45,29 @@
 //! The `status`/`clear`/`too-long` branches have no `prompt`, so they map onto
 //! `CommandResult::Done` (the `/effort`/`/model` precedent).
 //!
-//! ## Known gaps (documented, not implemented — no shared file may be touched
-//! by this port; see each fn's doc comment)
+//! ## Known gaps (documented, not implemented)
 //!
-//! * **No app-state goal seam.** `traits::OrchestratorHandle` has no
-//!   `get_active_goal` / `set_active_goal` / `clear_active_goal` method
-//!   (verified: `traits/src/orchestrator.rs` defines no such members). This
-//!   handler keeps its own `Mutex`-guarded [`ActiveGoal`] instead — sound for
-//!   as long as the registry holds ONE shared `Arc<GoalHandler>` per session
-//!   (the same lifetime every other stateful core handler assumes), but it
-//!   means a goal set through one `GoalHandler` instance is invisible to any
-//!   other instance. A real app-state seam should replace this field.
-//! * **No hook add/remove seam.** `OrchestratorHandle::list_hooks` is
-//!   read-only; there is no `add_session_hook` / `remove_session_hook`. This
-//!   port does NOT register or remove an actual `Stop` hook — the directive
-//!   text alone asks the model to keep working, but nothing will mechanically
-//!   block a real `Stop` event yet. Wiring that in requires both the new
-//!   handle methods AND the turn-loop change the spec calls out separately
-//!   (tagging a goal-owned hook so a non-blocking `ok:true` Prompt-hook result
-//!   auto-clears `activeGoal` and allows the stop) — out of scope for a single
-//!   command-handler file.
-//! * **No trust / hooks-restricted query.** [`workspace_trusted`] and
-//!   [`hooks_restricted`] are the `kEt(n,t)` gate's two halves; neither has a
-//!   handle seam, so both hardcode the always-succeeds answer (mirrors the
-//!   `effort.rs` `dynamic_workflows_enabled` "seam missing → hard value"
-//!   pattern). The fixed gate-failure strings are kept ready to fire once a
-//!   real query lands.
+//! * **Stop-hook enforcement is NOT wired (the real remaining gap).** The
+//!   app-state goal seam now EXISTS — `traits::OrchestratorHandle` carries
+//!   `get_active_goal` / `set_active_goal` / `clear_active_goal` /
+//!   `set_active_goal_last_reason`, and this handler delegates to them (no local
+//!   `Mutex` state). But nothing in the turn loop consults `active_goal` at stop
+//!   time: this port does NOT register a real `Stop` hook, so the directive text
+//!   alone asks the model to keep working — NOTHING mechanically blocks a real
+//!   `Stop` event, and `active_goal` is never auto-cleared on success. Wiring
+//!   that in requires the turn-loop change the spec calls out (a goal-owned hook
+//!   whose non-blocking `ok:true` Prompt-hook result auto-clears `activeGoal`
+//!   and allows the stop). Consequently `set_active_goal_last_reason` has no
+//!   production caller yet, so `lastReason` is always `None`.
+//! * **Trust / hooks-restricted values are not sourced.** [`workspace_trusted`]
+//!   and [`hooks_restricted`] are now `OrchestratorHandle` methods (the
+//!   `kEt(n,t)` gate's two halves), but their default impls return `true` /
+//!   `false` and no composition root passes real values yet (the
+//!   `with_workspace_trusted` / `with_hooks_restricted` builders have no
+//!   production caller), so both gates effectively still hardcode the
+//!   always-succeeds answer and the fixed gate-failure strings below remain
+//!   unreachable until the desktop/mobile roots wire real trust + settings-
+//!   derived restriction values.
 //! * **`lastReasonSuffix` formatting is NOT byte-verified.** The task's
 //!   locked output-string list gives every OTHER literal verbatim but leaves
 //!   this one as a `${lastReasonSuffix}` placeholder; the one targeted

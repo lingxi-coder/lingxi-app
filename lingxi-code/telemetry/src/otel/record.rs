@@ -142,7 +142,7 @@ pub struct TruncatedContent {
 /// ```text
 /// let t = max;
 /// if (e.length <= t) return { content: e, truncated: false };
-/// let n = `\n[TRUNCATED - Content exceeds ${t>=1024 ? `${Math.floor(t/1024)}KB` : `${t} character`} limit]`;
+/// let n = `\n\n[TRUNCATED - Content exceeds ${t>=1024 ? `${Math.floor(t/1024)}KB` : `${t} character`} limit]`;
 /// if (n.length >= t) return { content: e.slice(0, t), truncated: true };
 /// return { content: e.slice(0, t - n.length) + n, truncated: true };
 /// ```
@@ -188,14 +188,15 @@ pub fn truncate_content(content: &str, max: i64) -> TruncatedContent {
     }
 }
 
-/// The CC truncation marker (leading newline preserved): `\n[TRUNCATED - Content
-/// exceeds {N}KB limit]` for `t >= 1024`, else `\n[TRUNCATED - Content exceeds
-/// {t} character limit]` (singular `character`, matching the binary template).
+/// The CC truncation marker (two leading newlines, per the 2.1.215 binary —
+/// verified `\n\n[TRUNCATED…`, string-table length 0x1f=31): `\n\n[TRUNCATED -
+/// Content exceeds {N}KB limit]` for `t >= 1024`, else `\n\n[TRUNCATED - Content
+/// exceeds {t} character limit]` (singular `character`, matching the template).
 fn truncation_marker(t: usize) -> String {
     if t >= 1024 {
-        format!("\n[TRUNCATED - Content exceeds {}KB limit]", t / 1024)
+        format!("\n\n[TRUNCATED - Content exceeds {}KB limit]", t / 1024)
     } else {
-        format!("\n[TRUNCATED - Content exceeds {t} character limit]")
+        format!("\n\n[TRUNCATED - Content exceeds {t} character limit]")
     }
 }
 
@@ -684,7 +685,7 @@ mod tests {
         let s = "x".repeat(100);
         let out = truncate_content(&s, 60);
         assert!(out.truncated);
-        let marker = "\n[TRUNCATED - Content exceeds 60 character limit]";
+        let marker = "\n\n[TRUNCATED - Content exceeds 60 character limit]";
         assert!(out.content.ends_with(marker), "got: {:?}", out.content);
         // head + marker == exactly the budget (60).
         assert_eq!(utf16_len(&out.content), 60);
@@ -696,7 +697,7 @@ mod tests {
         let s = "y".repeat(5000);
         let out = truncate_content(&s, cap);
         assert!(out.truncated);
-        let marker = "\n[TRUNCATED - Content exceeds 2KB limit]";
+        let marker = "\n\n[TRUNCATED - Content exceeds 2KB limit]";
         assert!(out.content.ends_with(marker), "got tail: {:?}", &out.content[out.content.len().saturating_sub(60)..]);
         assert_eq!(utf16_len(&out.content), cap as usize);
     }

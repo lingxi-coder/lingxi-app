@@ -413,33 +413,36 @@ pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
 /// two DIFFERENT reasons that a future audit must not conflate:
 ///
 /// 1. **No plain-text analog by design (correct-by-design on THIS surface).**
-///    `btw` and `reload-plugins` are dispatched by claude-code on a host
-///    surface that is *not* the plain-text command registry, and have no
-///    plain-text command body to port:
-///    - `btw` is a `local-jsx` command (`Ask a quick side question without
-///      interrupting the main conversation`, argumentHint `[question]`) whose
-///      body renders an interactive JSX side-question dialog and resolves via
-///      the `askSideQuestion` **control-request** — a TUI/SDK dialog surface,
-///      never a plain-text registry entry.
-///    - `reload-plugins` is driven entirely through the SDK **`reload_plugins`
-///      control-request** (`query.reloadPlugins()` → `mcpDelegate.reloadPlugins`)
-///      — a control-channel action, not a plain-text command body.
-///    Implementing these on the plain-text surface is a **non-goal**: they are
+///    `btw` is a `local-jsx` command (`Ask a quick side question without
+///    interrupting the main conversation`, argumentHint `[question]`) whose body
+///    renders an interactive JSX side-question dialog and resolves via the
+///    `askSideQuestion` **control-request** — a TUI/SDK dialog surface, never a
+///    plain-text registry entry, and with no plain-text command body to port.
+///    Implementing it on the plain-text surface is a **non-goal**: it is
 ///    implemented-elsewhere, so the plain-text stub literal is faithful *for
-///    this partition*. (When/if LingXi wires the JSX side-dialog and SDK
-///    control-request surfaces, they are served there, not here.)
+///    this partition*. (When/if LingXi wires the JSX side-dialog surface, it is
+///    served there, not here.)
 ///
-/// 2. **Genuine plain-text-surface deferred gap.** `x402` IS a plain `local`
-///    text command (`supportsNonInteractive`, no `isEnabled` gate) with a
-///    real plain-text body; the Rust port defers it only for lack of the host
-///    wallet / x402 service infra. This one is in-scope future work for the
-///    plain-text registry.
+/// 2. **Genuine plain-text-surface deferred gap (in-scope future work).**
+///    - `reload-plugins` IS a real `type:"local"` command in the 2.1.215 binary
+///      (`argumentHint:"[--force]"`, no `isEnabled` gate) whose `call` body
+///      returns `{type:"text",...}` on the normal CLI path — it parses `--force`
+///      and computes cache invalidation locally. The SDK `reload_plugins`
+///      control-request is ONLY the `Wb()` thin-client/remote dispatch branch
+///      (analogous to `x402`'s host-infra dependency), NOT evidence of "no
+///      plain-text analog." So it is in-scope future work for the plain-text
+///      registry, exactly like a normal deferred gap.
+///    - `x402` is retained only for list continuity: the string `x402` does NOT
+///      appear anywhere in the 2.1.215 binary (verified — the only `402` matches
+///      are HTTP 402 / npm registry), so it is a stale entry from an earlier
+///      oracle version and should be dropped on the next regeneration, not
+///      treated as a confirmed 2.1.215 command.
 ///
 /// Each entry is `(name, what-claude-code-actually-ships + which case above)`.
 pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
-    ("btw", "claude-code ships a `local-jsx` side-question dialog (enabled, no gate) resolved via the askSideQuestion control-request; no plain-text command-api analog by design — implemented on the JSX/SDK dialog surface, not here"),
-    ("x402", "claude-code ships a `local` text command (supportsNonInteractive, no isEnabled gate); genuine plain-text-surface gap, deferred host wallet/x402 service infra"),
-    ("reload-plugins", "claude-code ships a `local` command (no gate) driven entirely via the SDK reload_plugins control-request; no plain-text command-api analog by design — implemented on the SDK control-channel surface, not here"),
+    ("btw", "claude-code ships a `local-jsx` side-question dialog (enabled, no gate) resolved via the askSideQuestion control-request; no plain-text command-api analog by design — implemented on the JSX/SDK dialog surface, not here (case 1)"),
+    ("reload-plugins", "claude-code 2.1.215 ships a real `type:\"local\"` command (argumentHint `[--force]`, no gate) whose body returns `{type:\"text\",...}` on the normal CLI path; the SDK `reload_plugins` control-request is ONLY the thin-client (Wb()) dispatch branch, not an absence of a local body — so this IS a genuine plain-text-surface deferred gap, in-scope future work (case 2)"),
+    ("x402", "NOT present in the 2.1.215 binary (0 hits latin1/utf16 — the only `402` strings are HTTP 402 / npm registry); a stale entry carried over from an earlier oracle version. Left here for continuity; drop when the deferred list is next regenerated (case 2, absent in 2.1.215)"),
 ];
 
 /// **Statically-hidden named commands** — real, enabled (or conditionally
@@ -1155,15 +1158,20 @@ mod tests {
 
     #[test]
     fn host_bound_holds_the_three_implemented_but_not_plain_text_surface_names() {
-        // Lock the specific three claude-code IMPLEMENTS (verified against the
-        // 2.1.215 binary: no isEnabled gate, real body) so they can never
-        // silently slide back into the faithful-no-op correct-by-design set.
-        // NOTE: only `x402` is a genuine plain-text-surface deferred gap (real
-        // `local` command body). `btw` (a `local-jsx` side-question dialog
-        // resolved via the askSideQuestion control-request) and `reload-plugins`
-        // (driven via the SDK `reload_plugins` control-request) are implemented
-        // on NON-plain-text host surfaces and have NO plain-text command-api
-        // analog by design — do not "port" them into this registry.
+        // Lock the specific three names so they can never silently slide back
+        // into the faithful-no-op correct-by-design set.
+        // CLASSIFICATION (corrected 2026-07-19 vs the 2.1.215 binary):
+        //  - `btw`: `local-jsx` side-question dialog resolved via the
+        //    askSideQuestion control-request — NO plain-text command-api analog
+        //    by design; do not port into this registry (case 1).
+        //  - `reload-plugins`: a REAL `type:"local"` command in 2.1.215 whose
+        //    body returns `{type:"text",...}` on the normal CLI path; the SDK
+        //    `reload_plugins` control-request is only the thin-client dispatch
+        //    branch. It IS a genuine plain-text-surface deferred gap — in-scope
+        //    future work (case 2).
+        //  - `x402`: NOT present in the 2.1.215 binary (0 hits) — a stale entry
+        //    from an earlier oracle; retained for list continuity only, drop on
+        //    next regeneration.
         let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
         let expected: std::collections::HashSet<&str> =
             ["btw", "x402", "reload-plugins"].into_iter().collect();

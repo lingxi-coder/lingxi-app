@@ -38,6 +38,25 @@ pub const ENV_HEADERS_HELPER_DEBOUNCE_MS: &str = "LINGXI_OTEL_HEADERS_HELPER_DEB
 /// `CLAUDE_CODE_OTEL_DIAG_STDERR`; already present in the hook-env denylist).
 pub const ENV_DIAG_STDERR: &str = "LINGXI_OTEL_DIAG_STDERR";
 
+/// Per-record content length cap in characters (rebrand of CC
+/// `CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH`; binary default `frg=61440`). Applied to
+/// the potentially-large body attributes on the `claude_code.events` log signal
+/// (`prompt` / `response` / `tool_result` / `tool_parameters`). See
+/// [`compute_content_max_length`] for the full `Math.min` precedence against the
+/// three standard `OTEL_*_VALUE_LENGTH_LIMIT` spec vars.
+pub const ENV_CONTENT_MAX_LENGTH: &str = "LINGXI_OTEL_CONTENT_MAX_LENGTH";
+
+// -- Standard OpenTelemetry value-length-limit spec vars (verbatim; the content
+//    cap is the `Math.min` of the gate var and these). --------------------------
+
+/// Generic attribute value length limit (`OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`).
+pub const ENV_ATTRIBUTE_VALUE_LENGTH_LIMIT: &str = "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT";
+/// Log-record attribute value length limit (`OTEL_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT`).
+pub const ENV_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT: &str =
+    "OTEL_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT";
+/// Span attribute value length limit (`OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT`).
+pub const ENV_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT: &str = "OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT";
+
 // -- Standard OpenTelemetry spec vars (kept verbatim; NEVER rebranded) --------
 
 /// Per-signal metrics exporter selection (`otlp` / `console` / `prometheus` / `none`).
@@ -93,6 +112,86 @@ pub const DEFAULT_METRIC_EXPORT_INTERVAL_MS: i64 = 60_000;
 pub const DEFAULT_LOGS_EXPORT_INTERVAL_MS: i64 = 5000;
 /// Binary default for `service.name` (`t["service.name"]||"claude-code"`).
 pub const DEFAULT_SERVICE_NAME: &str = "claude-code";
+/// Binary default for [`ENV_CONTENT_MAX_LENGTH`] (`var frg=61440`, i.e. 60 KiB).
+pub const DEFAULT_CONTENT_MAX_LENGTH: i64 = 61440;
+
+/// JS `Number(s)` coercion, byte-faithful enough for the numeric env vars CC
+/// feeds to `Math.min` in the content-cap computation (`mrg()`): the raw string
+/// is compared/min-ed as a JS number, NOT via `parseInt`. Trimmed; empty ⇒ `0`
+/// (JS `Number("")===0`); an otherwise-unparseable value ⇒ `NaN`.
+///
+/// Realistic length-limit env values are plain decimal integers, for which this
+/// matches JS exactly. The rare JS-only spellings (hex `0x…`, `Infinity`) fall
+/// through to `NaN` here — documented divergence, immaterial to the cap.
+#[must_use]
+pub fn js_number(raw: &str) -> f64 {
+    let t = raw.trim();
+    if t.is_empty() {
+        return 0.0; // JS: Number("") === 0
+    }
+    // Rust's f64 parse accepts "inf"/"infinity"/"nan" case-insensitively and all
+    // decimal int/float forms — a superset of what we need, with hex ⇒ NaN.
+    t.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// JS `Math.min` semantics: **any** `NaN` argument makes the whole result `NaN`
+/// (Rust's [`f64::min`] instead *ignores* NaN, which would silently pick a
+/// finite fallback — the wrong behavior for parity).
+#[must_use]
+fn js_min(values: &[f64]) -> f64 {
+    let mut acc = f64::INFINITY;
+    for &v in values {
+        if v.is_nan() {
+            return f64::NAN;
+        }
+        if v < acc {
+            acc = v;
+        }
+    }
+    acc
+}
+
+/// Compute the effective per-record content length cap, byte-faithful to the
+/// binary `mrg()`:
+/// `Math.min(CLAUDE_CODE_OTEL_CONTENT_MAX_LENGTH ?? 61440,
+///           OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT ?? Infinity,
+///           OTEL_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT ?? Infinity,
+///           OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT ?? Infinity)`.
+///
+/// Returned as an `i64` character budget: a `NaN` min (an unparseable explicit
+/// override) clamps to `0`, `+Infinity` (impossible while the content default is
+/// finite) clamps to [`i64::MAX`], and a fractional value floors toward zero —
+/// all matching how JS would then feed the value into `String.slice`.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "modeling JS Number/Math.min semantics; realistic caps are well within f64/i64 range"
+)]
+pub fn compute_content_max_length(get: &impl Fn(&str) -> Option<String>) -> i64 {
+    let num = |var: &str, default: f64| -> f64 {
+        match get(var) {
+            None => default,
+            Some(v) => js_number(&v),
+        }
+    };
+    let m = js_min(&[
+        num(ENV_CONTENT_MAX_LENGTH, DEFAULT_CONTENT_MAX_LENGTH as f64),
+        num(ENV_ATTRIBUTE_VALUE_LENGTH_LIMIT, f64::INFINITY),
+        num(ENV_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT, f64::INFINITY),
+        num(ENV_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT, f64::INFINITY),
+    ]);
+    if m.is_nan() {
+        return 0;
+    }
+    if m >= i64::MAX as f64 {
+        return i64::MAX;
+    }
+    if m <= 0.0 {
+        return 0;
+    }
+    m.floor() as i64
+}
 
 /// Truthy env-var parse, byte-faithful to the binary `ct()`:
 /// `if(!e)return!1;` then lower-case + trim and membership-test against
@@ -507,6 +606,10 @@ pub struct OtelConfig {
     pub traces_sampler: Option<String>,
     /// `OTEL_TRACES_SAMPLER_ARG`, if set.
     pub traces_sampler_arg: Option<String>,
+    /// Effective per-record content length cap in characters (binary `mrg()`);
+    /// see [`compute_content_max_length`]. Applied by the recording layer to the
+    /// large body attributes on the log signal.
+    pub content_max_length: i64,
 }
 
 impl OtelConfig {
@@ -534,6 +637,7 @@ impl OtelConfig {
             resource_attributes: get(ENV_RESOURCE_ATTRIBUTES),
             traces_sampler: get(ENV_TRACES_SAMPLER),
             traces_sampler_arg: get(ENV_TRACES_SAMPLER_ARG),
+            content_max_length: compute_content_max_length(&get),
         }
     }
 }
@@ -680,6 +784,61 @@ mod tests {
             ExporterKind::parse(Some("weird")),
             ExporterKind::Other("weird".to_string())
         );
+    }
+
+    #[test]
+    fn content_max_length_defaults_to_binary_frg() {
+        let cfg = OtelConfig::from_lookup(|_| None);
+        assert_eq!(cfg.content_max_length, DEFAULT_CONTENT_MAX_LENGTH);
+        assert_eq!(cfg.content_max_length, 61440);
+    }
+
+    #[test]
+    fn content_max_length_gate_var_overrides_default() {
+        let cfg = OtelConfig::from_lookup(lookup(&[(ENV_CONTENT_MAX_LENGTH, "1000")]));
+        assert_eq!(cfg.content_max_length, 1000);
+    }
+
+    #[test]
+    fn content_max_length_is_math_min_over_limits() {
+        // The smallest of the four wins (binary `Math.min`).
+        let cfg = OtelConfig::from_lookup(lookup(&[
+            (ENV_CONTENT_MAX_LENGTH, "61440"),
+            (ENV_ATTRIBUTE_VALUE_LENGTH_LIMIT, "8192"),
+            (ENV_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT, "500"),
+            (ENV_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT, "9000"),
+        ]));
+        assert_eq!(cfg.content_max_length, 500);
+    }
+
+    #[test]
+    fn content_max_length_unset_limits_are_infinity() {
+        // The three OTEL limits unset ⇒ Infinity ⇒ the gate var (or its default)
+        // governs, never the limits.
+        let cfg = OtelConfig::from_lookup(lookup(&[(ENV_CONTENT_MAX_LENGTH, "20000")]));
+        assert_eq!(cfg.content_max_length, 20000);
+    }
+
+    #[test]
+    fn content_max_length_nan_override_clamps_to_zero() {
+        // JS `Math.min(NaN, …)` === NaN; feeding NaN into `String.slice` yields an
+        // empty cut, which our i64 budget models as 0.
+        let cfg = OtelConfig::from_lookup(lookup(&[(ENV_CONTENT_MAX_LENGTH, "not-a-number")]));
+        assert_eq!(cfg.content_max_length, 0);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "asserting exact JS Number coercion of integral/decimal literals"
+    )]
+    fn js_number_matches_js_coercion() {
+        assert_eq!(js_number("1000"), 1000.0);
+        assert_eq!(js_number("  42  "), 42.0);
+        assert_eq!(js_number(""), 0.0); // Number("") === 0
+        assert_eq!(js_number("   "), 0.0);
+        assert!(js_number("abc").is_nan());
+        assert_eq!(js_number("2.5"), 2.5);
     }
 
     #[test]

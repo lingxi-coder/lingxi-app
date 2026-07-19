@@ -62,6 +62,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use command_api::builtin_support::names::{core_description, is_palette_hidden};
+use command_api::model::CommandSource;
+use command_api::registry::CommandRegistry;
 use client_adapter::lowering::{
     lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
     lower_status_snapshot, lower_task_output_chunk, lower_task_record,
@@ -69,7 +72,8 @@ use client_adapter::lowering::{
 use client_adapter::ClientEventSink;
 use client_protocol::commands::{ClientCommand, ListingKindDto};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
-use client_protocol::listings::{AuthStateDto, TaskStatusDto};
+use client_protocol::listings::{AuthStateDto, SlashCommandDto, TaskStatusDto};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use traits::auth::{AuthHandle, LoginInfo};
 use traits::orchestrator::OrchestratorHandle;
@@ -125,6 +129,10 @@ pub struct EngineCommandRouter {
     /// `Option` so a transport that has not yet built the command registry can
     /// still route the rest of the surface.
     dispatcher: Option<Arc<dyn SlashCommandDispatcher>>,
+    /// Optional shared slash-command registry backing the dispatcher. When
+    /// present it lets the router emit `SlashCommandCatalog` pulls and
+    /// `CommandsChanged` pushes from the same live registry snapshot.
+    slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
@@ -138,12 +146,14 @@ impl EngineCommandRouter {
         auth: Arc<dyn AuthHandle>,
         tasks: Arc<dyn TaskRegistryHandle>,
         dispatcher: Option<Arc<dyn SlashCommandDispatcher>>,
+        slash_registry: Option<Arc<RwLock<CommandRegistry>>>,
     ) -> Self {
         Self {
             handle,
             auth,
             tasks,
             dispatcher,
+            slash_registry,
             turn_active: AtomicBool::new(false),
         }
     }
@@ -190,6 +200,34 @@ impl EngineCommandRouter {
     /// List tasks (optionally filtered) and emit one `TaskRow` per task.
     async fn emit_task_list(&self, filter: TaskListFilter, sink: &dyn ClientEventSink) {
         emit_task_rows(&*self.tasks, sink, filter).await;
+    }
+
+    /// Snapshot the live slash-command catalog from the shared registry, adding
+    /// the local `/reload-plugins` command when the registry itself does not
+    /// carry it.
+    async fn slash_command_catalog(&self) -> Option<Vec<SlashCommandDto>> {
+        let registry = self.slash_registry.as_ref()?;
+        let reg = registry.read().await;
+        let mut commands: Vec<SlashCommandDto> = reg
+            .list_all()
+            .into_iter()
+            .map(|cmd| SlashCommandDto {
+                name: cmd.name.clone(),
+                description: cmd.description.clone(),
+                source: command_source_string(cmd.source).to_string(),
+            })
+            .collect();
+        if !commands.iter().any(|cmd| cmd.name == "reload-plugins")
+            && !is_palette_hidden("reload-plugins")
+        {
+            commands.push(SlashCommandDto {
+                name: "reload-plugins".to_string(),
+                description: core_description("reload-plugins").to_string(),
+                source: "builtin".to_string(),
+            });
+        }
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        Some(commands)
     }
 
     /// Pull + emit a single listing kind. Listing kinds with no engine handle in
@@ -246,11 +284,19 @@ impl EngineCommandRouter {
             ListingKindDto::Tasks => {
                 self.emit_task_list(TaskListFilter::default(), sink).await;
             }
+            ListingKindDto::SlashCommands => {
+                if let Some(commands) = self.slash_command_catalog().await {
+                    sink.emit(ClientEvent::SlashCommandCatalog { commands }).await;
+                } else {
+                    tracing::debug!(
+                        "bridge-server: slash-command catalog unavailable (no shared registry)"
+                    );
+                }
+            }
             // HOST/engine-tier reads the binary wires once it holds the desktop
             // runtime (plan §2). No engine handle for these in the foundation —
             // routing them is additive and does not change this seam's shape.
             ListingKindDto::Sessions
-            | ListingKindDto::SlashCommands
             | ListingKindDto::Memory
             | ListingKindDto::Settings => {
                 tracing::debug!(
@@ -364,6 +410,7 @@ impl CommandRouter for EngineCommandRouter {
 
             // ── Slash commands (LOSSY: display surfaced as TextDelta) ────────
             ClientCommand::RunSlashCommand { raw } => {
+                let before_catalog = self.slash_command_catalog().await;
                 if let Some(dispatcher) = self.dispatcher.as_ref() {
                     let display = match dispatcher.dispatch(&raw).await {
                         traits::SlashDispatchResult::Handled { display }
@@ -378,6 +425,12 @@ impl CommandRouter for EngineCommandRouter {
                         }
                     };
                     sink.emit(ClientEvent::TextDelta { text: display }).await;
+                    let after_catalog = self.slash_command_catalog().await;
+                    if let (Some(before), Some(commands)) = (before_catalog, after_catalog) {
+                        if before != commands {
+                            sink.emit(ClientEvent::CommandsChanged { commands }).await;
+                        }
+                    }
                 } else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
@@ -528,6 +581,19 @@ impl CommandRouter for EngineCommandRouter {
                 );
             }
         }
+    }
+}
+
+fn command_source_string(source: CommandSource) -> &'static str {
+    match source {
+        CommandSource::Builtin => "builtin",
+        CommandSource::User => "user",
+        CommandSource::Project => "project",
+        CommandSource::Local => "local",
+        CommandSource::Plugin => "plugin",
+        CommandSource::Managed => "managed",
+        CommandSource::Mcp => "mcp",
+        CommandSource::Bundled => "bundled",
     }
 }
 

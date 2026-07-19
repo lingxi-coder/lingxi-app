@@ -352,6 +352,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         std::env::set_var("LINGXI_DISABLE_LINGXI_MDS", "1");
     }
 
+    // (M-01, cc2.1.215) `--brief` exports `LINGXI_BRIEF=1` for this process +
+    // children (CC registry key `CLAUDE_CODE_BRIEF`; both honored by the tool
+    // gate). Mirrors CC's `CAn(e)`, where `e.brief` and `Z.CLAUDE_CODE_BRIEF`
+    // are equivalent triggers and the env is what the `SendUserMessage` tool's
+    // `isBriefEnabled`/`aKr()` gate reads. Default-off: without this flag the
+    // Brief tool stays invisible to the model (see `tool_ui::brief`).
+    if parsed.brief {
+        std::env::set_var("LINGXI_BRIEF", "1");
+    }
+
     // `--cwd <dir>` must apply BEFORE the subcommand dispatch, not just for
     // session modes: the subcommands resolve their target project from the LIVE
     // process cwd (mcp via `current_dir()` → project key + `<cwd>/.mcp.json`,
@@ -776,17 +786,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // path is honored. `--continue --resume <id>` is rejected upstream
     // (lib.rs:315 cross-flag rule), so the two never collide here.
     if parsed.continue_session {
+        let mut resumed_argv = parsed.clone();
+        if let Some(effort) = run::inherited_resume_effort(&parsed).await {
+            resumed_argv.effort = Some(effort);
+        }
         let sink = make_sink();
         let adapter: Arc<dyn traits::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("lingxi-cli: {e}");
                 return exit_codes::RUNTIME_ERROR;
             }
         };
-        return run::run_continue(&parsed, &runtime, sink.as_ref()).await;
+        return run::run_continue(&resumed_argv, &runtime, sink.as_ref()).await;
     }
 
     // --resume routes through run::run_resume, which itself splits (M7-12):
@@ -794,17 +808,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     //   (none) + TTY      → iocraft Resume screen
     //   (none) + --no-tui → M5-08 stdio picker (unchanged fallback)
     if parsed.resume.is_some() {
+        let mut resumed_argv = parsed.clone();
+        if let Some(effort) = run::inherited_resume_effort(&parsed).await {
+            resumed_argv.effort = Some(effort);
+        }
         let sink = make_sink();
         let adapter: Arc<dyn traits::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
+        let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("lingxi-cli: {e}");
                 return exit_codes::RUNTIME_ERROR;
             }
         };
-        return run::run_resume(&parsed, &runtime, sink.as_ref()).await;
+        return run::run_resume(&resumed_argv, &runtime, sink.as_ref()).await;
     }
 
     // (M4 cc2.1.198) `--from-pr [value]` — the binary opens the SAME resume

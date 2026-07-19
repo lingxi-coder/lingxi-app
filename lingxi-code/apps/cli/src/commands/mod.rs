@@ -32,6 +32,7 @@ pub mod plugin;
 pub mod plugin_init;
 pub mod plugin_install;
 pub mod plugin_marketplace;
+pub mod plugin_policy;
 pub mod plugin_prune;
 pub mod plugin_settings;
 pub mod plugin_tag;

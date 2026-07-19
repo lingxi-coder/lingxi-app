@@ -208,6 +208,10 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
             OutputEvent::Text { .. } | OutputEvent::Usage { .. } | OutputEvent::Thinking { .. } => {
                 None
             }
+            // A long-running tool (the `Slow` arm) emits periodic
+            // `ToolHeartbeat`s; they are timing-dependent and orthogonal to the
+            // tool-lifecycle ordering under test, so filter them out too.
+            OutputEvent::ToolHeartbeat { .. } => None,
             _ => Some("Other"),
         })
         .collect();

@@ -15,7 +15,7 @@ use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
 use crate::stream_json_input::{
-    content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack,
+    content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack_queued,
     spawn_stdin_router, ControlPlaneWriter, StdinChannels,
 };
 use command_api::format_description_with_source;
@@ -818,7 +818,11 @@ pub async fn run_stream_json_input_loop(
         mut turn_rx,
         mut control_req_rx,
         mut control_resp_rx,
-    } = spawn_stdin_router(argv.replay_user_messages, session_id_str.clone());
+    } = spawn_stdin_router(
+        argv.replay_user_messages,
+        session_id_str.clone(),
+        stream.outbound_tx(),
+    );
 
     // ORPHANED PERMISSION recovery channel. A late `control_response` whose
     // `can_use_tool` request was lost (process restart with `--resume`, or a
@@ -1039,7 +1043,10 @@ pub async fn run_stream_json_input_loop(
                 .uuid
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            emit_replay_ack(&ack_uuid, &turn.content, None, &session_id_str);
+            // Route through the single-writer drain queue (`outbound_tx`, bound
+            // above): a direct stdout write here would let the ack overtake data
+            // frames still queued in the outbound channel mid-turn.
+            emit_replay_ack_queued(&outbound_tx, &ack_uuid, &turn.content, None, &session_id_str);
         }
 
         // Phase 1: use cancel-aware turn entry point so `interrupt` can abort
@@ -1323,6 +1330,27 @@ pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -
     }
 }
 
+/// Resolve the saved effort for resume paths that know their target before the
+/// runtime is constructed (`--resume <uuid>` and `--continue`). An explicit
+/// `--effort` always wins. Picker paths resolve after selection in
+/// [`mount_resumed_tui`].
+pub(crate) async fn inherited_resume_effort(argv: &Argv) -> Option<String> {
+    if argv.effort.is_some() {
+        return None;
+    }
+    let session_id = if argv.continue_session {
+        load_resume_rows().await.ok()?.first()?.uuid
+    } else {
+        let raw = argv.resume.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        uuid::Uuid::parse_str(raw).ok()?
+    };
+    let messages = load_resume_session(session_id).await.ok()?;
+    orchestrator::runtime_metadata_from_messages(&messages).effort
+}
+
 /// (M4 cc2.1.198) `--from-pr [value]` — resume a session linked to a PR.
 ///
 /// The binary routes this through the SAME interactive resume picker as a
@@ -1565,11 +1593,21 @@ async fn mount_resumed_tui(
     messages: Vec<JsonlMessage>,
     carried_state: Option<crate::mode::RemountState>,
 ) -> crate::mode::RunOutcome {
+    // A cold resume inherits the last persisted assistant effort unless the
+    // caller explicitly supplied a new `--effort`. Resolve this before build:
+    // both the provider adapter and the orchestrator config are immutable once
+    // the runtime starts, so seeding it afterwards would update transcript
+    // display only while requests silently fell back to the default effort.
+    let mut resumed_argv = argv.clone();
+    if resumed_argv.effort.is_none() {
+        resumed_argv.effort =
+            orchestrator::runtime_metadata_from_messages(&messages).effort;
+    }
     // Build with the RESUMED session id as the JSONL writer's file name, so new
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
-    let mut tui_build = match crate::init::build_runtime_for_tui_inner(argv, Some(session_id)).await
-    {
+    let mut tui_build =
+        match crate::init::build_runtime_for_tui_inner(&resumed_argv, Some(session_id)).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("lingxi-cli: tui init failed: {e}");
@@ -1948,6 +1986,8 @@ pub(crate) async fn seed_orchestrator_session(
     let mut session = session_handle.lock().await;
     session.session_id = replayed.session_id;
     session.history = replayed.history;
+    session.transcript_only_messages = replayed.transcript_only_messages;
+    session.compact_summary_messages = replayed.compact_summary_messages;
     // Restore the saved model (recovered from the last assistant line by
     // `state_from_messages`) so a resumed session continues on — and shows — its
     // saved model, not the launch default. `state_from_messages` yields
@@ -1964,6 +2004,10 @@ pub(crate) async fn seed_orchestrator_session(
     // to its provider BY ID across all providers; a switched-to id like
     // `deepseek-v4-pro` is unique, so it lands on the right provider.
     session.model_profile = None;
+    drop(session);
+    orchestrator
+        .restore_resume_runtime_metadata(messages)
+        .await;
 }
 
 /// `--resume` (no id) under `--no-tui` / non-TTY — the UNCHANGED M5-08 stdio

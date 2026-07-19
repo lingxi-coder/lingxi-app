@@ -102,6 +102,18 @@ const FIND_DANGEROUS_ACTIONS: &[&str] = &[
     "-files0-from",
 ];
 
+/// Docker flags that can redirect a nominally read-only `ps`/`images` command to
+/// a remote daemon or alternate control plane. Reject them in the read-only
+/// classifier so `docker ps --host tcp://…` cannot auto-allow.
+const DOCKER_REMOTE_CONTROL_FLAGS: &[&str] = &[
+    "--url",
+    "--connection",
+    "--identity",
+    "--context",
+    "--host",
+    "-H",
+];
+
 /// Quote-aware scan for an ACTIVE `$` expansion or backtick command
 /// substitution, mirroring TS `containsUnquotedExpansion`
 /// (`readOnlyValidation.ts:1600`) for `$`, and the backtick arm of
@@ -252,7 +264,8 @@ fn is_read_only_subcommand(sub: &str) -> bool {
     // (`EXTERNAL_READONLY_COMMANDS`). A bare `docker` or any other subcommand is
     // NOT read-only.
     if base == "docker" {
-        return matches!(words.next(), Some("ps" | "images"));
+        let rest: Vec<&str> = words.collect();
+        return docker_subcommand_is_read_only(&rest);
     }
     // `git <subcommand>` — the read-only slice of TS `GIT_READ_ONLY_COMMANDS`
     // (`utils/shell/readOnlyCommandValidation.ts:107-923`). Delegates to
@@ -305,6 +318,36 @@ fn is_read_only_subcommand(sub: &str) -> bool {
         };
     }
     READONLY_BASE_COMMANDS.contains(&base)
+}
+
+fn docker_subcommand_is_read_only(rest: &[&str]) -> bool {
+    let Some(&subcommand) = rest.first() else {
+        return false;
+    };
+    if !matches!(subcommand, "ps" | "images") {
+        return false;
+    }
+    !docker_has_remote_control_flag(&rest[1..])
+}
+
+fn docker_has_remote_control_flag(args: &[&str]) -> bool {
+    for arg in args {
+        if *arg == "--" {
+            break;
+        }
+        if DOCKER_REMOTE_CONTROL_FLAGS.contains(arg) {
+            return true;
+        }
+        if let Some((flag, _)) = arg.split_once('=') {
+            if DOCKER_REMOTE_CONTROL_FLAGS.contains(&flag) {
+                return true;
+            }
+        }
+        if arg.starts_with("-H") && arg.len() > 2 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Git flags that WRITE to disk regardless of subcommand — the file-output
@@ -697,8 +740,18 @@ mod tests {
     fn docker_only_ps_and_images() {
         assert!(command_is_read_only("docker ps"));
         assert!(command_is_read_only("docker images"));
+        assert!(command_is_read_only("docker ps -a"));
         assert!(!command_is_read_only("docker run x"));
         assert!(!command_is_read_only("docker"));
+        assert!(!command_is_read_only("docker ps --host tcp://remote"));
+        assert!(!command_is_read_only("docker ps -H tcp://remote"));
+        assert!(!command_is_read_only("docker ps -Htcp://remote"));
+        assert!(!command_is_read_only("docker images --context=prod"));
+        assert!(!command_is_read_only("docker images --url tcp://remote"));
+        assert!(!command_is_read_only(
+            "docker images --connection ssh://remote"
+        ));
+        assert!(!command_is_read_only("docker ps --identity ~/.ssh/id_rsa"));
     }
 
     #[test]

@@ -1,13 +1,16 @@
 // lingxi-code/crates/core/src/settings/loader.rs
-//! 4-layer source orchestration.
+//! Settings-file path + file-read primitives.
 //!
-//! Task 7 lands [`read_settings_file`] (one file at a time). Task 8 layers
-//! the four sources (env > user > project > defaults) and produces the
-//! final [`crate::settings::Settings`] entry point.
+//! [`crate::settings::Settings`] owns the merge precedence across defaults,
+//! user, project, local, CLI, managed, and env layers. This module provides
+//! the per-file read guardrails and path helpers those folds rely on.
 
 use crate::settings::schema::SettingsJson;
 use crate::settings::SettingsError;
 use std::path::{Path, PathBuf};
+
+/// Claude Code rejects settings files above 2 MiB before reading/parsing them.
+pub const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Read one settings file from disk.
 ///
@@ -22,8 +25,8 @@ use std::path::{Path, PathBuf};
 /// - [`SettingsError::SchemaViolation`] when [`SettingsJson::validate`] rejects
 ///   the parsed file.
 pub fn read_settings_file(path: &Path) -> Result<Option<SettingsJson>, SettingsError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let metadata = match std::fs::metadata(path) {
+        Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(SettingsError::Io {
@@ -32,6 +35,36 @@ pub fn read_settings_file(path: &Path) -> Result<Option<SettingsJson>, SettingsE
             })
         }
     };
+    if !metadata.is_file() {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "settings file must be a regular file",
+            ),
+        });
+    }
+    if metadata.len() > MAX_SETTINGS_FILE_BYTES {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: settings_size_limit_error(),
+        });
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(SettingsError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })
+        }
+    };
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SETTINGS_FILE_BYTES {
+        return Err(SettingsError::Io {
+            path: path.to_path_buf(),
+            source: settings_size_limit_error(),
+        });
+    }
     let parsed: SettingsJson =
         serde_json::from_slice(&bytes).map_err(|e| SettingsError::ParseError {
             path: path.to_path_buf(),
@@ -67,8 +100,24 @@ pub fn project_settings_path(project_dir: &Path) -> PathBuf {
     project_dir.join(branding::DOT_DIR).join("settings.json")
 }
 
+/// Path to the project-local settings file:
+/// `<project_dir>/<branding::DOT_DIR>/settings.local.json`.
+#[must_use]
+pub fn local_settings_path(project_dir: &Path) -> PathBuf {
+    project_dir
+        .join(branding::DOT_DIR)
+        .join("settings.local.json")
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn settings_size_limit_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "Settings file exceeds the 2MiB limit",
+    )
 }
 
 #[cfg(test)]
@@ -140,6 +189,24 @@ mod tests {
         assert!(
             matches!(err, crate::settings::SettingsError::ParseError { .. }),
             "expected ParseError, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_files_larger_than_two_mebibytes_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            vec![b' '; usize::try_from(MAX_SETTINGS_FILE_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        let err = read_settings_file(&path).unwrap_err();
+        assert!(
+            matches!(err, crate::settings::SettingsError::Io { ref source, .. }
+                if source.kind() == std::io::ErrorKind::InvalidData
+                    && source.to_string().contains("2MiB limit")),
+            "expected InvalidData 2MiB limit error, got: {err:?}"
         );
     }
 }

@@ -1,6 +1,6 @@
-//! Integration test for M3-01 Settings — full 4-layer end-to-end.
+//! Integration test for the settings loader end-to-end.
 //!
-//! Spec coverage: §6 row M3-01 "4-layer end-to-end with real tempfile dirs",
+//! Spec coverage: file-layer precedence, local-settings path semantics,
 //! §7 wire-identifier byte-alignment (paths, prefix order, array fields).
 //!
 //! Every test mutates the process-wide `HOME` env var so the loader's
@@ -46,7 +46,14 @@ fn project_settings_path_is_dot_claude_settings_json() {
 }
 
 #[test]
-fn four_layer_priority_env_user_project_defaults() {
+fn local_settings_path_is_dot_claude_settings_local_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = engine::settings::loader::local_settings_path(tmp.path());
+    assert_eq!(p, tmp.path().join(".lingxi").join("settings.local.json"));
+}
+
+#[test]
+fn five_layer_priority_env_local_project_user_defaults() {
     let _guard = HOME_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -65,6 +72,13 @@ fn four_layer_priority_env_user_project_defaults() {
             .join("settings.json"),
         r#"{"model": "project-model"}"#,
     );
+    write_file(
+        &tmp.path()
+            .join("project")
+            .join(".lingxi")
+            .join("settings.local.json"),
+        r#"{"model": "local-model"}"#,
+    );
 
     let defaults = SettingsJson {
         model: Some("default-model".into()),
@@ -78,7 +92,7 @@ fn four_layer_priority_env_user_project_defaults() {
         defaults: defaults.clone(),
     })
     .unwrap();
-    assert_eq!(eff.settings.model.as_deref(), Some("user-model"));
+    assert_eq!(eff.settings.model.as_deref(), Some("local-model"));
 
     // Case B: env override wins.
     let mut env = BTreeMap::new();
@@ -114,7 +128,7 @@ fn env_prefix_lingxi_is_read() {
 }
 
 #[test]
-fn array_concat_dedup_across_all_four_layers() {
+fn array_concat_dedup_across_defaults_user_project_local_env_layers() {
     let _guard = HOME_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -129,6 +143,13 @@ fn array_concat_dedup_across_all_four_layers() {
     write_file(
         &tmp.path().join("p").join(".lingxi").join("settings.json"),
         r#"{"enabledTools": ["Bash", "Read"]}"#,
+    );
+    write_file(
+        &tmp.path()
+            .join("p")
+            .join(".lingxi")
+            .join("settings.local.json"),
+        r#"{"enabledTools": ["Task", "Read"]}"#,
     );
 
     let defaults = SettingsJson {
@@ -146,7 +167,7 @@ fn array_concat_dedup_across_all_four_layers() {
     })
     .unwrap();
 
-    // Order is defaults → project → user → env, deduped.
+    // Order is defaults → user → project → local → env, deduped.
     assert_eq!(
         eff.settings.enabled_tools.as_deref(),
         Some(
@@ -155,6 +176,7 @@ fn array_concat_dedup_across_all_four_layers() {
                 "Bash".to_string(),
                 "Read".to_string(),
                 "Edit".to_string(),
+                "Task".to_string(),
                 "WebFetch".to_string(),
             ][..]
         )

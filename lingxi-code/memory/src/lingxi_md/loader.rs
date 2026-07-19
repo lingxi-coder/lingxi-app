@@ -429,15 +429,18 @@ pub fn strip_frontmatter(raw: &str) -> &str {
 /// 4. Filter out empty patterns; if nothing remains, or every pattern is the
 ///    match-all `**`, return `None` (applies to all paths).
 ///
-/// FIDELITY BOUNDARY: the TS reference runs a full YAML parse. To avoid a YAML
-/// dependency this scanner handles the three shapes that occur in practice — a
-/// scalar (`paths: src/**`, optionally quoted), an inline flow list
-/// (`paths: [a, b]`), and a block list (`paths:` then `  - a` lines). Other
-/// YAML exotica are not supported and yield `None`.
+/// The frontmatter is parsed with the same YAML semantics as other markdown
+/// frontmatter in this crate. This matters for inline comments, quoted `#` and
+/// commas, flow/block sequences, and YAML escaping.
 #[must_use]
 pub fn parse_frontmatter_paths(raw: &str) -> Option<Vec<String>> {
-    let value = frontmatter_paths_value(raw)?;
-    let patterns: Vec<String> = split_path_in_frontmatter(&value)
+    let values = frontmatter_paths_values(raw)?;
+    let patterns: Vec<String> = values
+        .into_iter()
+        .flat_map(|value| match value {
+            FrontmatterPathValue::Scalar(value) => split_path_in_frontmatter(&value),
+            FrontmatterPathValue::ListItem(value) => expand_braces(&value),
+        })
         .into_iter()
         .map(|p| {
             // Remove a trailing `/**` (claudemd.ts:266-269).
@@ -452,80 +455,45 @@ pub fn parse_frontmatter_paths(raw: &str) -> Option<Vec<String>> {
     Some(patterns)
 }
 
-/// Extract the raw `paths:` value text from the leading frontmatter block.
-/// Returns the comma-joinable string form: a scalar is returned as-is
-/// (unquoted), a flow `[a, b]` is returned as `a, b`, and a block list of
-/// `- item` lines is returned comma-joined. `None` when there is no
-/// frontmatter or no `paths` key.
-fn frontmatter_paths_value(raw: &str) -> Option<String> {
-    // Isolate the frontmatter inner text (between the `---` fences).
+enum FrontmatterPathValue {
+    /// A scalar follows Claude's comma/braces path-list grammar.
+    Scalar(String),
+    /// A YAML sequence item is already one logical path; a quoted comma stays
+    /// literal while brace expansion still applies.
+    ListItem(String),
+}
+
+/// Parse the leading frontmatter as YAML and project its `paths` value.
+fn frontmatter_paths_values(raw: &str) -> Option<Vec<FrontmatterPathValue>> {
     let m = frontmatter_re().find(raw)?;
     if m.start() != 0 {
         return None;
     }
-    let block = &raw[m.start()..m.end()];
-    // Strip the opening `---\n` and the closing `---\n?` to get the inner YAML.
-    let inner = block
-        .trim_start_matches('-')
-        .trim_start_matches(|c| c == '\r' || c == '\n')
-        .trim_end_matches(|c: char| c == '-' || c == '\r' || c == '\n' || c.is_whitespace());
-
-    let lines: Vec<&str> = inner.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        // Only top-level (non-indented) `paths:` keys.
-        if line.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let rest = match line.strip_prefix("paths:") {
-            Some(r) => r,
-            None => continue,
-        };
-        let scalar = rest.trim();
-        if scalar.is_empty() {
-            // Block list form: collect subsequent `  - item` lines.
-            let mut items: Vec<String> = Vec::new();
-            for next in &lines[i + 1..] {
-                let t = next.trim_start();
-                if let Some(item) = t.strip_prefix('-') {
-                    items.push(unquote_yaml_scalar(item.trim()));
-                } else if next.starts_with(char::is_whitespace) {
-                    // Indented non-list continuation — not a shape we model.
-                    break;
-                } else {
-                    break;
-                }
-            }
-            if items.is_empty() {
-                return None;
-            }
-            return Some(items.join(","));
-        }
-        // Inline flow list `[a, b]`.
-        if let Some(body) = scalar.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            return Some(
-                body.split(',')
-                    .map(|p| unquote_yaml_scalar(p.trim()))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
-        // Plain scalar (optionally quoted).
-        return Some(unquote_yaml_scalar(scalar));
+    let mut yaml_lines = m.as_str().lines();
+    let opening = yaml_lines.next()?;
+    if opening.trim() != "---" {
+        return None;
     }
-    None
-}
-
-/// Strip a single matching pair of surrounding single/double quotes from a
-/// YAML scalar (best-effort; no escape processing).
-fn unquote_yaml_scalar(s: &str) -> String {
-    let s = s.trim();
-    if s.len() >= 2 {
-        let b = s.as_bytes();
-        if (b[0] == b'"' && b[s.len() - 1] == b'"') || (b[0] == b'\'' && b[s.len() - 1] == b'\'') {
-            return s[1..s.len() - 1].to_string();
+    let yaml = yaml_lines
+        .take_while(|line| line.trim() != "---")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let document: serde_yaml::Value = serde_yaml::from_str(&yaml).ok()?;
+    let paths = document.as_mapping()?.get(serde_yaml::Value::String("paths".into()))?;
+    match paths {
+        serde_yaml::Value::String(value) => {
+            Some(vec![FrontmatterPathValue::Scalar(value.clone())])
         }
+        serde_yaml::Value::Sequence(values) => {
+            let values = values
+                .iter()
+                .filter_map(serde_yaml::Value::as_str)
+                .map(|value| FrontmatterPathValue::ListItem(value.to_string()))
+                .collect::<Vec<_>>();
+            (!values.is_empty()).then_some(values)
+        }
+        _ => None,
     }
-    s.to_string()
 }
 
 /// Comma-split a frontmatter path value while respecting `{...}` braces, then

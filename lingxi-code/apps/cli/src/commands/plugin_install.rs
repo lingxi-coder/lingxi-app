@@ -19,8 +19,8 @@
 //!
 //! `--config key=value` persists NON-SENSITIVE userConfig values (validated
 //! against the plugin's manifest schema, byte-faithful errors) to settings
-//! `pluginConfigs[<name>].options` at the chosen scope — the map the
-//! composition-root loader reads back; uninstall clears that entry
+//! `pluginConfigs[<name@marketplace>].options` at the chosen scope — the map
+//! the composition-root loader reads back; uninstall clears that entry
 //! (`deletePluginOptions` settings half).
 //!
 //! Residuals (follow-ups): non-directory marketplace sources (git/github/url);
@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
 
+use crate::commands::plugin_policy;
 use crate::commands::plugin_settings::Scope;
 
 /// Now as ISO-8601 with milliseconds + `Z`.
@@ -99,6 +100,11 @@ fn split_id(arg: &str) -> (&str, Option<&str>) {
 /// The pre-`@` display name.
 fn name_of(id: &str) -> &str {
     id.split('@').next().unwrap_or(id)
+}
+
+/// The marketplace segment of a `name@marketplace` id, if present.
+fn marketplace_of(id: &str) -> Option<&str> {
+    split_id(id).1
 }
 
 /// Read a marketplace's `plugins[]` entry for `name`, returning its `source`
@@ -280,7 +286,8 @@ fn parse_config_pairs(
 /// Persist the non-sensitive `--config` values to settings
 /// `pluginConfigs[<plugin_key>].options` at `scope` — the exact map the
 /// composition-root loader reads back (`PluginManager::load_plugin` looks it up
-/// by the plugin's bare `manifest.name`, so `plugin_key` is that bare name).
+/// by the installed `name@marketplace` id for cache-installed plugins, else the
+/// bare local-plugin name).
 /// Existing `options` / `mcpServers` are preserved; a value now declared
 /// SENSITIVE is scrubbed from plaintext `options` (claude-code's `{...n, ...u}`
 /// stale-key scrub) and instead routed to secure storage — the keychain write is
@@ -332,8 +339,9 @@ fn persist_plugin_options(
 
 /// `deletePluginOptions` parity (settings half): clear a plugin's non-sensitive
 /// userConfig (`settings.pluginConfigs[<plugin_key>]`) at `scope` on uninstall.
-/// Keyed by the bare plugin name (matching the install-time write + loader
-/// lookup). A missing key is a no-op; a write failure logs claude-code's
+/// Keyed by the install-time config identity (`name@marketplace` for installed
+/// marketplace/cache plugins, bare name for local-only plugins). A missing key
+/// is a no-op; a write failure logs claude-code's
 /// byte-faithful warn. Clearing the plugin's secure-storage `pluginSecrets` is a
 /// documented follow-up (the sync CLI writes no secrets, so none linger).
 fn clear_plugin_config(scope: Scope, home: &Path, cwd: &Path, plugin_key: &str) {
@@ -450,18 +458,21 @@ pub fn run_install(
     };
 
     let full_id = format!("{name}@{market_name}");
+    plugin_policy::ensure_marketplace_allowed(&market_name)
+        .map_err(|reason| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &reason)))?;
 
     // `--config key=value` userConfig persistence. Parse + validate against the
     // plugin's declared schema (byte-faithful errors, no "Installing…" prefix —
     // like the scope error), then persist the NON-SENSITIVE values to settings
-    // `pluginConfigs[<name>].options` at the chosen scope. That is the exact map
-    // the composition-root loader reads back (keyed by the plugin's bare name).
+    // `pluginConfigs[<name@marketplace>].options` at the chosen scope. That is
+    // the exact map the composition-root loader reads back for installed
+    // marketplace/cache plugins.
     // Done BEFORE materialisation so a bad `--config` aborts without a half
     // install; a no-op when no `--config` was passed (byte-identical to before).
     let schema = read_user_config_schema(&plugin_src);
     let config_pairs = parse_config_pairs(config, &schema)?;
     if !config_pairs.is_empty() {
-        persist_plugin_options(scope, home, cwd, name, &schema, &config_pairs)?;
+        persist_plugin_options(scope, home, cwd, &full_id, &schema, &config_pairs)?;
     }
 
     // Version from the plugin's own manifest.
@@ -636,10 +647,9 @@ pub fn run_uninstall(
     let _ = edit_enabled(scope, home, cwd, &full_id, None);
 
     // deletePluginOptions parity: clear the plugin's persisted non-sensitive
-    // userConfig (`settings.pluginConfigs[<name>]`) at this scope so stale
-    // options don't linger for a later re-install. Keyed by the bare plugin name
-    // (matching the install-time write + loader lookup).
-    clear_plugin_config(scope, home, cwd, name_of(&full_id));
+    // userConfig (`settings.pluginConfigs[<name@marketplace>]`) at this scope so
+    // stale options don't linger for a later re-install.
+    clear_plugin_config(scope, home, cwd, &full_id);
 
     Ok(format!(
         "✔ Successfully uninstalled plugin: {} (scope: {})",
@@ -758,6 +768,10 @@ fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Resul
                 .or_else(|| p.keys().find(|k| k.eq_ignore_ascii_case(&base)).cloned())
         })
         .unwrap_or(base);
+
+    if let Some(marketplace) = marketplace_of(&id) {
+        plugin_policy::ensure_marketplace_allowed(marketplace)?;
+    }
 
     // `iP`: the plugin must resolve to a marketplace source, else "not found".
     let Some((market_name, plugin_src)) = resolve_source(plugins_dir, &id) else {
@@ -1018,9 +1032,10 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
-        // Persisted to pluginConfigs[<bare name>].options — the map the loader reads.
+        // Persisted to pluginConfigs[<name@marketplace>].options — the map the
+        // loader reads (H-12: keyed by full identity, not the bare manifest name).
         assert_eq!(
-            user_settings(&e)["pluginConfigs"]["hello"]["options"]["REGION"],
+            user_settings(&e)["pluginConfigs"]["hello@mymkt"]["options"]["REGION"],
             Value::String("us-east".into())
         );
         // The install itself still succeeded (enabledPlugins set too).
@@ -1046,7 +1061,7 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
-        let opts = &user_settings(&e)["pluginConfigs"]["hello"]["options"];
+        let opts = &user_settings(&e)["pluginConfigs"]["hello@mymkt"]["options"];
         // Non-sensitive persisted; the secret is NOT in plaintext settings.
         assert_eq!(opts["REGION"], Value::String("eu".into()));
         assert!(opts.get("API_KEY").is_none());
@@ -1122,7 +1137,7 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
-        assert!(user_settings(&e)["pluginConfigs"].get("hello").is_some());
+        assert!(user_settings(&e)["pluginConfigs"].get("hello@mymkt").is_some());
         run_uninstall(
             "hello@mymkt",
             None,
@@ -1135,7 +1150,7 @@ mod tests {
         )
         .unwrap();
         // deletePluginOptions parity: the pluginConfigs entry is gone.
-        assert!(user_settings(&e)["pluginConfigs"].get("hello").is_none());
+        assert!(user_settings(&e)["pluginConfigs"].get("hello@mymkt").is_none());
     }
 
     #[test]

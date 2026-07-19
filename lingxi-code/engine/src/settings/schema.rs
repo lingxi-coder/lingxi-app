@@ -255,6 +255,32 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_artifact: Option<bool>,
 
+    /// Scalar field (later source wins). `disableAgentView`: disable the agent
+    /// view surface (`claude agents`, `--bg`, `/background`, the on-demand
+    /// daemon) and the redefined background-session `/fork` + `/subtask`. CC
+    /// 2.1.215 settings zod (verbatim describe): "Disable agent view (`claude
+    /// agents`, `--bg`, /background, the on-demand daemon). Typically set in
+    /// managed settings. Equivalent to CLAUDE_CODE_DISABLE_AGENT_VIEW=1." Read by
+    /// `I2i()` (the `vO()` gate) alongside the `CLAUDE_CODE_DISABLE_AGENT_VIEW`
+    /// env var: `settings.disableAgentView === true` disables agent view exactly
+    /// like a truthy env var. Threaded into command registration via
+    /// [`traits::agent_view::is_enabled_with_setting`] (see
+    /// `command_core::register_core_batch_8`). Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_agent_view: Option<bool>,
+
+    /// `disableAllHooks` — when true, ALL hooks are disabled (claude hook-dispatch
+    /// gate `Ql()`). One half of the `/goal` hooks-restricted gate (`kEt`): a
+    /// restricted-hooks session rejects `/goal`. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_all_hooks: Option<bool>,
+
+    /// `allowManagedHooksOnly` — when true, only managed-policy hooks run. The
+    /// other half of the `/goal` hooks-restricted gate (claude
+    /// `allowManagedHooksOnly===!0`). Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_managed_hooks_only: Option<bool>,
+
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

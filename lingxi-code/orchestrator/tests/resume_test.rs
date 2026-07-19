@@ -1,6 +1,8 @@
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
-use orchestrator::{replay_session_state, state_from_messages, ResumeError};
+use orchestrator::{
+    replay_session_state, runtime_metadata_from_messages, state_from_messages, ResumeError,
+};
 use platform_posix::fs::PosixFileSystem;
 use protocol::ConversationMessage;
 use serde_json::json;
@@ -100,6 +102,47 @@ async fn state_from_messages_matches_disk_replay() {
     assert_eq!(from_hand.session_id, replayed.state.session_id);
     assert_eq!(from_hand.history.len(), replayed.state.history.len());
     assert_eq!(from_hand.history, replayed.state.history);
+}
+
+#[test]
+fn resume_restores_effort_compaction_counters_and_rapid_refill_tracking() {
+    let sid = Uuid::new_v4();
+    let line = |value: serde_json::Value| serde_json::from_value(value).unwrap();
+    let messages = vec![
+        line(json!({
+            "type":"system", "subtype":"compact_boundary",
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:00.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{}, "compactMetadata":{"preTokens":1000,"postTokens":400,"cumulativeDroppedTokens":600}
+        })),
+        line(json!({
+            "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:01.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":"one"}, "effort":"high"
+        })),
+        line(json!({
+            "type":"system", "subtype":"compact_boundary",
+            "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:02.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{}, "compactMetadata":{"preTokens":900,"postTokens":300,"cumulativeDroppedTokens":1200}
+        })),
+        line(json!({
+            "type":"assistant", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-07-19T00:00:03.000Z",
+            "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+            "message":{"role":"assistant","content":"two"}, "effort":"xhigh"
+        })),
+    ];
+
+    let metadata = runtime_metadata_from_messages(&messages);
+    assert_eq!(metadata.effort.as_deref(), Some("xhigh"));
+    assert_eq!(metadata.cumulative_dropped_tokens, 1200);
+    assert!(metadata.compaction_tracking.compacted);
+    assert_eq!(metadata.compaction_tracking.turn_counter, 1);
+    assert_eq!(metadata.compaction_tracking.consecutive_rapid_refills, 1);
 }
 
 #[tokio::test]

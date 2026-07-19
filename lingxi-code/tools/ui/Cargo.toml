@@ -23,7 +23,7 @@ thiserror.workspace = true
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 engine = { path = "../../engine" }
 tempfile = "3"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

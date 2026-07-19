@@ -2942,6 +2942,36 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 }
             }
         });
+        // Periodic tool heartbeat for long-running calls: transports that care
+        // can surface "still running" state between ToolCall and ToolResult,
+        // while sinks that ignore it keep the default no-op behavior.
+        let heartbeat_output = orch.output.clone();
+        let heartbeat_id = tool_use_id.clone();
+        let heartbeat_tool = name.to_string();
+        let (heartbeat_done_tx, mut heartbeat_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let heartbeat_started = std::time::Instant::now();
+        let heartbeat_task = tokio::spawn(async move {
+            // (review #10) `interval` fires its FIRST tick immediately, which
+            // would emit a spurious `elapsed_ms≈0` heartbeat on EVERY tool call
+            // (even instant ones), defeating the "long-running" intent. Start the
+            // first tick one period out so heartbeats only fire for tools that
+            // actually run >= 1s.
+            let period = std::time::Duration::from_secs(1);
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = &mut heartbeat_done_rx => break,
+                    _ = ticker.tick() => {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let elapsed_ms = heartbeat_started.elapsed().as_millis() as u64;
+                        heartbeat_output
+                            .emit_tool_heartbeat(&heartbeat_id, &heartbeat_tool, elapsed_ms)
+                            .await;
+                    }
+                }
+            }
+        });
 
         // Time the tool dispatch ONLY (excludes the permission prompt above and
         // the Post hooks below) — surfaced to PostToolUse/Failure hooks as
@@ -2950,6 +2980,8 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let tool_outcome = tool_handle
             .call(effective_input.clone(), ctx, progress_tx)
             .await;
+        let _ = heartbeat_done_tx.send(());
+        let _ = heartbeat_task.await;
         // The tool has dropped `progress_tx`; drain the consumer to completion.
         let _ = progress_consumer.await;
         #[allow(clippy::cast_possible_truncation)]

@@ -163,6 +163,7 @@ fn router_with(
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         tasks as Arc<dyn TaskRegistryHandle>,
         None,
+        None,
     )
 }
 
@@ -277,6 +278,7 @@ async fn slash_command_routes_to_registry() {
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
+        None,
     );
     let sink = CapturingSink::arc();
 

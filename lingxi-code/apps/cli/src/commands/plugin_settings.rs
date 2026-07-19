@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
 
+use crate::commands::plugin_policy;
+
 /// An editable settings scope for the `enabledPlugins` allowlist.
 ///
 /// `user` = `<lingxi-home>/settings.json`; `project` =
@@ -83,6 +85,11 @@ impl Scope {
 /// `@` (a bare name is returned as-is).
 fn name_of(id: &str) -> &str {
     id.split('@').next().unwrap_or(id)
+}
+
+/// Marketplace segment of a `plugin@marketplace` id.
+fn marketplace_of(id: &str) -> Option<&str> {
+    id.split_once('@').map(|(_, marketplace)| marketplace)
 }
 
 /// The `enabledPlugins` map from a scope's settings file (missing key / missing
@@ -171,6 +178,10 @@ pub fn run_enable(
 ) -> Result<String, String> {
     let requested = parse_scope(scope)?;
     let id = resolve_id(plugin, home, cwd).map_err(|reason| fail("enable", plugin, &reason))?;
+    if let Some(marketplace) = marketplace_of(&id) {
+        plugin_policy::ensure_marketplace_allowed(marketplace)
+            .map_err(|reason| fail("enable", &id, &reason))?;
+    }
     let scope = requested
         .or_else(|| scope_holding(&id, home, cwd))
         .unwrap_or(Scope::User);

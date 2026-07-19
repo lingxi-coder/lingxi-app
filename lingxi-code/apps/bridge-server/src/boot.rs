@@ -430,6 +430,12 @@ pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
         runtime.auth.clone(),
         runtime.task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
         Some(dispatcher),
+        // slash_registry: the shared CommandRegistry is not exposed on
+        // DesktopRuntime, so the router's proactive `CommandsChanged` catalog
+        // push (M-14) is inert here — RunSlashCommand still dispatches via the
+        // dispatcher above. FOLLOW-UP: expose DesktopRuntime.shared_registry and
+        // thread it in to enable the catalog-diff push over the bridge.
+        None,
     ));
 
     let connection = connection.bind(gate, driver).bind_router(router);

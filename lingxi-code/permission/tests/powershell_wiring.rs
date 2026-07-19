@@ -106,8 +106,27 @@ fn powershell_inside_cwd_does_not_trigger_containment() {
 
 #[test]
 fn powershell_without_parser_passes_through() {
-    // No parser wired → PowerShell containment is inert (byte-identical behavior).
-    // With an invalid parse result, the gate must not surface a containment ask.
+    // An invalid parse with an explicit signal now fails closed to Ask.
+    let policy = PermissionPolicy::new(PermissionMode::Default)
+        .with_roots(roots())
+        .with_pwsh_parser(Arc::new(FakeParser(ParseResult {
+            valid: false,
+            statements: Vec::new(),
+            invalid_reason: Some(
+                "PowerShell parser precheck rejected unsupported `u{...}` escape".to_string(),
+            ),
+        })));
+    let result = policy.authorize("PowerShell", &json!({ "command": "echo `u{263A}" }));
+    match result {
+        PermissionResult::Ask { prompt, .. } => assert_eq!(
+            prompt.message,
+            "PowerShell command could not be statically validated: PowerShell parser precheck rejected unsupported `u{...}` escape"
+        ),
+        other => panic!("expected invalid-parse Ask, got {other:?}"),
+    }
+
+    // No parser wired — or an invalid parse without an explicit signal —
+    // preserves the inert passthrough behavior.
     let policy = PermissionPolicy::new(PermissionMode::Default)
         .with_roots(roots())
         .with_pwsh_parser(Arc::new(FakeParser(ParseResult::default())));

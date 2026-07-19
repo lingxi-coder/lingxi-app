@@ -19,6 +19,12 @@ pub enum Source {
     User,
     /// `<project_dir>/.lingxi/settings.json`.
     Project,
+    /// `<project_dir>/.lingxi/settings.local.json`.
+    Local,
+    /// Parsed CLI `--settings` / `flagSettings`.
+    Cli,
+    /// Enterprise managed `policySettings`.
+    Managed,
     /// Built-in defaults baseline.
     Defaults,
 }
@@ -130,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn concat_dedup_records_all_contributors_in_order() {
+    fn concat_dedup_records_all_file_contributors_in_order() {
         let _guard = HOME_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -140,11 +146,14 @@ mod tests {
         std::fs::create_dir_all(&user_dir).unwrap();
         let project_subdir = project_dir.join(".lingxi");
         std::fs::create_dir_all(&project_subdir).unwrap();
+        let local_path = project_subdir.join("settings.local.json");
 
         let mut pf = std::fs::File::create(project_subdir.join("settings.json")).unwrap();
         writeln!(pf, r#"{{"trustedDirectories": ["/project"]}}"#).unwrap();
         let mut uf = std::fs::File::create(user_dir.join("settings.json")).unwrap();
         writeln!(uf, r#"{{"trustedDirectories": ["/user"]}}"#).unwrap();
+        let mut lf = std::fs::File::create(local_path).unwrap();
+        writeln!(lf, r#"{{"trustedDirectories": ["/local"]}}"#).unwrap();
         std::env::set_var("HOME", tmp.path().join("home_t9b"));
 
         let defaults = SettingsJson {
@@ -160,7 +169,12 @@ mod tests {
         let prov = eff.effective_for("trustedDirectories").unwrap();
         assert_eq!(
             prov.contributors,
-            vec![Source::Defaults, Source::Project, Source::User]
+            vec![
+                Source::Defaults,
+                Source::User,
+                Source::Project,
+                Source::Local
+            ]
         );
     }
 

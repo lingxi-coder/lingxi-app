@@ -2195,6 +2195,7 @@ pub async fn desktop_command_registry(
         home.clone(),
         Vec::new(),
         gates.safe_mode,
+        load_merged_disable_agent_view(cwd),
     );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
     // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
@@ -2889,6 +2890,67 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Load the merged `settings.disableAgentView` (project + user + env layers) for
+/// the given project dir. Mirrors [`load_merged_skip_web_fetch_preflight`] (same
+/// `engine::settings::Settings::load` seam). When `true`, the agent-view
+/// fork/subtask surface is disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`
+/// (binary `I2i()` — `settings.disableAgentView === true`), threaded into
+/// [`command_core::register_core_batch_8`] via
+/// [`traits::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
+/// load failure or when the key is unset — the frozen default (agent view
+/// enabled; the env half still applies independently).
+fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.disable_agent_view)
+        .unwrap_or(false)
+}
+
+/// Resolve the merged hooks-restricted flag for the `/goal` gate (review #12):
+/// `disableAllHooks || allowManagedHooksOnly` across the project/user/env layers
+/// (the same `Settings::load` seam). Mirrors claude's `kEt` hooks half —
+/// `if (tX() || lMe()) return hooks_gate`. `false` on any load failure or when
+/// both keys are unset (the permissive default).
+fn load_merged_hooks_restricted(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .map(|eff| {
+            eff.settings.disable_all_hooks.unwrap_or(false)
+                || eff.settings.allow_managed_hooks_only.unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Load the merged `askUserQuestionTimeout` (`60s`/`5m`/`10m`/`never`) across the
+/// project + user + env settings layers (the same `Settings::load` seam). The raw
+/// settings string is threaded into `BuiltinToolContext::ask_user_question_timeout`
+/// and parsed into `tool_ui::ask_user_question::AskUserQuestionTimeout` at tool
+/// registration (M-15). Returns `None` on any load failure or when the key is
+/// unset — the frozen default (`never` ⇒ block on the user, no auto-continue).
+fn load_merged_ask_user_question_timeout(project_dir: &std::path::Path) -> Option<String> {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.ask_user_question_timeout)
+}
+
 /// Load the merged HTTP-hook security policy (H-BIN-12) — `allowedHttpHookUrls`
 /// and `httpHookAllowedEnvVars` — across the project + user + env settings
 /// layers. Both are array-merge (concat-dedup) via the same
@@ -2998,32 +3060,29 @@ async fn load_enabled_plugins(
 }
 
 /// Read the merged `settings.pluginConfigs` scope (`plugin → {options,
-/// mcpServers}`) from the user then project `settings.json`, project last so it
-/// wins on conflict — the persisted, non-sensitive half of a plugin's
-/// `userConfig`. This is the composition-root READ that seeds
-/// [`plugin::PluginManager::with_plugin_configs`]; without it the manager's
-/// `plugin_configs` is always empty and non-sensitive options from settings.json
-/// never reach `resolve_user_config`. Mirrors `load_enabled_plugins`'s
-/// user-then-project merge (`pluginLoader.ts` reads settings the same way).
-/// Malformed files / a missing key degrade to an empty map (no persisted
-/// config), matching the resilient read-only boot.
-///
-/// Keyed by the `pluginConfigs` object key today (the manager looks it up by
-/// `manifest.name`); the installed `name@marketplace` id is a documented
-/// follow-up (see `manager.rs` `load_plugin`).
+/// mcpServers}`) from the user settings and managed policy tiers only. Project
+/// / local settings are intentionally ignored: cloned repositories must not be
+/// able to feed `${user_config.*}` substitutions. This is the composition-root
+/// READ that seeds [`plugin::PluginManager::with_plugin_configs`]; without it
+/// the manager's `plugin_configs` is always empty and non-sensitive options
+/// from settings.json never reach `resolve_user_config`. Malformed files / a
+/// missing key degrade to an empty map (no persisted config), matching the
+/// resilient read-only boot.
 async fn load_plugin_configs(
     lingxi_home: &std::path::Path,
-    cwd: &std::path::Path,
 ) -> std::collections::HashMap<String, plugin::PluginUserConfig> {
     let mut merged: std::collections::HashMap<String, plugin::PluginUserConfig> =
         std::collections::HashMap::new();
     let user = lingxi_home.join("settings.json");
-    let project = cwd.join(branding::DOT_DIR).join("settings.json");
-    // User first, project second → project overrides on identical plugin keys.
-    for path in [user, project] {
-        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
+    if let Ok(raw) = tokio::fs::read_to_string(&user).await {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+        {
+            for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
+                merged.insert(plugin, cfg);
+            }
+        }
+    }
+    for raw in crate::settings_watch::managed_settings_raw_tiers().await {
         let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
         else {
             continue;
@@ -3033,6 +3092,27 @@ async fn load_plugin_configs(
         }
     }
     merged
+}
+
+/// Read the managed-only blocked marketplace policy (`blockedMarketplaces`),
+/// last-write-wins across the managed tiers.
+async fn load_blocked_marketplaces() -> std::collections::HashSet<String> {
+    let mut blocked = std::collections::HashSet::new();
+    for raw in crate::settings_watch::managed_settings_raw_tiers().await {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(entries) = value.get("blockedMarketplaces").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        blocked = entries
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+    blocked
 }
 
 /// Discover the set of plugins that should be active for the current session —
@@ -3147,6 +3227,12 @@ impl PluginRuntime {
     /// a plugin that fails to enable is counted in `errors` and skipped; already
     /// live plugins are left untouched (no MCP reconnect churn).
     pub async fn refresh(&self) -> PluginRefreshCounts {
+        self.manager
+            .replace_plugin_configs(load_plugin_configs(&self.home).await)
+            .await;
+        self.manager
+            .replace_blocked_marketplaces(load_blocked_marketplaces().await)
+            .await;
         // (1) The fresh target set from disk + settings.
         let target = discover_plugin_set(
             self.ambient,
@@ -5973,6 +6059,10 @@ pub async fn build(
         // domain-blocklist preflight (enterprise escape hatch). Read from the
         // merged settings via the same `Settings::load` seam as outputStyle.
         skip_web_fetch_preflight: load_merged_skip_web_fetch_preflight(&cwd),
+        // (M-15) `settings.askUserQuestionTimeout` → the AskUserQuestion resolver's
+        // idle window. Read from the merged settings via the same `Settings::load`
+        // seam; parsed into `AskUserQuestionTimeout` at `tool_ui` registration.
+        ask_user_question_timeout: load_merged_ask_user_question_timeout(&cwd),
         // Inject the LIVE runner: the desktop session routes its sandboxed
         // bash/powershell/skill commands through `sandbox-runtime`'s
         // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),
@@ -6530,6 +6620,19 @@ pub async fn build(
     // restoration. Same shared-`Arc` file target, so the record lands in the SAME
     // `<uuid>.jsonl` the orchestrator appends messages to.
     let main_agent_setting_writer = main_jsonl_writer.clone();
+    // (review #12) Resolve the `/goal` accept-gate values BEFORE `cwd` is moved
+    // into the orchestrator. These feed the previously-unwired
+    // `with_workspace_trusted` / `with_hooks_restricted` builders so `/goal`
+    // honors claude's `Xys()` gate — rejected in an untrusted workspace or when
+    // hooks are restricted. Both resolve FAIL-SAFE: a missing global config or a
+    // load failure yields `untrusted` / `not-restricted`, so `/goal` is BLOCKED
+    // rather than falsely granted. A session that accepted the trust dialog has a
+    // recorded disk grant (`record_trust_accept`), so normal sessions stay
+    // trusted; homedir sessions short-circuit via session-trust.
+    let goal_workspace_trusted = migrations::global_config::global_config_path()
+        .map(|cfg| migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd))
+        .unwrap_or(false);
+    let goal_hooks_restricted = load_merged_hooks_restricted(&cwd);
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -6581,6 +6684,11 @@ pub async fn build(
         // subagent spawner's subagents dir — one consistent session id end-to-end.
         .with_session_id(main_session_id)
         .with_cost_tracker(cost_tracker)
+        // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
+        // above) into the orchestrator, replacing the hardcoded trusted=true /
+        // restricted=false defaults.
+        .with_workspace_trusted(goal_workspace_trusted)
+        .with_hooks_restricted(goal_hooks_restricted)
         .with_analytics_bus(analytics_bus)
         .with_mcp_registry(mcp_registry)
         .with_hook_registry(hook_registry)
@@ -6898,7 +7006,8 @@ pub async fn build(
         // just field defaults) and injects `LINGXI_PLUGIN_OPTION_*` into plugin
         // hooks. Sensitive values are NOT here — they resolve live from
         // `CredentialManager`.
-        let plugin_configs = load_plugin_configs(&cfg.lingxi_home, &cwd_for_plugins).await;
+        let plugin_configs = load_plugin_configs(&cfg.lingxi_home).await;
+        let blocked_marketplaces = load_blocked_marketplaces().await;
         let pm = Arc::new(
             plugin::PluginManager::new(
                 plugins_dir.clone(),
@@ -6916,7 +7025,8 @@ pub async fn build(
                 plugin_lsp_registry.clone(),
                 Arc::new(RwLock::new(ToolRegistry::new())),
             )
-            .with_plugin_configs(plugin_configs),
+            .with_plugin_configs(plugin_configs)
+            .with_blocked_marketplaces(blocked_marketplaces),
         );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();

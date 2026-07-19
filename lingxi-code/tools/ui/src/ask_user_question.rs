@@ -294,10 +294,12 @@ impl AskUserQuestionResolver for FirstOptionResolver {
 ///   synthesize the afk auto-advance answer (first option per question),
 ///   mirroring the oracle's "auto-continue with the answers selected so far".
 ///
-/// The [`AskUserQuestionTimeout`] is fixed at construction. Wiring it to the
-/// live `askUserQuestionTimeout` settings value (so a user's explicit
-/// `60s`/`5m`/`10m` opt-in takes effect) is host work; registration currently
-/// installs the oracle default ([`AskUserQuestionTimeout::Never`]).
+/// The [`AskUserQuestionTimeout`] is fixed at construction. Registration
+/// (`tool_ui::register_with_options`, M-15) builds it from the live
+/// `askUserQuestionTimeout` settings value carried on
+/// `BuiltinToolContext::ask_user_question_timeout`, so a user's explicit
+/// `60s`/`5m`/`10m` opt-in takes effect (an absent / unparsable value falls back
+/// to the oracle default [`AskUserQuestionTimeout::Never`]).
 pub struct DefaultTimeoutResolver {
     /// Fixed idle window; `None` ⇒ `never` (block).
     window: Option<Duration>,

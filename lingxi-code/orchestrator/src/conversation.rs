@@ -828,6 +828,10 @@ pub struct ConversationOrchestrator {
     /// `computed_transcript_path` returns an empty path (the prior `""` behavior).
     /// Wired at the composition root via [`Self::with_config_home`].
     pub(crate) config_home: Option<std::path::PathBuf>,
+    /// `/goal` workspace-trust gate.
+    pub(crate) workspace_trusted: bool,
+    /// `/goal` hook-policy gate.
+    pub(crate) hooks_restricted: bool,
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
@@ -1379,6 +1383,8 @@ impl ConversationOrchestrator {
             session_cwd: tool_api::SessionCwd::new(cwd.clone(), vec![cwd.clone()]),
             cwd,
             config_home: None,
+            workspace_trusted: true,
+            hooks_restricted: false,
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
             git_branch_cache: Mutex::new(None),
@@ -1487,6 +1493,20 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
         self.config_home = Some(config_home);
+        self
+    }
+
+    /// Wire the resolved workspace-trust state for `/goal`.
+    #[must_use]
+    pub fn with_workspace_trusted(mut self, trusted: bool) -> Self {
+        self.workspace_trusted = trusted;
+        self
+    }
+
+    /// Wire the resolved hook-policy restriction state for `/goal`.
+    #[must_use]
+    pub fn with_hooks_restricted(mut self, restricted: bool) -> Self {
+        self.hooks_restricted = restricted;
         self
     }
 

@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use migrations::settings_update::{read_settings_map, update_settings};
 use serde_json::{Map, Value};
 
+use crate::commands::plugin_policy;
 use crate::commands::plugin_settings::{Scope, SCOPES};
 
 /// The resolved-marketplaces registry file under the plugins root.
@@ -528,6 +529,8 @@ fn add_directory(
             manifest_path.display()
         ));
     }
+    plugin_policy::ensure_marketplace_allowed(&name)
+        .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
 
     let source_value = source_object(&Source::Directory(abs.to_path_buf()));
     write_marketplace(
@@ -566,10 +569,21 @@ fn add_remote(
         }
         Source::Directory(_) => unreachable!("add_remote called with a directory source"),
     };
+    if plugin_policy::blocked_marketplaces().contains(&hint) {
+        return Err(format!(
+            "Adding marketplace…✘ Failed to add marketplace: Marketplace '{hint}' is blocked by managed settings"
+        ));
+    }
 
     // From here the "Adding marketplace…" progress prefix is part of the line.
     let (name, clone_dir) = clone_marketplace(plugins_dir, &clone_url, &hint)
         .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+    if let Err(reason) = plugin_policy::ensure_marketplace_allowed(&name) {
+        let _ = std::fs::remove_dir_all(&clone_dir);
+        return Err(format!(
+            "Adding marketplace…✘ Failed to add marketplace: {reason}"
+        ));
+    }
 
     let source_value = source_object(remote);
     write_marketplace(
@@ -780,6 +794,9 @@ pub fn run_update(
     let mut registry = load_registry(plugins_dir);
 
     if let Some(name) = name {
+        plugin_policy::ensure_marketplace_allowed(name).map_err(|reason| {
+            format!("Updating marketplace: {name}...✘ Failed to update marketplace(s): {reason}")
+        })?;
         if !registry.contains_key(name) {
             let available: Vec<&str> = registry.keys().map(String::as_str).collect();
             return Err(format!(
@@ -807,6 +824,13 @@ pub fn run_update(
     }
 
     let count = registry.len();
+    for marketplace in registry.keys() {
+        plugin_policy::ensure_marketplace_allowed(marketplace).map_err(|reason| {
+            format!(
+                "Updating {count} marketplace(s)...✘ Failed to update marketplace(s): {reason}"
+            )
+        })?;
+    }
     for entry in registry.values_mut() {
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("lastUpdated".to_string(), Value::String(iso_now()));

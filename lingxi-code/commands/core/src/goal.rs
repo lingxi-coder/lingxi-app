@@ -45,32 +45,29 @@
 //! The `status`/`clear`/`too-long` branches have no `prompt`, so they map onto
 //! `CommandResult::Done` (the `/effort`/`/model` precedent).
 //!
-//! ## Known gaps (documented, not implemented — no shared file may be touched
-//! by this port; see each fn's doc comment)
+//! ## Known gaps (documented, not implemented)
 //!
-//! * **No app-state goal seam.** `traits::OrchestratorHandle` has no
-//!   `get_active_goal` / `set_active_goal` / `clear_active_goal` method
-//!   (verified: `traits/src/orchestrator.rs` defines no such members). This
-//!   handler keeps its own `Mutex`-guarded [`ActiveGoal`] instead — sound for
-//!   as long as the registry holds ONE shared `Arc<GoalHandler>` per session
-//!   (the same lifetime every other stateful core handler assumes), but it
-//!   means a goal set through one `GoalHandler` instance is invisible to any
-//!   other instance. A real app-state seam should replace this field.
-//! * **No hook add/remove seam.** `OrchestratorHandle::list_hooks` is
-//!   read-only; there is no `add_session_hook` / `remove_session_hook`. This
-//!   port does NOT register or remove an actual `Stop` hook — the directive
-//!   text alone asks the model to keep working, but nothing will mechanically
-//!   block a real `Stop` event yet. Wiring that in requires both the new
-//!   handle methods AND the turn-loop change the spec calls out separately
-//!   (tagging a goal-owned hook so a non-blocking `ok:true` Prompt-hook result
-//!   auto-clears `activeGoal` and allows the stop) — out of scope for a single
-//!   command-handler file.
-//! * **No trust / hooks-restricted query.** [`workspace_trusted`] and
-//!   [`hooks_restricted`] are the `kEt(n,t)` gate's two halves; neither has a
-//!   handle seam, so both hardcode the always-succeeds answer (mirrors the
-//!   `effort.rs` `dynamic_workflows_enabled` "seam missing → hard value"
-//!   pattern). The fixed gate-failure strings are kept ready to fire once a
-//!   real query lands.
+//! * **Stop-hook enforcement is NOT wired (the real remaining gap).** The
+//!   app-state goal seam now EXISTS — `traits::OrchestratorHandle` carries
+//!   `get_active_goal` / `set_active_goal` / `clear_active_goal` /
+//!   `set_active_goal_last_reason`, and this handler delegates to them (no local
+//!   `Mutex` state). But nothing in the turn loop consults `active_goal` at stop
+//!   time: this port does NOT register a real `Stop` hook, so the directive text
+//!   alone asks the model to keep working — NOTHING mechanically blocks a real
+//!   `Stop` event, and `active_goal` is never auto-cleared on success. Wiring
+//!   that in requires the turn-loop change the spec calls out (a goal-owned hook
+//!   whose non-blocking `ok:true` Prompt-hook result auto-clears `activeGoal`
+//!   and allows the stop). Consequently `set_active_goal_last_reason` has no
+//!   production caller yet, so `lastReason` is always `None`.
+//! * **Trust / hooks-restricted values are not sourced.** [`workspace_trusted`]
+//!   and [`hooks_restricted`] are now `OrchestratorHandle` methods (the
+//!   `kEt(n,t)` gate's two halves), but their default impls return `true` /
+//!   `false` and no composition root passes real values yet (the
+//!   `with_workspace_trusted` / `with_hooks_restricted` builders have no
+//!   production caller), so both gates effectively still hardcode the
+//!   always-succeeds answer and the fixed gate-failure strings below remain
+//!   unreachable until the desktop/mobile roots wire real trust + settings-
+//!   derived restriction values.
 //! * **`lastReasonSuffix` formatting is NOT byte-verified.** The task's
 //!   locked output-string list gives every OTHER literal verbatim but leaves
 //!   this one as a `${lastReasonSuffix}` placeholder; the one targeted
@@ -83,9 +80,9 @@
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
-use traits::OrchestratorHandle;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+use traits::{ActiveGoalSnapshot, OrchestratorHandle};
 
 /// `wEt` — the max goal-condition length (v2.1.198).
 const MAX_CONDITION_CHARS: usize = 4000;
@@ -127,24 +124,6 @@ const TELEMETRY_TOO_LONG_PROPERTY: &str = "too_long";
 /// faithful to the semantic action (a goal WAS cleared), carrying the cleared
 /// condition as `details`.
 const TELEMETRY_STOP_HOOK_REMOVED: &str = "tengu_stop_hook_removed";
-
-/// `kEt(n,t)` half 1 — workspace-trust query. `OrchestratorHandle` has no
-/// trust-query method (verified via `traits/src/orchestrator.rs`), so this
-/// always resolves `true` (every workspace treated as trusted) until a real
-/// seam is added — the same "seam missing → hard value" shape as
-/// `effort.rs`'s `dynamic_workflows_enabled`.
-fn workspace_trusted() -> bool {
-    true
-}
-
-/// `kEt(n,t)` half 2 — hooks-restricted query (`disableAllHooks` /
-/// `allowManagedHooksOnly`). Already ported in `hooks/src/executor.rs` +
-/// `hooks/src/loader.rs`, but `commands/core` cannot see the `hooks` crate's
-/// settings without a new `OrchestratorHandle` method. Hardcoded to `false`
-/// (never restricted) until that seam lands.
-fn hooks_restricted() -> bool {
-    false
-}
 
 /// `Goal condition is limited to {n} characters (got {got})` — verbatim.
 fn too_long_message(got: usize) -> String {
@@ -190,50 +169,26 @@ fn format_elapsed(d: Duration) -> String {
     }
 }
 
-/// In-process record of the active goal. See the module doc's "no app-state
-/// goal seam" gap for why this lives here instead of behind
-/// `OrchestratorHandle`.
-#[derive(Debug, Clone)]
-struct ActiveGoal {
-    /// The user-supplied condition text, verbatim.
-    condition: String,
-    /// When the goal was set — drives the status branch's `{elapsed}` slot.
-    set_at: Instant,
-    /// The most recent Stop-hook check's reason, if the (not-yet-wired)
-    /// turn loop has ever populated one. Always `None` in this port — see
-    /// the module doc's last bullet.
-    last_reason: Option<String>,
-}
-
 /// `/goal` handler — set, show, or clear a session-scoped stop-gating goal.
 #[derive(Clone)]
 pub struct GoalHandler {
-    /// Reserved for a future real app-state / hook seam; unused today (see
-    /// the module doc's gap list) but kept so a later patch can wire one in
-    /// without changing this handler's constructor signature.
-    #[allow(dead_code)]
     handle: Arc<dyn OrchestratorHandle>,
-    active: Arc<Mutex<Option<ActiveGoal>>>,
 }
 
 impl GoalHandler {
     /// Construct a `GoalHandler` bound to the given orchestrator handle.
     #[must_use]
     pub fn new(handle: Arc<dyn OrchestratorHandle>) -> Self {
-        Self {
-            handle,
-            active: Arc::new(Mutex::new(None)),
-        }
+        Self { handle }
     }
 
     /// The empty-arg status branch (binary: `` `Goal active: ${o.condition}
     /// (${s})${i}` `` / `"No goal set"`).
-    fn status(&self) -> String {
-        let guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        match guard.as_ref() {
+    async fn status(&self) -> String {
+        match self.handle.get_active_goal().await {
             None => NO_GOAL_SET.to_string(),
             Some(g) => {
-                let elapsed = format_elapsed(g.set_at.elapsed());
+                let elapsed = format_elapsed(goal_elapsed(&g));
                 let suffix = g
                     .last_reason
                     .as_ref()
@@ -246,9 +201,8 @@ impl GoalHandler {
 
     /// The clear-token branch (binary: `o===null?"No goal set":\`Goal
     /// cleared: ${o}\``).
-    fn clear(&self) -> String {
-        let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-        match guard.take() {
+    async fn clear(&self) -> String {
+        match self.handle.clear_active_goal().await {
             None => NO_GOAL_SET.to_string(),
             Some(g) => {
                 telemetry::emit_command_completed(TELEMETRY_STOP_HOOK_REMOVED, &g.condition);
@@ -261,25 +215,18 @@ impl GoalHandler {
     /// directive (binary: `` {type:"query",value:`Goal set: ${n}`,
     /// prompt:nrr(n)} `` — see the module doc's `CommandResult` mapping note
     /// for why only the `prompt` half is representable here).
-    fn set(&self, condition: &str) -> CommandResult {
-        if !workspace_trusted() {
+    async fn set(&self, condition: &str) -> CommandResult {
+        if !self.handle.workspace_trusted().await {
             return CommandResult::Done {
                 display: Some(TRUST_GATE_MESSAGE.to_string()),
             };
         }
-        if hooks_restricted() {
+        if self.handle.hooks_restricted().await {
             return CommandResult::Done {
                 display: Some(HOOKS_RESTRICTED_MESSAGE.to_string()),
             };
         }
-        {
-            let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-            *guard = Some(ActiveGoal {
-                condition: condition.to_string(),
-                set_at: Instant::now(),
-                last_reason: None,
-            });
-        }
+        self.handle.set_active_goal(condition).await;
         CommandResult::InjectMessage {
             content: directive_for(condition),
         }
@@ -294,14 +241,14 @@ impl BuiltinCommandHandler for GoalHandler {
         // 1) empty → status.
         if trimmed.is_empty() {
             return CommandResult::Done {
-                display: Some(self.status()),
+                display: Some(self.status().await),
             };
         }
 
         // 2) case-insensitive clear token → clear.
         if CLEAR_TOKENS.contains(&trimmed.to_lowercase().as_str()) {
             return CommandResult::Done {
-                display: Some(self.clear()),
+                display: Some(self.clear().await),
             };
         }
 
@@ -315,7 +262,7 @@ impl BuiltinCommandHandler for GoalHandler {
         }
 
         // 4) else → gate + set.
-        self.set(trimmed)
+        self.set(trimmed).await
     }
 
     fn name(&self) -> &str {
@@ -330,6 +277,12 @@ impl BuiltinCommandHandler for GoalHandler {
         // (locked, not editable by this port) has no `"goal"` arm yet.
         "Set a goal — keep working until the condition is met"
     }
+}
+
+fn goal_elapsed(goal: &ActiveGoalSnapshot) -> Duration {
+    SystemTime::now()
+        .duration_since(goal.set_at)
+        .unwrap_or_else(|_| Duration::from_secs(0))
 }
 
 #[cfg(test)]

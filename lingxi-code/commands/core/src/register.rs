@@ -324,6 +324,12 @@ pub fn register_core_batch_7(reg: &mut CommandRegistry) {
 /// * `safe_mode` — the CLI `--safe-mode` flag (`CustomizationGates.safe_mode`),
 ///   feeding `/reload-skills`'s trailing "(custom skills are disabled in safe
 ///   mode)" note.
+/// * `disable_agent_view` — the resolved `disableAgentView` setting value
+///   (`settings.disableAgentView === true`), read by the composition root from
+///   the merged engine settings. `true` disables the agent-view fork/subtask
+///   surface exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`; the two halves are
+///   OR-combined via [`traits::agent_view::is_enabled_with_setting`] (binary
+///   `I2i()`/`vO()`).
 ///
 /// The composition roots (`apps/engine-desktop`, `apps/engine-mobile`) call
 /// this alongside the other core batch registrars.
@@ -337,6 +343,7 @@ pub fn register_core_batch_8(
     home: std::path::PathBuf,
     additional_skill_dirs: Vec<std::path::PathBuf>,
     safe_mode: bool,
+    disable_agent_view: bool,
 ) {
     use crate::{
         AutocompactHandler, ForkBackgroundHandler, ForkHandler, GoalHandler, RecapHandler,
@@ -358,10 +365,12 @@ pub fn register_core_batch_8(
     //   * disabled → `SAd` (the legacy subagent-spawn `/fork`, `ForkHandler`);
     //                NO `/subtask`.
     //
-    // Only the env half of `vO()` (`CLAUDE_CODE_DISABLE_AGENT_VIEW`) is resolved
-    // here; the `disableAgentView` settings half is a documented composition-root
-    // seam (`traits::agent_view::is_enabled_with_setting`) — see that module.
-    if traits::agent_view::is_enabled() {
+    // Both halves of `vO()` are resolved here: the env half
+    // (`CLAUDE_CODE_DISABLE_AGENT_VIEW`) inside `is_enabled_with_setting`, and
+    // the `disableAgentView` settings half passed by the composition root from
+    // the merged engine settings (`settings.disableAgentView === true`). Either
+    // one disables the agent-view surface.
+    if traits::agent_view::is_enabled_with_setting(disable_agent_view) {
         reg.register_builtin_handler(Arc::new(ForkBackgroundHandler::new(handle.clone())));
         reg.register_builtin_handler(Arc::new(SubtaskHandler::new(handle.clone())));
     } else {
@@ -1045,7 +1054,11 @@ mod batch_8_tests {
     use command_api::parser::ParsedSlashCommand;
     use orchestrator::test_support::MockOrchestratorHandle;
 
-    fn batch_8(reg: &mut CommandRegistry, handle: Arc<dyn traits::OrchestratorHandle>) {
+    fn batch_8(
+        reg: &mut CommandRegistry,
+        handle: Arc<dyn traits::OrchestratorHandle>,
+        disable_agent_view: bool,
+    ) {
         register_core_batch_8(
             reg,
             handle,
@@ -1056,6 +1069,7 @@ mod batch_8_tests {
             std::env::temp_dir(),
             vec![],
             false,
+            disable_agent_view,
         );
     }
 
@@ -1076,7 +1090,7 @@ mod batch_8_tests {
         let _g = agent_view_env_lock();
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));
+        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), false);
 
         for name in ["subtask", "fork"] {
             assert!(reg.resolve(name).is_some(), "/{name} missing");
@@ -1103,7 +1117,7 @@ mod batch_8_tests {
 
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));
+        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), false);
 
         let fork_desc = reg.resolve("fork").expect("/fork must resolve").description.clone();
         let subtask = reg.resolve("subtask").and_then(|_| reg.get_handler("subtask"));
@@ -1121,6 +1135,28 @@ mod batch_8_tests {
         );
     }
 
+    /// cc2.1.215 fallback via the SETTINGS half of `vO()`
+    /// (`settings.disableAgentView === true`, env unset): batch-8 registers the
+    /// legacy subagent-spawn `/fork` (`SAd`) and NO `/subtask`, exactly like the
+    /// env override. Verifies M-03 threads `is_enabled_with_setting`.
+    #[test]
+    fn legacy_fork_only_when_agent_view_disabled_by_setting() {
+        let _g = agent_view_env_lock();
+        // env unset (agent_view_env_lock clears it); disable via the setting.
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), true);
+
+        assert_eq!(
+            reg.resolve("fork").expect("/fork must resolve").description,
+            "Spawn a background agent that inherits the full conversation"
+        );
+        assert!(
+            reg.resolve("subtask").and_then(|_| reg.get_handler("subtask")).is_none(),
+            "/subtask must NOT be registered when the disableAgentView setting is true"
+        );
+    }
+
     /// `/subtask` with no task renders the byte-exact usage string. Holds the
     /// agent-view env lock so a concurrent `legacy_fork_only_*` test (which
     /// disables agent view, hiding `/subtask`) cannot race the registration.
@@ -1129,7 +1165,7 @@ mod batch_8_tests {
         let _g = agent_view_env_lock();
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()));
+        batch_8(&mut reg, Arc::new(MockOrchestratorHandle::new()), false);
 
         let h = reg.get_handler("subtask").expect("subtask handler missing");
         let args = ParsedSlashCommand {

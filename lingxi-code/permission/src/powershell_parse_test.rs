@@ -29,10 +29,31 @@ fn build_pwsh_script_prepends_encoded_command() {
 
 #[test]
 fn parse_invalid_json_or_errors_is_passthrough() {
-    assert_eq!(parse_ps_ast_json("not json"), ParseResult::default());
+    let malformed = parse_ps_ast_json("not json");
+    assert!(!malformed.valid);
+    assert_eq!(
+        malformed.invalid_reason.as_deref(),
+        Some("PowerShell parser returned malformed JSON")
+    );
     let r = parse_ps_ast_json(r#"{"valid":false,"statements":[]}"#);
     assert!(!r.valid);
     assert!(r.statements.is_empty());
+    assert_eq!(
+        r.invalid_reason.as_deref(),
+        Some("PowerShell parser reported an invalid parse")
+    );
+}
+
+#[test]
+fn parse_errors_surface_explicit_signal() {
+    let r = parse_ps_ast_json(
+        r#"{"valid":false,"errors":[{"errorId":"UnexpectedToken","message":"Unexpected token"}],"statements":[]}"#,
+    );
+    assert!(!r.valid);
+    assert_eq!(
+        r.invalid_reason.as_deref(),
+        Some("PowerShell parser reported UnexpectedToken: Unexpected token")
+    );
 }
 
 /// A single `Get-Content /etc/passwd` pipeline as pwsh would emit it.
@@ -215,10 +236,18 @@ fn precheck_rejects_oversized_command() {
     let ok = "a".repeat(PWSH_MAX_COMMAND_BYTES);
     assert!(parse_precheck(&ok).is_none());
     let too_long = "a".repeat(PWSH_MAX_COMMAND_BYTES + 1);
-    assert_eq!(parse_precheck(&too_long), Some(ParseResult::default()));
+    let too_long = parse_precheck(&too_long).expect("oversized command should fail precheck");
+    assert_eq!(
+        too_long.invalid_reason.as_deref(),
+        Some("PowerShell parser precheck rejected command longer than 4500 bytes")
+    );
     // Byte-length, not char count: a multibyte char pushes the boundary in bytes.
     let multibyte = "é".repeat(PWSH_MAX_COMMAND_BYTES); // 2 bytes each → >4500 bytes
-    assert_eq!(parse_precheck(&multibyte), Some(ParseResult::default()));
+    let multibyte = parse_precheck(&multibyte).expect("multibyte overrun should fail precheck");
+    assert_eq!(
+        multibyte.invalid_reason.as_deref(),
+        Some("PowerShell parser precheck rejected command longer than 4500 bytes")
+    );
 }
 
 #[test]
@@ -231,10 +260,11 @@ fn precheck_refuses_unicode_codepoint_escape() {
     assert!(!has_unicode_codepoint_escape("`u{"));
     assert!(!has_unicode_codepoint_escape("u{41}"));
     assert!(!has_unicode_codepoint_escape("Get-Content notes.txt"));
-    // The pre-check turns a u{} command into a passthrough.
+    let rejected =
+        parse_precheck("Remove-Item /etc `u{263A}").expect("unicode escape should fail precheck");
     assert_eq!(
-        parse_precheck("Remove-Item /etc `u{263A}"),
-        Some(ParseResult::default())
+        rejected.invalid_reason.as_deref(),
+        Some("PowerShell parser precheck rejected unsupported `u{...}` escape")
     );
 }
 
@@ -242,11 +272,16 @@ fn precheck_refuses_unicode_codepoint_escape() {
 fn system_parser_passthrough_on_oversized_and_escape() {
     // These return before any spawn, so they are testable without pwsh installed.
     let parser = SystemPwshParser;
+    let too_long = parser.parse(&"x".repeat(PWSH_MAX_COMMAND_BYTES + 1));
     assert_eq!(
-        parser.parse(&"x".repeat(PWSH_MAX_COMMAND_BYTES + 1)),
-        ParseResult::default()
+        too_long.invalid_reason.as_deref(),
+        Some("PowerShell parser precheck rejected command longer than 4500 bytes")
     );
-    assert_eq!(parser.parse("echo `u{263A}"), ParseResult::default());
+    let unicode = parser.parse("echo `u{263A}");
+    assert_eq!(
+        unicode.invalid_reason.as_deref(),
+        Some("PowerShell parser precheck rejected unsupported `u{...}` escape")
+    );
 }
 
 #[test]

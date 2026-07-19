@@ -3,7 +3,8 @@
 use crate::token::Usage;
 use protocol::{ConversationMessage, MessageId, SessionId, ToolUseId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 
 /// Running total of `Usage` across all turns in a session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -57,6 +58,18 @@ pub enum TodoState {
     Completed,
 }
 
+/// Active session-scoped `/goal` state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveGoalState {
+    /// User-supplied goal condition.
+    pub condition: String,
+    /// When the goal became active.
+    pub set_at: SystemTime,
+    /// Most recent stop-time evaluation reason, when available.
+    #[serde(default)]
+    pub last_reason: Option<String>,
+}
+
 /// In-memory model of a conversation session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
@@ -76,6 +89,9 @@ pub struct SessionState {
     /// on deserialize so pre-M4-04 persisted sessions still load.
     #[serde(default)]
     pub todos: Vec<TodoItem>,
+    /// Active session-scoped `/goal`. Defaults to `None` on deserialize.
+    #[serde(default)]
+    pub active_goal: Option<ActiveGoalState>,
     /// Plan-mode flag (M4-04). Flipped by `EnterPlanModeTool` /
     /// `ExitPlanModeTool`. Defaults to `false` on deserialize.
     #[serde(default)]
@@ -119,6 +135,24 @@ pub struct SessionState {
     /// (the TUI grouping is not ported).
     #[serde(skip)]
     pub injected_message_sources: HashMap<MessageId, ToolUseId>,
+    /// Message ids whose JSONL user envelope carried
+    /// `isVisibleInTranscriptOnly: true`.
+    ///
+    /// These messages must remain in the model history (compact summaries are
+    /// load-bearing context), but renderers must not present them as ordinary
+    /// user input. The protocol's frozen `ConversationMessage::User` shape has
+    /// no slot for this independent Claude envelope flag, so resume preserves
+    /// it in a session side table instead of collapsing it into `is_meta`
+    /// (which has different last-real-user semantics).
+    #[serde(default)]
+    pub transcript_only_messages: HashSet<MessageId>,
+    /// Message ids whose JSONL user envelope carried
+    /// `isCompactSummary: true`. Kept separately from
+    /// [`Self::transcript_only_messages`] because the two flags are independent
+    /// on the wire even though Claude normally writes both for compact
+    /// summaries.
+    #[serde(default)]
+    pub compact_summary_messages: HashSet<MessageId>,
 }
 
 impl SessionState {
@@ -132,11 +166,14 @@ impl SessionState {
             model,
             model_profile: None,
             todos: Vec::new(),
+            active_goal: None,
             plan_mode: false,
             plan_reminder_shown: false,
             turns_since_last_todo_write: 0,
             turns_since_last_reminder: 0,
             injected_message_sources: HashMap::new(),
+            transcript_only_messages: HashSet::new(),
+            compact_summary_messages: HashSet::new(),
         }
     }
 }

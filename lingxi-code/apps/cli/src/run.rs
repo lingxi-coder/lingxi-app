@@ -15,7 +15,7 @@ use crate::init::Runtime;
 use crate::output::OutputSink;
 use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
 use crate::stream_json_input::{
-    content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack,
+    content_to_prompt, control_frame_request_id, control_request_subtype, emit_replay_ack_queued,
     spawn_stdin_router, ControlPlaneWriter, StdinChannels,
 };
 use command_api::format_description_with_source;
@@ -818,7 +818,11 @@ pub async fn run_stream_json_input_loop(
         mut turn_rx,
         mut control_req_rx,
         mut control_resp_rx,
-    } = spawn_stdin_router(argv.replay_user_messages, session_id_str.clone());
+    } = spawn_stdin_router(
+        argv.replay_user_messages,
+        session_id_str.clone(),
+        stream.outbound_tx(),
+    );
 
     // ORPHANED PERMISSION recovery channel. A late `control_response` whose
     // `can_use_tool` request was lost (process restart with `--resume`, or a
@@ -1039,7 +1043,10 @@ pub async fn run_stream_json_input_loop(
                 .uuid
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            emit_replay_ack(&ack_uuid, &turn.content, None, &session_id_str);
+            // Route through the single-writer drain queue (`outbound_tx`, bound
+            // above): a direct stdout write here would let the ack overtake data
+            // frames still queued in the outbound channel mid-turn.
+            emit_replay_ack_queued(&outbound_tx, &ack_uuid, &turn.content, None, &session_id_str);
         }
 
         // Phase 1: use cancel-aware turn entry point so `interrupt` can abort

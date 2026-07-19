@@ -22,6 +22,14 @@
 //! - [`logs`]: the `claude_code.events` log signal names + `OTEL_LOG_*` gate
 //!   helpers (the orchestrator's opt-in `assistant_response` log line reads
 //!   [`logs::assistant_responses_enabled`]).
+//! - [`record`]: the **recording foundation** (finding H-09) — the
+//!   [`record::MetricRecorder`]/[`record::LogRecorder`] traits every record site
+//!   depends on, a byte-noop default ([`record::NoopRecorder`]) for the gate-off
+//!   path, and a config-gated in-memory/console recorder
+//!   ([`record::InMemoryRecorder`]) that accumulates counters/histograms/logs and
+//!   honors the `LINGXI_OTEL_CONTENT_MAX_LENGTH` content cap. The real OTLP
+//!   transport behind these traits and the ~20 app-code record sites remain
+//!   documented follow-ups (see [`record`]).
 //!
 //! ## Rebrand policy
 //!
@@ -32,24 +40,34 @@
 //! schema identifier is kept verbatim (`OTel` wire contract; collectors key on
 //! them). See [`config`] for the full rationale.
 //!
-//! ## Remainder (partial — see H-BIN-06 return notes)
+//! ## Remainder (partial — see H-BIN-06 / H-09 return notes)
 //!
-//! The SDK exporters/readers that consume [`config::OtelConfig`] (real OTLP
-//! egress over grpc/http, the metric readers, the `LoggerProvider`, the trace
-//! provider) and the ~20 instrument recording sites (session/token/cost/tool/
-//! git/subagent/mcp/hook/compaction) are **not** wired here; this commit lands
-//! the config/gate/env/validation core that all of that will read.
+//! The recording *abstraction* now exists ([`record`]): the traits, the byte-noop
+//! default, the in-memory/console recorder, and the content cap. What remains is
+//! (1) the real OTLP egress over grpc/http behind those traits — the metric
+//! readers, the `LoggerProvider`, the trace provider, all consuming
+//! [`config::OtelConfig`]; and (2) wiring the ~20 instrument recording sites
+//! (session/token/cost/tool/git/subagent/mcp/hook/compaction), which live in
+//! currently-dirty app files. Both are enumerated as explicit follow-ups in
+//! [`record`].
 
 pub mod config;
 pub mod headers_helper;
 pub mod logs;
 pub mod metrics;
+pub mod record;
 
 pub use config::{
-    bool_env, env_truthy, int_env, ExporterKind, GateTimeouts, LogIncludeFlags, MetricsInclude,
-    OtelConfig, OtlpExporterConfig, OtlpProtocol, Signal, ENV_ENABLE_TELEMETRY,
+    bool_env, compute_content_max_length, env_truthy, int_env, js_number, ExporterKind,
+    GateTimeouts, LogIncludeFlags, MetricsInclude, OtelConfig, OtlpExporterConfig, OtlpProtocol,
+    Signal, DEFAULT_CONTENT_MAX_LENGTH, ENV_CONTENT_MAX_LENGTH, ENV_ENABLE_TELEMETRY,
 };
 pub use headers_helper::{validate_helper_output, ExecOutcome, HeadersHelperState, ResolveOutcome};
+pub use record::{
+    recorder_from_config, truncate_content, AttrValue, Attributes, CounterSeries, HistogramSeries,
+    InMemoryRecorder, LogRecord, LogRecorder, MetricRecorder, NoopRecorder, Recorder,
+    TruncatedContent,
+};
 
 /// Whether the OpenTelemetry monitoring stack is enabled for this process
 /// (binary `o7u()`: `ct(process.env.CLAUDE_CODE_ENABLE_TELEMETRY)`, rebranded

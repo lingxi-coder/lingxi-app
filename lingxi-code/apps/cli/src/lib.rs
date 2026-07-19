@@ -352,6 +352,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         std::env::set_var("LINGXI_DISABLE_LINGXI_MDS", "1");
     }
 
+    // (M-01, cc2.1.215) `--brief` exports `LINGXI_BRIEF=1` for this process +
+    // children (CC registry key `CLAUDE_CODE_BRIEF`; both honored by the tool
+    // gate). Mirrors CC's `CAn(e)`, where `e.brief` and `Z.CLAUDE_CODE_BRIEF`
+    // are equivalent triggers and the env is what the `SendUserMessage` tool's
+    // `isBriefEnabled`/`aKr()` gate reads. Default-off: without this flag the
+    // Brief tool stays invisible to the model (see `tool_ui::brief`).
+    if parsed.brief {
+        std::env::set_var("LINGXI_BRIEF", "1");
+    }
+
     // `--cwd <dir>` must apply BEFORE the subcommand dispatch, not just for
     // session modes: the subcommands resolve their target project from the LIVE
     // process cwd (mcp via `current_dir()` → project key + `<cwd>/.mcp.json`,

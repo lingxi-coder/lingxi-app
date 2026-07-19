@@ -77,10 +77,12 @@ fn emit_line_to_stdout(out: &mut std::io::Stdout, line: &str) {
 /// are gone), then it flushes and exits.
 ///
 /// Stdout ordering: the drain task is the only thing that calls `write_all`
-/// on stdout. No other code touches stdout after this task starts (except
-/// `emit_replay_ack` in stream_json_input, which has its own direct-write
-/// — that pre-Phase-0 path is safe because replay_ack is only called from
-/// the stdin-reader task, which runs before any turn starts).
+/// on stdout. No other code touches stdout after this task starts — the
+/// streaming replay-ack sites (`run.rs` in-turn-loop ack + `spawn_stdin_router`
+/// duplicate-ack) route through this same queue via
+/// `stream_json_input::emit_replay_ack_queued`. The direct-write
+/// `emit_replay_ack` survives only for the batch `read_input_turns` path, which
+/// runs before any drain task exists (tests / non-streaming callers).
 pub enum OutboundMsg {
     Line(String),
     Flush(oneshot::Sender<()>),

@@ -53,6 +53,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // (parity 2.1.207 H-BIN-03), same as `skipWebFetchPreflight`.
         disable_artifact: next.disable_artifact.or(prev.disable_artifact),
         enable_artifact: next.enable_artifact.or(prev.enable_artifact),
+        // Scalar Override (later source wins) — `disableAgentView` (M-03), same
+        // as `enableArtifact`.
+        disable_agent_view: next.disable_agent_view.or(prev.disable_agent_view),
         // Scalar Override — `askUserQuestionTimeout` (enum 60s|5m|10m|never).
         ask_user_question_timeout: next
             .ask_user_question_timeout

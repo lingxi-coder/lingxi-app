@@ -415,6 +415,48 @@ fn load_view_rows(cli: &Cli) -> Vec<tui::agents_screen::AgentRow> {
         .collect()
 }
 
+/// Resolve the working directory a session was created in, so an interactive
+/// attach/resume relaunch runs *in that directory*.
+///
+/// The resume loader derives the transcript path from the process cwd (Claude
+/// encodes cwd into the `projects/<encoded-cwd>/<sessionId>.jsonl` path). The
+/// agent view lists sessions from sibling git worktrees, each carrying its own
+/// cwd — so relaunching a foreign-worktree session from the view's own cwd
+/// would look up an empty/wrong transcript. Returning the recorded cwd lets the
+/// caller chdir the respawned child to match (mirrors the binary respawning in
+/// the session's cwd). Live sessions use `LiveSessionRecord.cwd`; background
+/// jobs use the worker `cwd` (where the transcript was written), falling back to
+/// `originCwd`.
+fn session_origin_cwd(home: &Path, session_id: &str) -> Option<PathBuf> {
+    use crate::agents_registry as reg;
+    let live = reg::read_live_sessions(&reg::sessions_dir(home));
+    let jobs = reg::read_jobs(&reg::jobs_dir(home));
+    session_origin_cwd_from(&live, &jobs, session_id)
+}
+
+/// Pure resolver for [`session_origin_cwd`] (filesystem read split out so the
+/// selection logic is unit-testable): a live record's cwd wins, else the
+/// matching job's worker `cwd`, else its `originCwd`. Empty strings are ignored.
+fn session_origin_cwd_from(
+    live: &[crate::agents_registry::LiveSessionRecord],
+    jobs: &[(String, crate::agents_registry::JobState)],
+    session_id: &str,
+) -> Option<PathBuf> {
+    if let Some(rec) = live
+        .iter()
+        .find(|r| r.session_id.as_deref() == Some(session_id))
+    {
+        if !rec.cwd.is_empty() {
+            return Some(PathBuf::from(&rec.cwd));
+        }
+    }
+    jobs.iter()
+        .find(|(_, job)| job.session_id.as_deref() == Some(session_id))
+        .and_then(|(_, job)| job.cwd.as_deref().or(job.origin_cwd.as_deref()))
+        .filter(|c| !c.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The dispatch flags an attach forwards to the resumed session (subset of
 /// the binary's respawn/dispatch defaults that lingxi's root argv accepts).
 fn attach_args(cli: &Cli, session_id: &str) -> Vec<String> {
@@ -689,7 +731,14 @@ fn run_agents_view(cli: &Cli, mut watcher: NotificationWatcher) -> i32 {
                     eprintln!("lingxi-cli agents: attach failed: empty attach argv");
                     return crate::exit_codes::RUNTIME_ERROR;
                 };
-                let status = std::process::Command::new(program).args(args).status();
+                let mut command = std::process::Command::new(program);
+                command.args(args);
+                // Respawn in the session's own cwd so the resume loader finds the
+                // right transcript when the session lives in a sibling worktree.
+                if let Some(cwd) = session_origin_cwd(&home, &session_id) {
+                    command.current_dir(cwd);
+                }
+                let status = command.status();
                 if let Err(e) = status {
                     eprintln!("lingxi-cli agents: attach failed: {e}");
                     return crate::exit_codes::RUNTIME_ERROR;
@@ -837,6 +886,55 @@ mod tests {
         assert!(!job_has_live_worker(&jobs, "sid-workerless", &alive));
         // Unknown session id → attach allowed.
         assert!(!job_has_live_worker(&jobs, "sid-unknown", &alive));
+    }
+
+    #[test]
+    fn session_origin_cwd_resolves_from_live_then_job() {
+        use crate::agents_registry::{JobState, LiveSessionRecord};
+        use serde_json::json;
+
+        let live: Vec<LiveSessionRecord> = serde_json::from_value(json!([
+            {"pid": 1, "sessionId": "sid-live", "cwd": "/work/wt-a", "startedAt": 0, "kind": "interactive"}
+        ]))
+        .unwrap();
+        let jobs = vec![(
+            "bead0001".to_string(),
+            JobState {
+                session_id: Some("sid-job".to_string()),
+                cwd: Some("/work/wt-b".to_string()),
+                origin_cwd: Some("/work/main".to_string()),
+                ..Default::default()
+            },
+        )];
+
+        // Live record wins and its cwd is returned.
+        assert_eq!(
+            session_origin_cwd_from(&live, &jobs, "sid-live"),
+            Some(PathBuf::from("/work/wt-a"))
+        );
+        // Job: the worker cwd (where the transcript was written) is preferred
+        // over originCwd.
+        assert_eq!(
+            session_origin_cwd_from(&live, &jobs, "sid-job"),
+            Some(PathBuf::from("/work/wt-b"))
+        );
+        // Unknown session → no cwd (relaunch keeps the caller's cwd).
+        assert_eq!(session_origin_cwd_from(&live, &jobs, "sid-unknown"), None);
+
+        // Job without a worker cwd falls back to originCwd.
+        let jobs_origin_only = vec![(
+            "bead0002".to_string(),
+            JobState {
+                session_id: Some("sid-origin".to_string()),
+                cwd: None,
+                origin_cwd: Some("/work/main".to_string()),
+                ..Default::default()
+            },
+        )];
+        assert_eq!(
+            session_origin_cwd_from(&[], &jobs_origin_only, "sid-origin"),
+            Some(PathBuf::from("/work/main"))
+        );
     }
 
     #[test]

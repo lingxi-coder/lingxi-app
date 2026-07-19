@@ -36,9 +36,11 @@
 
 #![forbid(unsafe_code)]
 
+use crate::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -276,19 +278,24 @@ pub fn process_line(
 
 // ── Replay-ack emitter ────────────────────────────────────────────────────────
 
-/// Emit a `user` replay-ack frame to stdout, echoing the ORIGINAL message so
-/// the host can correlate it (claude-code `SDKUserMessageReplaySchema`):
-/// same `uuid`, same `content`, same `timestamp` (when the inbound frame
-/// carried one — else a fresh one), `isReplay:true`.
+/// Build the `user` replay-ack frame that echoes the ORIGINAL message so the
+/// host can correlate it (claude-code `SDKUserMessageReplaySchema`): same
+/// `uuid`, same `content`, same `timestamp` (when the inbound frame carried
+/// one — else a fresh one), `isReplay:true`.
 ///
 /// `content` is the original message content (string or content-block array).
 /// `timestamp` is the original frame timestamp, if any.
-pub fn emit_replay_ack(uuid: &str, content: &Value, timestamp: Option<&str>, session_id: &str) {
+fn build_replay_ack_frame(
+    uuid: &str,
+    content: &Value,
+    timestamp: Option<&str>,
+    session_id: &str,
+) -> Value {
     let timestamp = timestamp.map_or_else(
         || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         ToString::to_string,
     );
-    let frame = json!({
+    json!({
         "type": "user",
         "message": {"role": "user", "content": content},
         "session_id": session_id,
@@ -296,16 +303,46 @@ pub fn emit_replay_ack(uuid: &str, content: &Value, timestamp: Option<&str>, ses
         "uuid": uuid,
         "timestamp": timestamp,
         "isReplay": true
-    });
-    let s = serde_json::to_string(&frame).unwrap_or_default();
-    let s = s
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
+    })
+}
+
+/// Emit a replay-ack frame by writing directly to a locked stdout.
+///
+/// ⚠️ Direct-write path — use ONLY from the batch reader ([`read_input_turns`]),
+/// which runs before the single-writer stdout drain task exists (tests /
+/// non-streaming callers). In streaming mode the drain task
+/// ([`crate::stream_json::spawn_drain_task`]) owns stdout, so a direct write
+/// here would jump ahead of frames still queued in the outbound channel —
+/// violating the "control plane NEVER overtakes the data plane" ordering
+/// invariant. Streaming callers MUST use [`emit_replay_ack_queued`] instead.
+pub fn emit_replay_ack(uuid: &str, content: &Value, timestamp: Option<&str>, session_id: &str) {
+    let frame = build_replay_ack_frame(uuid, content, timestamp, session_id);
+    let line = serialize_ndjson_line(&frame);
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let _ = out.write_all(s.as_bytes());
-    let _ = out.write_all(b"\n");
+    let _ = out.write_all(line.as_bytes());
     let _ = out.flush();
+}
+
+/// Emit a replay-ack frame through the single-writer outbound queue.
+///
+/// This preserves the strict FIFO ordering the control protocol requires: the
+/// ack is serialised and pushed onto the same `OutboundMsg` channel the
+/// `emit_*` frame methods use, so the drain task writes it in enqueue order
+/// relative to every data frame. All STREAMING replay-ack sites — the
+/// in-turn-loop ack in `run.rs` and the duplicate-ack in [`spawn_stdin_router`]
+/// — go through here (only the batch [`read_input_turns`] path, which has no
+/// live drain task, keeps the direct-write [`emit_replay_ack`]).
+pub fn emit_replay_ack_queued(
+    out_tx: &OutboundTx,
+    uuid: &str,
+    content: &Value,
+    timestamp: Option<&str>,
+    session_id: &str,
+) {
+    let frame = build_replay_ack_frame(uuid, content, timestamp, session_id);
+    let line = serialize_ndjson_line(&frame);
+    let _ = out_tx.send(OutboundMsg::Line(line));
 }
 
 // ── Content extractor ─────────────────────────────────────────────────────────
@@ -430,7 +467,11 @@ pub struct StdinChannels {
 /// block on `send`. This is intentional backpressure — the TS model also
 /// processes turns sequentially. Choose capacity > 1 so a burst of frames
 /// doesn't immediately stall, but < ∞ so a rogue flood can't OOM.
-pub fn spawn_stdin_router(replay_user_messages: bool, session_id: String) -> StdinChannels {
+pub fn spawn_stdin_router(
+    replay_user_messages: bool,
+    session_id: String,
+    out_tx: Arc<OutboundTx>,
+) -> StdinChannels {
     // Bounded channels: 64 buffered frames each. Turn channel is 64 (max burst
     // before the turn loop catches up). Control channels are 64 each.
     let (turn_tx, turn_rx) = mpsc::channel::<UserTurn>(64);
@@ -470,7 +511,16 @@ pub fn spawn_stdin_router(replay_user_messages: bool, session_id: String) -> Std
                 }) => {
                     eprintln!("Sending acknowledgment for duplicate user message: {uuid}");
                     if replay_user_messages {
-                        emit_replay_ack(&uuid, &content, timestamp.as_deref(), &session_id);
+                        // Route through the single-writer drain queue so this ack
+                        // stays FIFO-ordered with the data frames (never a direct
+                        // stdout write while the drain task owns stdout).
+                        emit_replay_ack_queued(
+                            &out_tx,
+                            &uuid,
+                            &content,
+                            timestamp.as_deref(),
+                            &session_id,
+                        );
                     }
                     // Duplicate — do NOT forward as a turn.
                 }
@@ -1021,5 +1071,58 @@ mod tests {
             inner.get("response").is_none(),
             "response key must be absent when payload is None"
         );
+    }
+
+    // ── replay-ack single-writer routing (M-07) ──────────────────────────────
+
+    #[test]
+    fn queued_replay_ack_enqueues_line_not_direct_write() {
+        // Streaming callers must route the replay-ack through the outbound queue
+        // so it stays FIFO-ordered behind data frames (control plane never
+        // overtakes the data plane). Verify the ack lands on the channel as a
+        // Line with the correct frame shape.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::stream_json::OutboundMsg>();
+        emit_replay_ack_queued(
+            &tx,
+            "uuid-1",
+            &json!("hello"),
+            Some("2026-07-19T00:00:00.000Z"),
+            "sess-1",
+        );
+        let line = outbound_line(rx.try_recv().expect("ack must be enqueued as one line"));
+        let parsed: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["type"], "user");
+        assert_eq!(parsed["uuid"], "uuid-1");
+        assert_eq!(parsed["isReplay"], true);
+        assert_eq!(parsed["message"]["content"], "hello");
+        assert_eq!(parsed["session_id"], "sess-1");
+        assert_eq!(parsed["timestamp"], "2026-07-19T00:00:00.000Z");
+        assert!(rx.try_recv().is_err(), "exactly one frame enqueued");
+    }
+
+    #[test]
+    fn queued_and_direct_replay_ack_produce_identical_bytes() {
+        // The channel-routed and direct-write paths must emit byte-identical
+        // frames (same serializer, same escaping, trailing LF) so the ordering
+        // fix changes only *when* the bytes hit stdout, never *what* is written.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::stream_json::OutboundMsg>();
+        emit_replay_ack_queued(
+            &tx,
+            "u",
+            &json!([{"type": "text", "text": "hi"}]),
+            Some("2026-07-19T12:00:00.000Z"),
+            "s",
+        );
+        let queued = outbound_line(rx.try_recv().unwrap());
+        let expected = serialize_ndjson_line(&build_replay_ack_frame(
+            "u",
+            &json!([{"type": "text", "text": "hi"}]),
+            Some("2026-07-19T12:00:00.000Z"),
+            "s",
+        ));
+        assert_eq!(queued, expected);
+        assert!(queued.ends_with('\n'), "line is newline-terminated");
     }
 }

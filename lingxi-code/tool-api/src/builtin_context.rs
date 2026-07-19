@@ -299,6 +299,22 @@ pub struct BuiltinToolContext {
     /// on a settings change); this bool is frozen at tool registration. A
     /// provider closure would be needed to close that minor divergence.
     pub skip_web_fetch_preflight: bool,
+
+    /// Mirror of `settings.askUserQuestionTimeout` (CC 2.1.201 zod:
+    /// `askUserQuestionTimeout:E.enum(["60s","5m","10m","never"]).catch(void 0)`,
+    /// default `never`). The idle window before an unanswered `AskUserQuestion`
+    /// prompt auto-continues with the answers selected so far. Threaded through
+    /// to `tool_ui`'s `DefaultTimeoutResolver` at registration
+    /// (`tool_ui::register_with_options` parses it via
+    /// `AskUserQuestionTimeout::parse_or_default` — so an absent / unparsable
+    /// value falls back to `never`, mirroring the zod `.catch`). Held as the raw
+    /// settings string (like [`Self::skip_web_fetch_preflight`] mirrors its bool)
+    /// because `tool-api` must NOT depend on `tool_ui` (the dependency runs the
+    /// other way). Populated at the two live composition roots
+    /// (`engine-desktop` + `engine-mobile`) from the merged `settings.json`;
+    /// `None` at every non-live / test construction site (frozen `never`
+    /// behavior).
+    pub ask_user_question_timeout: Option<String>,
 }
 
 impl BuiltinToolContext {

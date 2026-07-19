@@ -62,6 +62,7 @@ fn fresh(
         home,
         Vec::new(),
         false,
+        false,
     );
     let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
     (d, handle, root)
@@ -91,6 +92,7 @@ fn all_7_batch_8_names_resolve() {
         None,
         PathBuf::from("."),
         Vec::new(),
+        false,
         false,
     );
     for name in [

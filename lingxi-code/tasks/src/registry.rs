@@ -948,17 +948,24 @@ impl TaskRegistry {
             }
             // Reflect the kill in the tracked state for any variant the M1
             // surface can write; the handler's status sink drives the rest.
+            // Reverse-race guard: a task that already reached a terminal status
+            // (e.g. an MCP settle that won the race and fired `TaskCompleted`)
+            // must NOT be demoted to `Killed` — that would leave the task
+            // `Killed` after `TaskCompleted` already fired. Skip the status
+            // flip once terminal (mirrors `settle_mcp_task`'s re-check).
             if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
-                match s {
-                    TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
-                    TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
-                    // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
-                    // (the poll loop's `status==="killed"` → `cancelTask` branch).
-                    TaskState::McpTask(m) => {
-                        m.base.status = TaskStatus::Killed;
-                        m.mcp_status = "cancelled".to_string();
+                if !s.base().status.is_terminal() {
+                    match s {
+                        TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
+                        TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
+                        // A backgrounded MCP call: mark killed + `mcpStatus:"cancelled"`
+                        // (the poll loop's `status==="killed"` → `cancelTask` branch).
+                        TaskState::McpTask(m) => {
+                            m.base.status = TaskStatus::Killed;
+                            m.mcp_status = "cancelled".to_string();
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             if let Some(cleanup) = cleanup {
@@ -976,17 +983,21 @@ impl TaskRegistry {
         }
         if let Some(s) = self.tasks.write().await.get_mut(task_id_ref) {
             // Mark killed for the variants whose status is exposed here.
-            match s {
-                TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
-                TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
-                // A backgrounded MCP call: the stored cancel cleanup aborts the
-                // in-flight call; reflect the kill + `mcpStatus:"cancelled"`.
-                TaskState::McpTask(m) => {
-                    m.base.status = TaskStatus::Killed;
-                    m.mcp_status = "cancelled".to_string();
+            // Reverse-race guard: never demote an already-terminal task (e.g. a
+            // settle that won the race and fired `TaskCompleted`) to `Killed`.
+            if !s.base().status.is_terminal() {
+                match s {
+                    TaskState::LocalBash(b) => b.base.status = TaskStatus::Killed,
+                    TaskState::LocalAgent(a) => a.base.status = TaskStatus::Killed,
+                    // A backgrounded MCP call: the stored cancel cleanup aborts the
+                    // in-flight call; reflect the kill + `mcpStatus:"cancelled"`.
+                    TaskState::McpTask(m) => {
+                        m.base.status = TaskStatus::Killed;
+                        m.mcp_status = "cancelled".to_string();
+                    }
+                    // Other variants intentionally fall through in M1.
+                    _ => {}
                 }
-                // Other variants intentionally fall through in M1.
-                _ => {}
             }
         }
         if let Some(cleanup) = cleanup {

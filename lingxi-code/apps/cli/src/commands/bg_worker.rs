@@ -317,25 +317,38 @@ async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(
 
     // A resume worker carries no initial prompt (`spec.prompt == None`): skip the
     // initial turn and go straight to attach / offline-reply delivery.
-    if let Some(prompt) = spec.prompt.as_deref() {
-        run_attached_turn(
-            &runtime,
-            prompt,
-            attach_rx.as_mut(),
-            &mut queued,
-            &mut line_buf,
-        )
-        .await?;
+    let outcome: Result<(), String> = async {
+        if let Some(prompt) = spec.prompt.as_deref() {
+            run_attached_turn(&runtime, prompt, attach_rx.as_mut(), &mut queued, &mut line_buf)
+                .await?;
+        }
+        if let (Some(hub), Some(rx)) = (attach_hub.as_ref(), attach_rx.as_mut()) {
+            // The live-attach loop drains `queued` (offline replies first) before
+            // it blocks on live input, so a connected client is not required to
+            // deliver them.
+            run_attach_input_loop(&runtime, sink.as_ref(), hub, rx, &mut queued, &mut line_buf)
+                .await?;
+        } else {
+            // No live attach transport: deliver any offline-queued replies as
+            // plain follow-up turns directly.
+            deliver_offline_replies(&runtime, sink.as_ref(), &mut queued).await?;
+        }
+        Ok(())
     }
-    if let (Some(hub), Some(rx)) = (attach_hub.as_ref(), attach_rx.as_mut()) {
-        // The live-attach loop drains `queued` (offline replies first) before it
-        // blocks on live input, so a connected client is not required to deliver
-        // them.
-        run_attach_input_loop(&runtime, sink.as_ref(), hub, rx, queued, &mut line_buf).await?;
-    } else {
-        // No live attach transport: deliver any offline-queued replies as plain
-        // follow-up turns directly.
-        deliver_offline_replies(&runtime, sink.as_ref(), queued).await?;
+    .await;
+
+    if let Err(e) = outcome {
+        // (review #7) A turn error would otherwise DROP any follow-up lines a
+        // client submitted mid-turn (buffered in `queued` for the next turn).
+        // Persist them to the durable offline reply queue so a respawn / later
+        // attach still delivers them, mirroring the client-side
+        // persist_pending_line guarantee. (`line_buf` holds only an INCOMPLETE
+        // tail — no Enter yet — so it is intentionally not flushed; complete
+        // lines are already in `queued`.)
+        for line in queued.drain(..) {
+            let _ = crate::bg_reply_queue::enqueue_reply(&config_home, &spec.short, &line);
+        }
+        return Err(e);
     }
     Ok(())
 }
@@ -346,7 +359,7 @@ async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(
 async fn deliver_offline_replies(
     runtime: &crate::init::Runtime,
     sink: &dyn OutputSink,
-    mut queued: VecDeque<String>,
+    queued: &mut VecDeque<String>,
 ) -> Result<(), String> {
     while let Some(input) = queued.pop_front() {
         if input.trim().is_empty() {
@@ -439,10 +452,10 @@ async fn run_attach_input_loop(
     sink: &dyn OutputSink,
     hub: &crate::bg_attach::AttachHub,
     rx: &mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>,
-    mut queued: VecDeque<String>,
+    queued: &mut VecDeque<String>,
     line_buf: &mut Vec<u8>,
 ) -> Result<(), String> {
-    while let Some(input) = next_attach_line(hub, rx, &mut queued, line_buf).await {
+    while let Some(input) = next_attach_line(hub, rx, queued, line_buf).await {
         if input.trim().is_empty() {
             continue;
         }
@@ -454,7 +467,7 @@ async fn run_attach_input_loop(
                 }
                 SlashDispatchResult::RunAsTurn { prompt } => {
                     sink.turn_start().await;
-                    run_attached_turn(runtime, &prompt, Some(rx), &mut queued, line_buf).await?;
+                    run_attached_turn(runtime, &prompt, Some(rx), queued, line_buf).await?;
                 }
                 SlashDispatchResult::NotASlashCommand => {}
             }
@@ -463,7 +476,7 @@ async fn run_attach_input_loop(
             }
         } else {
             sink.turn_start().await;
-            run_attached_turn(runtime, &input, Some(rx), &mut queued, line_buf).await?;
+            run_attached_turn(runtime, &input, Some(rx), queued, line_buf).await?;
         }
     }
     Ok(())

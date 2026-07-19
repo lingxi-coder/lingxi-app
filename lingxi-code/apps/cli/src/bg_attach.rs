@@ -72,6 +72,9 @@ mod unix {
     use tokio::sync::mpsc;
 
     const MAX_REPLAY_BYTES: usize = 1024 * 1024;
+    /// Per-write timeout on an attached client socket (review #5/#6): a client
+    /// that stops draining is dropped rather than blocking the worker forever.
+    const ATTACH_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
     const FRAME_OUTPUT: u8 = 1;
     const FRAME_INPUT_BYTES: u8 = 2;
@@ -235,6 +238,16 @@ mod unix {
 
     fn accept_client(hub: &Arc<AttachHubInner>, mut stream: UnixStream) {
         let _ = stream.set_nonblocking(false);
+        // (review #5, #6) Bound EVERY write to this client. Without it, a client
+        // that authenticates then stops draining its socket (paused terminal,
+        // XOFF flow-control, SIGSTOP) makes the blocking `write_all` in the
+        // replay below — and later in `broadcast` while it holds the `clients`
+        // Mutex — block indefinitely, wedging the worker's turn output path and
+        // its tokio executor thread. With a write timeout the stalled write
+        // errors out and the client is dropped (replay: early return; broadcast:
+        // the `else { clients.remove(i) }` arm), so one bad local client can no
+        // longer hang the live worker.
+        let _ = stream.set_write_timeout(Some(ATTACH_WRITE_TIMEOUT));
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let Ok(auth_line) = read_auth_line(&mut stream) else {
             return;

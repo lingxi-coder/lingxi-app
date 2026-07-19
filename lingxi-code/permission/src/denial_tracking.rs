@@ -49,16 +49,22 @@
 //! breaker genuinely trips in an auto-mode session. (The earlier "not present in
 //! the external build / residual seam" note was stale.)
 //!
-//! What is **NOT yet wired** is the full trip *payload* handling. On a trip the
-//! consumer logs [`DenialBreakerTrip::fallback_warn_line`] and falls back to
-//! prompting (the counter/circuit-breaker semantics are byte-faithful), but it
-//! still passes `headless = false` to [`DenialTrackingState::trip`] and does not
-//! yet (a) thread the real `shouldAvoidPermissionPrompts` to ABORT headless runs
-//! ([`DenialBreakerTrip::HEADLESS_ABORT_MESSAGE`]), (b) emit [`DENIAL_LIMIT_EVENT`],
-//! or (c) carry [`DenialBreakerTrip::decision_reason`] onto the resulting Ask.
-//! Those three need a telemetry + headless seam plumbed into the permission gate
-//! (documented follow-up). The breaker logic, thresholds, and byte-exact trip
-//! outcome in this module are complete.
+//! On a trip the consumer now emits [`DENIAL_LIMIT_EVENT`]
+//! (`telemetry::emit_auto_mode_denial_limit_exceeded`) and logs
+//! [`DenialBreakerTrip::fallback_warn_line`], then falls back to prompting (the
+//! counter/circuit-breaker semantics are byte-faithful).
+//!
+//! What is **still NOT wired** are the two pieces that need architecture the
+//! permission gate lacks: (a) threading the real `shouldAvoidPermissionPrompts`
+//! to `trip(headless)` and ABORTING headless runs
+//! ([`DenialBreakerTrip::HEADLESS_ABORT_MESSAGE`]) — needs a headless flag on the
+//! outer gate AND an agent-level abort channel (the gate only returns per-tool
+//! decisions today; a tripped headless run currently degrades SAFELY to per-tool
+//! denies via `DenyOnAskGate`); and (b) carrying
+//! [`DenialBreakerTrip::decision_reason`] onto the resulting Ask — cannot be a
+//! `Some(Ask)` return here because [`crate::policy_gate`]'s `resolve_with_mode`
+//! `Ask` arm re-invokes the classifier, so it needs a side-channel. The breaker
+//! logic, thresholds, telemetry, and byte-exact trip outcome are complete.
 //!
 //! [`record_auto_deny`]: DenialTrackingState::record_auto_deny
 

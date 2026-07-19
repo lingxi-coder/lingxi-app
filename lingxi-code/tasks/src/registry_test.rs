@@ -1881,9 +1881,10 @@ async fn kill_mcp_task_fires_cancel_and_later_settle_noops() {
 // and firing a spurious `TaskCompleted`. Post-fix the flip is atomic with the
 // terminal re-check, so settle either wins wholesale or no-ops on the kill.
 //
-// (Note: the reverse race — a kill CLOBBERING an already-`Completed` settle
-// because `kill` carries no terminal guard — is a distinct issue outside this
-// finding; it yields `Killed`+`cancelled`, which this invariant permits.)
+// (Note: the reverse race — a kill CLOBBERING an already-`Completed` settle —
+// is a distinct issue, now guarded by `kill`'s own terminal re-check and
+// covered by `kill_after_settle_does_not_demote_completed_task`. This atomic
+// invariant permits `Killed`+`cancelled` only when the kill genuinely won.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settle_vs_kill_terminal_transition_is_atomic() {
     let dir = tempdir().unwrap();
@@ -1943,4 +1944,61 @@ async fn settle_vs_kill_terminal_transition_is_atomic() {
     // `firer` kept registered so the `TaskCompleted` fire path is exercised
     // under the race (a spurious fire would surface any panic in that path).
     let _ = firer.recorded();
+}
+
+// F3-1 reverse race: a `kill` arriving AFTER a settle already won the terminal
+// transition (and fired `TaskCompleted`) must NOT demote the task to `Killed`.
+// Pre-fix, `kill` carried no terminal guard and unconditionally wrote
+// `status=Killed` / `mcpStatus:"cancelled"`, clobbering the completed task —
+// leaving it `Killed`+`cancelled` even though `TaskCompleted` had already fired
+// for the same task, an inconsistency claude-code never produces.
+//
+// This test drives the interleave deterministically (settle fully, THEN kill)
+// and asserts the completed state survives the kill and no spurious hook fires.
+#[tokio::test]
+async fn kill_after_settle_does_not_demote_completed_task() {
+    let dir = tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
+    let firer = RecordingFirer::new();
+    let registry =
+        Arc::new(TaskRegistry::new(runtime, fs, out_mgr).with_task_completed_firer(firer.clone()));
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let id = registry
+        .register_mcp_task("git".into(), "log".into(), None, cancel.clone())
+        .await
+        .unwrap();
+
+    // Settle wins the terminal transition first — fires `TaskCompleted` once.
+    registry.settle_mcp_task(&id, "done", false).await.unwrap();
+    assert_eq!(firer.recorded().len(), 1, "settle fires TaskCompleted once");
+
+    // A late kill (e.g. a racing `TaskStop`) must NOT resurrect/demote the
+    // already-completed task.
+    registry.kill(&id).await.unwrap();
+
+    let state = registry.get(&id).await.unwrap();
+    let (status, mcp_status) = match &state {
+        TaskState::McpTask(m) => (state.base().status, m.mcp_status.clone()),
+        other => panic!("expected McpTask, got {other:?}"),
+    };
+    assert_eq!(
+        status,
+        TaskStatus::Completed,
+        "a completed task is not demoted to Killed by a late kill"
+    );
+    assert_eq!(
+        mcp_status, "completed",
+        "the completed mcpStatus is not clobbered to cancelled by a late kill"
+    );
+    assert_eq!(
+        firer.recorded().len(),
+        1,
+        "kill fires no additional TaskCompleted hook"
+    );
 }

@@ -173,6 +173,7 @@ impl PermissionPolicy {
         &self,
         command: &str,
         roots: &FsRoots,
+        mode: PermissionMode,
     ) -> Option<PermissionResult> {
         let parser = self.pwsh_parser.as_ref()?;
         let parse = parser.parse(command);
@@ -184,6 +185,9 @@ impl PermissionPolicy {
             additional: &self.additional_working_dirs,
             is_windows: cfg!(target_os = "windows"),
             is_macos: cfg!(target_os = "macos"),
+            // PERM-PS-VRG-01: feed the live session mode into the in-working-dir
+            // auto-allow gate (`t.mode` in claude-code `vRg`).
+            mode,
         };
         // PS-CD-03 (part 1): compute the compound-cd flag — 1:1 with claude-code
         // `y = u.length>1 && u.some(({element:V})=>P5r(V.name))`: a compound
@@ -646,7 +650,7 @@ impl PermissionPolicy {
             // absent / the command doesn't parse — matching claude-code.
             if tool_name == "PowerShell" {
                 if let Some(command) = shell_command::command_from_input(input) {
-                    if let Some(result) = self.check_powershell_containment(command, roots) {
+                    if let Some(result) = self.check_powershell_containment(command, roots, mode) {
                         return self.resolve_guard_ask(result, bypass, mode, &sources, tool_name);
                     }
                 }

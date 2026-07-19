@@ -2,6 +2,7 @@
 //! `hhe`, `Rgg`, `FKn`, `Rtt`, `LKn`), byte-checked against binary 2.1.206.
 
 use super::*;
+use crate::mode::PermissionMode;
 
 #[test]
 fn normalize_resolves_common_aliases() {
@@ -487,9 +488,16 @@ fn ps_roots() -> crate::filesystem::FsRoots {
 #[test]
 fn check_ps_path_allows_inside_working_dir() {
     let roots = ps_roots();
-    // A relative path resolves under cwd → allowed.
+    // A relative path resolves under cwd → allowed (read is auto-allowed in-cwd).
     assert!(matches!(
-        check_ps_path("notes.txt", PsOperation::Read, &roots, &[], false),
+        check_ps_path(
+            "notes.txt",
+            PsOperation::Read,
+            &roots,
+            &[],
+            false,
+            PermissionMode::Default,
+        ),
         PsPathOutcome::Allowed { .. }
     ));
     // An absolute path inside cwd → allowed.
@@ -499,7 +507,8 @@ fn check_ps_path_allows_inside_working_dir() {
             PsOperation::Read,
             &roots,
             &[],
-            false
+            false,
+            PermissionMode::Default,
         ),
         PsPathOutcome::Allowed { .. }
     ));
@@ -508,7 +517,14 @@ fn check_ps_path_allows_inside_working_dir() {
 #[test]
 fn check_ps_path_blocks_outside_working_dir_with_containment() {
     let roots = ps_roots();
-    match check_ps_path("/etc/passwd", PsOperation::Read, &roots, &[], false) {
+    match check_ps_path(
+        "/etc/passwd",
+        PsOperation::Read,
+        &roots,
+        &[],
+        false,
+        PermissionMode::Default,
+    ) {
         PsPathOutcome::AskContainment { resolved } => assert_eq!(resolved, "/etc/passwd"),
         other => panic!("expected AskContainment, got {other:?}"),
     }
@@ -518,24 +534,29 @@ fn check_ps_path_blocks_outside_working_dir_with_containment() {
 fn check_ps_path_honors_additional_working_dirs() {
     let roots = ps_roots();
     let extra = [std::path::PathBuf::from("/tmp/allowed")];
+    // A write inside an additional working dir is auto-allowed only under
+    // `AcceptEdits` (the main-pipeline in-cwd write gate); use it here to exercise
+    // the in-dir allow path.
     assert!(matches!(
         check_ps_path(
             "/tmp/allowed/f.txt",
             PsOperation::Write,
             &roots,
             &extra,
-            false
+            false,
+            PermissionMode::AcceptEdits,
         ),
         PsPathOutcome::Allowed { .. }
     ));
-    // Still blocked outside both cwd and the extra dir.
+    // Still blocked outside both cwd and the extra dir (regardless of mode).
     assert!(matches!(
         check_ps_path(
             "/tmp/other/f.txt",
             PsOperation::Write,
             &roots,
             &extra,
-            false
+            false,
+            PermissionMode::AcceptEdits,
         ),
         PsPathOutcome::AskContainment { .. }
     ));
@@ -545,22 +566,45 @@ fn check_ps_path_honors_additional_working_dirs() {
 fn check_ps_path_string_guard_wins_over_containment() {
     let roots = ps_roots();
     // A guard fires before any working-dir resolution.
-    match check_ps_path("~bob/secret", PsOperation::Read, &roots, &[], false) {
+    match check_ps_path(
+        "~bob/secret",
+        PsOperation::Read,
+        &roots,
+        &[],
+        false,
+        PermissionMode::Default,
+    ) {
         PsPathOutcome::AskReason { reason, .. } => assert_eq!(reason, ps_path_reasons::TILDE_USER),
         other => panic!("expected AskReason, got {other:?}"),
     }
-    match check_ps_path("out*.log", PsOperation::Write, &roots, &[], false) {
+    match check_ps_path(
+        "out*.log",
+        PsOperation::Write,
+        &roots,
+        &[],
+        false,
+        PermissionMode::Default,
+    ) {
         PsPathOutcome::AskReason { reason, .. } => assert_eq!(reason, ps_path_reasons::GLOB_WRITE),
         other => panic!("expected AskReason, got {other:?}"),
     }
 }
 
 fn ctx_of<'a>(roots: &'a crate::filesystem::FsRoots, add: &'a [std::path::PathBuf]) -> PsCtx<'a> {
+    ctx_of_mode(roots, add, PermissionMode::Default)
+}
+
+fn ctx_of_mode<'a>(
+    roots: &'a crate::filesystem::FsRoots,
+    add: &'a [std::path::PathBuf],
+    mode: PermissionMode,
+) -> PsCtx<'a> {
     PsCtx {
         roots,
         additional: add,
         is_windows: false,
         is_macos: false,
+        mode,
     }
 }
 
@@ -578,19 +622,82 @@ fn validate_one(command: PsCommand) -> PsContainmentResult {
 }
 
 #[test]
-fn xgg_allows_path_inside_cwd() {
-    // Get-Content of a file under cwd → passthrough.
+fn xgg_allows_in_cwd_read_but_asks_in_cwd_write() {
+    // PERM-PS-VRG-01 (main pipeline, default mode): an in-cwd READ is auto-allowed
+    // → passthrough; an in-cwd WRITE is NOT (only `read`/`acceptEdits`) → the
+    // containment ask.
     assert_eq!(
         validate_one(cmd("Get-Content", &["notes.txt"])),
         PsContainmentResult::Passthrough
     );
-    assert_eq!(
-        validate_one(cmd(
+    match validate_one(cmd(
+        "Set-Content",
+        &["-Path", "/proj/work/out.txt", "-Value", "x"],
+    )) {
+        PsContainmentResult::Ask { message, .. } => assert_eq!(
+            message,
+            "set-content targeting '/proj/work/out.txt' was blocked. For security, LingXi may only access files in the allowed working directories for this session: '/proj/work'."
+        ),
+        other => panic!("expected in-cwd write containment ask, got {other:?}"),
+    }
+}
+
+#[test]
+fn vrg_gate_matrix_main_pipeline_and_nested() {
+    // PERM-PS-VRG-01 gate matrix.
+    let roots = ps_roots();
+    let write = || {
+        cmd(
             "Set-Content",
-            &["-Path", "/proj/work/out.txt", "-Value", "x"]
-        )),
+            &["-Path", "/proj/work/out.txt", "-Value", "x"],
+        )
+    };
+
+    // MAIN-PIPELINE, in-cwd READ, default mode → auto-allowed (passthrough).
+    assert_eq!(
+        validate_ps_statement(
+            &one_cmd_stmt(cmd("Get-Content", &["/proj/work/notes.txt"])),
+            &ctx_of(&roots, &[]),
+            false,
+        ),
         PsContainmentResult::Passthrough
     );
+
+    // MAIN-PIPELINE, in-cwd WRITE, default mode → NOT auto-allowed → ask.
+    match validate_ps_statement(&one_cmd_stmt(write()), &ctx_of(&roots, &[]), false) {
+        PsContainmentResult::Ask { message, .. } => assert_eq!(
+            message,
+            "set-content targeting '/proj/work/out.txt' was blocked. For security, LingXi may only access files in the allowed working directories for this session: '/proj/work'."
+        ),
+        other => panic!("expected default-mode in-cwd write ask, got {other:?}"),
+    }
+
+    // MAIN-PIPELINE, in-cwd WRITE, acceptEdits mode → auto-allowed (passthrough).
+    assert_eq!(
+        validate_ps_statement(
+            &one_cmd_stmt(write()),
+            &ctx_of_mode(&roots, &[], PermissionMode::AcceptEdits),
+            false,
+        ),
+        PsContainmentResult::Passthrough
+    );
+
+    // NESTED, in-cwd WRITE, default mode → the vRg gate DOES run on nested path
+    // checks (it is universal, verified vs the binary) → ask, not passthrough.
+    // (Main pipeline `Write-Output run` has no expression source / control-flow ask,
+    // so the nested per-path containment ask is what surfaces.)
+    let nested_stmt = PsStatement {
+        commands: vec![PsElement::Command(cmd("Write-Output", &["run"]))],
+        nested_commands: vec![write()],
+        redirections: Vec::new(),
+    };
+    match validate_ps_statement(&nested_stmt, &ctx_of(&roots, &[]), false) {
+        PsContainmentResult::Ask { message, .. } => assert!(
+            message.contains("was blocked"),
+            "expected nested in-cwd write containment ask, got: {message}"
+        ),
+        other => panic!("expected nested in-cwd write ask, got {other:?}"),
+    }
 }
 
 #[test]
@@ -793,22 +900,28 @@ fn xgg_nested_without_pipeline_expression_no_control_flow_ask() {
 }
 
 #[test]
-fn xgg_nested_remove_recurse_cwd_no_extra_ask() {
-    // The `Remove-Item -Recurse` working-directory guard is main-pipeline-only in
-    // claude-code. A nested `Remove-Item -Recurse` targeting cwd must NOT ask (the
-    // port's former anti-parity extra ask is removed). With no pipeline expression,
-    // the statement passes through.
+fn xgg_nested_remove_recurse_cwd_asks_via_vrg_gate() {
+    // PERM-PS-VRG-01: CC's `vRg` per-path auto-allow gate is UNIVERSAL — it runs on
+    // NESTED command paths too (verified vs the 2.1.211 binary). A nested
+    // `Remove-Item /proj/work` (write, in-cwd, default mode) therefore ASKS via the
+    // vRg containment gate, NOT the (separate, main-pipeline-only) `-Recurse` "would
+    // delete the working directory" guard.
     let roots = ps_roots();
     let stmt = PsStatement {
         commands: vec![PsElement::Command(cmd("Write-Output", &["run"]))],
         nested_commands: vec![cmd("Remove-Item", &["-Recurse", "/proj/work"])],
         redirections: Vec::new(),
     };
-    assert_eq!(
-        validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false),
-        PsContainmentResult::Passthrough
-    );
-    // Contrast: the SAME command in the main pipeline still asks (guard intact).
+    match validate_ps_statement(&stmt, &ctx_of(&roots, &[]), false) {
+        PsContainmentResult::Ask { message, .. } => assert!(
+            !message.contains("would delete the working directory"),
+            "nested asks via the vRg containment gate, not the main-only -Recurse guard: {message}"
+        ),
+        other => panic!("expected nested in-cwd write containment ask, got {other:?}"),
+    }
+    // Contrast: the SAME command in the main pipeline surfaces the main-only
+    // `-Recurse` "would delete the working directory" guard (set before the
+    // per-path loop, so it wins).
     match validate_ps_statement(
         &one_cmd_stmt(cmd("Remove-Item", &["-Recurse", "/proj/work"])),
         &ctx_of(&roots, &[]),

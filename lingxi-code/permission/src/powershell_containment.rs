@@ -1617,6 +1617,11 @@ pub enum PsPathOutcome {
 /// `is_windows` selects the Windows-specific guard variants (drive-relative,
 /// provider min length). Deny-RULE resolution is handled upstream in the policy
 /// gate (see [`classify_ps_path`]).
+///
+/// PERM-PS-VRG-01: `mode` carries claude-code `vRg`'s in-working-dir auto-allow
+/// gate (`if(s){{if(r==="read"||t.mode==="acceptEdits")return{{allowed:!0}}}}`): an
+/// in-cwd path is auto-allowed ONLY for a `read` op OR `acceptEdits` mode. The gate
+/// is universal (main-pipeline, nested, and redirection path checks alike).
 #[must_use]
 pub fn check_ps_path(
     raw: &str,
@@ -1624,6 +1629,7 @@ pub fn check_ps_path(
     roots: &crate::filesystem::FsRoots,
     additional: &[std::path::PathBuf],
     is_windows: bool,
+    mode: crate::mode::PermissionMode,
 ) -> PsPathOutcome {
     let home = roots
         .home
@@ -1651,8 +1657,30 @@ pub fn check_ps_path(
             work_dirs.push(roots.cwd.clone());
             work_dirs.extend(additional.iter().cloned());
             if crate::filesystem::path_in_allowed_working_path(&resolved, &work_dirs, roots) {
-                PsPathOutcome::Allowed {
-                    resolved: resolved.to_string_lossy().into_owned(),
+                // claude-code `vRg` in-working-dir auto-allow gate, verified against
+                // the 2.1.211 binary: `if(s){if(r==="read"||t.mode==="acceptEdits")
+                // return{allowed:!0}}`. An in-cwd path is auto-allowed ONLY for a
+                // `read` op OR `acceptEdits` mode; a write/create in `default`/`plan`
+                // mode falls through to the containment ASK (`vRg`'s
+                // `{allowed:false, isInWorkingDir:true}` tail). This gate is
+                // UNIVERSAL — CC applies it to main-pipeline, NESTED-command, and
+                // redirection path checks alike (all route through `yeo`→`vRg` with
+                // the same mode/op). (The genuinely main-pipeline-only construct is
+                // the SEPARATE `Remove-Item -Recurse` "would delete the working
+                // directory" ask, handled elsewhere via the `!nested` gate.) The
+                // deferred `$wt`/`Ott`/`Ltt` allow-rule + safety walks CC evaluates
+                // before its final `allowed:false` are out of scope — the port goes
+                // straight to the ask.
+                if matches!(op, PsOperation::Read)
+                    || matches!(mode, crate::mode::PermissionMode::AcceptEdits)
+                {
+                    PsPathOutcome::Allowed {
+                        resolved: resolved.to_string_lossy().into_owned(),
+                    }
+                } else {
+                    PsPathOutcome::AskContainment {
+                        resolved: resolved.to_string_lossy().into_owned(),
+                    }
                 }
             } else {
                 PsPathOutcome::AskContainment {
@@ -1868,6 +1896,10 @@ pub struct PsCtx<'a> {
     pub is_windows: bool,
     /// macOS `/private` normalization for the removal-protected check.
     pub is_macos: bool,
+    /// Active permission mode — feeds the `vRg` in-working-dir auto-allow gate
+    /// (PERM-PS-VRG-01): a main-pipeline in-cwd write auto-allows only under
+    /// `AcceptEdits`.
+    pub mode: crate::mode::PermissionMode,
 }
 
 /// Validate a parsed PowerShell command (claude-code `Z_u`): run [`xgg`-style]
@@ -2060,12 +2092,16 @@ fn run_ps_command(
         if is_remove && is_protected_removal_raw(path, home.as_deref(), ctx.is_macos) {
             return Some(deny_removal(path));
         }
+        // PERM-PS-VRG-01: the in-cwd write/create auto-allow gate (inside
+        // check_ps_path) runs on this per-path check regardless of main-vs-nested
+        // — CC's `vRg` is universal (main + nested both route through `yeo`→`vRg`).
         let outcome = check_ps_path(
             path,
             extraction.operation_type,
             roots,
             ctx.additional,
             ctx.is_windows,
+            ctx.mode,
         );
         let resolved = match &outcome {
             PsPathOutcome::Allowed { resolved }
@@ -2131,12 +2167,16 @@ fn check_redirections(
         if is_null_redirect(&r.target) {
             continue;
         }
+        // PERM-PS-VRG-01: redirection targets (op = Create) also route through
+        // CC's `yeo`→`vRg` gate, so an in-cwd redirect-create in default/plan mode
+        // asks (only `read`/`acceptEdits` auto-allow).
         match check_ps_path(
             &r.target,
             PsOperation::Create,
             ctx.roots,
             ctx.additional,
             ctx.is_windows,
+            ctx.mode,
         ) {
             PsPathOutcome::Allowed { .. } => {}
             PsPathOutcome::AskReason { reason, .. } => {

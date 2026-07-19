@@ -209,15 +209,37 @@ impl PermissionPolicy {
             })
             .collect();
         let compound_cd = all_names.len() > 1 && all_names.iter().any(|n| ps_element_is_cd_like(n));
-        match crate::powershell_containment::validate_ps_statements(
+        // PERM-PS-CALLER-06: the git-security caller battery (claude-code `NTU`)
+        // pushes its asks into the decision accumulator BEFORE the
+        // `gTu`/validate_ps_statements result, and final resolution is
+        // first-deny-then-first-ask. So a `gTu` DENY still wins over everything,
+        // but a battery ASK outranks `gTu`'s generic containment ask on a tie.
+        // Evaluate the battery here, then let a `gTu` deny override it, else the
+        // battery ask, else the `gTu` ask/passthrough.
+        let battery = crate::powershell_containment::powershell_git_battery(
             &parse.statements,
             &ctx,
             compound_cd,
-        ) {
+        );
+        let gtu = crate::powershell_containment::validate_ps_statements(
+            &parse.statements,
+            &ctx,
+            compound_cd,
+        );
+        if let crate::powershell_containment::PsContainmentResult::Deny { message, reason } = gtu {
+            return Some(deny_powershell_containment(message, reason));
+        }
+        if let Some(crate::powershell_containment::PsContainmentResult::Ask { message, reason }) =
+            battery
+        {
+            return Some(ask_powershell_containment(message, reason));
+        }
+        match gtu {
             crate::powershell_containment::PsContainmentResult::Passthrough => None,
             crate::powershell_containment::PsContainmentResult::Ask { message, reason } => {
                 Some(ask_powershell_containment(message, reason))
             }
+            // Unreachable: a `gTu` deny returned above.
             crate::powershell_containment::PsContainmentResult::Deny { message, reason } => {
                 Some(deny_powershell_containment(message, reason))
             }

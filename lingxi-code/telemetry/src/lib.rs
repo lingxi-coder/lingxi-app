@@ -135,6 +135,26 @@ pub fn emit_skill_discovery_collected(hidden_by_main_turn: bool) {
     );
 }
 
+/// Emit `tengu_auto_mode_denial_limit_exceeded` — claude-code's `dSm` trip
+/// telemetry, fired when the auto-mode classifier denial breaker trips
+/// (consecutive or total limit). `mode` is `"headless"`/`"cli"`
+/// (`DenialBreakerTrip::mode_tag`); the counts and blocking tool round out the
+/// tags. Byte-1:1 event name; the permission gate calls this on a trip.
+pub fn emit_auto_mode_denial_limit_exceeded(
+    mode: &str,
+    consecutive_denials: u32,
+    total_denials: u32,
+    tool_name: &str,
+) {
+    tracing::info!(
+        event = crate::tengu::agent::AUTO_MODE_DENIAL_LIMIT_EXCEEDED,
+        mode = mode,
+        consecutive_denials = consecutive_denials,
+        total_denials = total_denials,
+        tool_name = tool_name,
+    );
+}
+
 /// Emit `tengu_retention_sweep` — the on-disk data-retention housekeeping event
 /// (claude-code `fWu`). `skipped` with a `skip_reason` records a no-op run;
 /// otherwise the counts describe what was removed. The port sweeps the

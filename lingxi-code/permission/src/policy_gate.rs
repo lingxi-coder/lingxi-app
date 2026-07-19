@@ -397,6 +397,12 @@ impl PolicyPermissionGate {
                 // headless seam in the gate (documented follow-up in
                 // denial_tracking.rs), so `headless` stays `false` here for now.
                 if let Some(trip) = tracking.trip(false) {
+                    telemetry::emit_auto_mode_denial_limit_exceeded(
+                        trip.mode_tag(),
+                        trip.consecutive_denials,
+                        trip.total_denials,
+                        name,
+                    );
                     tracing::warn!(target: "permission", "{}", trip.fallback_warn_line());
                     return None;
                 }

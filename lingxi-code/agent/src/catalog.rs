@@ -262,7 +262,8 @@ pub fn parse_agent_markdown(
     };
 
     // (11) tools: All-vs-Explicit per claude's coercion. Auto-memory tool
-    // injection is DEFERRED (isAutoMemoryEnabled is not wired in LingXi).
+    // injection (Write/Edit/Read when `memory:` is set) is applied at spawn by
+    // `AgentToolResolver::resolve`, not here — this is the parse layer.
     let tools_vec = parse_agent_tools_from_frontmatter(fm.tools.as_ref());
     let (tools_policy, allowed_tools) = match &tools_vec {
         // undefined = all tools

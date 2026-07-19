@@ -76,9 +76,11 @@ pub struct AgentDefinition {
     /// non-ant builds.
     #[serde(default)]
     pub isolation: Option<AgentIsolation>,
-    /// Persistent memory scope (claude `memory`). Field-level parity: parsed
-    /// and stored. The auto-memory tool-injection (Write/Edit/Read) is gated
-    /// on `isAutoMemoryEnabled`, which is not wired in LingXi — deferred.
+    /// Persistent memory scope (claude `memory`). Parsed, stored, and EXECUTED:
+    /// when set, [`crate::tool_resolver::AgentToolResolver::resolve`] injects the
+    /// auto-memory tools (`Read`/`Write`/`Edit`) into the spawned agent's tool
+    /// pool, mirroring claude's `isAutoMemoryEnabled` → Write/Edit/Read
+    /// injection (the scope selects only WHERE memory lives, not which tools).
     #[serde(default)]
     pub memory: Option<AgentMemoryScope>,
     /// Reasoning effort preference (claude `effort` = level OR integer).

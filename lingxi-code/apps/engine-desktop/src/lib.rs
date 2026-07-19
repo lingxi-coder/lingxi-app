@@ -2889,6 +2889,24 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Load the merged `askUserQuestionTimeout` (`60s`/`5m`/`10m`/`never`) across the
+/// project + user + env settings layers (the same `Settings::load` seam). The raw
+/// settings string is threaded into `BuiltinToolContext::ask_user_question_timeout`
+/// and parsed into `tool_ui::ask_user_question::AskUserQuestionTimeout` at tool
+/// registration (M-15). Returns `None` on any load failure or when the key is
+/// unset — the frozen default (`never` ⇒ block on the user, no auto-continue).
+fn load_merged_ask_user_question_timeout(project_dir: &std::path::Path) -> Option<String> {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.ask_user_question_timeout)
+}
+
 /// Load the merged HTTP-hook security policy (H-BIN-12) — `allowedHttpHookUrls`
 /// and `httpHookAllowedEnvVars` — across the project + user + env settings
 /// layers. Both are array-merge (concat-dedup) via the same
@@ -5973,6 +5991,10 @@ pub async fn build(
         // domain-blocklist preflight (enterprise escape hatch). Read from the
         // merged settings via the same `Settings::load` seam as outputStyle.
         skip_web_fetch_preflight: load_merged_skip_web_fetch_preflight(&cwd),
+        // (M-15) `settings.askUserQuestionTimeout` → the AskUserQuestion resolver's
+        // idle window. Read from the merged settings via the same `Settings::load`
+        // seam; parsed into `AskUserQuestionTimeout` at `tool_ui` registration.
+        ask_user_question_timeout: load_merged_ask_user_question_timeout(&cwd),
         // Inject the LIVE runner: the desktop session routes its sandboxed
         // bash/powershell/skill commands through `sandbox-runtime`'s
         // `SandboxManager` (forward proxies + Linux socat bridge + MITM/seccomp),

@@ -2161,6 +2161,850 @@ fn check_redirections(
     None
 }
 
+// ===========================================================================
+// PERM-PS-CALLER-06 — git-security caller battery
+//
+// Byte-faithful port of the ASK battery emitted by claude-code's OUTER
+// PowerShell permission wrapper `NTU` (the fn that WRAPS the
+// `gTu`/[`validate_ps_statements`] call), 2.1.211. `NTU` accumulates every ask
+// into an array `d`, then returns the first `deny` else the first `ask`. The
+// `gTu` result is pushed AFTER these battery asks, so a battery ask outranks the
+// generic containment ask on a tie (a `gTu` DENY still wins over everything).
+//
+// This module ports the 5 in-scope asks (detectable from command names +
+// redirection/write targets). The 2 that need extra infra are DEFERRED:
+//   * bare-repo-indicators (`E = S && nHr()`): an FS probe of cwd for
+//     HEAD/objects/refs outside a `.git/` dir.
+//   * PS5.1 cwd-first shadowing (`qt()==="windows" && …`): Windows-only.
+// ===========================================================================
+
+/// cd-git ask message (2.1.211 `NTU`, `if(y&&S)`).
+const BATTERY_CD_GIT: &str =
+    "Compound commands with cd/Set-Location and git require approval to prevent bare repository attacks";
+/// git-internal-write ask message (2.1.211 `NTU`, inside `if(S)`, `if(V||U)`).
+const BATTERY_GIT_INTERNAL_WRITE: &str = "Command writes to a git-internal path (HEAD, objects/, refs/, hooks/, .git/) and runs git. This could plant a malicious hook that git then executes.";
+/// xcopy/robocopy + git ask message (2.1.211 `NTU`, inside `if(S)`, `mxg`).
+const BATTERY_XCOPY_ROBOCOPY: &str = "Compound command runs a native file copier (xcopy/robocopy) and git. The copier can place files at git-internal paths (HEAD, objects/, refs/) that git then treats as repository state.";
+/// archive-extract + git ask message (2.1.211 `NTU`, `pxg`, git-present branch).
+const BATTERY_ARCHIVE_GIT: &str = "Compound command extracts an archive and runs git. Archive contents may plant bare-repository indicators (HEAD, hooks/, refs/) that git then treats as the repository root.";
+/// archive-extract (no git) ask message (2.1.211 `NTU`, `pxg`, no-git branch).
+const BATTERY_ARCHIVE_NO_GIT: &str = "Compound command extracts an archive followed by other commands. Archive contents (symlinks, config files) cannot be validated and may redirect subsequent path operations.";
+/// dotgit-write ask message (2.1.211 `NTU`, `deo`). Em-dash is U+2014.
+const BATTERY_DOTGIT_WRITE: &str =
+    "Command writes to .git/ \u{2014} hooks or config planted there execute on the next git operation.";
+
+/// Native file copiers (2.1.211 `fxg`) — matched by PLAIN basename-lowercase, NOT
+/// [`normalize_cmdlet`] (the set lists the `.exe` variants explicitly).
+const COPIER_SET: [&str; 4] = ["xcopy", "xcopy.exe", "robocopy", "robocopy.exe"];
+/// Archive extractors (2.1.211 `pxg`) — matched by PLAIN basename-lowercase.
+const ARCHIVE_SET: [&str; 15] = [
+    "tar",
+    "tar.exe",
+    "bsdtar",
+    "bsdtar.exe",
+    "unzip",
+    "unzip.exe",
+    "7z",
+    "7z.exe",
+    "7za",
+    "7za.exe",
+    "gzip",
+    "gzip.exe",
+    "gunzip",
+    "gunzip.exe",
+    "expand-archive",
+];
+/// Write-cmdlet set (2.1.211 `LYi`) — keyed by [`normalize_cmdlet`]. DISTINCT
+/// from the path-taking `FKN` map.
+const WRITE_CMDLETS: [&str; 13] = [
+    "new-item",
+    "set-content",
+    "add-content",
+    "out-file",
+    "copy-item",
+    "move-item",
+    "rename-item",
+    "expand-archive",
+    "invoke-webrequest",
+    "invoke-restmethod",
+    "tee-object",
+    "export-csv",
+    "export-clixml",
+];
+
+// --- `Zbu` copy/move destination-analyzer parameter categories -------------
+/// 2.1.211 `Y0g` — path parameters (prefix-matched).
+const ZBU_PATH: [&str; 2] = ["path", "literalpath"];
+/// 2.1.211 `J0g` — literal-path parameters (exact).
+const ZBU_LITERALPATH: [&str; 2] = ["pspath", "lp"];
+/// 2.1.211 `X0g` — common switch parameters (exact).
+const ZBU_SWITCH_EXACT: [&str; 5] = ["cf", "wi", "vb", "db", "usetx"];
+/// 2.1.211 `Q0g` — common value parameters (exact).
+const ZBU_VALUE_EXACT: [&str; 10] =
+    ["ea", "ev", "wa", "wv", "infa", "iv", "proga", "ov", "ob", "pv"];
+/// 2.1.211 `Z0g` — switch parameters (prefix-matched).
+const ZBU_SWITCH_PREFIX: [&str; 9] = [
+    "container",
+    "force",
+    "passthru",
+    "recurse",
+    "whatif",
+    "confirm",
+    "usetransaction",
+    "verbose",
+    "debug",
+];
+/// 2.1.211 `eRg` — value parameters (prefix-matched).
+const ZBU_VALUE_PREFIX: [&str; 16] = [
+    "filter",
+    "include",
+    "exclude",
+    "credential",
+    "fromsession",
+    "tosession",
+    "erroraction",
+    "errorvariable",
+    "warningaction",
+    "warningvariable",
+    "informationaction",
+    "informationvariable",
+    "progressaction",
+    "outvariable",
+    "outbuffer",
+    "pipelinevariable",
+];
+
+/// PLAIN basename-lowercase of a command name (2.1.211 `mxg`/`pxg` normalization):
+/// lowercase, then the substring after the last `\` or `/`. NO extension strip, NO
+/// alias resolution — deliberately different from [`normalize_cmdlet`].
+fn battery_basename_lower(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let cut = lower
+        .rfind(['\\', '/'])
+        .map_or(0, |i| i + 1);
+    lower[cut..].to_string()
+}
+
+/// True when any command name resolves to `git` via [`normalize_cmdlet`]
+/// (2.1.211 `S = u.some(({element:V})=>D_(V.name)==="git")`).
+fn battery_has_git(names: &[&str]) -> bool {
+    names.iter().any(|n| normalize_cmdlet(n) == "git")
+}
+
+/// 2.1.211 `Vwe` casefold: lowercase, `ı`→`i`, `ſ`→`s`, then final-sigma `ς`→`σ`.
+/// NOTE: the binary also applies Unicode NFC before the final-sigma fold; that
+/// step is omitted here because every target segment (`.git`, `head`, `objects`,
+/// `refs`, `hooks`, `git~N`) is pure ASCII (NFC-stable), so its omission cannot
+/// cause an UNDER-ask on the git-internal/dotgit sets.
+fn battery_casefold(s: &str) -> String {
+    casefold_path(s).replace('\u{03C2}', "\u{03C3}")
+}
+
+/// 2.1.211 `l8` = `Vbu(e, undefined)`: PowerShell backtick decoding with NO escape
+/// table (so `` `n ``→`n`, not newline). Removes `` `<newline><ws> `` line
+/// continuations, decodes `` `u{hex} ``, and turns any other `` `X `` into `X`.
+fn battery_backtick_decode(s: &str) -> String {
+    // Pass 1: /`[\r\n]+\s*/g → "" (line continuation).
+    let chars: Vec<char> = s.chars().collect();
+    let mut p1: Vec<char> = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '`' && i + 1 < chars.len() && matches!(chars[i + 1], '\r' | '\n') {
+            let mut j = i + 1;
+            while j < chars.len() && matches!(chars[j], '\r' | '\n') {
+                j += 1;
+            }
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        p1.push(chars[i]);
+        i += 1;
+    }
+    // Pass 2: /`(?:u\{([0-9a-fA-F]{1,6})\}|([\s\S]?))/g.
+    let mut out = String::with_capacity(p1.len());
+    let mut i = 0;
+    while i < p1.len() {
+        if p1[i] != '`' {
+            out.push(p1[i]);
+            i += 1;
+            continue;
+        }
+        // Try `u{hex}`.
+        if i + 1 < p1.len() && (p1[i + 1] == 'u') && i + 2 < p1.len() && p1[i + 2] == '{' {
+            let mut j = i + 3;
+            let mut hex = String::new();
+            while j < p1.len() && p1[j].is_ascii_hexdigit() && hex.len() < 6 {
+                hex.push(p1[j]);
+                j += 1;
+            }
+            if !hex.is_empty() && j < p1.len() && p1[j] == '}' {
+                if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+                    match char::from_u32(cp) {
+                        Some(c) if cp <= 0x10_FFFF => out.push(c),
+                        _ => out.push('\u{FFFD}'),
+                    }
+                } else {
+                    out.push('\u{FFFD}');
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        // Backtick + single char (or backtick at end → nothing).
+        if i + 1 < p1.len() {
+            out.push(p1[i + 1]);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Node `path.posix.normalize` for a relative/absolute posix string (used by
+/// [`battery_ueo`]). Collapses `.`/`..`, preserves a leading `/` and a trailing
+/// `/`, and returns `.` for an empty result.
+fn battery_posix_normalize(s: &str) -> String {
+    let is_abs = s.starts_with('/');
+    let has_trailing = s.len() > 1 && s.ends_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => match out.last() {
+                Some(&"..") => {
+                    if !is_abs {
+                        out.push("..");
+                    }
+                }
+                Some(_) => {
+                    out.pop();
+                }
+                None => {
+                    if !is_abs {
+                        out.push("..");
+                    }
+                }
+            },
+            other => out.push(other),
+        }
+    }
+    let mut res = out.join("/");
+    if is_abs {
+        res = format!("/{res}");
+    }
+    if res.is_empty() {
+        return if is_abs { "/".into() } else { ".".into() };
+    }
+    if has_trailing && !res.ends_with('/') {
+        res.push('/');
+    }
+    res
+}
+
+/// Posix basename (2.1.211 `M3.posix.basename`): the last `/`-segment; `.`/`..`
+/// are returned verbatim.
+fn battery_posix_basename(s: &str) -> String {
+    let trimmed = s.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(i) => trimmed[i + 1..].to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// Strip a leading `Provider\…\FileSystem::` prefix
+/// (2.1.211 `/^(?:[A-Za-z0-9_.]+\\){0,3}FileSystem::/i`). Runs BEFORE the
+/// backslash→slash conversion, so path separators are still `\`.
+fn battery_strip_fs_provider(t: &str) -> String {
+    let chars: Vec<char> = t.chars().collect();
+    let target: Vec<char> = "filesystem::".chars().collect();
+    let matches_at = |p: usize| -> bool {
+        if p + target.len() > chars.len() {
+            return false;
+        }
+        (0..target.len()).all(|k| chars[p + k].to_ascii_lowercase() == target[k])
+    };
+    let mut ends = vec![0usize];
+    let mut pos = 0usize;
+    for _ in 0..3 {
+        let start = pos;
+        let mut j = start;
+        while j < chars.len()
+            && (chars[j].is_ascii_alphanumeric() || chars[j] == '_' || chars[j] == '.')
+        {
+            j += 1;
+        }
+        if j > start && j < chars.len() && chars[j] == '\\' {
+            pos = j + 1;
+            ends.push(pos);
+        } else {
+            break;
+        }
+    }
+    for &ge in ends.iter().rev() {
+        if matches_at(ge) {
+            return chars[ge + target.len()..].iter().collect();
+        }
+    }
+    t.to_string()
+}
+
+/// Replace a leading `X:` NOT followed by a separator with `./`
+/// (2.1.211 `/^[A-Za-z]:(?![/\\])/ → "./"`).
+fn battery_strip_drive_relative(t: &str) -> String {
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() >= 2 && chars[0].is_ascii_alphabetic() && chars[1] == ':' {
+        let after = chars.get(2);
+        if after.is_none_or(|&c| c != '/' && c != '\\') {
+            let rest: String = chars[2..].iter().collect();
+            return format!("./{rest}");
+        }
+    }
+    t.to_string()
+}
+
+/// Per-segment trailing strip inside [`battery_ueo`] (2.1.211 inner `.map`):
+/// repeatedly drop trailing spaces then trailing dots; `.`/`..` are preserved; an
+/// emptied segment becomes `.`.
+fn battery_strip_segment(seg: &str) -> String {
+    if seg.is_empty() {
+        return String::new();
+    }
+    let mut n = seg.to_string();
+    loop {
+        let o = n.clone();
+        while n.ends_with(' ') {
+            n.pop();
+        }
+        if n == "." || n == ".." {
+            return n;
+        }
+        while n.ends_with('.') {
+            n.pop();
+        }
+        if n == o {
+            break;
+        }
+    }
+    if n.is_empty() {
+        ".".to_string()
+    } else {
+        n
+    }
+}
+
+/// 2.1.211 `ueo` — the path normalizer feeding `$Xt`/`deo`. Strips comments/quotes,
+/// decodes backticks, drops a provider prefix / drive-relative marker, converts
+/// separators, expands `~`, splits off a drive, strips trailing spaces/dots per
+/// segment, posix-normalizes, and drops a leading `./`.
+fn battery_ueo(e: &str, ctx: &PsCtx) -> String {
+    // yre
+    let mut t = strip_comments_and_leading_ws(e).to_string();
+    // Drop a leading `-X:`/`/X:` parameter prefix, then re-yre.
+    if let Some(fc) = t.chars().next() {
+        if EY.contains(&fc) || fc == '/' {
+            if let Some(rel) = t[fc.len_utf8()..].find(':') {
+                let colon = fc.len_utf8() + rel;
+                t = strip_comments_and_leading_ws(&t[colon + 1..]).to_string();
+            }
+        }
+    }
+    // FM (strip surrounding quotes) → l8 (backtick decode).
+    t = strip_surrounding_quotes(&t).to_string();
+    t = battery_backtick_decode(&t);
+    // Provider prefix, drive-relative marker (both before separator conversion).
+    t = battery_strip_fs_provider(&t);
+    t = battery_strip_drive_relative(&t);
+    t = t.replace('\\', "/");
+    // Tilde expansion.
+    if t == "~" || t.starts_with("~/") {
+        if let Some(home) = ctx.roots.home.as_ref() {
+            let h = home.to_string_lossy();
+            t = format!("{h}{}", &t[1..]).replace('\\', "/");
+        }
+    }
+    // Split off a leading `X:/` drive.
+    let mut drive = String::new();
+    {
+        let c: Vec<char> = t.chars().collect();
+        if c.len() >= 3 && c[0].is_ascii_alphabetic() && c[1] == ':' && c[2] == '/' {
+            drive = t[..2].to_string();
+            t = t[2..].to_string();
+        }
+    }
+    // Per-segment trailing strip.
+    t = t
+        .split('/')
+        .map(battery_strip_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    t = battery_posix_normalize(&t);
+    if !drive.is_empty() {
+        t = format!("{drive}{t}");
+    }
+    if let Some(rest) = t.strip_prefix("./") {
+        t = rest.to_string();
+    }
+    t
+}
+
+/// 2.1.211 `Xbu` — collapse a leading run of `../<casefold(basename(cwd))>/` and a
+/// bare trailing `../<base>` → `.`. Input is already casefolded.
+fn battery_xbu(e: &str, ctx: &PsCtx) -> String {
+    if !e.starts_with("../") {
+        return e.to_string();
+    }
+    let base = battery_casefold(&battery_posix_basename(&ctx.roots.cwd.to_string_lossy()));
+    if base.is_empty() {
+        return e.to_string();
+    }
+    let prefix = format!("../{base}/");
+    let mut n = e.to_string();
+    while n.starts_with(&prefix) {
+        n = n[prefix.len()..].to_string();
+    }
+    if n == format!("../{base}") {
+        return ".".to_string();
+    }
+    n
+}
+
+/// 2.1.211 `Qbu` — resolve `t` against cwd (lexically, per the module's
+/// realpath-free convention) and return the casefolded cwd-relative path, `.` when
+/// equal, or `None` when it escapes cwd.
+fn battery_qbu(t: &str, ctx: &PsCtx) -> Option<String> {
+    let resolved = crate::filesystem::expand_path(t, ctx.roots);
+    let a = battery_casefold(&resolved.to_string_lossy());
+    let cwd = ctx.roots.cwd.to_string_lossy().into_owned();
+    let l = battery_casefold(&cwd);
+    if a == l {
+        return Some(".".to_string());
+    }
+    let sep = std::path::MAIN_SEPARATOR;
+    let s = if cwd.ends_with(sep) {
+        cwd
+    } else {
+        format!("{cwd}{sep}")
+    };
+    let c = battery_casefold(&s);
+    if !a.starts_with(&c) {
+        return None;
+    }
+    Some(a[c.len()..].replace('\\', "/"))
+}
+
+/// 2.1.211 `tRg` — true iff `e` resolves to exactly cwd (the realpath-free
+/// reduction of the containment walk when `originalCwd == cwd`).
+fn battery_trg(e: &str, ctx: &PsCtx) -> bool {
+    let resolved = crate::filesystem::expand_path(e, ctx.roots);
+    battery_casefold(&resolved.to_string_lossy())
+        == battery_casefold(&ctx.roots.cwd.to_string_lossy())
+}
+
+/// `/^git~\d+($|\/)/` — a Windows 8.3 short name for a `.git` dir.
+fn battery_git_shortname(e: &str) -> bool {
+    let Some(rest) = e.strip_prefix("git~") else {
+        return false;
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return false;
+    }
+    let after = &rest[digits..];
+    after.is_empty() || after.starts_with('/')
+}
+
+/// 2.1.211 `zbu` — git-internal segment matcher (HEAD/objects/refs/hooks/.git +
+/// `git~N`).
+fn battery_zbu(e: &str) -> bool {
+    if e == "head" || e == ".git" {
+        return true;
+    }
+    if e.starts_with(".git/") || battery_git_shortname(e) {
+        return true;
+    }
+    // K0g minus "head" (the loop `continue`s on "head").
+    for t in ["objects", "refs", "hooks"] {
+        if e == t || e.starts_with(&format!("{t}/")) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 2.1.211 `Kbu` — `.git` subtree matcher (`.git`, `.git/…`, `git~N`).
+fn battery_kbu(e: &str) -> bool {
+    if e == ".git" || e.starts_with(".git/") {
+        return true;
+    }
+    battery_git_shortname(e)
+}
+
+/// 2.1.211 `$Xt` — a write target is a git-internal path (uses [`battery_zbu`]).
+fn battery_xt_git_internal(e: &str, ctx: &PsCtx) -> bool {
+    let t = battery_ueo(e, ctx);
+    if battery_zbu(&battery_xbu(&battery_casefold(&t), ctx)) {
+        return true;
+    }
+    matches!(battery_qbu(&t, ctx), Some(n) if battery_zbu(&n))
+}
+
+/// 2.1.211 `deo` — a write target is inside `.git/` (uses [`battery_kbu`]).
+fn battery_deo_dotgit(e: &str, ctx: &PsCtx) -> bool {
+    let t = battery_ueo(e, ctx);
+    if battery_kbu(&battery_xbu(&battery_casefold(&t), ctx)) {
+        return true;
+    }
+    matches!(battery_qbu(&t, ctx), Some(n) if battery_kbu(&n))
+}
+
+/// 2.1.211 `peo` — comma-split flattener: `[e, ...e.split(",")]` when `e` has a
+/// comma, else `[e]`.
+fn battery_peo(e: &str) -> Vec<String> {
+    if !e.contains(',') {
+        return vec![e.to_string()];
+    }
+    let mut v = vec![e.to_string()];
+    v.extend(e.split(',').map(str::to_string));
+    v
+}
+
+/// 2.1.211 `Ybu` — a glob/`$` metacharacter is present (`/[*?[\]$]/`).
+fn battery_ybu(e: &str) -> bool {
+    e.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '$'))
+}
+
+fn any_prefix_of(list: &[&str], g: &str) -> bool {
+    list.iter().any(|h| h.starts_with(g))
+}
+
+/// 2.1.211 `Zbu` — copy/move DESTINATION git-internal analyzer. Walks the args of a
+/// `Copy-Item`/`Move-Item` splitting them into parameters (by the `Zbu_*`
+/// category sets) and positionals; returns `true` on ANY ambiguity or when a
+/// destination/source basename resolves to a git-internal path. `has_siblings`
+/// mirrors the `t` flag ("this command has sibling pipeline commands").
+fn battery_zbu_analyze(args: &[String], has_siblings: bool, ctx: &PsCtx) -> bool {
+    let mut path_vals: Vec<String> = Vec::new(); // r
+    let mut positionals: Vec<String> = Vec::new(); // n
+    let mut dest: Option<String> = None; // o
+    let mut has_path_param = false; // i
+    let mut container_non_true = false; // s
+    let mut literal_vals: Vec<String> = Vec::new(); // a
+
+    let mut p = 0usize;
+    while p < args.len() {
+        let f = strip_comments_and_leading_ws(&args[p]).to_string();
+        let first = f.chars().next();
+        if f.is_empty() || first.is_none_or(|c| !EY.contains(&c)) {
+            positionals.push(args[p].clone());
+            p += 1;
+            continue;
+        }
+        // Parameter: -name[:value]. `indexOf(":",1)`.
+        let fc_len = first.map_or(0, char::len_utf8);
+        let colon = f[fc_len..].find(':').map(|r| fc_len + r);
+        let (name, inline_val) = match colon {
+            Some(ci) => (f[fc_len..ci].to_lowercase(), Some(f[ci + 1..].to_string())),
+            None => (f[fc_len..].to_lowercase(), None),
+        };
+        let g = name;
+        if g.is_empty() {
+            return true;
+        }
+        let is_dest = "destination".starts_with(&g);
+        let is_literal = ZBU_LITERALPATH.contains(&g.as_str()) || "literalpath".starts_with(&g);
+        let is_path = is_literal || any_prefix_of(&ZBU_PATH, &g);
+        let is_switch = ZBU_SWITCH_EXACT.contains(&g.as_str()) || any_prefix_of(&ZBU_SWITCH_PREFIX, &g);
+        let is_value = ZBU_VALUE_EXACT.contains(&g.as_str()) || any_prefix_of(&ZBU_VALUE_PREFIX, &g);
+        let categories =
+            i32::from(is_dest) + i32::from(is_path) + i32::from(is_switch) + i32::from(is_value);
+        if categories != 1 {
+            return true;
+        }
+        if is_switch {
+            if "container".starts_with(&g) {
+                if let Some(v) = inline_val.as_ref() {
+                    let h = strip_surrounding_quotes(strip_comments_and_leading_ws(v));
+                    if !h.trim().eq_ignore_ascii_case("$true") {
+                        container_non_true = true;
+                    }
+                }
+            }
+            p += 1;
+            continue;
+        }
+        // Value = inline `:val` or the next arg (raw).
+        let value = match inline_val {
+            Some(v) => Some(v),
+            None => {
+                p += 1;
+                args.get(p).cloned()
+            }
+        };
+        let Some(value) = value else {
+            p += 1;
+            continue;
+        };
+        if is_dest {
+            dest = Some(value);
+        } else if is_path {
+            has_path_param = true;
+            if is_literal {
+                literal_vals.extend(value.split(',').map(str::to_string));
+            } else {
+                path_vals.extend(value.split(',').map(str::to_string));
+            }
+        }
+        p += 1;
+    }
+
+    let expected_positionals =
+        i32::from(!has_path_param) + i32::from(dest.is_none());
+    if positionals.len() as i32 > expected_positionals {
+        return true;
+    }
+    let mut second_pos: Option<String> = None; // c
+    let mut u = 0usize;
+    if !has_path_param && u < positionals.len() {
+        path_vals.extend(positionals[u].split(',').map(str::to_string));
+        u += 1;
+    }
+    if dest.is_none() && u < positionals.len() {
+        second_pos = Some(positionals[u].clone());
+    }
+    if path_vals.is_empty() && literal_vals.is_empty() && !has_siblings {
+        return false;
+    }
+    let d = dest.clone().or(second_pos);
+    if let Some(d) = d {
+        let mut pp = battery_ueo(&d, ctx);
+        if pp.is_empty() {
+            pp = ".".to_string();
+        }
+        if battery_ybu(&pp) {
+            return true;
+        }
+        if !battery_trg(&pp, ctx) {
+            return false;
+        }
+    }
+    if container_non_true || has_siblings {
+        return true;
+    }
+    for (is_lit, list) in [(false, &path_vals), (true, &literal_vals)] {
+        for m in list {
+            let mut g = battery_ueo(m, ctx);
+            if g.is_empty() {
+                g = ".".to_string();
+            }
+            let bad = if is_lit {
+                g.contains('$')
+            } else {
+                battery_ybu(&g)
+            };
+            if bad {
+                return true;
+            }
+            let y = battery_posix_basename(&g);
+            if y == "." || y == ".." {
+                return true;
+            }
+            if battery_xt_git_internal(&y, ctx) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A flattened `u`-list entry (2.1.211 `LTU`): a command element plus its
+/// containing statement and, for a main-pipeline element, its index within
+/// `statement.commands`.
+struct BatteryUEntry<'a> {
+    cmd: &'a PsCommand,
+    stmt: &'a PsStatement,
+    /// `Some(idx)` for a main-pipeline `CommandAst`; `None` for a nested command.
+    main_index: Option<usize>,
+}
+
+/// Build the `u`-list: every main-pipeline `CommandAst` (skipping `Expression`
+/// elements) plus every `nested_commands` entry, in order.
+fn battery_u_list(statements: &[PsStatement]) -> Vec<BatteryUEntry<'_>> {
+    let mut u = Vec::new();
+    for stmt in statements {
+        for (idx, el) in stmt.commands.iter().enumerate() {
+            if let PsElement::Command(c) = el {
+                u.push(BatteryUEntry {
+                    cmd: c,
+                    stmt,
+                    main_index: Some(idx),
+                });
+            }
+        }
+        for c in &stmt.nested_commands {
+            u.push(BatteryUEntry {
+                cmd: c,
+                stmt,
+                main_index: None,
+            });
+        }
+    }
+    u
+}
+
+/// Statement-level + nested-command redirection targets, filtered like 2.1.211
+/// `R5r` (`!isMerging && !xXt`).
+fn battery_r5r_targets(statements: &[PsStatement]) -> Vec<&str> {
+    let mut out = Vec::new();
+    for stmt in statements {
+        for r in &stmt.redirections {
+            if !r.is_merging && !is_null_redirect(&r.target) {
+                out.push(r.target.as_str());
+            }
+        }
+        for c in &stmt.nested_commands {
+            for r in &c.redirections {
+                if !r.is_merging && !is_null_redirect(&r.target) {
+                    out.push(r.target.as_str());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// PERM-PS-CALLER-06 git-security caller battery (2.1.211 `NTU` in-scope asks).
+///
+/// Evaluated by [`crate::policy`]'s `check_powershell_containment` BEFORE the
+/// [`validate_ps_statements`] (`gTu`) result is consumed, so a battery ask
+/// outranks the generic containment ask (a `gTu` DENY still wins). Returns the
+/// FIRST matching battery ask in `NTU` push order, or `None` (no battery ask →
+/// fall through to `gTu`).
+///
+/// `compound_cd` is the already-computed `y` flag (`u.length>1 && any cd-like`).
+#[must_use]
+pub fn powershell_git_battery(
+    statements: &[PsStatement],
+    ctx: &PsCtx,
+    compound_cd: bool,
+) -> Option<PsContainmentResult> {
+    let u = battery_u_list(statements);
+    let names: Vec<&str> = u.iter().map(|e| e.cmd.name.as_str()).collect();
+    let has_git = battery_has_git(&names);
+
+    let ask = |msg: &str| {
+        Some(PsContainmentResult::Ask {
+            message: msg.to_string(),
+            reason: msg.to_string(),
+        })
+    };
+
+    // 1. cd-git — `if(y&&S)`.
+    if compound_cd && has_git {
+        return ask(BATTERY_CD_GIT);
+    }
+
+    // (bare-repo indicators — `if(E)` — OUT OF SCOPE, deferred.)
+
+    if has_git {
+        // 2. git-internal-write — inside `if(S)`, `if(V||U)`.
+        let v = u.iter().any(|entry| {
+            let j = entry.cmd;
+            // command-level redirections: RAW (no merge/null filter).
+            for r in &j.redirections {
+                if battery_xt_git_internal(&r.target, ctx) {
+                    return true;
+                }
+            }
+            let canon = normalize_cmdlet(&j.name);
+            if !WRITE_CMDLETS.contains(&canon.as_str()) {
+                return false;
+            }
+            if j
+                .args
+                .iter()
+                .flat_map(|a| battery_peo(a))
+                .any(|a| battery_xt_git_internal(&a, ctx))
+            {
+                return true;
+            }
+            if canon == "copy-item" || canon == "move-item" {
+                let te: isize = entry.main_index.map_or(-1, |i| i as isize);
+                let ae = te > 0 || (te == -1 && entry.stmt.commands.len() > 1);
+                if battery_zbu_analyze(&j.args, ae, ctx) {
+                    return true;
+                }
+            }
+            // Non-CommandAst expression elements in the statement.
+            for el in &entry.stmt.commands {
+                if let PsElement::Expression { text } = el {
+                    if battery_xt_git_internal(text, ctx) {
+                        return true;
+                    }
+                }
+            }
+            false
+        });
+        let u_redir = battery_r5r_targets(statements)
+            .iter()
+            .any(|t| battery_xt_git_internal(t, ctx));
+        if v || u_redir {
+            return ask(BATTERY_GIT_INTERNAL_WRITE);
+        }
+
+        // 3. xcopy/robocopy + git — inside `if(S)`, `mxg`.
+        if names
+            .iter()
+            .any(|n| COPIER_SET.contains(&battery_basename_lower(n).as_str()))
+        {
+            return ask(BATTERY_XCOPY_ROBOCOPY);
+        }
+    }
+
+    // (PS5.1 cwd-first shadowing — Windows-only — OUT OF SCOPE, deferred.)
+
+    // 4. archive-extract — `if(pxg && u.length>1)`.
+    let archive_present = names
+        .iter()
+        .any(|n| ARCHIVE_SET.contains(&battery_basename_lower(n).as_str()));
+    if archive_present && u.len() > 1 {
+        return ask(if has_git {
+            BATTERY_ARCHIVE_GIT
+        } else {
+            BATTERY_ARCHIVE_NO_GIT
+        });
+    }
+
+    // 5. dotgit-write — `deo` (NOT gated on git presence).
+    let dot = u.iter().any(|entry| {
+        let j = entry.cmd;
+        for r in &j.redirections {
+            if battery_deo_dotgit(&r.target, ctx) {
+                return true;
+            }
+        }
+        let canon = normalize_cmdlet(&j.name);
+        if !WRITE_CMDLETS.contains(&canon.as_str()) {
+            return false;
+        }
+        j.args
+            .iter()
+            .flat_map(|a| battery_peo(a))
+            .any(|a| battery_deo_dotgit(&a, ctx))
+    });
+    let dot_redir = battery_r5r_targets(statements)
+        .iter()
+        .any(|t| battery_deo_dotgit(t, ctx));
+    if dot || dot_redir {
+        return ask(BATTERY_DOTGIT_WRITE);
+    }
+
+    None
+}
+
 #[cfg(test)]
 #[path = "powershell_containment_test.rs"]
 mod powershell_containment_test;

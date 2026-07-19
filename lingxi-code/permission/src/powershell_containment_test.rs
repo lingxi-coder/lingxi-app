@@ -942,3 +942,264 @@ fn null_redirect_targets_skipped() {
     assert!(!is_null_redirect("out.txt"));
     assert!(!is_null_redirect("$env:TEMP\\x"));
 }
+
+// ===========================================================================
+// PERM-PS-CALLER-06 — git-security caller battery tests (2.1.211 `NTU`).
+// ===========================================================================
+
+/// A statement built from a list of main-pipeline commands.
+fn bstmt(cmds: Vec<PsCommand>) -> PsStatement {
+    PsStatement {
+        commands: cmds.into_iter().map(PsElement::Command).collect(),
+        nested_commands: Vec::new(),
+        redirections: Vec::new(),
+    }
+}
+
+fn bredir(target: &str) -> PsRedirection {
+    PsRedirection {
+        target: target.to_string(),
+        is_merging: false,
+    }
+}
+
+fn battery(statements: &[PsStatement], compound_cd: bool) -> Option<PsContainmentResult> {
+    let roots = ps_roots();
+    powershell_git_battery(statements, &ctx_of(&roots, &[]), compound_cd)
+}
+
+fn battery_ask_msg(r: &Option<PsContainmentResult>) -> Option<&str> {
+    match r {
+        Some(PsContainmentResult::Ask { message, .. }) => Some(message.as_str()),
+        _ => None,
+    }
+}
+
+// --- cd-git ----------------------------------------------------------------
+
+#[test]
+fn battery_cd_git_positive() {
+    // `cd sub; git status` — compound cd + git.
+    let stmts = vec![
+        bstmt(vec![cmd("cd", &["sub"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let r = battery(&stmts, /* compound_cd = */ true);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_CD_GIT));
+}
+
+#[test]
+fn battery_cd_git_negative_no_git() {
+    // Compound cd WITHOUT git → no cd-git ask (and no other in-scope ask fires).
+    let stmts = vec![
+        bstmt(vec![cmd("cd", &["sub"])]),
+        bstmt(vec![cmd("Get-Content", &["notes.txt"])]),
+    ];
+    assert!(battery(&stmts, true).is_none());
+}
+
+#[test]
+fn battery_cd_git_negative_git_not_compound() {
+    // A lone `git` (not compound) never fires cd-git.
+    let stmts = vec![bstmt(vec![cmd("git", &["status"])])];
+    assert!(battery(&stmts, false).is_none());
+}
+
+// --- git-internal-write ----------------------------------------------------
+
+#[test]
+fn battery_git_internal_write_positive_arg() {
+    // `New-Item HEAD; git status` — a write cmdlet targets a git-internal path.
+    let stmts = vec![
+        bstmt(vec![cmd("New-Item", &["HEAD"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let r = battery(&stmts, false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_GIT_INTERNAL_WRITE));
+}
+
+#[test]
+fn battery_git_internal_write_positive_redirection() {
+    // `git status > .git/hooks/evil` — a statement-level redirection (`R5r`/`U`)
+    // targets a git-internal path.
+    let mut s = bstmt(vec![cmd("git", &["status"])]);
+    s.redirections.push(bredir(".git/hooks/evil"));
+    let r = battery(&[s], false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_GIT_INTERNAL_WRITE));
+}
+
+#[test]
+fn battery_git_internal_write_negative_no_git() {
+    // Write to HEAD but NO git command present → not the git-internal-write ask
+    // (S is required). It IS a `.git`? no — HEAD is not under `.git/`, so dotgit
+    // does not fire either → passthrough.
+    let stmts = vec![bstmt(vec![cmd("New-Item", &["HEAD"])])];
+    assert!(battery(&stmts, false).is_none());
+}
+
+#[test]
+fn battery_git_internal_write_negative_safe_target() {
+    // `New-Item notes.txt; git status` — write target is NOT git-internal.
+    let stmts = vec![
+        bstmt(vec![cmd("New-Item", &["notes.txt"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    assert!(battery(&stmts, false).is_none());
+}
+
+// --- xcopy/robocopy + git --------------------------------------------------
+
+#[test]
+fn battery_xcopy_robocopy_positive() {
+    // `robocopy src dst; git status` — native copier + git.
+    let stmts = vec![
+        bstmt(vec![cmd("robocopy", &["src", "dst"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let r = battery(&stmts, false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_XCOPY_ROBOCOPY));
+}
+
+#[test]
+fn battery_xcopy_robocopy_positive_pathed_exe() {
+    // Basename-lowercase membership: a path-qualified `xcopy.exe` still matches.
+    let stmts = vec![
+        bstmt(vec![cmd("C:\\Windows\\System32\\robocopy.exe", &["a", "b"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let r = battery(&stmts, false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_XCOPY_ROBOCOPY));
+}
+
+#[test]
+fn battery_xcopy_robocopy_negative_no_git() {
+    // Copier WITHOUT git → no ask (the copier test is gated inside `if(S)`).
+    let stmts = vec![bstmt(vec![cmd("robocopy", &["src", "dst"])])];
+    assert!(battery(&stmts, false).is_none());
+}
+
+// --- archive-extract -------------------------------------------------------
+
+#[test]
+fn battery_archive_extract_positive_git() {
+    // `tar -xf a.tar; git status` — extract + git.
+    let stmts = vec![
+        bstmt(vec![cmd("tar", &["-xf", "a.tar"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let r = battery(&stmts, false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_ARCHIVE_GIT));
+}
+
+#[test]
+fn battery_archive_extract_positive_no_git() {
+    // `tar -xf a.tar; Get-Content notes.txt` — extract + other command (no git).
+    let stmts = vec![
+        bstmt(vec![cmd("tar", &["-xf", "a.tar"])]),
+        bstmt(vec![cmd("Get-Content", &["notes.txt"])]),
+    ];
+    let r = battery(&stmts, false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_ARCHIVE_NO_GIT));
+}
+
+#[test]
+fn battery_archive_extract_negative_single_command() {
+    // A lone archive command (not compound) never asks.
+    let stmts = vec![bstmt(vec![cmd("tar", &["-xf", "a.tar"])])];
+    assert!(battery(&stmts, false).is_none());
+}
+
+// --- dotgit-write ----------------------------------------------------------
+
+#[test]
+fn battery_dotgit_write_positive_arg() {
+    // `Set-Content .git/config ...` — write into `.git/`, NO git command needed.
+    let stmts = vec![bstmt(vec![cmd("Set-Content", &[".git/config", "x"])])];
+    let r = battery(&stmts, false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_DOTGIT_WRITE));
+}
+
+#[test]
+fn battery_dotgit_write_positive_redirection() {
+    // `Write-Output x > .git/hooks/pre-commit` — statement-level redirection into
+    // `.git/` (dotgit is `.git`-subtree only, so `.git/hooks/...` matches).
+    let mut s = bstmt(vec![cmd("Write-Output", &["x"])]);
+    s.redirections.push(bredir(".git/hooks/pre-commit"));
+    let r = battery(&[s], false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_DOTGIT_WRITE));
+}
+
+#[test]
+fn battery_dotgit_write_negative_safe_target() {
+    // Write to a non-`.git` path → no dotgit ask.
+    let stmts = vec![bstmt(vec![cmd("Set-Content", &["config.txt", "x"])])];
+    assert!(battery(&stmts, false).is_none());
+}
+
+// --- precedence & regression ----------------------------------------------
+
+#[test]
+fn battery_cd_git_precedes_git_internal_write() {
+    // Both cd-git and git-internal-write would fire; cd-git is pushed first, so it
+    // wins the first-ask resolution.
+    let stmts = vec![
+        bstmt(vec![cmd("cd", &["sub"])]),
+        bstmt(vec![cmd("New-Item", &["HEAD"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let r = battery(&stmts, true);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_CD_GIT));
+}
+
+#[test]
+fn battery_git_internal_write_precedes_dotgit() {
+    // A `.git/hooks/...` write with git present fires git-internal-write (pushed
+    // earlier), not dotgit-write, even though both segment-match.
+    let stmts = vec![
+        bstmt(vec![cmd("Set-Content", &[".git/hooks/pre-commit", "x"])]),
+        bstmt(vec![cmd("git", &["status"])]),
+    ];
+    let r = battery(&stmts, false);
+    assert_eq!(battery_ask_msg(&r), Some(BATTERY_GIT_INTERNAL_WRITE));
+}
+
+#[test]
+fn battery_plain_safe_command_passes() {
+    // A benign single read command triggers no battery ask.
+    let stmts = vec![bstmt(vec![cmd("Get-Content", &["notes.txt"])])];
+    assert!(battery(&stmts, false).is_none());
+    // Even compound-but-benign (two reads, no git/archive/copier/write) passes.
+    let stmts2 = vec![
+        bstmt(vec![cmd("Get-Content", &["a.txt"])]),
+        bstmt(vec![cmd("Get-ChildItem", &["."])]),
+    ];
+    assert!(battery(&stmts2, false).is_none());
+}
+
+// --- helper unit checks ----------------------------------------------------
+
+#[test]
+fn battery_ueo_normalizes_backtick_and_drive_relative() {
+    let roots = ps_roots();
+    let ctx = ctx_of(&roots, &[]);
+    // Backtick before a normal char is stripped: ".g`it" → ".git".
+    assert_eq!(battery_ueo(".g`it", &ctx), ".git");
+    // Drive-relative `C:foo` → `./foo` → `foo`.
+    assert_eq!(battery_ueo("C:foo", &ctx), "foo");
+    // Backslashes normalized, trailing dot stripped: `.git\\config.` → `.git/config`.
+    assert_eq!(battery_ueo(".git\\config.", &ctx), ".git/config");
+}
+
+#[test]
+fn battery_zbu_and_kbu_segment_matchers() {
+    // zbu = git-internal segments; Kbu = `.git` subtree only.
+    assert!(battery_zbu("head"));
+    assert!(battery_zbu("objects/pack"));
+    assert!(battery_zbu(".git/config"));
+    assert!(battery_zbu("git~1/refs"));
+    assert!(!battery_zbu("notes.txt"));
+    assert!(battery_kbu(".git"));
+    assert!(battery_kbu(".git/hooks/x"));
+    assert!(!battery_kbu("head")); // dotgit does NOT match bare HEAD
+    assert!(!battery_kbu("objects/pack"));
+}

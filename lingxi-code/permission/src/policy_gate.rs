@@ -388,7 +388,16 @@ impl PolicyPermissionGate {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 tracking.record_auto_deny();
-                if tracking.trip(false).is_some() {
+                // (PERM-AUTO-07, partial) Consume the breaker trip so it is no
+                // longer silently swallowed: log the fallback warn line, then
+                // fall back to prompting (return None → the caller resolves to
+                // Ask). FULL fidelity — threading real `shouldAvoidPermissionPrompts`
+                // to abort headless runs, emitting DENIAL_LIMIT_EVENT, and carrying
+                // `trip.decision_reason(...)` onto the Ask — needs a telemetry +
+                // headless seam in the gate (documented follow-up in
+                // denial_tracking.rs), so `headless` stays `false` here for now.
+                if let Some(trip) = tracking.trip(false) {
+                    tracing::warn!(target: "permission", "{}", trip.fallback_warn_line());
                     return None;
                 }
                 Some(PermissionResult::Deny {

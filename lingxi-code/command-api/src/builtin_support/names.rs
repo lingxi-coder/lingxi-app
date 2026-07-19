@@ -404,21 +404,42 @@ pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
     ),
 ];
 
-/// **Partition B — HOST-BOUND-DEFERRED gaps (NOT correct-by-design).**
-/// claude-code *implements* each of these (the source has a real body and is
-/// enabled for ordinary users — **no** `isEnabled:()=>false`, no ant/statsig
-/// gate). The Rust port returns the stub literal only because the supporting
-/// host surface is not wired yet (an interactive JSX/TUI dialog, or an SDK
-/// control-request path that has no plain-text registry analog). These are
-/// **genuine deferred gaps**, a different partition from
-/// [`CORRECT_BY_DESIGN_STUBS`]: implementing them IS in-scope future work, so
-/// they must never be mislabeled as faithful-by-design.
+/// **Partition B — HOST-BOUND names (implemented by claude-code, but NOT on
+/// this plain-text command surface).** claude-code *implements* each of these
+/// (the source has a real body and is enabled for ordinary users — **no**
+/// `isEnabled:()=>false`, no ant/statsig gate), so they are NOT faithful no-op
+/// stubs like [`CORRECT_BY_DESIGN_STUBS`]. They are grouped here because the
+/// plain-text command-api registry returns the stub literal for them — but for
+/// two DIFFERENT reasons that a future audit must not conflate:
 ///
-/// Each entry is `(name, what-claude-code-actually-ships + why-deferred)`.
+/// 1. **No plain-text analog by design (correct-by-design on THIS surface).**
+///    `btw` and `reload-plugins` are dispatched by claude-code on a host
+///    surface that is *not* the plain-text command registry, and have no
+///    plain-text command body to port:
+///    - `btw` is a `local-jsx` command (`Ask a quick side question without
+///      interrupting the main conversation`, argumentHint `[question]`) whose
+///      body renders an interactive JSX side-question dialog and resolves via
+///      the `askSideQuestion` **control-request** — a TUI/SDK dialog surface,
+///      never a plain-text registry entry.
+///    - `reload-plugins` is driven entirely through the SDK **`reload_plugins`
+///      control-request** (`query.reloadPlugins()` → `mcpDelegate.reloadPlugins`)
+///      — a control-channel action, not a plain-text command body.
+///    Implementing these on the plain-text surface is a **non-goal**: they are
+///    implemented-elsewhere, so the plain-text stub literal is faithful *for
+///    this partition*. (When/if LingXi wires the JSX side-dialog and SDK
+///    control-request surfaces, they are served there, not here.)
+///
+/// 2. **Genuine plain-text-surface deferred gap.** `x402` IS a plain `local`
+///    text command (`supportsNonInteractive`, no `isEnabled` gate) with a
+///    real plain-text body; the Rust port defers it only for lack of the host
+///    wallet / x402 service infra. This one is in-scope future work for the
+///    plain-text registry.
+///
+/// Each entry is `(name, what-claude-code-actually-ships + which case above)`.
 pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
-    ("btw", "claude-code ships a `local-jsx` side-question dialog, enabled (no gate); deferred for lack of TUI dialog infra"),
-    ("x402", "claude-code ships a `local` text command (supportsNonInteractive, no isEnabled gate); deferred host wallet/x402 service infra"),
-    ("reload-plugins", "claude-code ships a `local` command (no gate); driven via SDK control-request, no plain-text registry analog yet"),
+    ("btw", "claude-code ships a `local-jsx` side-question dialog (enabled, no gate) resolved via the askSideQuestion control-request; no plain-text command-api analog by design — implemented on the JSX/SDK dialog surface, not here"),
+    ("x402", "claude-code ships a `local` text command (supportsNonInteractive, no isEnabled gate); genuine plain-text-surface gap, deferred host wallet/x402 service infra"),
+    ("reload-plugins", "claude-code ships a `local` command (no gate) driven entirely via the SDK reload_plugins control-request; no plain-text command-api analog by design — implemented on the SDK control-channel surface, not here"),
 ];
 
 /// **Statically-hidden named commands** — real, enabled (or conditionally
@@ -1133,10 +1154,16 @@ mod tests {
     }
 
     #[test]
-    fn host_bound_deferred_holds_exactly_the_three_implemented_names() {
-        // Lock the specific three claude-code IMPLEMENTS (verified against
-        // src/commands/{btw,x402,reload-plugins}: no isEnabled gate, real body)
-        // so they can never silently slide back into the correct-by-design set.
+    fn host_bound_holds_the_three_implemented_but_not_plain_text_surface_names() {
+        // Lock the specific three claude-code IMPLEMENTS (verified against the
+        // 2.1.215 binary: no isEnabled gate, real body) so they can never
+        // silently slide back into the faithful-no-op correct-by-design set.
+        // NOTE: only `x402` is a genuine plain-text-surface deferred gap (real
+        // `local` command body). `btw` (a `local-jsx` side-question dialog
+        // resolved via the askSideQuestion control-request) and `reload-plugins`
+        // (driven via the SDK `reload_plugins` control-request) are implemented
+        // on NON-plain-text host surfaces and have NO plain-text command-api
+        // analog by design — do not "port" them into this registry.
         let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
         let expected: std::collections::HashSet<&str> =
             ["btw", "x402", "reload-plugins"].into_iter().collect();

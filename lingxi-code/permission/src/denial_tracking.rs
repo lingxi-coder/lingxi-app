@@ -40,17 +40,25 @@
 //! checks/trips. `Y4t` (reset) is called when the mode is `"auto"` and there are
 //! denials, or when a permission resolves to `allow` (`P.behavior==="allow"`).
 //!
-//! # Live consumer status in `LingXi`
+//! # Live consumer status in `LingXi` (PERM-AUTO-07)
 //!
-//! The auto-mode LLM classifier itself is **not present in the external build**
-//! ([`crate::classifier::is_classifier_permissions_enabled`] is hardcoded
-//! `false`; the `mJn` / `isAutoModeAvailable` / `isAutoModeCircuitBroken` gate is
-//! documented as deferred in [`crate::mode::next_permission_mode`]). So there is
-//! no live auto-mode classifier deny site that would call [`record_auto_deny`]
-//! today — the breaker's consumer is a **residual seam**. This module implements
-//! the breaker logic, thresholds, and the byte-exact trip outcome so the future
-//! auto-mode classifier path (or a test) can drive it without re-deriving the
-//! claude-code semantics.
+//! The auto-mode LLM classifier is now **LIVE**:
+//! [`crate::classifier::is_classifier_permissions_enabled`] returns `true`, and
+//! [`crate::policy_gate`]'s `auto_mode_classifier_result` consumes it — every
+//! classifier `Deny` calls [`record_auto_deny`] and consults the breaker, so the
+//! breaker genuinely trips in an auto-mode session. (The earlier "not present in
+//! the external build / residual seam" note was stale.)
+//!
+//! What is **NOT yet wired** is the full trip *payload* handling. On a trip the
+//! consumer logs [`DenialBreakerTrip::fallback_warn_line`] and falls back to
+//! prompting (the counter/circuit-breaker semantics are byte-faithful), but it
+//! still passes `headless = false` to [`DenialTrackingState::trip`] and does not
+//! yet (a) thread the real `shouldAvoidPermissionPrompts` to ABORT headless runs
+//! ([`DenialBreakerTrip::HEADLESS_ABORT_MESSAGE`]), (b) emit [`DENIAL_LIMIT_EVENT`],
+//! or (c) carry [`DenialBreakerTrip::decision_reason`] onto the resulting Ask.
+//! Those three need a telemetry + headless seam plumbed into the permission gate
+//! (documented follow-up). The breaker logic, thresholds, and byte-exact trip
+//! outcome in this module are complete.
 //!
 //! [`record_auto_deny`]: DenialTrackingState::record_auto_deny
 

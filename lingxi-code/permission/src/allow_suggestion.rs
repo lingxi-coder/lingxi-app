@@ -170,7 +170,7 @@ const INTERPRETER_BLOCKLIST: &[&str] = &[
 /// `NAME=value` prefix keeps the command prefix-narrowable only when every NAME
 /// is in this set (else the suggestion falls back to the EXACT full command, so
 /// a `SECRET=… cmd` grant never widens to `cmd *`).
-const SAFE_ENV_ASSIGNMENTS: &[&str] = &[
+pub(crate) const SAFE_ENV_ASSIGNMENTS: &[&str] = &[
     "GOEXPERIMENT",
     "GOOS",
     "GOARCH",

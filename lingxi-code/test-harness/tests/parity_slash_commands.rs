@@ -71,6 +71,7 @@ fn fully_wired_registry() -> CommandRegistry {
         std::path::PathBuf::from("."),
         Vec::new(),
         false,
+        false,
     );
     reg
 }

@@ -711,6 +711,13 @@ pub async fn build_mobile_inner(
     // (⇒ `never`, block on the user). Parsed into `AskUserQuestionTimeout` at
     // `tool_ui` registration.
     let mut ask_user_question_timeout: Option<String> = None;
+    // (M-03) `settings.disableAgentView` → the agent-view fork/subtask surface is
+    // disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` (binary `I2i()`).
+    // Read from the SAME settings.json tiers as the perms loop below,
+    // scalar-override (later tier wins). `false` by default (agent view enabled;
+    // the env half still applies independently). Threaded into
+    // `register_core_batch_8` via `traits::agent_view::is_enabled_with_setting`.
+    let mut disable_agent_view = false;
     // (#3 shell-expansion) Capture the boot `Arc<PermissionPolicy>` before it is
     // consumed by `PolicyPermissionGate::new`, so `tool_ctx.permission_policy`
     // shares the SAME base policy the model-facing gate enforces (the prompt
@@ -790,6 +797,14 @@ pub async fn build_mobile_inner(
                         .and_then(serde_json::Value::as_str)
                     {
                         ask_user_question_timeout = Some(s.to_string());
+                    }
+                    // (M-03) Scalar-override: a tier that declares the key
+                    // overrides (user → project → local, so local wins).
+                    if let Some(b) = v
+                        .get("disableAgentView")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        disable_agent_view = b;
                     }
                 }
                 additional_working_dirs
@@ -1273,6 +1288,7 @@ pub async fn build_mobile_inner(
         cwd.clone(),
         Vec::new(),
         false,
+        disable_agent_view,
     );
     *shared_command_registry.write().await = reg;
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry)

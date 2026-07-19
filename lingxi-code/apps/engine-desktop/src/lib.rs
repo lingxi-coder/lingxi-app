@@ -2195,6 +2195,7 @@ pub async fn desktop_command_registry(
         home.clone(),
         Vec::new(),
         gates.safe_mode,
+        load_merged_disable_agent_view(cwd),
     );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
     // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
@@ -2886,6 +2887,28 @@ fn load_merged_skip_web_fetch_preflight(project_dir: &std::path::Path) -> bool {
     engine::settings::Settings::load(inputs)
         .ok()
         .and_then(|eff| eff.settings.skip_web_fetch_preflight)
+        .unwrap_or(false)
+}
+
+/// Load the merged `settings.disableAgentView` (project + user + env layers) for
+/// the given project dir. Mirrors [`load_merged_skip_web_fetch_preflight`] (same
+/// `engine::settings::Settings::load` seam). When `true`, the agent-view
+/// fork/subtask surface is disabled exactly like `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`
+/// (binary `I2i()` — `settings.disableAgentView === true`), threaded into
+/// [`command_core::register_core_batch_8`] via
+/// [`traits::agent_view::is_enabled_with_setting`] (M-03). Returns `false` on any
+/// load failure or when the key is unset — the frozen default (agent view
+/// enabled; the env half still applies independently).
+fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.disable_agent_view)
         .unwrap_or(false)
 }
 

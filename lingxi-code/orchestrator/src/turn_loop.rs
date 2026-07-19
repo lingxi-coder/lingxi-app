@@ -2951,7 +2951,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let (heartbeat_done_tx, mut heartbeat_done_rx) = tokio::sync::oneshot::channel::<()>();
         let heartbeat_started = std::time::Instant::now();
         let heartbeat_task = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            // (review #10) `interval` fires its FIRST tick immediately, which
+            // would emit a spurious `elapsed_ms≈0` heartbeat on EVERY tool call
+            // (even instant ones), defeating the "long-running" intent. Start the
+            // first tick one period out so heartbeats only fire for tools that
+            // actually run >= 1s.
+            let period = std::time::Duration::from_secs(1);
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {

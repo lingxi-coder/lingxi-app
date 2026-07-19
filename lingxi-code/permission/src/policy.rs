@@ -1391,6 +1391,15 @@ impl PermissionPolicy {
         if !shell_command::is_shell_tool(tool_name) {
             return false;
         }
+        // (review #3) `auto_allows` mirrors claude-code's BashTool-specific
+        // sandbox branch and uses bash split/strip semantics; claude never routes
+        // PowerShell through it. Excluding PowerShell here keeps the PowerShell
+        // path-containment / invalid-parse Ask (a fail-closed guard evaluated
+        // later in `authorize`) authoritative, instead of a bash-shaped sandbox
+        // auto-allow pre-empting it for an unparseable PowerShell command.
+        if tool_name == "PowerShell" {
+            return false;
+        }
         shell_command::command_from_input(input).is_some_and(|cmd| sandbox.auto_allows(cmd))
     }
 

@@ -1032,9 +1032,10 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
-        // Persisted to pluginConfigs[<bare name>].options — the map the loader reads.
+        // Persisted to pluginConfigs[<name@marketplace>].options — the map the
+        // loader reads (H-12: keyed by full identity, not the bare manifest name).
         assert_eq!(
-            user_settings(&e)["pluginConfigs"]["hello"]["options"]["REGION"],
+            user_settings(&e)["pluginConfigs"]["hello@mymkt"]["options"]["REGION"],
             Value::String("us-east".into())
         );
         // The install itself still succeeded (enabledPlugins set too).
@@ -1060,7 +1061,7 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
-        let opts = &user_settings(&e)["pluginConfigs"]["hello"]["options"];
+        let opts = &user_settings(&e)["pluginConfigs"]["hello@mymkt"]["options"];
         // Non-sensitive persisted; the secret is NOT in plaintext settings.
         assert_eq!(opts["REGION"], Value::String("eu".into()));
         assert!(opts.get("API_KEY").is_none());
@@ -1136,7 +1137,7 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
-        assert!(user_settings(&e)["pluginConfigs"].get("hello").is_some());
+        assert!(user_settings(&e)["pluginConfigs"].get("hello@mymkt").is_some());
         run_uninstall(
             "hello@mymkt",
             None,
@@ -1149,7 +1150,7 @@ mod tests {
         )
         .unwrap();
         // deletePluginOptions parity: the pluginConfigs entry is gone.
-        assert!(user_settings(&e)["pluginConfigs"].get("hello").is_none());
+        assert!(user_settings(&e)["pluginConfigs"].get("hello@mymkt").is_none());
     }
 
     #[test]

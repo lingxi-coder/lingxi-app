@@ -311,12 +311,27 @@ async fn execute_job(config_home: std::path::PathBuf, spec: JobSpec) -> Result<(
             .map(|reply| reply.text)
             .collect();
 
-    run_attached_turn(&runtime, &spec.prompt, attach_rx.as_mut(), &mut queued).await?;
+    // Line-assembly buffer for the raw-byte attach transport: partial input
+    // bytes accumulate here (across turns) until a newline completes a line.
+    let mut line_buf: Vec<u8> = Vec::new();
+
+    // A resume worker carries no initial prompt (`spec.prompt == None`): skip the
+    // initial turn and go straight to attach / offline-reply delivery.
+    if let Some(prompt) = spec.prompt.as_deref() {
+        run_attached_turn(
+            &runtime,
+            prompt,
+            attach_rx.as_mut(),
+            &mut queued,
+            &mut line_buf,
+        )
+        .await?;
+    }
     if let (Some(hub), Some(rx)) = (attach_hub.as_ref(), attach_rx.as_mut()) {
         // The live-attach loop drains `queued` (offline replies first) before it
         // blocks on live input, so a connected client is not required to deliver
         // them.
-        run_attach_input_loop(&runtime, sink.as_ref(), hub, rx, queued).await?;
+        run_attach_input_loop(&runtime, sink.as_ref(), hub, rx, queued, &mut line_buf).await?;
     } else {
         // No live attach transport: deliver any offline-queued replies as plain
         // follow-up turns directly.
@@ -345,7 +360,8 @@ async fn deliver_offline_replies(
                 }
                 SlashDispatchResult::RunAsTurn { prompt } => {
                     sink.turn_start().await;
-                    run_attached_turn(runtime, &prompt, None, &mut VecDeque::new()).await?;
+                    run_attached_turn(runtime, &prompt, None, &mut VecDeque::new(), &mut Vec::new())
+                        .await?;
                 }
                 SlashDispatchResult::NotASlashCommand => {}
             }
@@ -354,7 +370,7 @@ async fn deliver_offline_replies(
             }
         } else {
             sink.turn_start().await;
-            run_attached_turn(runtime, &input, None, &mut VecDeque::new()).await?;
+            run_attached_turn(runtime, &input, None, &mut VecDeque::new(), &mut Vec::new()).await?;
         }
     }
     Ok(())
@@ -365,6 +381,7 @@ async fn run_attached_turn(
     prompt: &str,
     mut attach_rx: Option<&mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>>,
     queued: &mut VecDeque<String>,
+    line_buf: &mut Vec<u8>,
 ) -> Result<(), String> {
     if let Some(rx) = attach_rx.as_mut() {
         let cancel = CancellationToken::new();
@@ -378,8 +395,19 @@ async fn run_attached_turn(
                 result = &mut turn => return handle_turn_result(result),
                 input = rx.recv(), if !rx_closed => {
                     match input {
-                        Some(crate::bg_attach::AttachInput::Line(line)) => queued.push_back(line),
+                        // Raw attach bytes: assemble into follow-up lines for the
+                        // next turn (they must not interleave with the running one).
+                        Some(crate::bg_attach::AttachInput::Bytes(bytes)) => {
+                            assemble_lines(line_buf, &bytes, queued);
+                        }
                         Some(crate::bg_attach::AttachInput::Interrupt) => cancel.cancel(),
+                        // Resize does not affect the worker's line-based turn loop
+                        // (it is not a real PTY yet); the size is ignored.
+                        Some(crate::bg_attach::AttachInput::Resize { .. }) => {}
+                        // A client detach / EOF ends *input* for this turn; the
+                        // in-flight turn still runs to completion.
+                        Some(crate::bg_attach::AttachInput::Detach)
+                        | Some(crate::bg_attach::AttachInput::Eof) => rx_closed = true,
                         Some(crate::bg_attach::AttachInput::ClientDetached) => {}
                         None => rx_closed = true,
                     }
@@ -412,8 +440,9 @@ async fn run_attach_input_loop(
     hub: &crate::bg_attach::AttachHub,
     rx: &mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>,
     mut queued: VecDeque<String>,
+    line_buf: &mut Vec<u8>,
 ) -> Result<(), String> {
-    while let Some(input) = next_attach_line(hub, rx, &mut queued).await {
+    while let Some(input) = next_attach_line(hub, rx, &mut queued, line_buf).await {
         if input.trim().is_empty() {
             continue;
         }
@@ -425,7 +454,7 @@ async fn run_attach_input_loop(
                 }
                 SlashDispatchResult::RunAsTurn { prompt } => {
                     sink.turn_start().await;
-                    run_attached_turn(runtime, &prompt, Some(rx), &mut queued).await?;
+                    run_attached_turn(runtime, &prompt, Some(rx), &mut queued, line_buf).await?;
                 }
                 SlashDispatchResult::NotASlashCommand => {}
             }
@@ -434,35 +463,66 @@ async fn run_attach_input_loop(
             }
         } else {
             sink.turn_start().await;
-            run_attached_turn(runtime, &input, Some(rx), &mut queued).await?;
+            run_attached_turn(runtime, &input, Some(rx), &mut queued, line_buf).await?;
         }
     }
     Ok(())
+}
+
+/// Append raw attach-transport bytes to `buf` and move every complete
+/// (`\n`-terminated) line into `queued`, stripping a trailing `\r`. The final
+/// partial line (no newline yet) stays in `buf` for the next byte frame.
+fn assemble_lines(buf: &mut Vec<u8>, bytes: &[u8], queued: &mut VecDeque<String>) {
+    buf.extend_from_slice(bytes);
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let mut line: Vec<u8> = buf.drain(..=pos).collect();
+        line.pop(); // drop the trailing '\n'
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        queued.push_back(String::from_utf8_lossy(&line).into_owned());
+    }
 }
 
 async fn next_attach_line(
     hub: &crate::bg_attach::AttachHub,
     rx: &mut mpsc::UnboundedReceiver<crate::bg_attach::AttachInput>,
     queued: &mut VecDeque<String>,
+    line_buf: &mut Vec<u8>,
 ) -> Option<String> {
     loop {
         if let Some(line) = queued.pop_front() {
             return Some(line);
         }
+        // Drain everything currently buffered, assembling raw bytes into lines.
         while let Ok(input) = rx.try_recv() {
             match input {
-                crate::bg_attach::AttachInput::Line(line) => return Some(line),
-                crate::bg_attach::AttachInput::Interrupt => continue,
-                crate::bg_attach::AttachInput::ClientDetached => continue,
+                crate::bg_attach::AttachInput::Bytes(bytes) => {
+                    assemble_lines(line_buf, &bytes, queued);
+                }
+                crate::bg_attach::AttachInput::Interrupt
+                | crate::bg_attach::AttachInput::Resize { .. }
+                | crate::bg_attach::AttachInput::Detach
+                | crate::bg_attach::AttachInput::Eof
+                | crate::bg_attach::AttachInput::ClientDetached => {}
             }
+        }
+        if let Some(line) = queued.pop_front() {
+            return Some(line);
         }
         if !hub.has_clients() {
             return None;
         }
         match rx.recv().await {
-            Some(crate::bg_attach::AttachInput::Line(line)) => return Some(line),
-            Some(crate::bg_attach::AttachInput::Interrupt) => continue,
-            Some(crate::bg_attach::AttachInput::ClientDetached) => {
+            Some(crate::bg_attach::AttachInput::Bytes(bytes)) => {
+                assemble_lines(line_buf, &bytes, queued);
+            }
+            Some(crate::bg_attach::AttachInput::Interrupt)
+            | Some(crate::bg_attach::AttachInput::Resize { .. }) => continue,
+            // Client EOF (`Ctrl-D`) ends attach input.
+            Some(crate::bg_attach::AttachInput::Eof) => return None,
+            Some(crate::bg_attach::AttachInput::Detach)
+            | Some(crate::bg_attach::AttachInput::ClientDetached) => {
                 if !hub.has_clients() {
                     return None;
                 }
@@ -520,10 +580,11 @@ mod tests {
         // all agree and `--resume <sessionId>` finds the turn.
         let spec = JobSpec {
             short: "74d8a00f".to_string(),
-            prompt: "say hi".to_string(),
+            prompt: Some("say hi".to_string()),
             cwd: "/tmp/x".to_string(),
             session_id: "cb1f9d13-20a6-4e53-ad3e-5720d438a5f2".to_string(),
             name: None,
+            launch: WorkerLaunch::Prompt,
         };
         let argv = worker_argv(&spec);
         assert_eq!(
@@ -545,7 +606,7 @@ mod tests {
         seed_job(&home, "bc7c6b33", "port the daemon");
         let mut seen: Option<String> = None;
         let code = run_worker_core(&home, "bc7c6b33", |spec| {
-            seen = Some(spec.prompt.clone());
+            seen = spec.prompt.clone();
             async move { Ok(()) }
         })
         .await;
@@ -649,11 +710,15 @@ mod tests {
         let hub = crate::bg_attach::AttachHub::start(sock, "token-1".to_string()).unwrap();
         let mut rx = hub.take_input_rx().unwrap();
         let mut queued = VecDeque::from(["follow up".to_string()]);
+        let mut line_buf: Vec<u8> = Vec::new();
 
         assert_eq!(
-            next_attach_line(&hub, &mut rx, &mut queued).await,
+            next_attach_line(&hub, &mut rx, &mut queued, &mut line_buf).await,
             Some("follow up".to_string())
         );
-        assert_eq!(next_attach_line(&hub, &mut rx, &mut queued).await, None);
+        assert_eq!(
+            next_attach_line(&hub, &mut rx, &mut queued, &mut line_buf).await,
+            None
+        );
     }
 }

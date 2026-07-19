@@ -2912,6 +2912,27 @@ fn load_merged_disable_agent_view(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve the merged hooks-restricted flag for the `/goal` gate (review #12):
+/// `disableAllHooks || allowManagedHooksOnly` across the project/user/env layers
+/// (the same `Settings::load` seam). Mirrors claude's `kEt` hooks half —
+/// `if (tX() || lMe()) return hooks_gate`. `false` on any load failure or when
+/// both keys are unset (the permissive default).
+fn load_merged_hooks_restricted(project_dir: &std::path::Path) -> bool {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .map(|eff| {
+            eff.settings.disable_all_hooks.unwrap_or(false)
+                || eff.settings.allow_managed_hooks_only.unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
 /// Load the merged `askUserQuestionTimeout` (`60s`/`5m`/`10m`/`never`) across the
 /// project + user + env settings layers (the same `Settings::load` seam). The raw
 /// settings string is threaded into `BuiltinToolContext::ask_user_question_timeout`
@@ -6599,6 +6620,19 @@ pub async fn build(
     // restoration. Same shared-`Arc` file target, so the record lands in the SAME
     // `<uuid>.jsonl` the orchestrator appends messages to.
     let main_agent_setting_writer = main_jsonl_writer.clone();
+    // (review #12) Resolve the `/goal` accept-gate values BEFORE `cwd` is moved
+    // into the orchestrator. These feed the previously-unwired
+    // `with_workspace_trusted` / `with_hooks_restricted` builders so `/goal`
+    // honors claude's `Xys()` gate — rejected in an untrusted workspace or when
+    // hooks are restricted. Both resolve FAIL-SAFE: a missing global config or a
+    // load failure yields `untrusted` / `not-restricted`, so `/goal` is BLOCKED
+    // rather than falsely granted. A session that accepted the trust dialog has a
+    // recorded disk grant (`record_trust_accept`), so normal sessions stay
+    // trusted; homedir sessions short-circuit via session-trust.
+    let goal_workspace_trusted = migrations::global_config::global_config_path()
+        .map(|cfg| migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd))
+        .unwrap_or(false);
+    let goal_hooks_restricted = load_merged_hooks_restricted(&cwd);
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -6650,6 +6684,11 @@ pub async fn build(
         // subagent spawner's subagents dir — one consistent session id end-to-end.
         .with_session_id(main_session_id)
         .with_cost_tracker(cost_tracker)
+        // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
+        // above) into the orchestrator, replacing the hardcoded trusted=true /
+        // restricted=false defaults.
+        .with_workspace_trusted(goal_workspace_trusted)
+        .with_hooks_restricted(goal_hooks_restricted)
         .with_analytics_bus(analytics_bus)
         .with_mcp_registry(mcp_registry)
         .with_hook_registry(hook_registry)

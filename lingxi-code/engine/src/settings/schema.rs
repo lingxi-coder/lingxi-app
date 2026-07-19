@@ -269,6 +269,18 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_agent_view: Option<bool>,
 
+    /// `disableAllHooks` — when true, ALL hooks are disabled (claude hook-dispatch
+    /// gate `Ql()`). One half of the `/goal` hooks-restricted gate (`kEt`): a
+    /// restricted-hooks session rejects `/goal`. Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_all_hooks: Option<bool>,
+
+    /// `allowManagedHooksOnly` — when true, only managed-policy hooks run. The
+    /// other half of the `/goal` hooks-restricted gate (claude
+    /// `allowManagedHooksOnly===!0`). Scalar-override merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_managed_hooks_only: Option<bool>,
+
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

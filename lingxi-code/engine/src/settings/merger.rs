@@ -56,6 +56,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // Scalar Override (later source wins) — `disableAgentView` (M-03), same
         // as `enableArtifact`.
         disable_agent_view: next.disable_agent_view.or(prev.disable_agent_view),
+        disable_all_hooks: next.disable_all_hooks.or(prev.disable_all_hooks),
+        allow_managed_hooks_only: next
+            .allow_managed_hooks_only
+            .or(prev.allow_managed_hooks_only),
         // Scalar Override — `askUserQuestionTimeout` (enum 60s|5m|10m|never).
         ask_user_question_timeout: next
             .ask_user_question_timeout

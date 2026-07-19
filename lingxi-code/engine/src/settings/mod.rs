@@ -194,10 +194,14 @@ impl Settings {
         trace.record_layer(tracer::Source::Defaults, &defaults);
         let mut acc = defaults;
 
-        // Layer 2: user
+        // Layer 2: user. (review #2) A single unreadable/oversized/invalid file
+        // is SKIPPED (via `read_layer_or_skip`) rather than aborting the whole
+        // merge — claude-code "skips files with errors entirely, not just the
+        // invalid settings" and keeps merging the remaining sources, so one bad
+        // user file never discards valid project/local/env layers.
         if file_scope.include_user {
             if let Some(user_path) = loader::user_settings_path() {
-                if let Some(usr) = loader::read_settings_file(&user_path)? {
+                if let Some(usr) = read_layer_or_skip(&user_path) {
                     trace.record_layer(tracer::Source::User, &usr);
                     acc = merger::merge(acc, usr);
                 }
@@ -207,7 +211,7 @@ impl Settings {
         // Layer 3: project
         if file_scope.include_project {
             let project_path = loader::project_settings_path(project_dir);
-            if let Some(proj) = loader::read_settings_file(&project_path)? {
+            if let Some(proj) = read_layer_or_skip(&project_path) {
                 trace.record_layer(tracer::Source::Project, &proj);
                 acc = merger::merge(acc, proj);
             }
@@ -216,7 +220,7 @@ impl Settings {
         // Layer 4: project-local
         if file_scope.include_local {
             let local_path = loader::local_settings_path(project_dir);
-            if let Some(local) = loader::read_settings_file(&local_path)? {
+            if let Some(local) = read_layer_or_skip(&local_path) {
                 trace.record_layer(tracer::Source::Local, &local);
                 acc = merger::merge(acc, local);
             }
@@ -341,9 +345,12 @@ impl Settings {
                         layers_present += 1;
                     }
                     Ok(None) => {}
+                    // (review #2) Skip a bad file, keep merging the rest (parity:
+                    // claude-code skips files with errors entirely). The error is
+                    // still surfaced via telemetry; it just no longer discards the
+                    // other layers.
                     Err(e) => {
                         emit_parse_error(bus, up, &e).await;
-                        return Err(e);
                     }
                 }
             }
@@ -361,7 +368,6 @@ impl Settings {
                 Ok(None) => {}
                 Err(e) => {
                     emit_parse_error(bus, &project_path, &e).await;
-                    return Err(e);
                 }
             }
         }
@@ -378,7 +384,6 @@ impl Settings {
                 Ok(None) => {}
                 Err(e) => {
                     emit_parse_error(bus, &local_path, &e).await;
-                    return Err(e);
                 }
             }
         }
@@ -458,6 +463,27 @@ impl Settings {
             settings: acc,
             trace,
         })
+    }
+}
+
+/// Read one settings-file layer for the non-telemetry loader, returning `None`
+/// when the file is absent OR unreadable/oversized/invalid. (review #2 / parity)
+/// claude-code "skips files with errors entirely, not just the invalid settings"
+/// and keeps merging the remaining sources, so a single bad file must never
+/// discard valid project/local/env layers. The error is logged (never the raw
+/// content) and swallowed; genuinely fatal conditions (env parse) are handled
+/// separately by the callers and still abort.
+fn read_layer_or_skip(path: &std::path::Path) -> Option<SettingsJson> {
+    match loader::read_settings_file(path) {
+        Ok(opt) => opt,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to read raw settings from file; skipping this layer and continuing the merge"
+            );
+            None
+        }
     }
 }
 
@@ -926,13 +952,23 @@ mod load_tests {
             Some(&bus),
         )
         .await;
-        assert!(result.is_err(), "malformed JSON must surface as Err");
+        // (review #2) A malformed file is SKIPPED, not fatal: the load still
+        // succeeds (here yielding just the defaults, since the only configured
+        // layer was the bad project file) — claude-code skips files with errors
+        // and keeps merging the rest. The parse error is still surfaced via
+        // telemetry.
+        let effective = result.expect("a malformed file is skipped; the load still succeeds");
+        assert_eq!(
+            effective.settings,
+            schema::SettingsJson::default(),
+            "the skipped bad layer contributes nothing; defaults remain"
+        );
 
         let captured = sink.events.lock().unwrap().clone();
         let parse_err = captured
             .iter()
             .find(|(n, _)| n == "tengu_settings_parse_error")
-            .expect("tengu_settings_parse_error must be emitted before the error returns");
+            .expect("tengu_settings_parse_error must still be emitted for the skipped file");
         assert!(parse_err.1.contains_key("_PROTO_path"));
         assert!(matches!(
             parse_err.1.get("error"),

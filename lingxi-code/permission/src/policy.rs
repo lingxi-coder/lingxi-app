@@ -636,7 +636,10 @@ impl PermissionPolicy {
         //     Gated
         //     on [`Self::sandbox_runtime`]: `None` (the default) ⇒ no-op, so
         //     behavior is unchanged when absent.
-        if self.shell_sandbox_auto_allows(tool_name, input) {
+        // PERM-SBX-WOG-02: on the too-complex/parse-abort branch this runs the
+        // strict WOg gate instead of the permissive BAu check (BAu XOR WOg);
+        // a normally-parsed command keeps the current BAu behavior.
+        if self.shell_sandbox_auto_allows_decision(tool_name, input) {
             return allow_sandbox_auto();
         }
         // 2. Path containment guards. The catastrophic removal guard used to
@@ -1427,6 +1430,48 @@ impl PermissionPolicy {
             return false;
         }
         shell_command::command_from_input(input).is_some_and(|cmd| sandbox.auto_allows(cmd))
+    }
+
+    /// The actual 1d sandbox-auto-allow DECISION (claude-code `rLg`'s BAu-vs-WOg
+    /// fork), used only at the [`Self::authorize`] allow site. On a
+    /// NORMALLY-parsed command this is identical to [`Self::shell_sandbox_auto_allows`]
+    /// (the permissive `BAu`/`auto_allows` check). On the TOO-COMPLEX /
+    /// parse-abort branch (feature `bash-ast`) it instead runs the STRICT `WOg`
+    /// battery ([`crate::sandbox_auto_allow::SandboxAutoAllowConfig::wog_allows_when_too_complex`]) —
+    /// CC forks BAu XOR WOg, never both — so a too-complex command that WOg
+    /// rejects is NOT auto-allowed and falls through to the too-complex prompt
+    /// (PERM-SBX-WOG-02, an under-ask fix).
+    ///
+    /// NOTE: the tool-wide-ask exemption site ([`Self::authorize`] 1c) keeps
+    /// calling the complexity-independent [`Self::shell_sandbox_auto_allows`] —
+    /// CC's exemption `y` is C6-only there, and the port's extra `!bau_refuses`
+    /// is a safe over-inclusion; the WOg fork must not change that site.
+    fn shell_sandbox_auto_allows_decision(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> bool {
+        let Some(sandbox) = self.sandbox_runtime.as_ref() else {
+            return false;
+        };
+        if !shell_command::is_shell_tool(tool_name) {
+            return false;
+        }
+        if tool_name == "PowerShell" {
+            return false;
+        }
+        let Some(cmd) = shell_command::command_from_input(input) else {
+            return false;
+        };
+        #[cfg(feature = "bash-ast")]
+        {
+            if let crate::bash_ast_security::ParseForSecurityResult::TooComplex { reason } =
+                crate::bash_ast_security::parse_for_security(cmd)
+            {
+                return sandbox.wog_allows_when_too_complex(cmd, &reason);
+            }
+        }
+        sandbox.auto_allows(cmd)
     }
 
     /// Shell-only general sed-constraint ASK (the 3-sed layer). Returns the

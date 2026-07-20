@@ -72,6 +72,15 @@ pub struct PermissionCheckContext {
     /// omits it). Populated by the `PolicyPermissionGate` Ask path from the
     /// policy result's [`PermissionDecisionReason`].
     pub decision_reason: Option<String>,
+    /// The policy Ask's decision-reason TYPE discriminant, forwarded as the
+    /// `decision_reason_type` field of a stdio `can_use_tool` request (claude-code
+    /// `decision_reason_type: decisionReason?.type` — `rule`/`mode`/
+    /// `subcommandResults`/`permissionPromptTool`/`hook`/`asyncAgent`/`workingDir`/
+    /// `safetyCheck`/`sandboxOverride`/`classifier`/`other`). An SDK host reads
+    /// this to classify Ask reasons where the free-text [`Self::decision_reason`]
+    /// is omitted. `None` ⇒ the key is OMITTED. Populated by the
+    /// `PolicyPermissionGate` Ask path alongside `decision_reason`.
+    pub decision_reason_type: Option<String>,
     /// The policy Ask's permission-rule SUGGESTIONS, forwarded as the
     /// `permission_suggestions` field of a stdio `can_use_tool` request
     /// (claude-code `mainPermissionResult.suggestions` — a `PermissionUpdate[]`).

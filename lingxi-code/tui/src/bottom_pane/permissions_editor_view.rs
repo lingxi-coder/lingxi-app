@@ -204,6 +204,8 @@ fn source_label(source: PermissionRuleSource) -> &'static str {
         PermissionRuleSource::CliArg => "cli",
         PermissionRuleSource::Command => "command",
         PermissionRuleSource::Session => "session",
+        PermissionRuleSource::ToolsNarrowing => "tools-narrowing",
+        PermissionRuleSource::McpServerPolicy => "mcp-policy",
     }
 }
 

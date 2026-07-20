@@ -850,7 +850,7 @@ fn has_glob_metachar(s: &str) -> bool {
 /// segment (a possible symlink escape). Splits on `/` (also `\` on Windows),
 /// skips empty and `.` segments, and flags a `..` seen once any non-`..` segment
 /// has been passed.
-fn dotdot_after_directory_segment(path: &str) -> bool {
+pub(crate) fn dotdot_after_directory_segment(path: &str) -> bool {
     let mut seen_real = false;
     for seg in path.split(|c| c == '/' || (cfg!(target_os = "windows") && c == '\\')) {
         if seg.is_empty() || seg == "." {

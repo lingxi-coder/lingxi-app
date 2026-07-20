@@ -180,8 +180,14 @@ pub enum PermissionRuleSource {
     CliArg,
     /// Rules emitted by a command (e.g. `/permissions add`).
     Command,
-    /// Session-scoped rules (highest priority).
+    /// Session-scoped rules.
     Session,
+    /// CLI `--tools` narrowing deny rules (claude-code `toolsNarrowing`). Walked
+    /// AFTER `session` (lowest citation precedence). No producer yet — latent.
+    ToolsNarrowing,
+    /// Dynamic MCP server-policy rules (claude-code `mcpServerPolicy`). Walked
+    /// last (lowest citation precedence). No producer yet — latent.
+    McpServerPolicy,
 }
 
 impl PermissionRuleSource {
@@ -194,15 +200,21 @@ impl PermissionRuleSource {
     /// DECISION is behavior-first and independent of this rank.
     #[must_use]
     pub fn priority(self) -> u8 {
+        // Comparison-only; absolute values are irrelevant, only the relative
+        // order (= the `fJr` walk `[...S1, cliArg, command, session,
+        // toolsNarrowing, mcpServerPolicy]` where the FIRST wins citation, so
+        // userSettings highest ... mcpServerPolicy lowest).
         match self {
-            Self::Session => 0,
-            Self::Command => 1,
-            Self::CliArg => 2,
-            Self::PolicySettings => 3,
-            Self::FlagSettings => 4,
-            Self::LocalSettings => 5,
-            Self::ProjectSettings => 6,
-            Self::UserSettings => 7,
+            Self::McpServerPolicy => 0,
+            Self::ToolsNarrowing => 1,
+            Self::Session => 2,
+            Self::Command => 3,
+            Self::CliArg => 4,
+            Self::PolicySettings => 5,
+            Self::FlagSettings => 6,
+            Self::LocalSettings => 7,
+            Self::ProjectSettings => 8,
+            Self::UserSettings => 9,
         }
     }
 
@@ -224,6 +236,8 @@ impl PermissionRuleSource {
             Self::CliArg => "cliArg",
             Self::Command => "command",
             Self::Session => "session",
+            Self::ToolsNarrowing => "toolsNarrowing",
+            Self::McpServerPolicy => "mcpServerPolicy",
         }
     }
 }

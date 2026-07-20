@@ -101,6 +101,9 @@ pub(crate) fn format_source(source: PermissionRuleSource) -> &'static str {
         PermissionRuleSource::CliArg => "CLI argument",
         PermissionRuleSource::Command => "command configuration",
         PermissionRuleSource::Session => "current session",
+        // 2.1.215 `pgl` display map tail.
+        PermissionRuleSource::ToolsNarrowing => "CLI tool narrowing",
+        PermissionRuleSource::McpServerPolicy => "MCP server policy",
     }
 }
 
@@ -573,6 +576,43 @@ mod tests {
         assert_eq!(
             format_source(PermissionRuleSource::Session),
             "current session"
+        );
+        // 2.1.215 `pgl` tail sources.
+        assert_eq!(
+            format_source(PermissionRuleSource::ToolsNarrowing),
+            "CLI tool narrowing"
+        );
+        assert_eq!(
+            format_source(PermissionRuleSource::McpServerPolicy),
+            "MCP server policy"
+        );
+    }
+
+    #[test]
+    fn new_sources_are_lowest_citation_priority_and_not_shared() {
+        // Walk tail: session > toolsNarrowing > mcpServerPolicy (lowest).
+        assert!(
+            PermissionRuleSource::Session.priority()
+                > PermissionRuleSource::ToolsNarrowing.priority()
+        );
+        assert!(
+            PermissionRuleSource::ToolsNarrowing.priority()
+                > PermissionRuleSource::McpServerPolicy.priority()
+        );
+        // userSettings still highest (walk head wins citation).
+        assert!(
+            PermissionRuleSource::UserSettings.priority()
+                > PermissionRuleSource::Session.priority()
+        );
+        assert!(!is_shared_setting_source(PermissionRuleSource::ToolsNarrowing));
+        assert!(!is_shared_setting_source(PermissionRuleSource::McpServerPolicy));
+        assert_eq!(
+            PermissionRuleSource::ToolsNarrowing.lingxi_settings_source(),
+            "toolsNarrowing"
+        );
+        assert_eq!(
+            PermissionRuleSource::McpServerPolicy.lingxi_settings_source(),
+            "mcpServerPolicy"
         );
     }
 }

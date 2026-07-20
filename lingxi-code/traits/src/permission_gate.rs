@@ -81,6 +81,15 @@ pub struct PermissionCheckContext {
     /// is omitted. `None` ⇒ the key is OMITTED. Populated by the
     /// `PolicyPermissionGate` Ask path alongside `decision_reason`.
     pub decision_reason_type: Option<String>,
+    /// `true` when a PreToolUse hook returned `ask`, establishing claude-code's
+    /// `hookAskFloor` (BIN 224697675/225722419). With the floor set, an Auto-mode
+    /// classifier ALLOW must NOT silently defeat the hook's ask — the ask is kept
+    /// (prompts interactively, denies headless), matching CC's floor
+    /// (`if(hookAskFloor && !interactive && shouldAvoidPermissionPrompts) return
+    /// asyncAgent-deny; else the classifier callback preserves behavior "ask"`).
+    /// The 2.1.207 classifier-allow-over-hook-ask behavior 2.1.211/215 removed.
+    /// Additive default `false`, so a non-hook-ask check is unaffected.
+    pub hook_ask_floor: bool,
     /// The policy Ask's permission-rule SUGGESTIONS, forwarded as the
     /// `permission_suggestions` field of a stdio `can_use_tool` request
     /// (claude-code `mainPermissionResult.suggestions` — a `PermissionUpdate[]`).

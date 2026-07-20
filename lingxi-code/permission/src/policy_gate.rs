@@ -245,10 +245,22 @@ impl PolicyPermissionGate {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
             PermissionResult::Ask { ref reason, .. } => {
-                if let Some(classified) =
-                    self.auto_mode_classifier_result(mode, reason, name, input)
-                {
-                    return self.classified_result_to_outcome(classified, name);
+                // HOOK-ASKFLOOR-03: when a PreToolUse hook returned `ask`
+                // (`ctx.hook_ask_floor`), the Auto-mode classifier's ALLOW must NOT
+                // silently defeat the hook's ask — CC's `hookAskFloor` keeps the ask
+                // (the classifier callback re-surfaces `behavior:"ask"`, and a
+                // prompt-avoiding context returns the asyncAgent deny). Skipping the
+                // classifier here lets the ask fall through to the normal path,
+                // which prompts interactively and denies in headless
+                // (`DenyOnAskGate`) — the same outcome as CC's floor. Without this,
+                // Auto mode re-allows the tool, the 2.1.207 regression 211/215
+                // removed.
+                if !ctx.hook_ask_floor {
+                    if let Some(classified) =
+                        self.auto_mode_classifier_result(mode, reason, name, input)
+                    {
+                        return self.classified_result_to_outcome(classified, name);
+                    }
                 }
                 if read_only_default_auto_allows(name, reason) {
                     self.record_auto_mode_non_deny(mode);

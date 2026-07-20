@@ -1939,6 +1939,19 @@ fn set_first_ask(ask: &mut Option<PsContainmentResult>, message: String) {
     }
 }
 
+/// Like [`set_first_ask`] but with a `decisionReason` distinct from the display
+/// `message` (claude-code attaches a separate `decisionReason:{type:'other',
+/// reason}` on some asks — e.g. the compound-`cd` ask).
+fn set_first_ask_with_reason(
+    ask: &mut Option<PsContainmentResult>,
+    message: String,
+    reason: String,
+) {
+    if ask.is_none() {
+        *ask = Some(PsContainmentResult::Ask { reason, message });
+    }
+}
+
 /// Validate a single PowerShell statement/pipeline (claude-code `xgg`).
 #[must_use]
 pub fn validate_ps_statement(
@@ -1950,7 +1963,15 @@ pub fn validate_ps_statement(
     let mut ask: Option<PsContainmentResult> = None;
 
     if compound_cd {
-        set_first_ask(&mut ask, "Compound command changes working directory (Set-Location/Push-Location/Pop-Location/New-PSDrive) \u{2014} relative paths cannot be validated against the original cwd and require manual approval".to_string());
+        // The compound-cd ask carries a `decisionReason` distinct from its display
+        // message (claude-code `decisionReason:{type:"other",reason:"Compound
+        // command contains cd with path operation — manual approval required to
+        // prevent path resolution bypass"}`, @225367333).
+        set_first_ask_with_reason(
+            &mut ask,
+            "Compound command changes working directory (Set-Location/Push-Location/Pop-Location/New-PSDrive) \u{2014} relative paths cannot be validated against the original cwd and require manual approval".to_string(),
+            "Compound command contains cd with path operation \u{2014} manual approval required to prevent path resolution bypass".to_string(),
+        );
     }
 
     // Main pipeline elements.

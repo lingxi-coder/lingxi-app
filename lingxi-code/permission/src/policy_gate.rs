@@ -272,6 +272,7 @@ impl PolicyPermissionGate {
                     // PermissionCheckContext field docs.)
                     let ctx2 = PermissionCheckContext {
                         decision_reason: serialize_decision_reason(reason),
+                        decision_reason_type: decision_reason_type(reason).map(str::to_string),
                         ..ctx.clone()
                     };
                     let outcome = self.inner.check_with_context(name, input, &ctx2).await;
@@ -864,6 +865,32 @@ fn serialize_decision_reason(reason: &PermissionDecisionReason) -> Option<String
         | PermissionDecisionReason::AutoModeFallback
         | PermissionDecisionReason::BypassPermissions => None,
     }
+}
+
+/// The claude-code `decisionReason.type` discriminant string for this reason —
+/// sent as the `decision_reason_type` field of a `can_use_tool` request so an SDK
+/// host can classify Ask reasons where the free-text `decision_reason` is
+/// `undefined` (rule/mode/subcommandResults/permissionPromptTool). Every string
+/// is byte-confirmed present in the 2.1.215 binary; the LingXi-internal
+/// denial/auto-mode/bypass variants carry no CC `.type` and return `None`.
+pub(crate) fn decision_reason_type(reason: &PermissionDecisionReason) -> Option<&'static str> {
+    Some(match reason {
+        PermissionDecisionReason::MatchedRule { .. } => "rule",
+        PermissionDecisionReason::PermissionMode { .. } => "mode",
+        PermissionDecisionReason::SubcommandResults { .. } => "subcommandResults",
+        PermissionDecisionReason::PermissionPromptTool { .. } => "permissionPromptTool",
+        PermissionDecisionReason::ClassifierApproved { .. }
+        | PermissionDecisionReason::ClassifierRejected { .. } => "classifier",
+        PermissionDecisionReason::HookOverride { .. } => "hook",
+        PermissionDecisionReason::AsyncAgent { .. } => "asyncAgent",
+        PermissionDecisionReason::WorkingDirectory { .. } => "workingDir",
+        PermissionDecisionReason::SafetyCheck { .. } => "safetyCheck",
+        PermissionDecisionReason::SandboxOverride { .. } => "sandboxOverride",
+        PermissionDecisionReason::Other { .. } => "other",
+        PermissionDecisionReason::DenialLimitExceeded
+        | PermissionDecisionReason::AutoModeFallback
+        | PermissionDecisionReason::BypassPermissions => return None,
+    })
 }
 
 /// Map a [`PermissionDecisionReason`] to the coarse [`PermissionDecisionSource`]

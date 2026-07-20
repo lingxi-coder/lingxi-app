@@ -427,14 +427,16 @@ impl StdioControlPermissionGate {
         if let Some(reason) = &ctx.decision_reason {
             request["decision_reason"] = json!(reason);
         }
-        // NOTE (PERM-GATE-WIRE-01 partial): claude-code also sends
-        // `decision_reason_type: decisionReason?.type` (the DISCRIMINATED reason
-        // kind — `rule`/`mode`/`subcommandResults`/… — which an SDK host parses
-        // for ask reasons where `decision_reason` text is `undefined`). Emitting
-        // it requires a `decision_reason_type` field on `PermissionCheckContext`
-        // (in the `traits` crate) populated at the `PolicyPermissionGate` Ask
-        // point; that cross-crate wiring is deferred, so the key is OMITTED for
-        // now. The remaining optional keys (`description`,
+        // GATE-WIRE-01: `decision_reason_type: decisionReason?.type` (the
+        // DISCRIMINATED reason kind — `rule`/`mode`/`subcommandResults`/… — which
+        // an SDK host parses for ask reasons where the `decision_reason` text is
+        // `undefined`). Populated by the `PolicyPermissionGate` Ask path; OMITTED
+        // when `None` (the LingXi-internal denial/auto-mode/bypass reasons carry
+        // no CC `.type`).
+        if let Some(rt) = &ctx.decision_reason_type {
+            request["decision_reason_type"] = json!(rt);
+        }
+        // The remaining optional keys (`description`,
         // `classifier_approvable`, `requires_user_interaction`) likewise await
         // their producers, mirroring the `permission_suggestions`/`blocked_path`
         // pattern above.

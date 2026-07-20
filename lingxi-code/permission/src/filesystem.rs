@@ -167,7 +167,10 @@ fn root_path_for_source(source: PermissionRuleSource, roots: &FsRoots) -> PathBu
         | PermissionRuleSource::FlagSettings
         | PermissionRuleSource::CliArg
         | PermissionRuleSource::Command
-        | PermissionRuleSource::Session => roots.cwd.clone(),
+        | PermissionRuleSource::Session
+        // Runtime sources (2.1.215 tail) → original cwd like every non-user source.
+        | PermissionRuleSource::ToolsNarrowing
+        | PermissionRuleSource::McpServerPolicy => roots.cwd.clone(),
     }
 }
 

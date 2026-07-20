@@ -37,7 +37,7 @@ const ACCEPT_EDITS_ALLOWED_COMMANDS: [&str; 7] =
 /// behavior-first (`authorize_inner` checks the whole deny bucket before ask
 /// before allow), so the source order never changes the allow/deny DECISION —
 /// only which source's rule is reported. (Was the exact reverse of this.)
-const SOURCES_BY_PRIORITY: [PermissionRuleSource; 8] = [
+const SOURCES_BY_PRIORITY: [PermissionRuleSource; 10] = [
     PermissionRuleSource::UserSettings,
     PermissionRuleSource::ProjectSettings,
     PermissionRuleSource::LocalSettings,
@@ -46,6 +46,9 @@ const SOURCES_BY_PRIORITY: [PermissionRuleSource; 8] = [
     PermissionRuleSource::CliArg,
     PermissionRuleSource::Command,
     PermissionRuleSource::Session,
+    // 2.1.215 `fJr` tail — lowest citation precedence, walked last.
+    PermissionRuleSource::ToolsNarrowing,
+    PermissionRuleSource::McpServerPolicy,
 ];
 
 /// Rule-driven authorization policy.

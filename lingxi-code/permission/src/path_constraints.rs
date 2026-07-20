@@ -642,6 +642,22 @@ pub fn check_path_constraints(
                 reason: "Brace characters in write target require manual approval \u{2014} bash may brace-expand to paths outside the working directory".to_string(),
             });
         }
+        // `X6r` `..`-after-directory pre-guard (claude-code `Q6r`/validatePath runs
+        // `X6r(o)` on the redirect target BEFORE containment — the `"create"` call
+        // site). A `..` segment after a real directory segment may follow a symlink
+        // out of the working dir, so it ASKS even when the path lexically collapses
+        // back inside cwd — `expand_redirect_target` (→ `expand_path`) would
+        // otherwise collapse `sub/../out.txt` to `out.txt` and mask the escape
+        // (PATH-04 under-ask). Runs on the dequoted RAW target: the `..`-after-real-
+        // segment property is invariant under tilde expansion.
+        if crate::command_path_containment::dotdot_after_directory_segment(
+            strip_surrounding_quotes(&r.target),
+        ) {
+            return Some(PathConstraintAsk {
+                message: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
+                reason: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
+            });
+        }
         let resolved = expand_redirect_target(&r.target, roots);
         if !path_in_allowed_working_path(Path::new(&resolved), &work_dirs, roots) {
             let dirs = all_working_directories(roots, additional);
@@ -698,6 +714,19 @@ pub fn check_path_constraints(
             return Some(PathConstraintAsk {
                 message: "Shell expansion syntax in paths requires manual approval".to_string(),
                 reason: "Shell expansion syntax in paths requires manual approval".to_string(),
+            });
+        }
+        // `X6r` `..`-after-directory pre-guard for the cd target (claude-code
+        // `Q6r`/validatePath, the `"read"` call site for cd). Same symlink-escape
+        // defense as the redirect branch: `cd sub/../elsewhere` asks even though it
+        // lexically collapses inside cwd (PATH-04 under-ask). Runs on the dequoted
+        // RAW target before `expand_cd_target` collapses it.
+        if crate::command_path_containment::dotdot_after_directory_segment(
+            strip_surrounding_quotes(&cd_arg),
+        ) {
+            return Some(PathConstraintAsk {
+                message: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
+                reason: "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory".to_string(),
             });
         }
         if !path_in_allowed_working_path(Path::new(&resolved), &work_dirs, roots) {
@@ -795,6 +824,31 @@ mod tests {
 
     fn check(cmd: &str) -> Option<PathConstraintAsk> {
         check_path_constraints(cmd, &roots(), &[])
+    }
+
+    // ── PATH-04: `..`-after-directory traversal on redirect/cd targets asks ──
+    #[test]
+    fn redirect_target_dotdot_after_dir_asks_even_when_contained() {
+        // `sub/../out.txt` collapses back inside cwd, but the `..` after a real
+        // directory segment may follow a symlink out — CC asks (X6r pre-guard).
+        let a = check("echo x > sub/../out.txt").expect("must ask");
+        assert_eq!(
+            a.message,
+            "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
+        );
+        assert_eq!(a.reason, a.message);
+        // A leading `../out.txt` (no real segment before `..`) does NOT trip this
+        // guard — it falls through to the ordinary containment check.
+        assert!(check("echo x > out.txt").is_none(), "plain in-cwd write is fine");
+    }
+
+    #[test]
+    fn cd_target_dotdot_after_dir_asks_even_when_contained() {
+        let a = check("cd sub/../other && ls").expect("must ask");
+        assert_eq!(
+            a.message,
+            "Path contains '..' traversal after a directory segment, which may follow a symlink outside the working directory"
+        );
     }
 
     // ── redirection outside cwd → ask ──────────────────────────────────────

@@ -1019,10 +1019,15 @@ fn zu_compound_cd_asks() {
     let roots = ps_roots();
     let stmt = one_cmd_stmt(cmd("Get-Content", &["notes.txt"]));
     match validate_ps_statements(&[stmt], &ctx_of(&roots, &[]), true) {
-        PsContainmentResult::Ask { message, .. } => {
+        PsContainmentResult::Ask { message, reason } => {
             assert!(
                 message.contains("Compound command changes working directory"),
                 "{message}"
+            );
+            // PS-CD-03: the decisionReason is DISTINCT from the display message.
+            assert_eq!(
+                reason,
+                "Compound command contains cd with path operation \u{2014} manual approval required to prevent path resolution bypass"
             );
         }
         other => panic!("expected Ask, got {other:?}"),

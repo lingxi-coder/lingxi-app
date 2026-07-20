@@ -690,6 +690,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decision_reason_type_matches_binary_discriminants() {
+        use crate::result::{ClassifierKind, SandboxOverrideReason};
+        use crate::rule::{PermissionRule, PermissionRuleSource, PermissionRuleValue};
+        let rule = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Bash"),
+            behavior: crate::rule::PermissionBehavior::Ask,
+            source: PermissionRuleSource::UserSettings,
+        };
+        // The four where decision_reason TEXT is None → the type carries the info.
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::MatchedRule { rule }),
+            Some("rule")
+        );
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::PermissionMode {
+                mode: PermissionMode::Default
+            }),
+            Some("mode")
+        );
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::PermissionPromptTool {
+                tool_name: "mcp__x".into()
+            }),
+            Some("permissionPromptTool")
+        );
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::HookOverride {
+                hook_id: "h1".into(),
+                source: None,
+                reason: None,
+            }),
+            Some("hook")
+        );
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::ClassifierRejected {
+                classifier: ClassifierKind::Transcript,
+                score: 0.9,
+            }),
+            Some("classifier")
+        );
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::SandboxOverride {
+                reason: SandboxOverrideReason::ExcludedCommand,
+            }),
+            Some("sandboxOverride")
+        );
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::Other { reason: "m".into() }),
+            Some("other")
+        );
+        // LingXi-internal reasons carry no CC `.type`.
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::BypassPermissions),
+            None
+        );
+        assert_eq!(
+            decision_reason_type(&PermissionDecisionReason::AutoModeFallback),
+            None
+        );
+    }
+
     /// Inner gate that records the [`PermissionCheckContext`] handed to
     /// `check_with_context` (so a test can assert the gate enriched it).
     struct ContextRecordingInner {

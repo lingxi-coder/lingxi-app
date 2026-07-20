@@ -58,6 +58,10 @@ pub const WRITE_STARTED: &str = "tengu_tool_write_started";
 pub const WRITE_COMPLETED: &str = "tengu_tool_write_completed";
 /// `tengu_tool_write_failed` — Write tool errored.
 pub const WRITE_FAILED: &str = "tengu_tool_write_failed";
+/// `tengu_subagent_md_report_blocked` — a subagent's Write of a
+/// `REPORT`/`SUMMARY`/`FINDINGS`/`ANALYSIS` `*.md` report file was hard-blocked
+/// (subagents must return findings as text). Payload carries `contentBytes`.
+pub const SUBAGENT_MD_REPORT_BLOCKED: &str = "tengu_subagent_md_report_blocked";
 /// `tengu_tool_web_fetch_started` — `WebFetch` tool began an HTTP request.
 pub const WEB_FETCH_STARTED: &str = "tengu_tool_web_fetch_started";
 /// `tengu_tool_web_fetch_completed` — `WebFetch` tool received the response.

@@ -122,6 +122,34 @@ impl FileWriteTool {
         );
         self.ctx.bus.log_event(WRITE_FAILED, md).await;
     }
+
+    /// Emit `tengu_subagent_md_report_blocked` with the attempted content's
+    /// UTF-8 byte length (claude-code `Buffer.byteLength(t)`).
+    async fn emit_subagent_md_report_blocked(&self, content: &str) {
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert(
+            "contentBytes".to_string(),
+            AnalyticsValue::Int(i64::try_from(content.len()).unwrap_or(i64::MAX)),
+        );
+        self.ctx
+            .bus
+            .log_event(telemetry::tengu::tool::SUBAGENT_MD_REPORT_BLOCKED, md)
+            .await;
+    }
+}
+
+/// claude-code `/^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i.test(basename(n))`:
+/// a basename that (case-insensitively) starts with one of the four report words
+/// and ends with `.md`.
+fn is_subagent_report_md(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".md")
+        && ["report", "summary", "findings", "analysis"]
+            .iter()
+            .any(|w| lower.starts_with(w))
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -221,6 +249,22 @@ impl Tool for FileWriteTool {
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
         let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+
+        // A subagent must NOT write a REPORT/SUMMARY/FINDINGS/ANALYSIS `*.md`
+        // report file — it should return findings as text (claude-code:
+        // `if(r.agentId && /^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i
+        // .test(basename(n))) return {result:!1, message:…, errorCode:5}` plus
+        // `tengu_subagent_md_report_blocked`). `ctx.agent_id.is_some()` is the
+        // `r.agentId` analog (populated only inside a subagent; `None` on the main
+        // thread / leader), so a main-agent write is unaffected. Runs before the
+        // started/permission path, mirroring CC's validateInput placement.
+        if ctx.agent_id.is_some() && is_subagent_report_md(&path) {
+            self.emit_subagent_md_report_blocked(content).await;
+            return Err(ToolError::InvalidInput(
+                "Subagents should return findings as text, not write report files. Include this content in your final response instead.".into(),
+            ));
+        }
+
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
@@ -613,6 +657,76 @@ mod tests {
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&"tengu_tool_write_started".to_string()));
         assert!(names.contains(&"tengu_tool_write_completed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn subagent_report_md_write_is_blocked() {
+        // A subagent (ctx.agent_id = Some) writing REPORT*.md is hard-blocked
+        // with CC's exact message; a same-named write by the MAIN agent
+        // (agent_id = None) is allowed.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("REPORT-final.md");
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileWriteTool::new(ctx);
+
+        let mut subagent_ctx = fresh_ctx();
+        subagent_ctx.agent_id = Some(protocol::AgentId::new());
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "findings" }),
+                subagent_ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(
+                m,
+                "Subagents should return findings as text, not write report files. Include this content in your final response instead."
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(!target.exists(), "blocked write must not create the file");
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"tengu_subagent_md_report_blocked".to_string()));
+
+        // Main agent (agent_id None) is unaffected.
+        let (ctx2, _s2) = make_ctx(&tmp);
+        let tool2 = FileWriteTool::new(ctx2);
+        tool2
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "ok" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn is_subagent_report_md_matches_cc_regex() {
+        use std::path::Path;
+        // `/^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$/i`
+        for p in [
+            "REPORT.md",
+            "report-v2.md",
+            "Summary_final.md",
+            "FINDINGS.MD",
+            "analysis.md",
+        ] {
+            assert!(is_subagent_report_md(Path::new(p)), "{p} should match");
+        }
+        for p in [
+            "notes.md",
+            "report.txt",
+            "my-report.md",
+            "readme.md",
+            "REPORT",
+        ] {
+            assert!(!is_subagent_report_md(Path::new(p)), "{p} must NOT match");
+        }
     }
 
     #[tokio::test]

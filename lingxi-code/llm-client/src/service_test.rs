@@ -1656,6 +1656,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn is_fast_mode_not_enabled_discriminates() {
+        // claude-code `YNd`: only a 400 (InvalidRequest) whose message includes
+        // "Fast mode is not enabled" triggers the fast-mode-disable-and-retry.
+        assert!(ApiService::is_fast_mode_not_enabled(&LlmError::InvalidRequest {
+            message: "Fast mode is not enabled for this account".into()
+        }));
+        // A different 400 must NOT trigger it (would otherwise strip speed on any
+        // 400 and mask real request errors).
+        assert!(!ApiService::is_fast_mode_not_enabled(&LlmError::InvalidRequest {
+            message: "messages: at least one message is required".into()
+        }));
+        // Non-400 errors never match (the classifier is 400-scoped via the
+        // InvalidRequest discriminant).
+        assert!(!ApiService::is_fast_mode_not_enabled(&LlmError::Overloaded {
+            repeated: false
+        }));
+        assert!(!ApiService::is_fast_mode_not_enabled(&LlmError::RateLimited {
+            retry_after: None,
+            scope: None,
+        }));
+    }
+
     /// Plan test: budget terminates after DEFAULT_MAX_RETRIES + 1 executions.
     #[tokio::test]
     async fn retry_terminal_after_budget() {

@@ -5459,11 +5459,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// when no `SessionStart` hook is registered. The hook executor reads
     /// `session_id` / `cwd` from the lifecycle [`HookContext`]; the variant's
     /// `session_id` field is filled from the live session for symmetry.
-    async fn collect_session_start_messages(&self, source: &str) -> Vec<ConversationMessage> {
+    /// Fire the `SessionStart` hooks once and return the folded aggregate.
+    async fn run_session_start_hooks(&self, source: &str) -> hooks::response::AggregateHookResult {
         let session_id = { self.session.lock().await.session_id };
         let ctx = self.lifecycle_hook_ctx(false).await;
-        let agg = self
-            .hooks
+        self.hooks
             .execute(
                 HookEvent::SessionStart {
                     session_id,
@@ -5471,7 +5471,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 },
                 ctx,
             )
-            .await;
+            .await
+    }
+
+    async fn collect_session_start_messages(&self, source: &str) -> Vec<ConversationMessage> {
+        let agg = self.run_session_start_hooks(source).await;
+        Self::session_start_context_messages(&agg)
+    }
+
+    /// Build the model-facing `hook_additional_context` meta message(s) from a
+    /// folded `SessionStart` aggregate (empty when no hook emitted context).
+    fn session_start_context_messages(
+        agg: &hooks::response::AggregateHookResult,
+    ) -> Vec<ConversationMessage> {
         // SESSIONSTART.CTX: a `SessionStart` hook's
         // `hookSpecificOutput.additionalContext` becomes a persistent
         // `hook_additional_context` attachment in the conversation —
@@ -5508,11 +5520,29 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         )]
     }
 
-    /// Fire SessionStart and append its model-facing additional context.
+    /// Fire SessionStart and append its model-facing additional context, then
+    /// honor a `SessionStart` hook's `initialUserMessage` (injected as a non-meta
+    /// user prompt — claude-code `if(p.initialUserMessage)$os=p.initialUserMessage`)
+    /// and `reloadSkills`.
     pub async fn fire_session_start(&self, source: &str) {
-        let messages = self.collect_session_start_messages(source).await;
+        let agg = self.run_session_start_hooks(source).await;
+        let messages = Self::session_start_context_messages(&agg);
         if !messages.is_empty() {
             self.session.lock().await.history.extend(messages);
+        }
+        // `initialUserMessage` → seed the initial user prompt (claude-code `$os`).
+        if let Some(initial) = &agg.initial_user_message {
+            self.inject_user_message(initial).await;
+        }
+        // `reloadSkills` → re-scan skill/command dirs. The port loads these once
+        // at boot and has no hot-reload seam yet, so the request is captured but
+        // its action is a documented follow-up (surfaced here so the drop is not
+        // silent).
+        if agg.reload_skills {
+            tracing::warn!(
+                event = "session_start_reload_skills_unsupported",
+                "SessionStart hook requested reloadSkills; skill/command hot-reload is not yet implemented"
+            );
         }
     }
 

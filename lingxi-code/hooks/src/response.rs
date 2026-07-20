@@ -151,6 +151,22 @@ pub struct HookResponse {
     /// default `None`, so hooks that omit it leave the watch set untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_paths: Option<Vec<String>>,
+    /// `hookSpecificOutput.initialUserMessage` returned by a `SessionStart` hook
+    /// (claude-code schema: `initialUserMessage:S.string().optional()`; consumed
+    /// as `if(p.initialUserMessage)$os=p.initialUserMessage` — the pending initial
+    /// user prompt). Scoped to `SessionStart`. Additive default `None`; the
+    /// orchestrator injects it as a (non-meta) user message at session start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_user_message: Option<String>,
+    /// `hookSpecificOutput.reloadSkills` returned by a `SessionStart` hook
+    /// (claude-code schema: `reloadSkills:S.boolean().describe("Re-scan skill and
+    /// command directories")`; consumed as `if(p.reloadSkills)u=!0`). Scoped to
+    /// `SessionStart`. Additive default `None`. NOTE: the port loads skills/
+    /// commands once at boot and has no hot-reload seam, so this is parsed +
+    /// folded (no longer silently dropped) but its re-scan ACTION is a documented
+    /// follow-up — honoring it requires a skill/command registry reload path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload_skills: Option<bool>,
 }
 
 /// Structured elicitation answer a hook can return, mirroring claude-code's
@@ -349,4 +365,16 @@ pub struct AggregateHookResult {
     /// set unchanged. Additive default empty, so callers with no such hook are
     /// unaffected (byte-identical).
     pub watch_paths: Vec<String>,
+    /// The last `hookSpecificOutput.initialUserMessage` any folded `SessionStart`
+    /// hook returned (claude-code keeps the latest — `if(p.initialUserMessage)
+    /// $os=p.initialUserMessage`). `Some` seeds a pending initial user prompt that
+    /// the orchestrator injects as a (non-meta) user message at session start.
+    /// Additive default `None` → byte-identical when no hook sets it.
+    pub initial_user_message: Option<String>,
+    /// `true` when ANY folded `SessionStart` hook returned `reloadSkills: true`
+    /// (claude-code `if(p.reloadSkills)u=!0`, OR-folded). Signals the skill/command
+    /// directories should be re-scanned. NOTE: the port has no hot-reload seam yet,
+    /// so this is captured (no longer dropped at parse) but its re-scan action is a
+    /// documented follow-up. Additive default `false`.
+    pub reload_skills: bool,
 }

@@ -1158,7 +1158,19 @@ pub fn parse_response(
     // top-level `permissionDecision` parse was a non-parity divergence and has
     // been removed (R-O2a) — `permissionDecision` is honoured ONLY under
     // `hookSpecificOutput` below.
-    if let Some(r) = obj.get("permissionDecisionReason").and_then(Value::as_str) {
+    // Top-level `reason` (claude-code: the block-message resolution
+    // `blockingError = e.hookSpecificOutput.permissionDecisionReason || e.reason
+    // || "Blocked by hook"`, plus the general `{decision:"block", reason}` output
+    // shape). `permissionDecisionReason` is a hookSpecificOutput-ONLY field in
+    // CC's schema (`permissionDecisionReason:S.string().optional()` inside the
+    // hookSpecificOutput object) — there is NO top-level `permissionDecisionReason`,
+    // so the previous top-level read of that key was a phantom that both invented a
+    // non-existent field AND dropped the real top-level `reason` (a
+    // `{decision:"block", reason:"…"}` hook surfaced an empty block message). Read
+    // top-level `reason` here; the lower `hookSpecificOutput.permissionDecisionReason`
+    // parse (below) overrides it, preserving CC's `hsOut.permissionDecisionReason ||
+    // e.reason` precedence.
+    if let Some(r) = obj.get("reason").and_then(Value::as_str) {
         resp.reason = Some(r.to_string());
     }
 
@@ -1330,6 +1342,19 @@ pub fn parse_response(
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect(),
             );
+        }
+
+        // `hookSpecificOutput.{initialUserMessage,reloadSkills}` (claude-code
+        // `SessionStart` consumer: `if(p.initialUserMessage)$os=p.initialUserMessage`
+        // and `if(p.reloadSkills)u=!0`). Scoped to `SessionStart` (the binary reads
+        // these only in the SessionStart case of its result switch).
+        if expected_event == "SessionStart" {
+            if let Some(m) = hs.get("initialUserMessage").and_then(Value::as_str) {
+                resp.initial_user_message = Some(m.to_string());
+            }
+            if let Some(b) = hs.get("reloadSkills").and_then(Value::as_bool) {
+                resp.reload_skills = Some(b);
+            }
         }
     }
 

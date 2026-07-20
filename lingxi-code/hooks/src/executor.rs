@@ -1367,6 +1367,15 @@ impl HookExecutorImpl {
             if let Some(paths) = &resp.watch_paths {
                 agg.watch_paths.extend(paths.iter().cloned());
             }
+            // `initialUserMessage` (SessionStart output): keep the latest —
+            // `if(p.initialUserMessage)$os=p.initialUserMessage` last-wins.
+            if let Some(m) = &resp.initial_user_message {
+                agg.initial_user_message = Some(m.clone());
+            }
+            // `reloadSkills` (SessionStart output): OR-fold — `if(p.reloadSkills)u=!0`.
+            if resp.reload_skills == Some(true) {
+                agg.reload_skills = true;
+            }
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));

@@ -366,6 +366,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_response_session_start_initial_message_and_reload_skills() {
+        // SessionStart hookSpecificOutput `initialUserMessage` + `reloadSkills`
+        // must be captured (previously silently dropped at parse).
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","initialUserMessage":"hi there","reloadSkills":true}}"#,
+            "SessionStart",
+        )
+        .unwrap();
+        assert_eq!(r.initial_user_message.as_deref(), Some("hi there"));
+        assert_eq!(r.reload_skills, Some(true));
+        // Scoped to SessionStart: the same keys on another event are ignored.
+        let r2 = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","initialUserMessage":"x","reloadSkills":true}}"#,
+            "UserPromptSubmit",
+        )
+        .unwrap();
+        assert_eq!(r2.initial_user_message, None);
+        assert_eq!(r2.reload_skills, None);
+    }
+
+    #[test]
+    fn parse_response_reads_top_level_reason() {
+        // claude-code resolves a block message as `hookSpecificOutput
+        // .permissionDecisionReason || e.reason || "Blocked by hook"`. The
+        // top-level `reason` of a `{decision:"block", reason:"…"}` hook MUST be
+        // captured (previously the port read a phantom top-level
+        // `permissionDecisionReason` and dropped the real `reason`).
+        let r = parse_response(
+            r#"{"decision":"block","reason":"policy violation"}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Block));
+        assert_eq!(r.reason.as_deref(), Some("policy violation"));
+    }
+
+    #[test]
+    fn parse_response_hsout_permission_decision_reason_overrides_top_level_reason() {
+        // Precedence: `hookSpecificOutput.permissionDecisionReason || e.reason`.
+        // The hookSpecificOutput reason wins over a top-level `reason`.
+        let r = parse_response(
+            r#"{"reason":"top","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"specific"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.decision, Some(HookDecision::Block));
+        assert_eq!(r.reason.as_deref(), Some("specific"));
+    }
+
+    #[test]
+    fn parse_response_ignores_phantom_top_level_permission_decision_reason() {
+        // There is NO top-level `permissionDecisionReason` in CC's schema (it is
+        // a hookSpecificOutput-only field). A top-level one must NOT populate the
+        // reason.
+        let r = parse_response(
+            r#"{"decision":"block","permissionDecisionReason":"phantom"}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(r.reason, None);
+    }
+
+    #[test]
     fn parse_response_hsout_permission_decision_overrides_legacy_block() {
         // R-D2: `azn`'s SECOND switch reassigns `permissionBehavior`
         // UNCONDITIONALLY — a `hookSpecificOutput.permissionDecision` ALWAYS

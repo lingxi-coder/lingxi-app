@@ -686,11 +686,23 @@ impl ApiService {
     ) -> String {
         let mut obj = serde_json::Map::new();
         if let Ok(extra_str) = std::env::var("CLAUDE_CODE_EXTRA_METADATA") {
-            if let Ok(serde_json::Value::Object(extra)) =
-                serde_json::from_str::<serde_json::Value>(&extra_str)
-            {
-                for (k, v) in extra {
-                    obj.insert(k, v);
+            // `if(t)` — an empty/unset value is skipped silently; a set-but-invalid
+            // value logs at error level (claude-code `yit`: `else` branch of
+            // `if(i && typeof i==="object" && !Array.isArray(i))`). serde's
+            // `Value::Object` already excludes arrays, so a JSON array falls to the
+            // log arm like `!Array.isArray` in CC. One message only (unlike
+            // EXTRA_BODY, METADATA's `xl(t,!1)` folds parse-failure into the same
+            // arm — there is no "Error parsing …" variant).
+            if !extra_str.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&extra_str) {
+                    Ok(serde_json::Value::Object(extra)) => {
+                        for (k, v) in extra {
+                            obj.insert(k, v);
+                        }
+                    }
+                    _ => tracing::error!(
+                        "CLAUDE_CODE_EXTRA_METADATA env var must be a JSON object, but was given {extra_str}"
+                    ),
                 }
             }
         }
@@ -706,6 +718,13 @@ impl ApiService {
             "session_id".to_string(),
             serde_json::Value::String(session_id.to_string()),
         );
+        // NOTE (gap-audit, deferred): claude-code's `yit` additionally spreads
+        // `...r&&{parent_session_id:r}` AFTER `session_id` when the session has a
+        // parent (`S6()` — resume-fork / subagent). The port bakes `user_id` ONCE
+        // at engine construction (not per-request like CC's `getAPIMetadata`), and
+        // the parent session id is not in scope there, so `parent_session_id` is
+        // not emitted. Fully honoring it needs a dynamic per-request `user_id` (or
+        // threading the session's `parent_session_id` to the composition root).
         serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
     }
 

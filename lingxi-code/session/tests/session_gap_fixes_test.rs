@@ -586,7 +586,8 @@ fn route_lines_last_prompt_without_leaf_uuid_is_ignored() {
 
 #[test]
 fn route_lines_parses_tag_entries() {
-    // Binary: `tags.set(N.sessionId, [...(tags.get(N.sessionId)??[]), N.tag])`.
+    // Binary 2.1.215: `a.set(J.sessionId, J.tag)` — LAST-WRITE-WINS single value
+    // per session (a re-tag overwrites; an earlier build accumulated an array).
     let content = concat!(
         r#"{"type":"tag","sessionId":"s1","tag":"important"}"#,
         "\n",
@@ -596,10 +597,9 @@ fn route_lines_parses_tag_entries() {
         "\n",
     );
     let t = route_lines(content);
-    let s1_tags = t.tags.get("s1").expect("s1 tags");
-    assert_eq!(s1_tags, &vec!["important".to_string(), "work".to_string()]);
-    let s2_tags = t.tags.get("s2").expect("s2 tags");
-    assert_eq!(s2_tags, &vec!["personal".to_string()]);
+    // s1 re-tagged: only the LATEST ("work") is kept.
+    assert_eq!(t.tags.get("s1").map(String::as_str), Some("work"));
+    assert_eq!(t.tags.get("s2").map(String::as_str), Some("personal"));
 }
 
 #[test]

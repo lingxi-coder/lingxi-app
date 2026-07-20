@@ -196,6 +196,24 @@ impl BlockAccumulator {
         }
     }
 
+    /// Append `thinking` from a `thinking_delta` to the block at `index` —
+    /// applying ONLY to a `Reasoning` (thinking) block, and a SILENT NO-OP
+    /// otherwise (claude-code `case"thinking_delta":{if(n?.type==="thinking")…;
+    /// break}`). This must NOT error: the API streams `thinking_delta`
+    /// (`estimated_tokens` pings) DURING the redacted-thinking phase, so a
+    /// `thinking_delta` legitimately arrives on a `redacted_thinking`
+    /// ([`BlockKind::Preserved`]) block — the previous shared `append_text` path
+    /// raised a `type mismatch` and terminated the stream (a spurious failure
+    /// where CC succeeds). A `thinking_delta` for a non-existent block is also a
+    /// no-op, mirroring CC's `n?.type` optional-chaining.
+    fn append_thinking(&mut self, index: u32, text: &str) {
+        if let Some(state) = self.blocks.get_mut(&index) {
+            if matches!(state.kind, BlockKind::Reasoning) {
+                state.text_buf.push_str(text);
+            }
+        }
+    }
+
     /// Set the signature on a `Reasoning` block (from a `signature_delta`).
     fn set_signature(&mut self, index: u32, sig: &str) -> Result<(), LlmError> {
         let state = self
@@ -455,7 +473,9 @@ pub(crate) async fn accumulate_stream_salvaging(
                     salvage!(acc.append_json(index, &partial_json));
                 }
                 ContentDelta::ThinkingDelta { thinking } => {
-                    salvage!(acc.append_text(index, &thinking));
+                    // No-op on a non-thinking block (e.g. `redacted_thinking`),
+                    // never a stream error — see [`append_thinking`].
+                    acc.append_thinking(index, &thinking);
                 }
                 ContentDelta::SignatureDelta { signature } => {
                     salvage!(acc.set_signature(index, &signature));
@@ -887,6 +907,46 @@ mod tests {
             }
             other => panic!("expected StreamInterrupted, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn thinking_delta_on_redacted_thinking_is_ignored() {
+        // The API streams `thinking_delta` (estimated_tokens pings) during the
+        // redacted-thinking phase, so one legitimately lands on a
+        // `redacted_thinking` block. CC no-ops it (`if(n?.type==="thinking")`);
+        // the port must NOT terminate the stream with a type mismatch.
+        let evs = vec![
+            message_start("m1", "claude-mock"),
+            LlmEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::RedactedThinking {
+                    data: "opaque".into(),
+                },
+            },
+            LlmEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::ThinkingDelta {
+                    thinking: "leak".into(),
+                },
+            },
+            LlmEvent::ContentBlockStop { index: 0 },
+            LlmEvent::MessageStop,
+        ];
+        let resp = accumulate_stream(boxed(evs))
+            .await
+            .expect("redacted-thinking stream must succeed");
+        // The redacted_thinking block is preserved unchanged; the stray
+        // thinking_delta text is dropped (not appended anywhere).
+        assert!(
+            resp.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::RedactedThinking { .. })),
+            "redacted_thinking block preserved"
+        );
+        assert!(
+            !resp.content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text.contains("leak"))),
+            "stray thinking_delta must not materialize as text"
+        );
     }
 
     #[tokio::test]

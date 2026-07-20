@@ -89,9 +89,12 @@ pub struct LoadedTranscript {
     pub last_prompt_explicit: bool,
 
     // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────────
-    /// `tag` entries: keyed by `sessionId`, accumulated as a `Vec<String>`.
-    /// Binary `Yle`: `tags.set(N.sessionId, [...(tags.get(N.sessionId)??[]), N.tag])`.
-    pub tags: HashMap<String, Vec<String>>,
+    /// `tag` entries: keyed by `sessionId`, LAST-WRITE-WINS single value.
+    /// Binary 2.1.215: `if(J.type==="tag"&&J.sessionId) a.set(J.sessionId, J.tag)`
+    /// — the map stores the LATEST tag per session (an earlier build's `Yle`
+    /// accumulated `[...(prev??[]), tag]`; CC has since switched to `.set` single
+    /// value, so a re-tag overwrites rather than appends).
+    pub tags: HashMap<String, String>,
     /// `agent-name` entries: keyed by `agentId` → agent display name.
     /// Binary `Yle`: `agentNames.set(N.agentId, N.agentName)`.
     pub agent_names: HashMap<String, String>,
@@ -333,15 +336,13 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
 
         // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────
         } else if ty == "tag" {
-            // Binary `Yle`: `tags.set(N.sessionId, [...(tags.get(N.sessionId)??[]), N.tag])`.
+            // Binary 2.1.215: `a.set(J.sessionId, J.tag)` — last-write-wins single
+            // value (a re-tag OVERWRITES the session's tag, not appends).
             if let (Some(sid), Some(tag)) = (
                 value.get("sessionId").and_then(Value::as_str),
                 value.get("tag").and_then(Value::as_str),
             ) {
-                out.tags
-                    .entry(sid.to_string())
-                    .or_default()
-                    .push(tag.to_string());
+                out.tags.insert(sid.to_string(), tag.to_string());
             }
         } else if ty == "agent-name" {
             // Binary v2.1.193 @211658974: `else if(j.type==="agent-name"&&j.sessionId)

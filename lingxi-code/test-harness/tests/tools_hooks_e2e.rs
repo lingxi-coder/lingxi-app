@@ -56,6 +56,10 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // P2-10 watchPaths: None — this PreToolUse Block mock is not a
                 // FileChanged/CwdChanged hook, so it adds no watch paths.
                 watch_paths: None,
+                // SessionStart initialUserMessage/reloadSkills: None — this is a
+                // PreToolUse Block mock, not a SessionStart hook.
+                initial_user_message: None,
+                reload_skills: None,
             }),
         }
     }

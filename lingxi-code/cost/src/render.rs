@@ -81,6 +81,31 @@ pub fn format_token_count(n: u64) -> String {
     n.to_string()
 }
 
+/// Token-count formatter — port of claude-code `ed` (Intl compact notation,
+/// lowercased, `maximumFractionDigits:1` AND `minimumFractionDigits:1`). Unlike
+/// [`format_token_count`] (`Bu`, which drops a trailing `.0`), `ed` ALWAYS shows
+/// exactly one fraction digit, so `2000 → "2.0k"`, `12000 → "12.0k"`,
+/// `1000000 → "1.0m"`, and a sub-1000 count keeps its `.0` (`500 → "500.0"`,
+/// `0 → "0.0"`). The `cbg` usage-by-model block uses `ed`, not `Bu`.
+#[must_use]
+pub fn format_token_count_ed(n: u64) -> String {
+    const UNITS: [(u64, char); 4] = [
+        (1_000_000_000_000, 't'),
+        (1_000_000_000, 'b'),
+        (1_000_000, 'm'),
+        (1_000, 'k'),
+    ];
+    for &(threshold, suffix) in &UNITS {
+        if n >= threshold {
+            #[allow(clippy::cast_precision_loss)]
+            let rounded = ((n as f64 / threshold as f64) * 10.0).round() / 10.0;
+            return format!("{rounded:.1}{suffix}");
+        }
+    }
+    // Sub-1000: one forced fraction digit, no suffix (`500 → "500.0"`).
+    format!("{n}.0")
+}
+
 /// `nano-USD → USD` (matches `cost/src/pricing.rs`'s `nano / 1e9`).
 #[allow(clippy::cast_precision_loss)]
 fn nano_to_usd(nano: u64) -> f64 {
@@ -106,10 +131,10 @@ pub fn usage_by_model_block(by_model: &[traits::ModelUsageRow]) -> String {
         let padded = format!("{label:>21}");
         let line = format!(
             "  {} input, {} output, {} cache read, {} cache write ({})",
-            format_token_count(m.input_tokens),
-            format_token_count(m.output_tokens),
-            format_token_count(m.cache_read_input_tokens),
-            format_token_count(m.cache_creation_input_tokens),
+            format_token_count_ed(m.input_tokens),
+            format_token_count_ed(m.output_tokens),
+            format_token_count_ed(m.cache_read_input_tokens),
+            format_token_count_ed(m.cache_creation_input_tokens),
             format_cost(nano_to_usd(m.total_nano_usd)),
         );
         r.push('\n');
@@ -205,11 +230,28 @@ mod tests {
         }];
         let out = usage_by_model_block(&rows);
         // label right-aligned to 21 ("claude-opus-4-8:" is 16 chars, so 5 leading spaces),
-        // then the token/cost line (5k, 2k, 1.5k, 0; cost $1.23).
+        // then the token/cost line via the `ed` formatter (KEEPS the trailing `.0`,
+        // unlike `Bu`): 5.0k, 2.0k, 1.5k, 0.0; cost $1.23.
         assert_eq!(
             out,
-            "Usage by model:\n     claude-opus-4-8:  5k input, 2k output, 1.5k cache read, 0 cache write ($1.23)"
+            "Usage by model:\n     claude-opus-4-8:  5.0k input, 2.0k output, 1.5k cache read, 0.0 cache write ($1.23)"
         );
+    }
+
+    #[test]
+    fn format_token_count_ed_keeps_trailing_zero() {
+        // `ed` = compact, min+maxFractionDigits:1 — always one fraction digit.
+        assert_eq!(format_token_count_ed(0), "0.0");
+        assert_eq!(format_token_count_ed(5), "5.0");
+        assert_eq!(format_token_count_ed(500), "500.0");
+        assert_eq!(format_token_count_ed(1_000), "1.0k");
+        assert_eq!(format_token_count_ed(1_960), "2.0k");
+        assert_eq!(format_token_count_ed(2_000), "2.0k");
+        assert_eq!(format_token_count_ed(12_000), "12.0k");
+        assert_eq!(format_token_count_ed(1_234), "1.2k");
+        assert_eq!(format_token_count_ed(1_000_000), "1.0m");
+        // Contrast with `Bu` (strips `.0`).
+        assert_eq!(format_token_count(2_000), "2k");
     }
 
     #[test]

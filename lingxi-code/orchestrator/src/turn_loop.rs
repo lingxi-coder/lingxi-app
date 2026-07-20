@@ -2788,6 +2788,10 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             // rewrite to the input the tool actually runs with.
                             let ctx = traits::permission_gate::PermissionCheckContext {
                                 tool_use_id: Some(tool_use_id.to_string()),
+                                // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
+                                // floor so the Auto classifier can't re-allow past it
+                                // (policy_gate Ask arm gates the classifier on this).
+                                hook_ask_floor: hook_ask,
                                 ..Default::default()
                             };
                             match orch

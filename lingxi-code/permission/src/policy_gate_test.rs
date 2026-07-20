@@ -922,6 +922,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_ask_floor_prevents_classifier_from_defeating_hook_ask() {
+        // HOOK-ASKFLOOR-03: Auto mode + a safe local shell the classifier WOULD
+        // allow. Without the floor the classifier auto-allows (inner untouched);
+        // WITH the floor (a PreToolUse hook returned `ask`) the classifier is
+        // SKIPPED, so the ask delegates to the inner transport (prompt / headless
+        // deny) — the hook's ask is honored, not silently re-allowed.
+        let input = serde_json::json!({ "command": "cargo test -p permission" });
+
+        // No floor → classifier allows, inner not consulted.
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "asked".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let no_floor = gate
+            .check_with_context("Bash", &input, &PermissionCheckContext::default())
+            .await;
+        assert!(
+            matches!(no_floor, PermissionOutcome::Allow { .. }),
+            "no floor: classifier allows"
+        );
+        assert_eq!(inner.calls(), 0, "no floor: classifier skips the prompt");
+
+        // Floor set → classifier skipped, ask delegated to inner (→ Deny here).
+        let policy2 = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            std::iter::empty(),
+        ));
+        let inner2 = RecordingInner::new(PermissionDecision::Deny {
+            reason: "asked".into(),
+        });
+        let gate2 = PolicyPermissionGate::new(policy2, inner2.clone());
+        let ctx = PermissionCheckContext {
+            hook_ask_floor: true,
+            ..Default::default()
+        };
+        let floored = gate2.check_with_context("Bash", &input, &ctx).await;
+        assert!(
+            matches!(floored, PermissionOutcome::Deny { .. }),
+            "floor: classifier must NOT re-allow the hook's ask"
+        );
+        assert!(
+            inner2.calls() >= 1,
+            "floor: the ask must reach the prompt/inner, not classifier-allow"
+        );
+    }
+
+    #[tokio::test]
     async fn auto_mode_classifier_deny_has_classifier_source() {
         let policy = Arc::new(PermissionPolicy::from_rules(
             PermissionMode::Auto,

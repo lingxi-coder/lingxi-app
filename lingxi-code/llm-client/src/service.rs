@@ -1710,6 +1710,16 @@ impl ApiService {
         }
     }
 
+    /// claude-code `YNd`: a `speed:"fast"` request whose account/model does not
+    /// support fast mode is rejected with a 400 whose message includes
+    /// `"Fast mode is not enabled"` (`e.status===400 && e.message?.includes(
+    /// "Fast mode is not enabled")`). The drive loop responds by clearing
+    /// `req.speed` and retrying (uncounted) rather than failing the turn
+    /// (`if(T && YNd(v)){o.fastMode=!1;continue}`).
+    fn is_fast_mode_not_enabled(err: &LlmError) -> bool {
+        matches!(err, LlmError::InvalidRequest { message } if message.contains("Fast mode is not enabled"))
+    }
+
     // ── Non-stream drive (Step 1 + 1b) ───────────────────────────────────────
 
     /// Shared non-stream retry driver. Accepts an already-built `LlmRequest` so
@@ -1932,6 +1942,28 @@ impl ApiService {
                                     aws.refresh().await;
                                     continue;
                                 }
+                            }
+
+                            // Fast-mode-400 (claude-code `if(T && YNd(v)){Klc(),
+                            // o.fastMode=!1;continue}`): a `speed:"fast"` request
+                            // whose account/model doesn't support fast mode gets a
+                            // 400 "Fast mode is not enabled". Clear `req.speed`
+                            // (so the re-prepared body drops the `speed` key) and
+                            // retry WITHOUT counting it against the retry budget,
+                            // rather than surfacing the 400 as a terminal
+                            // InvalidRequest that fails the /fast user's turn.
+                            // Guarded on fast mode being ON so a genuine 400
+                            // without fast mode still terminates; once cleared the
+                            // 400 cannot recur (the body carries no `speed`).
+                            if req.speed.as_deref() == Some("fast")
+                                && Self::is_fast_mode_not_enabled(&decode_err)
+                            {
+                                tracing::info!(
+                                    event = "fast_mode_disabled_retry",
+                                    "fast mode not enabled for this account/model; disabling and retrying"
+                                );
+                                req.speed = None;
+                                continue;
                             }
 
                             let step = next_step_with_backoff(
@@ -2321,7 +2353,7 @@ impl ApiService {
     #[allow(clippy::too_many_lines)]
     async fn drive_stream(
         &self,
-        req: LlmRequest,
+        mut req: LlmRequest,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         let request_id = new_request_id();
         telemetry::emit_started(&self.analytics, &req.model, &request_id, true).await;
@@ -2449,6 +2481,22 @@ impl ApiService {
                                 aws.refresh().await;
                                 continue;
                             }
+                        }
+
+                        // Fast-mode-400 (stream twin of the non-stream `YNd`
+                        // handler): a `speed:"fast"` request the account/model
+                        // rejects with a 400 "Fast mode is not enabled" clears
+                        // `req.speed` and retries (uncounted) instead of failing
+                        // the /fast user's streamed turn.
+                        if req.speed.as_deref() == Some("fast")
+                            && Self::is_fast_mode_not_enabled(&decode_err)
+                        {
+                            tracing::info!(
+                                event = "fast_mode_disabled_retry",
+                                "fast mode not enabled for this account/model; disabling and retrying (stream)"
+                            );
+                            req.speed = None;
+                            continue;
                         }
 
                         let step = next_step_with_backoff(

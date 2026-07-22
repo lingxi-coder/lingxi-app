@@ -17,8 +17,8 @@ move `LingXi Code.app` to `/Applications`.
 
 Verified artifact for this Beta run (2026-07-21):
 
-- ZIP SHA-256: `2870e30313be07012cd9135ae627fb2015d2135e14610ded39801846f7c98955`
-- bundled `bridge-server` SHA-256: `79cbbb53614b79dc1e37ff38719282f7f0315dc7a099e24a978ba9de1da899d0`
+- ZIP SHA-256: `c4e85b5c79890b3df3ce2c78396d3334296c223fa99c4ec19773e80062ee5f5d`
+- bundled `bridge-server` SHA-256: `1d70c1d6bd597baa3b581d7117657e3f40a687673ba26a2a6d6eb7825c9735e4`
 
 The exact artifact passed the static package audit and packaged smoke gate.
 
